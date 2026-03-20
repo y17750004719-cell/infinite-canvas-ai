@@ -159,6 +159,7 @@ const PORT_ICON_SIZE = 46;
 const PORT_ICON_RADIUS = PORT_ICON_SIZE / 2;
 const PORT_OUTER_GAP = 26;
 const PORT_PROXIMITY_SIZE = 84;
+const CONNECTION_ANCHOR_EDGE_GAP = 8;
 const DARK_THEME = {
   appBg: '#050608',
   panel: 'rgba(16, 18, 22, 0.88)',
@@ -578,10 +579,10 @@ function ConnectionPortIcon({
         aria-hidden="true"
       >
         <path
-          d="M12 6.2v11.6M6.2 12h11.6"
+          d="M12 4.6v14.8M4.6 12h14.8"
           fill="none"
           stroke="rgba(229,231,235,0.92)"
-          strokeWidth="2.2"
+          strokeWidth="2.5"
           strokeLinecap="round"
         />
       </svg>
@@ -1314,6 +1315,14 @@ export default function AIWorkspace() {
     y: item.y + item.height / 2,
   });
 
+  const getConnectionAnchorCanvasPoint = (item: CanvasItem, side: 'left' | 'right') => ({
+    x:
+      side === 'left'
+        ? item.x - CONNECTION_ANCHOR_EDGE_GAP
+        : item.x + item.width + CONNECTION_ANCHOR_EDGE_GAP,
+    y: item.y + item.height / 2,
+  });
+
   const toCanvasScreenPoint = (point: { x: number; y: number }) => ({
     x: point.x * viewport.scale + viewport.x,
     y: point.y * viewport.scale + viewport.y,
@@ -1338,7 +1347,7 @@ export default function AIWorkspace() {
     }
 
     return {
-      from: toCanvasScreenPoint(getPortCanvasPoint(fromItem, 'right')),
+      from: toCanvasScreenPoint(getConnectionAnchorCanvasPoint(fromItem, 'right')),
       to: session.point,
     };
   };
@@ -1427,8 +1436,8 @@ export default function AIWorkspace() {
         const toItem = items.find((item) => item.id === connection.toItemId);
         if (!fromItem || !toItem) return false;
 
-        const from = toCanvasScreenPoint(getPortCanvasPoint(fromItem, 'right'));
-        const to = toCanvasScreenPoint(getPortCanvasPoint(toItem, 'left'));
+        const from = toCanvasScreenPoint(getConnectionAnchorCanvasPoint(fromItem, 'right'));
+        const to = toCanvasScreenPoint(getConnectionAnchorCanvasPoint(toItem, 'left'));
         const { c1, c2 } = getConnectionControlPoints(from, to);
 
         const minX = Math.min(from.x, c1.x, c2.x, to.x) - HIT_PADDING;
@@ -1463,12 +1472,12 @@ export default function AIWorkspace() {
   };
 
   const findNearestInputPort = (x: number, y: number, fromItemId: string): { targetId: string; x: number; y: number } | null => {
-    const SNAP_DISTANCE = 18;
+    const SNAP_DISTANCE = 28;
     let nearest: { targetId: string; x: number; y: number; distance: number } | null = null;
 
     for (const item of items) {
       if (item.id === fromItemId) continue;
-      const port = toCanvasScreenPoint(getPortCanvasPoint(item, 'left'));
+      const port = toCanvasScreenPoint(getConnectionAnchorCanvasPoint(item, 'left'));
       const distance = Math.hypot(port.x - x, port.y - y);
       if (distance > SNAP_DISTANCE) continue;
       if (!nearest || distance < nearest.distance) {
@@ -3706,9 +3715,12 @@ export default function AIWorkspace() {
           const canvasRect = canvasRef.current?.getBoundingClientRect();
           const svgWidth = canvasRect?.width ?? 0;
           const svgHeight = canvasRect?.height ?? 0;
-          const scaledPortIconSize = Math.min(Math.max(PORT_ICON_SIZE * viewport.scale, 28), 76);
-          const scaledPortProximitySize = Math.min(Math.max(PORT_PROXIMITY_SIZE * viewport.scale, 56), 81);
-          const scaledPortGlyphSize = Math.min(Math.max(scaledPortIconSize * 0.3, 10), 30);
+          const scaledPortIconSize = PORT_ICON_SIZE * viewport.scale;
+          const scaledPortProximitySize = PORT_PROXIMITY_SIZE * viewport.scale;
+          const scaledPortGlyphSize = scaledPortIconSize * 0.46;
+          const scaledConnectionStrokeWidth = 3.5 * viewport.scale;
+          const scaledSelectedConnectionStrokeWidth = 4.5 * viewport.scale;
+          const scaledDebugConnectionStrokeWidth = 3 * viewport.scale;
           const showConnectionTestLine = DEBUG_CANVAS_CONNECTIONS && !from;
           return (
             <>
@@ -3723,8 +3735,8 @@ export default function AIWorkspace() {
             const fromItem = items.find((item) => item.id === connection.fromItemId);
             const toItem = items.find((item) => item.id === connection.toItemId);
             if (!fromItem || !toItem) return null;
-            const connectionFrom = toCanvasScreenPoint(getPortCanvasPoint(fromItem, 'right'));
-            const connectionTo = toCanvasScreenPoint(getPortCanvasPoint(toItem, 'left'));
+            const connectionFrom = toCanvasScreenPoint(getConnectionAnchorCanvasPoint(fromItem, 'right'));
+            const connectionTo = toCanvasScreenPoint(getConnectionAnchorCanvasPoint(toItem, 'left'));
             const isSelectedConnection = selectedConnectionIds.includes(connection.id);
             return (
               <g key={connection.id}>
@@ -3755,7 +3767,7 @@ export default function AIWorkspace() {
                   fill="none"
                   stroke={DARK_THEME.canvasLine}
                   strokeOpacity={isSelectedConnection ? 0.98 : 0.9}
-                  strokeWidth={isSelectedConnection ? 5 : 4}
+                  strokeWidth={isSelectedConnection ? scaledSelectedConnectionStrokeWidth : scaledConnectionStrokeWidth}
                   strokeLinecap="round"
                   pointerEvents="none"
                 />
@@ -3769,7 +3781,7 @@ export default function AIWorkspace() {
               x2={220}
               y2={120}
               stroke="#2563eb"
-              strokeWidth={3}
+              strokeWidth={scaledDebugConnectionStrokeWidth}
               strokeOpacity={1}
               strokeLinecap="round"
             />
@@ -3780,13 +3792,20 @@ export default function AIWorkspace() {
               fill="none"
               stroke={DARK_THEME.canvasLine}
               strokeOpacity="0.9"
-              strokeWidth="4"
+              strokeWidth={scaledConnectionStrokeWidth}
               strokeLinecap="round"
               pointerEvents="none"
             />
           )}
         </svg>
         <div className="absolute inset-0 z-[90] pointer-events-none">
+          <div
+            className="absolute z-[90] overflow-visible"
+            style={{
+              transform: `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.scale})`,
+              transformOrigin: '0 0',
+            }}
+          >
           {items.map((item) => {
             const isHoveredItem = hoveredCanvasItemId === item.id;
             const isHoveredInputPort = hoveredInputPortItemId === item.id;
@@ -3797,8 +3816,8 @@ export default function AIWorkspace() {
               isHoveredItem || isNearPort || isConnectionSource;
             const showInputPort =
               isHoveredItem || isNearPort || (connectionMode === 'dragging' && connectionSnapTargetId === item.id);
-            const inputPoint = getPortOverlayPoint(item, 'left');
-            const outputPoint = getPortOverlayPoint(item, 'right');
+            const inputPoint = getPortCanvasPoint(item, 'left');
+            const outputPoint = getPortCanvasPoint(item, 'right');
 
             return (
               <React.Fragment key={`port-overlay-${item.id}`}>
@@ -3816,8 +3835,8 @@ export default function AIWorkspace() {
                   style={{
                     left: inputPoint.x,
                     top: inputPoint.y,
-                    width: scaledPortProximitySize,
-                    height: scaledPortProximitySize,
+                    width: PORT_PROXIMITY_SIZE,
+                    height: PORT_PROXIMITY_SIZE,
                   }}
                 />
                 <div
@@ -3829,11 +3848,11 @@ export default function AIWorkspace() {
                   style={{
                     left: inputPoint.x,
                     top: inputPoint.y,
-                    width: scaledPortIconSize,
-                    height: scaledPortIconSize,
+                    width: PORT_ICON_SIZE,
+                    height: PORT_ICON_SIZE,
                   }}
                 >
-                  <ConnectionPortIcon className="h-full w-full" glyphSize={scaledPortGlyphSize} />
+                  <ConnectionPortIcon className="h-full w-full" />
                 </div>
                 <div
                   data-port-bridge="out"
@@ -3862,8 +3881,8 @@ export default function AIWorkspace() {
                   style={{
                     left: outputPoint.x,
                     top: outputPoint.y,
-                    width: scaledPortProximitySize,
-                    height: scaledPortProximitySize,
+                    width: PORT_PROXIMITY_SIZE,
+                    height: PORT_PROXIMITY_SIZE,
                   }}
                 />
                 <button
@@ -3896,16 +3915,17 @@ export default function AIWorkspace() {
                   style={{
                     left: outputPoint.x,
                     top: outputPoint.y,
-                    width: scaledPortIconSize,
-                    height: scaledPortIconSize,
+                    width: PORT_ICON_SIZE,
+                    height: PORT_ICON_SIZE,
                   }}
                   aria-label="开始连线"
                 >
-                  <ConnectionPortIcon className="h-full w-full" glyphSize={scaledPortGlyphSize} />
+                  <ConnectionPortIcon className="h-full w-full" />
                 </button>
               </React.Fragment>
             );
           })}
+          </div>
         </div>
             </>
           );
@@ -3933,6 +3953,7 @@ export default function AIWorkspace() {
                 return (
               <div
                 key={item.id}
+                data-canvas-item-id={item.id}
                 className={`absolute group cursor-move ${!item.visible ? 'opacity-30' : ''}`}
                 style={{
                   left: item.x,
@@ -4062,7 +4083,7 @@ export default function AIWorkspace() {
       </div>
 
       {/* Zoom Controller - Outside Canvas */}
-      <div className="absolute left-[340px] bottom-4 z-50 flex items-center gap-2 rounded-xl border border-white/10 bg-[rgba(16,18,22,0.88)] p-1.5 shadow-[0_18px_50px_rgba(0,0,0,0.35)] backdrop-blur-xl">
+      <div className="absolute left-4 bottom-4 z-50 flex items-center gap-2 rounded-xl border border-white/10 bg-[rgba(16,18,22,0.88)] p-1.5 shadow-[0_18px_50px_rgba(0,0,0,0.35)] backdrop-blur-xl">
         <button 
           className="rounded-md p-1.5 text-zinc-400 hover:bg-white/8 hover:text-zinc-100"
           onClick={() => setViewport(prev => ({ ...prev, scale: Math.max(0.1, prev.scale - 0.1) }))}
