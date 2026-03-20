@@ -3,8 +3,17 @@ node_modules
 output
 .DS_Store
 *.tsbuildinfo
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
 .env
 .env.local
 .env.*.local
 .opencode/
+.vercel
+.turbo
+coverage
+.vscode/
+.idea/
 public/uploads/*
