@@ -57,6 +57,18 @@ interface ConnectionSession {
   moved: boolean;
 }
 
+type PortSide = 'left' | 'right';
+
+interface MagneticPortState {
+  itemId: string;
+  side: PortSide;
+  point: { x: number; y: number };
+  isTracking: boolean;
+  isReturning: boolean;
+}
+
+type MagneticPortMap = Record<string, MagneticPortState>;
+
 interface FrozenPreviewConnection {
   from: { x: number; y: number };
   to: { x: number; y: number };
@@ -169,6 +181,9 @@ const PORT_ICON_SIZE = 46;
 const PORT_ICON_RADIUS = PORT_ICON_SIZE / 2;
 const PORT_OUTER_GAP = 26;
 const PORT_PROXIMITY_SIZE = 84;
+const PORT_ACTIVATION_RADIUS = 76;
+const PORT_TRACKING_RADIUS = 112;
+const PORT_RETURN_DURATION_MS = 220;
 const CONNECTION_ANCHOR_EDGE_GAP = 8;
 const DARK_THEME = {
   appBg: '#050608',
@@ -636,6 +651,7 @@ export default function AIWorkspace() {
   const [connectionPointerId, setConnectionPointerId] = useState<number | null>(null);
   const [frozenPreviewConnection, setFrozenPreviewConnection] = useState<FrozenPreviewConnection | null>(null);
   const [pendingConnectionMenu, setPendingConnectionMenu] = useState<PendingConnectionMenu | null>(null);
+  const [magneticPorts, setMagneticPorts] = useState<MagneticPortMap>({});
   const [viewport, setViewport] = useState({ x: 0, y: 0, scale: 1 });
   const [isDragging, setIsDragging] = useState(false);
   const [isPanning, setIsPanning] = useState(false);
@@ -650,6 +666,7 @@ export default function AIWorkspace() {
   const panStartOffset = useRef({ x: 0, y: 0 });
   const marqueeStartRef = useRef<{ x: number; y: number } | null>(null);
   const draggingItemIdsRef = useRef<string[]>([]);
+  const magneticPortResetTimerRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
   const cornerResizeStart = useRef<{
     mouseX: number;
     mouseY: number;
@@ -1407,8 +1424,149 @@ export default function AIWorkspace() {
     setFrozenPreviewConnection(null);
   }, []);
 
-  const getPortOverlayPoint = (item: CanvasItem, side: 'left' | 'right') =>
-    toCanvasScreenPoint(getPortCanvasPoint(item, side));
+  const toCanvasPoint = (screenPoint: { x: number; y: number }) => ({
+    x: (screenPoint.x - viewport.x) / viewport.scale,
+    y: (screenPoint.y - viewport.y) / viewport.scale,
+  });
+
+  const getMagneticPortKey = useCallback((itemId: string, side: PortSide) => `${itemId}:${side}`, []);
+
+  const clearMagneticPortResetTimer = useCallback((key?: string) => {
+    if (key) {
+      const timer = magneticPortResetTimerRef.current[key];
+      if (timer) {
+        clearTimeout(timer);
+        delete magneticPortResetTimerRef.current[key];
+      }
+      return;
+    }
+
+    Object.values(magneticPortResetTimerRef.current).forEach((timer) => clearTimeout(timer));
+    magneticPortResetTimerRef.current = {};
+  }, []);
+
+  const getRenderedPortOverlayPoint = useCallback(
+    (item: CanvasItem, side: PortSide) => {
+      const key = getMagneticPortKey(item.id, side);
+      const originalPoint = getPortCanvasPoint(item, side);
+      if (magneticPorts[key]) {
+        return magneticPorts[key].point;
+      }
+      return originalPoint;
+    },
+    [magneticPorts, getMagneticPortKey]
+  );
+
+  const releaseMagneticPort = useCallback(
+    (port: MagneticPortState) => {
+      const key = getMagneticPortKey(port.itemId, port.side);
+      const item = items.find((entry) => entry.id === port.itemId);
+      if (!item) {
+        clearMagneticPortResetTimer(key);
+        setMagneticPorts((prev) => {
+          if (!prev[key]) return prev;
+          const next = { ...prev };
+          delete next[key];
+          return next;
+        });
+        return;
+      }
+
+      const origin = getPortCanvasPoint(item, port.side);
+      clearMagneticPortResetTimer(key);
+      setMagneticPorts((prev) => ({
+        ...prev,
+        [key]: {
+          itemId: port.itemId,
+          side: port.side,
+          point: origin,
+          isTracking: false,
+          isReturning: true,
+        },
+      }));
+      magneticPortResetTimerRef.current[key] = setTimeout(() => {
+        setMagneticPorts((prev) => {
+          const current = prev[key];
+          if (!current?.isReturning) return prev;
+          const next = { ...prev };
+          delete next[key];
+          return next;
+        });
+        delete magneticPortResetTimerRef.current[key];
+      }, PORT_RETURN_DURATION_MS);
+    },
+    [items, clearMagneticPortResetTimer, getMagneticPortKey]
+  );
+
+  const updateMagneticPort = useCallback(
+    (point: { x: number; y: number }) => {
+      if (connectionMode === 'dragging' || pendingConnectionMenu) {
+        Object.values(magneticPorts).forEach((port) => {
+          if (port.isTracking) releaseMagneticPort(port);
+        });
+        return;
+      }
+
+      let nearest:
+        | {
+            key: string;
+            itemId: string;
+            side: PortSide;
+            distance: number;
+          }
+        | null = null;
+
+      for (const item of items) {
+        for (const side of ['left', 'right'] as const) {
+          const origin = getPortCanvasPoint(item, side);
+          const key = getMagneticPortKey(item.id, side);
+          const existingPort = magneticPorts[key];
+          const threshold = existingPort?.isTracking ? PORT_TRACKING_RADIUS : PORT_ACTIVATION_RADIUS;
+          const distance = Math.hypot(point.x - origin.x, point.y - origin.y);
+          if (distance > threshold) continue;
+          if (!nearest || distance < nearest.distance) {
+            nearest = {
+              key,
+              itemId: item.id,
+              side,
+              distance,
+            };
+          }
+        }
+      }
+
+      const nearestKey = nearest?.key ?? null;
+
+      Object.entries(magneticPorts).forEach(([key, port]) => {
+        if (!port.isTracking) return;
+        if (key === nearestKey) return;
+        releaseMagneticPort(port);
+      });
+
+      if (!nearest) return;
+
+      clearMagneticPortResetTimer(nearest.key);
+      setMagneticPorts((prev) => ({
+        ...prev,
+        [nearest.key]: {
+          itemId: nearest.itemId,
+          side: nearest.side,
+          point,
+          isTracking: true,
+          isReturning: false,
+        },
+      }));
+    },
+    [
+      connectionMode,
+      pendingConnectionMenu,
+      magneticPorts,
+      items,
+      releaseMagneticPort,
+      clearMagneticPortResetTimer,
+      getMagneticPortKey,
+    ]
+  );
 
   const beginConnectionDragFromItem = (
     item: CanvasItem,
@@ -1416,6 +1574,8 @@ export default function AIWorkspace() {
     source: 'bridge' | 'button'
   ) => {
     clearPendingConnectionMenu();
+    clearMagneticPortResetTimer();
+    setMagneticPorts({});
     setSelectedConnectionIds([]);
     const wasHoveredOutput = hoveredOutputPortItemId === item.id;
     const isHoveredCanvasItem = hoveredCanvasItemId === item.id;
@@ -1445,7 +1605,7 @@ export default function AIWorkspace() {
       } catch {}
     }
 
-    const portPoint = getPortOverlayPoint(item, 'right');
+    const portPoint = toCanvasScreenPoint(getRenderedPortOverlayPoint(item, 'right'));
     startDraggingConnection(item.id, portPoint, capturedPointerId);
   };
 
@@ -1777,6 +1937,9 @@ export default function AIWorkspace() {
 
   const handleCanvasPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     const target = e.target as HTMLElement;
+    Object.values(magneticPorts).forEach((port) => {
+      if (port.isTracking) releaseMagneticPort(port);
+    });
     debugCanvasConnection('canvas-pointerdown', {
       button: e.button,
       pointerId: e.pointerId,
@@ -1894,6 +2057,13 @@ export default function AIWorkspace() {
       return;
     }
 
+    if (!isDragging) {
+      const point = getCanvasRelativePoint(e.clientX, e.clientY);
+      if (point) {
+        updateMagneticPort(toCanvasPoint(point));
+      }
+    }
+
     if (isDragging && selectedId) {
       const dx = (e.clientX - dragStart.current.x) / viewport.scale;
       const dy = (e.clientY - dragStart.current.y) / viewport.scale;
@@ -1904,6 +2074,12 @@ export default function AIWorkspace() {
       ));
       dragStart.current = { x: e.clientX, y: e.clientY };
     }
+  };
+
+  const handleCanvasPointerLeave = () => {
+    Object.values(magneticPorts).forEach((port) => {
+      if (port.isTracking) releaseMagneticPort(port);
+    });
   };
 
   const handleCanvasPointerUp = (e?: React.PointerEvent<HTMLDivElement>) => {
@@ -3313,8 +3489,9 @@ export default function AIWorkspace() {
   useEffect(() => {
     return () => {
       detachConnectionWindowListeners();
+      clearMagneticPortResetTimer();
     };
-  }, []);
+  }, [clearMagneticPortResetTimer]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -3820,6 +3997,7 @@ export default function AIWorkspace() {
         onPointerMove={handleCanvasPointerMove}
         onPointerUp={handleCanvasPointerUp}
         onPointerCancel={handleCanvasPointerUp}
+        onPointerLeave={handleCanvasPointerLeave}
         onWheel={handleWheel}
         onPaste={handleCanvasPaste}
       >
@@ -3949,14 +4127,29 @@ export default function AIWorkspace() {
             const isHoveredItem = hoveredCanvasItemId === item.id;
             const isHoveredInputPort = hoveredInputPortItemId === item.id;
             const isHoveredOutputPort = hoveredOutputPortItemId === item.id;
+            const inputMagneticState = magneticPorts[getMagneticPortKey(item.id, 'left')];
+            const outputMagneticState = magneticPorts[getMagneticPortKey(item.id, 'right')];
+            const isMagneticItem = Boolean(inputMagneticState || outputMagneticState);
             const isConnectionSource = connectionSessionRef.current?.fromItemId === item.id;
             const isNearPort = isHoveredInputPort || isHoveredOutputPort;
             const showOutputPort =
-              isHoveredItem || isNearPort || isConnectionSource;
+              isHoveredItem || isNearPort || isConnectionSource || isMagneticItem;
             const showInputPort =
-              isHoveredItem || isNearPort || (connectionMode === 'dragging' && connectionSnapTargetId === item.id);
-            const inputPoint = getPortCanvasPoint(item, 'left');
-            const outputPoint = getPortCanvasPoint(item, 'right');
+              isHoveredItem || isNearPort || isMagneticItem || (connectionMode === 'dragging' && connectionSnapTargetId === item.id);
+            const inputPoint = getRenderedPortOverlayPoint(item, 'left');
+            const outputPoint = getRenderedPortOverlayPoint(item, 'right');
+            const inputTransition =
+              inputMagneticState && !inputMagneticState.isTracking
+                ? `left ${PORT_RETURN_DURATION_MS}ms cubic-bezier(0.22, 1, 0.36, 1), top ${PORT_RETURN_DURATION_MS}ms cubic-bezier(0.22, 1, 0.36, 1), opacity 150ms ease`
+                : inputMagneticState
+                  ? 'transform 100ms ease, opacity 150ms ease'
+                  : 'opacity 150ms ease';
+            const outputTransition =
+              outputMagneticState && !outputMagneticState.isTracking
+                ? `left ${PORT_RETURN_DURATION_MS}ms cubic-bezier(0.22, 1, 0.36, 1), top ${PORT_RETURN_DURATION_MS}ms cubic-bezier(0.22, 1, 0.36, 1), opacity 150ms ease`
+                : outputMagneticState
+                  ? 'transform 100ms ease, opacity 150ms ease'
+                  : 'opacity 150ms ease';
 
             return (
               <React.Fragment key={`port-overlay-${item.id}`}>
@@ -3976,6 +4169,7 @@ export default function AIWorkspace() {
                     top: inputPoint.y,
                     width: PORT_PROXIMITY_SIZE,
                     height: PORT_PROXIMITY_SIZE,
+                    transition: inputTransition,
                   }}
                 />
                 <div
@@ -3989,6 +4183,8 @@ export default function AIWorkspace() {
                     top: inputPoint.y,
                     width: PORT_ICON_SIZE,
                     height: PORT_ICON_SIZE,
+                    transform: `translate(-50%, -50%) scale(${inputMagneticState?.isTracking ? 1.04 : 1})`,
+                    transition: inputTransition,
                   }}
                 >
                   <ConnectionPortIcon className="h-full w-full" />
@@ -4022,6 +4218,7 @@ export default function AIWorkspace() {
                     top: outputPoint.y,
                     width: PORT_PROXIMITY_SIZE,
                     height: PORT_PROXIMITY_SIZE,
+                    transition: outputTransition,
                   }}
                 />
                 <button
@@ -4056,6 +4253,8 @@ export default function AIWorkspace() {
                     top: outputPoint.y,
                     width: PORT_ICON_SIZE,
                     height: PORT_ICON_SIZE,
+                    transform: `translate(-50%, -50%) scale(${outputMagneticState?.isTracking ? 1.04 : 1})`,
+                    transition: outputTransition,
                   }}
                   aria-label="开始连线"
                 >
