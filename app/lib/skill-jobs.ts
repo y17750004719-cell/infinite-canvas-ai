@@ -251,7 +251,7 @@ function loadLogoSkillConfig(): { components: LogoSkillComponentConfig[]; concur
     concurrency: DEFAULT_CONCURRENCY,
   };
 
-  const configPath = path.join(process.cwd(), ".opencode", "skills", "logo", "config.json");
+  const configPath = path.join(process.cwd(), "skills", "logo", "config.json");
   if (!fs.existsSync(configPath)) {
     return fallback;
   }
@@ -308,7 +308,7 @@ function loadBrandSkillConfig(): { nineGridSize: string; materialTypes: string[]
     materialTypes: [...DEFAULT_BRAND_MATERIAL_POOL.map((item) => item.key)],
   };
 
-  const configPath = path.join(process.cwd(), ".opencode", "skills", "brand", "config.json");
+  const configPath = path.join(process.cwd(), "skills", "brand", "config.json");
   if (!fs.existsSync(configPath)) {
     return fallback;
   }

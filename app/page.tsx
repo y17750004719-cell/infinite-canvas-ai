@@ -6,7 +6,7 @@ import remarkGfm from 'remark-gfm';
 import { 
   MousePointer2, Type, Square, PenTool, Image as ImageIcon, 
   Eraser, Layers, Share2, History, Settings, Paperclip,
-  Send, Sparkles, X, ChevronDown, Trash2, Edit3, ArrowLeft, FolderOpen, Plus, SlidersHorizontal, Copy, Check
+  Send, Sparkles, X, ChevronDown, Trash2, Edit3, ArrowLeft, FolderOpen, Plus, SlidersHorizontal, Copy, Check, Video
 } from 'lucide-react';
 import { saveSessions, loadSessions, ProjectSession as DBSession } from './lib/db';
 import { ASPECT_RATIOS } from './lib/api-client';
@@ -55,6 +55,16 @@ interface ConnectionSession {
   point: { x: number; y: number } | null;
   snapTargetId: string | null;
   moved: boolean;
+}
+
+interface FrozenPreviewConnection {
+  from: { x: number; y: number };
+  to: { x: number; y: number };
+}
+
+interface PendingConnectionMenu {
+  fromItemId: string;
+  position: { x: number; y: number };
 }
 
 interface ChatMessage {
@@ -590,6 +600,27 @@ function ConnectionPortIcon({
   );
 }
 
+const CONNECTION_MENU_OPTIONS = [
+  {
+    id: 'text',
+    title: '文本',
+    description: '脚本、广告词、品牌文案',
+    icon: Type,
+  },
+  {
+    id: 'image',
+    title: '图片',
+    description: '风格一致、图生图',
+    icon: ImageIcon,
+  },
+  {
+    id: 'video',
+    title: '视频',
+    description: '风格化、视频生视频',
+    icon: Video,
+  },
+] as const;
+
 export default function AIWorkspace() {
   const [viewMode, setViewMode] = useState<'gallery' | 'editor'>('gallery');
   const [tool, setTool] = useState<Tool>('select');
@@ -603,6 +634,8 @@ export default function AIWorkspace() {
   const [connectionFromItemId, setConnectionFromItemId] = useState<string | null>(null);
   const [connectionPoint, setConnectionPoint] = useState<{ x: number; y: number } | null>(null);
   const [connectionPointerId, setConnectionPointerId] = useState<number | null>(null);
+  const [frozenPreviewConnection, setFrozenPreviewConnection] = useState<FrozenPreviewConnection | null>(null);
+  const [pendingConnectionMenu, setPendingConnectionMenu] = useState<PendingConnectionMenu | null>(null);
   const [viewport, setViewport] = useState({ x: 0, y: 0, scale: 1 });
   const [isDragging, setIsDragging] = useState(false);
   const [isPanning, setIsPanning] = useState(false);
@@ -693,6 +726,23 @@ export default function AIWorkspace() {
   const [chatInputFocused, setChatInputFocused] = useState(false);
   const [chatInputHeight, setChatInputHeight] = useState(24);
   const [copiedAssistantMessageId, setCopiedAssistantMessageId] = useState<string | null>(null);
+  const multiSelectionBounds = React.useMemo(() => {
+    if (selectedIds.length <= 1) return null;
+    const selectedItems = items.filter((item) => selectedIds.includes(item.id));
+    if (selectedItems.length <= 1) return null;
+
+    const left = Math.min(...selectedItems.map((item) => item.x));
+    const top = Math.min(...selectedItems.map((item) => item.y));
+    const right = Math.max(...selectedItems.map((item) => item.x + item.width));
+    const bottom = Math.max(...selectedItems.map((item) => item.y + item.height));
+
+    return {
+      left,
+      top,
+      width: right - left,
+      height: bottom - top,
+    };
+  }, [items, selectedIds]);
   const SKILL_TOKEN_SELECTOR = '[data-skill-token="true"]';
   const copiedAssistantMessageTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -1352,6 +1402,11 @@ export default function AIWorkspace() {
     };
   };
 
+  const clearPendingConnectionMenu = useCallback(() => {
+    setPendingConnectionMenu(null);
+    setFrozenPreviewConnection(null);
+  }, []);
+
   const getPortOverlayPoint = (item: CanvasItem, side: 'left' | 'right') =>
     toCanvasScreenPoint(getPortCanvasPoint(item, side));
 
@@ -1360,6 +1415,7 @@ export default function AIWorkspace() {
     pointerId: number,
     source: 'bridge' | 'button'
   ) => {
+    clearPendingConnectionMenu();
     setSelectedConnectionIds([]);
     const wasHoveredOutput = hoveredOutputPortItemId === item.id;
     const isHoveredCanvasItem = hoveredCanvasItemId === item.id;
@@ -1667,6 +1723,7 @@ export default function AIWorkspace() {
       point: session?.point ?? null,
     });
     if (session && session.mode === 'dragging' && session.fromItemId && session.snapTargetId && session.fromItemId !== session.snapTargetId) {
+      clearPendingConnectionMenu();
       setConnections((prev) => {
         const exists = prev.some(
           (connection) =>
@@ -1683,9 +1740,40 @@ export default function AIWorkspace() {
           },
         ];
       });
+    } else if (session && session.mode === 'dragging' && session.fromItemId && session.point) {
+      const fromItem = items.find((item) => item.id === session.fromItemId);
+      if (fromItem) {
+        setFrozenPreviewConnection({
+          from: toCanvasScreenPoint(getConnectionAnchorCanvasPoint(fromItem, 'right')),
+          to: session.point,
+        });
+        setPendingConnectionMenu({
+          fromItemId: session.fromItemId,
+          position: {
+            x: session.point.x,
+            y: session.point.y,
+          },
+        });
+      } else {
+        clearPendingConnectionMenu();
+      }
     }
     resetConnectionInteraction();
   };
+
+  const beginDraggingSelectedItems = React.useCallback(
+    (clientX: number, clientY: number, itemIds: string[], primaryId: string | null) => {
+      if (itemIds.length === 0 || !primaryId) return;
+      clearPendingConnectionMenu();
+      setSelectedConnectionIds([]);
+      setIsDragging(true);
+      draggingItemIdsRef.current = itemIds;
+      setSelectedId(primaryId);
+      setSelectedIds(itemIds);
+      dragStart.current = { x: clientX, y: clientY };
+    },
+    [clearPendingConnectionMenu]
+  );
 
   const handleCanvasPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     const target = e.target as HTMLElement;
@@ -1713,6 +1801,7 @@ export default function AIWorkspace() {
     }
 
     if (e.button === 0 && isSpacePressed) {
+      clearPendingConnectionMenu();
       e.preventDefault();
       setIsPanning(true);
       panStartOffset.current = { x: viewport.x, y: viewport.y };
@@ -1721,6 +1810,7 @@ export default function AIWorkspace() {
     }
 
     if (e.button === 1) {
+      clearPendingConnectionMenu();
       e.preventDefault();
       setIsPanning(true);
       panStartOffset.current = { x: viewport.x, y: viewport.y };
@@ -1729,6 +1819,10 @@ export default function AIWorkspace() {
     }
 
     if (e.button === 0 && target.dataset.canvas === 'true') {
+      if (pendingConnectionMenu) {
+        clearPendingConnectionMenu();
+        return;
+      }
       const canvasRect = canvasRef.current?.getBoundingClientRect();
       if (!canvasRect) return;
       const startX = e.clientX - canvasRect.left;
@@ -3237,6 +3331,10 @@ export default function AIWorkspace() {
           resetConnectionInteraction();
           return;
         }
+        if (pendingConnectionMenu) {
+          clearPendingConnectionMenu();
+          return;
+        }
       }
 
       if (e.key === 'Delete' || e.key === 'Backspace') {
@@ -3275,7 +3373,22 @@ export default function AIWorkspace() {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
     };
-  }, [selectedId, selectedIds, connectionPointerId, selectedConnectionIds]);
+  }, [selectedId, selectedIds, connectionPointerId, selectedConnectionIds, pendingConnectionMenu, clearPendingConnectionMenu]);
+
+  useEffect(() => {
+    if (!pendingConnectionMenu) return;
+
+    const handlePointerDownOutsideMenu = (e: PointerEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (target?.closest('[data-connection-create-menu="true"]')) return;
+      clearPendingConnectionMenu();
+    };
+
+    document.addEventListener('pointerdown', handlePointerDownOutsideMenu);
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDownOutsideMenu);
+    };
+  }, [pendingConnectionMenu, clearPendingConnectionMenu]);
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
@@ -3721,6 +3834,21 @@ export default function AIWorkspace() {
           const scaledConnectionStrokeWidth = 3.5 * viewport.scale;
           const scaledSelectedConnectionStrokeWidth = 4.5 * viewport.scale;
           const scaledDebugConnectionStrokeWidth = 3 * viewport.scale;
+          const connectionMenuWidth = 360;
+          const connectionMenuHeight = 292;
+          const connectionMenuPadding = 24;
+          const pendingMenuLeft = pendingConnectionMenu
+            ? Math.min(
+                Math.max(pendingConnectionMenu.position.x + 18, connectionMenuPadding),
+                Math.max(connectionMenuPadding, svgWidth - connectionMenuWidth - connectionMenuPadding)
+              )
+            : 0;
+          const pendingMenuTop = pendingConnectionMenu
+            ? Math.min(
+                Math.max(pendingConnectionMenu.position.y - 40, connectionMenuPadding),
+                Math.max(connectionMenuPadding, svgHeight - connectionMenuHeight - connectionMenuPadding)
+              )
+            : 0;
           const showConnectionTestLine = DEBUG_CANVAS_CONNECTIONS && !from;
           return (
             <>
@@ -3792,6 +3920,17 @@ export default function AIWorkspace() {
               fill="none"
               stroke={DARK_THEME.canvasLine}
               strokeOpacity="0.9"
+              strokeWidth={scaledConnectionStrokeWidth}
+              strokeLinecap="round"
+              pointerEvents="none"
+            />
+          )}
+          {frozenPreviewConnection && (
+            <path
+              d={buildConnectionPath(frozenPreviewConnection.from, frozenPreviewConnection.to)}
+              fill="none"
+              stroke={DARK_THEME.canvasLine}
+              strokeOpacity="0.5"
               strokeWidth={scaledConnectionStrokeWidth}
               strokeLinecap="round"
               pointerEvents="none"
@@ -3927,6 +4066,64 @@ export default function AIWorkspace() {
           })}
           </div>
         </div>
+        {pendingConnectionMenu && (
+          <div className="pointer-events-none absolute inset-0 z-[110]">
+            <div
+              data-connection-create-menu="true"
+              className="pointer-events-auto absolute overflow-hidden rounded-[26px] border border-white/[0.1] bg-[rgba(26,26,28,0.985)] shadow-[0_26px_72px_rgba(0,0,0,0.5)] backdrop-blur-xl"
+              style={{
+                left: pendingMenuLeft,
+                top: pendingMenuTop,
+                width: 320,
+                minHeight: 198,
+              }}
+              onPointerDown={(e) => {
+                e.stopPropagation();
+              }}
+            >
+              <div className="p-3.5">
+                <div className="mb-2.5 px-1 text-xs font-medium tracking-[-0.01em] text-zinc-500/80">
+                  引用该节点生成
+                </div>
+                <div className="space-y-1.5">
+                  {CONNECTION_MENU_OPTIONS.map((option) => {
+                    const Icon = option.icon;
+                    return (
+                      <button
+                        key={option.id}
+                        type="button"
+                        onPointerDown={(e) => {
+                          e.stopPropagation();
+                        }}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          clearPendingConnectionMenu();
+                        }}
+                        className="group flex min-h-[68px] w-full items-center gap-2.5 rounded-[20px] border border-transparent bg-transparent px-3 py-2.5 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.015)] transition-all duration-300 ease-in-out hover:bg-[rgba(255,255,255,0.038)]"
+                      >
+                        <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-[11px] bg-[rgba(255,255,255,0.055)] text-zinc-50 shadow-[inset_0_1px_0_rgba(255,255,255,0.025)] transition-colors duration-300 group-hover:bg-[rgba(255,255,255,0.07)]">
+                          <Icon size={21} strokeWidth={2} />
+                        </div>
+                        <div className="flex min-w-0 flex-1 items-center pl-1">
+                          <div className="flex min-w-0 flex-1 flex-col justify-center">
+                            <div className="text-[16px] font-medium tracking-[-0.03em] text-zinc-50 transition-transform duration-300 ease-in-out group-hover:translate-y-1">
+                              {option.title}
+                            </div>
+                            <div className="max-h-0 overflow-hidden opacity-0 transition-all duration-300 ease-in-out group-hover:mt-0.5 group-hover:max-h-9 group-hover:opacity-100">
+                              <div className="translate-y-1.5 whitespace-normal break-words text-[11px] font-medium tracking-[-0.01em] text-zinc-500 transition-transform duration-300 ease-in-out group-hover:translate-y-0">
+                                {option.description}
+                              </div>
+                            </div>
+                          </div>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
             </>
           );
         })()}
@@ -3939,9 +4136,34 @@ export default function AIWorkspace() {
             transformOrigin: '0 0',
           }}
         >
+          {multiSelectionBounds && (
+            <div
+              data-selection-group="true"
+              className="absolute rounded-[28px] border border-white/20 bg-white/[0.06] shadow-[0_18px_40px_rgba(0,0,0,0.16)]"
+              style={{
+                left: multiSelectionBounds.left - 10,
+                top: multiSelectionBounds.top - 10,
+                width: multiSelectionBounds.width + 20,
+                height: multiSelectionBounds.height + 20,
+              }}
+              onPointerDown={(e) => {
+                if (e.button !== 0) return;
+                if (isSpacePressed) return;
+                e.preventDefault();
+                e.stopPropagation();
+                beginDraggingSelectedItems(
+                  e.clientX,
+                  e.clientY,
+                  selectedIds,
+                  getPrimarySelectedId(selectedIds)
+                );
+              }}
+            />
+          )}
           {items.map(item => (
               (() => {
                 const isItemSelected = selectedIds.includes(item.id) || selectedId === item.id;
+                const showMultiSelectionGroup = selectedIds.length > 1;
                 const isHoveredItem = hoveredCanvasItemId === item.id;
                 const isHoveredOutputPort = hoveredOutputPortItemId === item.id;
                 const isConnectionSource = connectionSessionRef.current?.fromItemId === item.id;
@@ -3992,13 +4214,8 @@ export default function AIWorkspace() {
                 if (e.shiftKey) return;
                 e.preventDefault();
                 e.stopPropagation();
-                setSelectedConnectionIds([]);
-                setIsDragging(true);
                 const draggingIds = selectedIds.includes(item.id) ? selectedIds : [item.id];
-                draggingItemIdsRef.current = draggingIds;
-                setSelectedId(item.id);
-                setSelectedIds(draggingIds);
-                dragStart.current = { x: e.clientX, y: e.clientY };
+                beginDraggingSelectedItems(e.clientX, e.clientY, draggingIds, item.id);
               }}
             >
               {item.type === 'image' && item.src && (
@@ -4012,7 +4229,7 @@ export default function AIWorkspace() {
               )}
               {item.type === 'shape' && <div className="w-full h-full rounded" style={{ backgroundColor: item.fill }} />}
               {item.type === 'text' && <div className="w-full h-full flex items-center justify-center text-sm text-zinc-100">{item.text}</div>}
-              {(isItemSelected || isHoveredItem) && (
+              {((isItemSelected && !showMultiSelectionGroup) || isHoveredItem) && (
                 <div
                   className="absolute inset-[-2px] z-10 border border-dashed border-white/45 pointer-events-none"
                   style={{ borderRadius: `${NODE_CORNER_RADIUS}px` }}

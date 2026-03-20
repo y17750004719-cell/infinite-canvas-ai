@@ -216,7 +216,7 @@ function resolveIntent(
 
 function loadSkillContent(skillId: string): string | null {
   try {
-    const skillPath = path.join(process.cwd(), ".opencode", "skills", skillId, "SKILL.md");
+    const skillPath = path.join(process.cwd(), "skills", skillId, "SKILL.md");
     if (fs.existsSync(skillPath)) {
       return fs.readFileSync(skillPath, "utf-8");
     }

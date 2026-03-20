@@ -1,0 +1,25 @@
+{
+  "nine_grid": {
+    "layout": "3x3",
+    "cell_ratio": "1:1",
+    "size": "2048x2048",
+    "selection_mode": "ai_recommend",
+    "require_reference": ["logo", "brand_brief", "vi_guide"],
+    "default_material_types": [
+      "tshirt",
+      "hoodie",
+      "cap",
+      "socks",
+      "tote_bag",
+      "notebook",
+      "phone_case",
+      "signage",
+      "packaging_box"
+    ]
+  },
+  "output_rules": {
+    "plain_text": true,
+    "no_extra_symbols": true,
+    "no_redundant_formatting": true
+  }
+}

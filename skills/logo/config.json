@@ -1,0 +1,14 @@
+{
+  "job": {
+    "concurrency": 3
+  },
+  "components": [
+    { "key": "logo", "name": "品牌 Logo", "size": "2048x2048" },
+    { "key": "business_card", "name": "名片", "size": "1024x1024" },
+    { "key": "letterhead", "name": "信纸", "size": "1024x768" },
+    { "key": "envelope", "name": "信封", "size": "1024x768" },
+    { "key": "poster", "name": "海报", "size": "768x1024" },
+    { "key": "packaging_cup", "name": "杯套", "size": "1024x1024" },
+    { "key": "packaging_bag", "name": "纸袋", "size": "1024x768" }
+  ]
+}
