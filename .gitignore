@@ -1,0 +1,10 @@
+node_modules
+.next
+output
+.DS_Store
+*.tsbuildinfo
+.env
+.env.local
+.env.*.local
+.opencode/
+public/uploads/*
