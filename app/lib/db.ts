@@ -13,6 +13,8 @@ export interface CanvasItem {
   height: number;
   rotation: number;
   src?: string;
+  naturalWidth?: number;
+  naturalHeight?: number;
   fill?: string;
   text?: string;
   visible: boolean;

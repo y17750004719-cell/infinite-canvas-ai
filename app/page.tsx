@@ -33,6 +33,8 @@ interface CanvasItem {
   height: number;
   rotation: number;
   src?: string;
+  naturalWidth?: number;
+  naturalHeight?: number;
   fill?: string;
   text?: string;
   visible: boolean;
@@ -185,6 +187,7 @@ const PORT_ACTIVATION_RADIUS = 76;
 const PORT_TRACKING_RADIUS = 112;
 const PORT_RETURN_DURATION_MS = 220;
 const CONNECTION_ANCHOR_EDGE_GAP = 8;
+const IMAGE_DISPLAY_MIN_SIDE = 512;
 const DARK_THEME = {
   appBg: '#050608',
   panel: 'rgba(16, 18, 22, 0.88)',
@@ -203,6 +206,90 @@ const DARK_THEME = {
   portFill: '#090b0f',
   portStroke: 'rgba(229, 231, 235, 0.78)',
 };
+
+const getConstrainedImageDisplaySize = (
+  naturalWidth: number,
+  naturalHeight: number,
+  minSide: number = IMAGE_DISPLAY_MIN_SIDE
+) => {
+  if (naturalWidth <= 0 || naturalHeight <= 0) {
+    return { width: minSide, height: minSide };
+  }
+
+  if (naturalWidth >= naturalHeight) {
+    return {
+      width: (naturalWidth / naturalHeight) * minSide,
+      height: minSide,
+    };
+  }
+
+  return {
+    width: minSide,
+    height: (naturalHeight / naturalWidth) * minSide,
+  };
+};
+
+const createImageCanvasItem = ({
+  id,
+  src,
+  naturalWidth,
+  naturalHeight,
+  x,
+  y,
+}: {
+  id: string;
+  src: string;
+  naturalWidth: number;
+  naturalHeight: number;
+  x: number;
+  y: number;
+}): CanvasItem => {
+  const { width, height } = getConstrainedImageDisplaySize(naturalWidth, naturalHeight);
+
+  return {
+    id,
+    type: 'image',
+    x,
+    y,
+    width,
+    height,
+    rotation: 0,
+    src,
+    naturalWidth,
+    naturalHeight,
+    visible: true,
+    locked: false,
+  };
+};
+
+const getOriginalImageCopyPayload = (item: CanvasItem) => {
+  if (item.type !== 'image' || !item.src) {
+    return null;
+  }
+
+  return {
+    src: item.src,
+    naturalWidth: item.naturalWidth ?? item.width,
+    naturalHeight: item.naturalHeight ?? item.height,
+  };
+};
+
+const normalizeCanvasItems = (items: CanvasItem[]): CanvasItem[] =>
+  items.map((item) => {
+    if (item.type !== 'image') {
+      return item;
+    }
+
+    const sourceWidth = item.naturalWidth ?? item.width;
+    const sourceHeight = item.naturalHeight ?? item.height;
+    const { width, height } = getConstrainedImageDisplaySize(sourceWidth, sourceHeight);
+
+    return {
+      ...item,
+      width,
+      height,
+    };
+  });
 
 interface GalleryViewProps {
   sessions: ProjectSession[];
@@ -1130,22 +1217,14 @@ export default function AIWorkspace() {
     await new Promise<void>((resolve, reject) => {
       const img = new Image();
       img.onload = () => {
-        const aspectRatio = img.width / img.height;
-        const width = 300;
-        const height = 300 / aspectRatio;
-
-        const newItem: CanvasItem = {
+        const newItem = createImageCanvasItem({
           id: `item-${Date.now()}-${Math.random()}`,
-          type: 'image',
+          src: imageUrl,
+          naturalWidth: img.width,
+          naturalHeight: img.height,
           x: (-viewport.x / viewport.scale) + 100 + orderOffset * 24,
           y: (-viewport.y / viewport.scale) + 100 + orderOffset * 24,
-          width,
-          height,
-          rotation: 0,
-          src: imageUrl,
-          visible: true,
-          locked: false,
-        };
+        });
         setItems(prev => [...prev, newItem]);
         resolve();
       };
@@ -2009,6 +2088,12 @@ export default function AIWorkspace() {
       if (itemId !== selectedId) {
         return;
       }
+      const resizingItem = items.find((item) => item.id === itemId);
+      if (!resizingItem || resizingItem.type === 'image') {
+        setIsCornerResizing(false);
+        cornerResizeStart.current = null;
+        return;
+      }
       const deltaX = (e.clientX - mouseX) / viewport.scale;
       const deltaY = (e.clientY - mouseY) / viewport.scale;
       const minSize = 40;
@@ -2144,6 +2229,37 @@ export default function AIWorkspace() {
     cornerResizeStart.current = null;
   };
 
+  const applyViewportScale = useCallback(
+    (nextScale: number, anchor?: { x: number; y: number }) => {
+      setViewport((prev) => {
+        const clampedScale = Math.min(Math.max(nextScale, 0.1), 10);
+        if (clampedScale === prev.scale) {
+          return prev;
+        }
+
+        if (!anchor) {
+          return {
+            ...prev,
+            scale: clampedScale,
+          };
+        }
+
+        const canvasPoint = {
+          x: (anchor.x - prev.x) / prev.scale,
+          y: (anchor.y - prev.y) / prev.scale,
+        };
+
+        return {
+          ...prev,
+          scale: clampedScale,
+          x: anchor.x - canvasPoint.x * clampedScale,
+          y: anchor.y - canvasPoint.y * clampedScale,
+        };
+      });
+    },
+    []
+  );
+
   const handleWheel = (e: React.WheelEvent) => {
     e.preventDefault();
     
@@ -2153,27 +2269,14 @@ export default function AIWorkspace() {
     const rect = canvas.getBoundingClientRect();
     const pointerX = e.clientX - rect.left;
     const pointerY = e.clientY - rect.top;
-    
+
     const oldScale = viewport.scale;
-    const mousePointTo = {
-      x: (pointerX - viewport.x) / oldScale,
-      y: (pointerY - viewport.y) / oldScale,
-    };
-    
+
     const direction = e.deltaY > 0 ? -1 : 1;
     const scaleBy = 1.1;
     const newScale = direction > 0 ? oldScale * scaleBy : oldScale / scaleBy;
-    const clampedScale = Math.min(Math.max(newScale, 0.1), 10);
-    
-    const newX = pointerX - mousePointTo.x * clampedScale;
-    const newY = pointerY - mousePointTo.y * clampedScale;
-    
-    setViewport(prev => ({
-      ...prev,
-      scale: clampedScale,
-      x: newX,
-      y: newY,
-    }));
+
+    applyViewportScale(newScale, { x: pointerX, y: pointerY });
   };
 
   useEffect(() => {
@@ -2709,21 +2812,14 @@ export default function AIWorkspace() {
           const img = new Image();
           img.crossOrigin = 'anonymous';
           img.onload = () => {
-            const aspectRatio = img.width / img.height;
-            const width = 320;
-            const height = 320 / aspectRatio;
-            const newItem: CanvasItem = {
+            const newItem = createImageCanvasItem({
               id: `generated-${Date.now()}-brand-logo`,
-              type: 'image',
+              src: logoUrl,
+              naturalWidth: img.width,
+              naturalHeight: img.height,
               x: (-currentViewport.x / currentViewport.scale) + 120,
               y: (-currentViewport.y / currentViewport.scale) + 120,
-              width,
-              height,
-              rotation: 0,
-              src: logoUrl,
-              visible: true,
-              locked: false,
-            };
+            });
             setItems(prev => [...prev, newItem]);
           };
           img.src = logoUrl;
@@ -2976,22 +3072,14 @@ export default function AIWorkspace() {
           const img = new Image();
           img.crossOrigin = 'anonymous';
           img.onload = () => {
-            const aspectRatio = img.width / img.height;
-            let width = 400;
-            let height = 400 / aspectRatio;
-            
-            const newItem: CanvasItem = {
+            const newItem = createImageCanvasItem({
               id: `generated-${Date.now()}`,
-              type: 'image',
+              src: imageUrl,
+              naturalWidth: img.width,
+              naturalHeight: img.height,
               x: (-currentViewport.x / currentViewport.scale) + 100,
               y: (-currentViewport.y / currentViewport.scale) + 100,
-              width,
-              height,
-              rotation: 0,
-              src: imageUrl,
-              visible: true,
-              locked: false,
-            };
+            });
             setItems(prev => [...prev, newItem]);
             
             setTimeout(() => {
@@ -3316,7 +3404,7 @@ export default function AIWorkspace() {
       finalActiveId = emptyTopic.id;
     }
     
-    setItems(session.items || []);
+    setItems(normalizeCanvasItems(session.items || []));
     // 加载当前活跃对话的消息
     const activeTopic = finalTopics.find(t => t.id === finalActiveId) || finalTopics[0];
     setChatMessages(activeTopic ? activeTopic.messages : []);
@@ -3406,7 +3494,12 @@ export default function AIWorkspace() {
       const savedSessions = await loadSessions();
       
       if (savedSessions && savedSessions.length > 0) {
-        setSessions(savedSessions);
+        const normalizedSessions = savedSessions.map((session) => ({
+          ...session,
+          items: normalizeCanvasItems(session.items || []),
+        }));
+
+        setSessions(normalizedSessions);
         
         const urlParams = new URLSearchParams(window.location.search);
         const workspaceId = urlParams.get('workspace');
@@ -3417,7 +3510,7 @@ export default function AIWorkspace() {
         }
         
         setViewMode('editor');
-        const targetSession = savedSessions.find(s => s.id === workspaceId) || savedSessions[0];
+        const targetSession = normalizedSessions.find(s => s.id === workspaceId) || normalizedSessions[0];
         const targetTopics = targetSession.topics || [];
         const targetActiveTopic = targetTopics.find((t) => t.id === targetSession.activeTopicId) || targetTopics[0] || null;
         
@@ -3461,7 +3554,7 @@ export default function AIWorkspace() {
       const targetActiveTopic = targetTopics.find((t) => t.id === session.activeTopicId) || targetTopics[0] || null;
 
       setCurrentSessionId(sessionId);
-      setItems(session.items || []);
+      setItems(normalizeCanvasItems(session.items || []));
       setChatMessages(targetActiveTopic ? targetActiveTopic.messages : (session.messages || []));
       setActiveSkill(inferTopicSkill(targetActiveTopic));
       if (!targetActiveTopic || targetActiveTopic.messages.length === 0) {
@@ -3761,23 +3854,16 @@ export default function AIWorkspace() {
           const img = new Image();
           img.crossOrigin = 'anonymous';
           img.onload = () => {
-            const aspectRatio = img.width / img.height;
-            const width = 300;
-            const height = 300 / aspectRatio;
             const offset = processedSkillJobUrlsRef.current.size * 30;
 
-            const newItem: CanvasItem = {
+            const newItem = createImageCanvasItem({
               id: `generated-${Date.now()}-${itemKey}`,
-              type: 'image',
+              src: item.localUrl,
+              naturalWidth: img.width,
+              naturalHeight: img.height,
               x: (-viewport.x / viewport.scale) + 100 + offset,
               y: (-viewport.y / viewport.scale) + 100 + offset,
-              width,
-              height,
-              rotation: 0,
-              src: item.localUrl,
-              visible: true,
-              locked: false,
-            };
+            });
             setItems(prev => [...prev, newItem]);
           };
           img.src = item.localUrl;
@@ -4370,7 +4456,7 @@ export default function AIWorkspace() {
                 const hasIncomingConnection = connections.some((connection) => connection.toItemId === item.id);
                 const showOutputPort =
                   isHoveredItem || isHoveredOutputPort || isConnectionSource || hasOutgoingConnection;
-                const showCornerResizeHandle = isHoveredItem;
+                const showCornerResizeHandle = isHoveredItem && item.type !== 'image';
                 return (
               <div
                 key={item.id}
@@ -4421,7 +4507,7 @@ export default function AIWorkspace() {
                 <img
                   src={item.src}
                   alt=""
-                  className="w-full h-full object-cover pointer-events-none"
+                  className="w-full h-full object-contain pointer-events-none"
                   style={{ borderRadius: `${NODE_CORNER_RADIUS}px` }}
                   draggable={false}
                 />
@@ -4438,6 +4524,7 @@ export default function AIWorkspace() {
                 <button
                   data-corner-resize="true"
                   onPointerDown={(e) => {
+                    if (item.type === 'image') return;
                     e.preventDefault();
                     e.stopPropagation();
                     setSelectedId(item.id);
@@ -4502,7 +4589,7 @@ export default function AIWorkspace() {
       <div className="absolute left-4 bottom-4 z-50 flex items-center gap-2 rounded-xl border border-white/10 bg-[rgba(16,18,22,0.88)] p-1.5 shadow-[0_18px_50px_rgba(0,0,0,0.35)] backdrop-blur-xl">
         <button 
           className="rounded-md p-1.5 text-zinc-400 hover:bg-white/8 hover:text-zinc-100"
-          onClick={() => setViewport(prev => ({ ...prev, scale: Math.max(0.1, prev.scale - 0.1) }))}
+          onClick={() => applyViewportScale(viewport.scale - 0.1)}
         >
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <line x1="5" y1="12" x2="19" y2="12" />
@@ -4513,7 +4600,7 @@ export default function AIWorkspace() {
         </span>
         <button 
           className="rounded-md p-1.5 text-zinc-400 hover:bg-white/8 hover:text-zinc-100"
-          onClick={() => setViewport(prev => ({ ...prev, scale: Math.min(10, prev.scale + 0.1) }))}
+          onClick={() => applyViewportScale(viewport.scale + 0.1)}
         >
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <line x1="12" y1="5" x2="12" y2="19" />
@@ -4538,7 +4625,7 @@ export default function AIWorkspace() {
       ) : (
         <div className="absolute right-4 top-4 bottom-4 z-[140] isolate flex w-[480px] flex-col overflow-hidden rounded-[28px] border border-white/10 bg-[rgba(12,14,18,0.9)] shadow-[0_28px_80px_rgba(0,0,0,0.42)] backdrop-blur-xl transition-all duration-300">
           {/* Header */}
-          <div className="flex flex-shrink-0 items-center justify-between border-b border-white/8 px-6 py-4">
+          <div className="flex flex-shrink-0 items-center justify-between border-b border-[#252b34] px-6 py-4">
             <div className="flex items-center gap-3">
               <h1 className="text-base font-medium text-zinc-100">{currentProjectName}</h1>
             </div>
@@ -4951,7 +5038,7 @@ export default function AIWorkspace() {
                     {showGenerationModeMenu && (
                       <div className="absolute bottom-full left-0 z-20 mb-2 min-w-[80px] rounded-2xl border border-[#2a3038] bg-[#171b21] p-1 shadow-[0_20px_60px_rgba(0,0,0,0.42)]">
                         {[
-                          { id: 'auto' as const, label: '自定义' },
+                          { id: 'auto' as const, label: '默认' },
                           { id: 'image' as const, label: '生图' },
                           { id: 'chat' as const, label: '对话' },
                         ].map((option) => (
@@ -4980,7 +5067,7 @@ export default function AIWorkspace() {
                       className="flex items-center gap-1 rounded-full border border-[#2a3038] bg-[#181d24] px-2 py-1 text-xs font-medium text-zinc-300 transition-colors hover:bg-[#212730] disabled:cursor-not-allowed disabled:opacity-50"
                     >
                       <SlidersHorizontal size={12} />
-                      <span>{generationMode === 'auto' ? '自定义' : generationMode === 'image' ? '生图' : '对话'}</span>
+                      <span>{generationMode === 'auto' ? '默认' : generationMode === 'image' ? '生图' : '对话'}</span>
                     </button>
                   </div>
                   {generationMode === 'image' && (
