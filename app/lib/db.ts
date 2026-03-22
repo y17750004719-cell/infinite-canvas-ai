@@ -17,6 +17,7 @@ export interface CanvasItem {
   naturalHeight?: number;
   fill?: string;
   text?: string;
+  textVariant?: 'legacy' | 'card';
   visible: boolean;
   locked: boolean;
 }

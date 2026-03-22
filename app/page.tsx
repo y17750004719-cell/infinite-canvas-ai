@@ -4,9 +4,9 @@ import React, { useState, useRef, useEffect, useCallback, memo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { 
-  MousePointer2, Type, Square, PenTool, Image as ImageIcon, 
-  Eraser, Layers, Share2, History, Settings, Paperclip,
-  Send, Sparkles, X, ChevronDown, Trash2, Edit3, ArrowLeft, FolderOpen, Plus, SlidersHorizontal, Copy, Check, Video
+  MousePointer2, Type, Image as ImageIcon,
+  Share2, History, Settings, Paperclip,
+  Send, Sparkles, X, ChevronDown, Trash2, Edit3, ArrowLeft, FolderOpen, Plus, SlidersHorizontal, Copy, Check, Video, Pencil
 } from 'lucide-react';
 import { saveSessions, loadSessions, ProjectSession as DBSession } from './lib/db';
 import { ASPECT_RATIOS } from './lib/api-client';
@@ -37,6 +37,7 @@ interface CanvasItem {
   naturalHeight?: number;
   fill?: string;
   text?: string;
+  textVariant?: 'legacy' | 'card';
   visible: boolean;
   locked: boolean;
 }
@@ -138,17 +139,13 @@ interface ProjectSession {
   viewport: { x: number; y: number; scale: number };
 }
 
-type Tool = 'select' | 'text' | 'rectangle' | 'pen' | 'image' | 'eraser' | 'layers';
+type Tool = 'select' | 'text' | 'image';
 type GenerationMode = 'auto' | 'image' | 'chat';
 
 const tools = [
   { id: 'select', icon: MousePointer2, label: '选择' },
   { id: 'text', icon: Type, label: '文字' },
-  { id: 'rectangle', icon: Square, label: '矩形' },
-  { id: 'pen', icon: PenTool, label: '画笔' },
   { id: 'image', icon: ImageIcon, label: '图片' },
-  { id: 'eraser', icon: Eraser, label: '橡皮擦' },
-  { id: 'layers', icon: Layers, label: '图层' },
 ];
 
 const quickActions = [
@@ -188,6 +185,16 @@ const PORT_TRACKING_RADIUS = 112;
 const PORT_RETURN_DURATION_MS = 220;
 const CONNECTION_ANCHOR_EDGE_GAP = 8;
 const IMAGE_DISPLAY_MIN_SIDE = 512;
+const TEXT_CARD_DIMENSIONS = {
+  width: 380,
+  height: 430,
+} as const;
+const TEXT_CARD_FRAME_INSET_X = 16;
+const TEXT_CARD_FRAME_TOP = 24;
+const TEXT_CARD_FRAME_BOTTOM = 12;
+const NODE_SELECTED_OUTLINE_COLOR = 'rgba(226, 232, 240, 0.76)';
+const NODE_SELECTED_OUTLINE_WIDTH = 2;
+const VIEWPORT_ZOOM_DURATION_MS = 140;
 const DARK_THEME = {
   appBg: '#050608',
   panel: 'rgba(16, 18, 22, 0.88)',
@@ -290,6 +297,787 @@ const normalizeCanvasItems = (items: CanvasItem[]): CanvasItem[] =>
       height,
     };
   });
+
+const getItemVisualBounds = (item: CanvasItem) => {
+  if (item.type === 'text' && item.textVariant === 'card') {
+    return {
+      left: item.x + TEXT_CARD_FRAME_INSET_X,
+      top: item.y + TEXT_CARD_FRAME_TOP,
+      width: Math.max(0, item.width - TEXT_CARD_FRAME_INSET_X * 2),
+      height: Math.max(0, item.height - TEXT_CARD_FRAME_TOP - TEXT_CARD_FRAME_BOTTOM),
+    };
+  }
+
+  return {
+    left: item.x,
+    top: item.y,
+    width: item.width,
+    height: item.height,
+  };
+};
+
+const getTextCardFrameBounds = (item: CanvasItem) => ({
+  left: TEXT_CARD_FRAME_INSET_X,
+  top: TEXT_CARD_FRAME_TOP,
+  width: Math.max(0, item.width - TEXT_CARD_FRAME_INSET_X * 2),
+  height: Math.max(0, item.height - TEXT_CARD_FRAME_TOP - TEXT_CARD_FRAME_BOTTOM),
+});
+
+interface ViewportState {
+  x: number;
+  y: number;
+  scale: number;
+}
+
+interface CanvasSize {
+  width: number;
+  height: number;
+}
+
+const CanvasBackgroundLayer = memo(function CanvasBackgroundLayer({
+  viewport,
+}: {
+  viewport: ViewportState;
+}) {
+  return (
+    <div
+      className="pointer-events-none absolute inset-0"
+      style={{
+        backgroundColor: DARK_THEME.appBg,
+        backgroundImage: `radial-gradient(${DARK_THEME.canvasDot} 0.9px, transparent 0.9px)`,
+        backgroundSize: `${20 * viewport.scale}px ${20 * viewport.scale}px`,
+        backgroundPosition: `${viewport.x}px ${viewport.y}px`,
+      }}
+    />
+  );
+});
+
+const CanvasConnectionsLayer = memo(function CanvasConnectionsLayer({
+  canvasSize,
+  connections,
+  itemById,
+  selectedConnectionIds,
+  viewport,
+  previewFrom,
+  previewTo,
+  frozenPreviewConnection,
+  onConnectionPointerDown,
+  getConnectionAnchorCanvasPoint,
+  toCanvasScreenPoint,
+  buildConnectionPath,
+}: {
+  canvasSize: CanvasSize;
+  connections: Connection[];
+  itemById: Record<string, CanvasItem>;
+  selectedConnectionIds: string[];
+  viewport: ViewportState;
+  previewFrom: { x: number; y: number } | null;
+  previewTo: { x: number; y: number } | null;
+  frozenPreviewConnection: FrozenPreviewConnection | null;
+  onConnectionPointerDown: (e: React.PointerEvent<SVGPathElement>, connectionId: string) => void;
+  getConnectionAnchorCanvasPoint: (item: CanvasItem, side: 'left' | 'right') => { x: number; y: number };
+  toCanvasScreenPoint: (point: { x: number; y: number }) => { x: number; y: number };
+  buildConnectionPath: (from: { x: number; y: number }, to: { x: number; y: number }) => string;
+}) {
+  const scaledConnectionStrokeWidth = 3.5 * viewport.scale;
+  const scaledSelectedConnectionStrokeWidth = 4.5 * viewport.scale;
+  const scaledDebugConnectionStrokeWidth = 3 * viewport.scale;
+  const showConnectionTestLine = DEBUG_CANVAS_CONNECTIONS && !previewFrom;
+
+  return (
+    <svg
+      className="pointer-events-none absolute inset-0 z-[80] h-full w-full overflow-hidden"
+      width={canvasSize.width}
+      height={canvasSize.height}
+      viewBox={`0 0 ${Math.max(canvasSize.width, 1)} ${Math.max(canvasSize.height, 1)}`}
+      preserveAspectRatio="none"
+    >
+      {connections.map((connection) => {
+        const fromItem = itemById[connection.fromItemId];
+        const toItem = itemById[connection.toItemId];
+        if (!fromItem || !toItem) return null;
+        const connectionFrom = toCanvasScreenPoint(getConnectionAnchorCanvasPoint(fromItem, 'right'));
+        const connectionTo = toCanvasScreenPoint(getConnectionAnchorCanvasPoint(toItem, 'left'));
+        const isSelectedConnection = selectedConnectionIds.includes(connection.id);
+        return (
+          <g key={connection.id}>
+            <path
+              d={buildConnectionPath(connectionFrom, connectionTo)}
+              fill="none"
+              stroke="transparent"
+              strokeWidth="20"
+              strokeLinecap="round"
+              className="pointer-events-auto cursor-pointer"
+              onPointerDown={(e) => onConnectionPointerDown(e, connection.id)}
+            />
+            <path
+              d={buildConnectionPath(connectionFrom, connectionTo)}
+              fill="none"
+              stroke={DARK_THEME.canvasLine}
+              strokeOpacity={isSelectedConnection ? 0.98 : 0.9}
+              strokeWidth={isSelectedConnection ? scaledSelectedConnectionStrokeWidth : scaledConnectionStrokeWidth}
+              strokeLinecap="round"
+              pointerEvents="none"
+            />
+          </g>
+        );
+      })}
+      {showConnectionTestLine && (
+        <line
+          x1={40}
+          y1={40}
+          x2={220}
+          y2={120}
+          stroke="#2563eb"
+          strokeWidth={scaledDebugConnectionStrokeWidth}
+          strokeOpacity={1}
+          strokeLinecap="round"
+        />
+      )}
+      {previewFrom && previewTo && (
+        <path
+          d={buildConnectionPath(previewFrom, previewTo)}
+          fill="none"
+          stroke={DARK_THEME.canvasLine}
+          strokeOpacity="0.9"
+          strokeWidth={scaledConnectionStrokeWidth}
+          strokeLinecap="round"
+          pointerEvents="none"
+        />
+      )}
+      {frozenPreviewConnection && (
+        <path
+          d={buildConnectionPath(frozenPreviewConnection.from, frozenPreviewConnection.to)}
+          fill="none"
+          stroke={DARK_THEME.canvasLine}
+          strokeOpacity="0.5"
+          strokeWidth={scaledConnectionStrokeWidth}
+          strokeLinecap="round"
+          pointerEvents="none"
+        />
+      )}
+    </svg>
+  );
+});
+
+const CanvasPortsLayer = memo(function CanvasPortsLayer({
+  items,
+  viewport,
+  hoveredCanvasItemId,
+  hoveredInputPortItemId,
+  hoveredOutputPortItemId,
+  magneticPorts,
+  connectionFromItemId,
+  connectionMode,
+  connectionSnapTargetId,
+  getMagneticPortKey,
+  getRenderedPortOverlayPoint,
+  onInputPortEnter,
+  onInputPortLeave,
+  onOutputPortEnter,
+  onOutputPortLeave,
+  onOutputPortPointerDown,
+}: {
+  items: CanvasItem[];
+  viewport: ViewportState;
+  hoveredCanvasItemId: string | null;
+  hoveredInputPortItemId: string | null;
+  hoveredOutputPortItemId: string | null;
+  magneticPorts: MagneticPortMap;
+  connectionFromItemId: string | null;
+  connectionMode: ConnectionMode;
+  connectionSnapTargetId: string | null;
+  getMagneticPortKey: (itemId: string, side: PortSide) => string;
+  getRenderedPortOverlayPoint: (item: CanvasItem, side: PortSide) => { x: number; y: number };
+  onInputPortEnter: (itemId: string) => void;
+  onInputPortLeave: (itemId: string) => void;
+  onOutputPortEnter: (itemId: string) => void;
+  onOutputPortLeave: (itemId: string) => void;
+  onOutputPortPointerDown: (
+    e: React.PointerEvent<HTMLElement>,
+    item: CanvasItem,
+    source: 'bridge' | 'button'
+  ) => void;
+}) {
+  return (
+    <div className="absolute inset-0 z-[90] pointer-events-none">
+      <div
+        className="absolute z-[90] overflow-visible"
+        style={{
+          transform: `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.scale})`,
+          transformOrigin: '0 0',
+        }}
+      >
+        {items.map((item) => {
+          const isHoveredItem = hoveredCanvasItemId === item.id;
+          const isHoveredInputPort = hoveredInputPortItemId === item.id;
+          const isHoveredOutputPort = hoveredOutputPortItemId === item.id;
+          const inputMagneticState = magneticPorts[getMagneticPortKey(item.id, 'left')];
+          const outputMagneticState = magneticPorts[getMagneticPortKey(item.id, 'right')];
+          const isMagneticItem = Boolean(inputMagneticState || outputMagneticState);
+          const isConnectionSource = connectionFromItemId === item.id;
+          const isNearPort = isHoveredInputPort || isHoveredOutputPort;
+          const showOutputPort = isHoveredItem || isNearPort || isConnectionSource || isMagneticItem;
+          const showInputPort =
+            isHoveredItem ||
+            isNearPort ||
+            isMagneticItem ||
+            (connectionMode === 'dragging' && connectionSnapTargetId === item.id);
+          const inputPoint = getRenderedPortOverlayPoint(item, 'left');
+          const outputPoint = getRenderedPortOverlayPoint(item, 'right');
+          const inputTransition =
+            inputMagneticState && !inputMagneticState.isTracking
+              ? `left ${PORT_RETURN_DURATION_MS}ms cubic-bezier(0.22, 1, 0.36, 1), top ${PORT_RETURN_DURATION_MS}ms cubic-bezier(0.22, 1, 0.36, 1), opacity 150ms ease`
+              : inputMagneticState
+                ? 'transform 100ms ease, opacity 150ms ease'
+                : 'opacity 150ms ease';
+          const outputTransition =
+            outputMagneticState && !outputMagneticState.isTracking
+              ? `left ${PORT_RETURN_DURATION_MS}ms cubic-bezier(0.22, 1, 0.36, 1), top ${PORT_RETURN_DURATION_MS}ms cubic-bezier(0.22, 1, 0.36, 1), opacity 150ms ease`
+              : outputMagneticState
+                ? 'transform 100ms ease, opacity 150ms ease'
+                : 'opacity 150ms ease';
+
+          return (
+            <React.Fragment key={`port-overlay-${item.id}`}>
+              <div
+                data-port-bridge="in"
+                data-item-id={item.id}
+                onPointerEnter={() => onInputPortEnter(item.id)}
+                onPointerLeave={() => onInputPortLeave(item.id)}
+                className="absolute -translate-x-1/2 -translate-y-1/2 bg-transparent pointer-events-auto"
+                style={{
+                  left: inputPoint.x,
+                  top: inputPoint.y,
+                  width: PORT_PROXIMITY_SIZE,
+                  height: PORT_PROXIMITY_SIZE,
+                  transition: inputTransition,
+                }}
+              />
+              <div
+                data-port="in"
+                data-item-id={item.id}
+                className={`absolute -translate-x-1/2 -translate-y-1/2 pointer-events-none transition-opacity duration-150 ${
+                  showInputPort ? 'opacity-100' : 'opacity-0'
+                }`}
+                style={{
+                  left: inputPoint.x,
+                  top: inputPoint.y,
+                  width: PORT_ICON_SIZE,
+                  height: PORT_ICON_SIZE,
+                  transform: `translate(-50%, -50%) scale(${inputMagneticState?.isTracking ? 1.04 : 1})`,
+                  transition: inputTransition,
+                }}
+              >
+                <ConnectionPortIcon className="h-full w-full" />
+              </div>
+              <div
+                data-port-bridge="out"
+                data-item-id={item.id}
+                onPointerEnter={() => onOutputPortEnter(item.id)}
+                onPointerLeave={() => onOutputPortLeave(item.id)}
+                onPointerDown={(e) => onOutputPortPointerDown(e, item, 'bridge')}
+                className="absolute -translate-x-1/2 -translate-y-1/2 bg-transparent pointer-events-auto"
+                style={{
+                  left: outputPoint.x,
+                  top: outputPoint.y,
+                  width: PORT_PROXIMITY_SIZE,
+                  height: PORT_PROXIMITY_SIZE,
+                  transition: outputTransition,
+                }}
+              />
+              <button
+                type="button"
+                data-port="out"
+                data-item-id={item.id}
+                onPointerEnter={() => onOutputPortEnter(item.id)}
+                onPointerLeave={() => onOutputPortLeave(item.id)}
+                onPointerDown={(e) => onOutputPortPointerDown(e, item, 'button')}
+                className={`absolute -translate-x-1/2 -translate-y-1/2 rounded-full bg-transparent transition-opacity duration-150 ${
+                  showOutputPort ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'
+                }`}
+                style={{
+                  left: outputPoint.x,
+                  top: outputPoint.y,
+                  width: PORT_ICON_SIZE,
+                  height: PORT_ICON_SIZE,
+                  transform: `translate(-50%, -50%) scale(${outputMagneticState?.isTracking ? 1.04 : 1})`,
+                  transition: outputTransition,
+                }}
+                aria-label="开始连线"
+              >
+                <ConnectionPortIcon className="h-full w-full" />
+              </button>
+            </React.Fragment>
+          );
+        })}
+      </div>
+    </div>
+  );
+});
+
+const CanvasNodesLayer = memo(function CanvasNodesLayer({
+  items,
+  viewport,
+  multiSelectionBounds,
+  selectedIds,
+  selectedId,
+  hoveredCanvasItemId,
+  onSelectionGroupPointerDown,
+  onItemMouseEnter,
+  onItemMouseLeave,
+  onItemClick,
+  onItemPointerDown,
+  onCornerResizePointerDown,
+}: {
+  items: CanvasItem[];
+  viewport: ViewportState;
+  multiSelectionBounds: { left: number; top: number; width: number; height: number } | null;
+  selectedIds: string[];
+  selectedId: string | null;
+  hoveredCanvasItemId: string | null;
+  onSelectionGroupPointerDown: (e: React.PointerEvent<HTMLDivElement>) => void;
+  onItemMouseEnter: (itemId: string) => void;
+  onItemMouseLeave: (itemId: string) => void;
+  onItemClick: (e: React.MouseEvent<HTMLDivElement>, itemId: string) => void;
+  onItemPointerDown: (e: React.PointerEvent<HTMLDivElement>, itemId: string) => void;
+  onCornerResizePointerDown: (e: React.PointerEvent<HTMLButtonElement>, item: CanvasItem) => void;
+}) {
+  return (
+    <div
+      className="absolute z-[2]"
+      style={{
+        transform: `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.scale})`,
+        transformOrigin: '0 0',
+      }}
+    >
+      {multiSelectionBounds && (
+        <div
+          data-selection-group="true"
+          className="absolute rounded-[28px] border border-white/20 bg-white/[0.06] shadow-[0_18px_40px_rgba(0,0,0,0.16)]"
+          style={{
+            left: multiSelectionBounds.left - 10,
+            top: multiSelectionBounds.top - 10,
+            width: multiSelectionBounds.width + 20,
+            height: multiSelectionBounds.height + 20,
+          }}
+          onPointerDown={onSelectionGroupPointerDown}
+        />
+      )}
+      {items.map((item) => {
+        const isItemSelected = selectedIds.includes(item.id) || selectedId === item.id;
+        const showMultiSelectionGroup = selectedIds.length > 1;
+        const isHoveredItem = hoveredCanvasItemId === item.id;
+        const showCornerResizeHandle = isHoveredItem && item.type !== 'image';
+        const isTextCard = item.type === 'text' && item.textVariant === 'card';
+        const textCardFrameBounds = isTextCard ? getTextCardFrameBounds(item) : null;
+
+        return (
+          <div
+            key={item.id}
+            data-canvas-item-id={item.id}
+            className={`absolute group cursor-move ${!item.visible ? 'opacity-30' : ''}`}
+            style={{
+              left: item.x,
+              top: item.y,
+              width: item.width,
+              height: item.height,
+              transform: `rotate(${item.rotation}deg)`,
+            }}
+            onMouseEnter={() => onItemMouseEnter(item.id)}
+            onMouseLeave={() => onItemMouseLeave(item.id)}
+            onClick={(e) => onItemClick(e, item.id)}
+            onPointerDown={(e) => onItemPointerDown(e, item.id)}
+          >
+            {item.type === 'image' && item.src && (
+              <img
+                src={item.src}
+                alt=""
+                className="h-full w-full object-contain pointer-events-none"
+                style={{ borderRadius: `${NODE_CORNER_RADIUS}px` }}
+                draggable={false}
+              />
+            )}
+            {item.type === 'shape' && <div className="h-full w-full rounded" style={{ backgroundColor: item.fill }} />}
+            {item.type === 'text' && item.textVariant !== 'card' && (
+              <div className="flex h-full w-full items-center justify-center text-sm text-zinc-100">{item.text}</div>
+            )}
+            {item.type === 'text' && item.textVariant === 'card' && (
+              <div className="relative h-full w-full">
+                <div className="absolute left-4 top-0 inline-flex items-center gap-1.5 text-sm font-medium text-zinc-500">
+                  <Type size={14} strokeWidth={2.1} />
+                  <span>Text</span>
+                </div>
+                <div
+                  className="absolute rounded-[22px] bg-[#1f1f22] px-9 py-12"
+                  style={{
+                    left: `${TEXT_CARD_FRAME_INSET_X}px`,
+                    top: `${TEXT_CARD_FRAME_TOP}px`,
+                    right: `${TEXT_CARD_FRAME_INSET_X}px`,
+                    bottom: `${TEXT_CARD_FRAME_BOTTOM}px`,
+                  }}
+                >
+                  <div className="flex h-full w-full items-center">
+                    <div className="w-full max-w-[280px] pl-8 text-left">
+                      <div className="flex flex-col gap-4">
+                      <div className="px-2 text-sm text-zinc-500">尝试：</div>
+                      <div className="flex flex-col items-start gap-2">
+                        {[
+                          { icon: Pencil, label: '自己编写内容' },
+                          { icon: Video, label: '文字生视频' },
+                          { icon: ImageIcon, label: '图片反推提示词' },
+                        ].map((option) => {
+                          const Icon = option.icon;
+                          return (
+                            <button
+                              key={option.label}
+                              type="button"
+                              onPointerDown={(e) => {
+                                e.stopPropagation();
+                              }}
+                              className="group/row inline-flex min-w-[188px] items-center justify-start gap-2.5 rounded-[14px] bg-transparent px-3 py-2 text-left transition-colors duration-150 ease-out hover:bg-[rgba(255,255,255,0.038)]"
+                            >
+                              <Icon
+                                size={16}
+                                className="shrink-0 text-zinc-400 transition-colors duration-150 group-hover/row:text-zinc-100"
+                              />
+                              <span className="text-[15px] font-medium tracking-[-0.02em] text-zinc-400 transition-colors duration-150 group-hover/row:text-zinc-100">
+                                {option.label}
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+            {isItemSelected &&
+              !showMultiSelectionGroup &&
+              (isTextCard && textCardFrameBounds ? (
+                <div
+                  className="absolute z-10 pointer-events-none"
+                  style={{
+                    left: `${textCardFrameBounds.left - NODE_SELECTED_OUTLINE_WIDTH}px`,
+                    top: `${textCardFrameBounds.top - NODE_SELECTED_OUTLINE_WIDTH}px`,
+                    width: `${textCardFrameBounds.width + NODE_SELECTED_OUTLINE_WIDTH * 2}px`,
+                    height: `${textCardFrameBounds.height + NODE_SELECTED_OUTLINE_WIDTH * 2}px`,
+                    borderRadius: '24px',
+                    border: `${NODE_SELECTED_OUTLINE_WIDTH}px solid ${NODE_SELECTED_OUTLINE_COLOR}`,
+                  }}
+                />
+              ) : (
+                <div
+                  className="absolute z-10 pointer-events-none"
+                  style={{
+                    inset: `${-NODE_SELECTED_OUTLINE_WIDTH}px`,
+                    borderRadius: `${NODE_CORNER_RADIUS}px`,
+                    border: `${NODE_SELECTED_OUTLINE_WIDTH}px solid ${NODE_SELECTED_OUTLINE_COLOR}`,
+                  }}
+                />
+              ))}
+            {showCornerResizeHandle && (
+              <button
+                data-corner-resize="true"
+                onPointerDown={(e) => onCornerResizePointerDown(e, item)}
+                className="absolute flex cursor-nwse-resize items-center justify-center overflow-visible bg-transparent"
+                style={{
+                  width: `${CORNER_HANDLE_HIT_SIZE}px`,
+                  height: `${CORNER_HANDLE_HIT_SIZE}px`,
+                  right: isTextCard
+                    ? `${TEXT_CARD_FRAME_INSET_X + CORNER_HANDLE_HIT_OFFSET}px`
+                    : `${CORNER_HANDLE_HIT_OFFSET}px`,
+                  bottom: isTextCard
+                    ? `${TEXT_CARD_FRAME_BOTTOM + CORNER_HANDLE_HIT_OFFSET}px`
+                    : `${CORNER_HANDLE_HIT_OFFSET}px`,
+                }}
+                aria-label="缩放"
+              >
+                <svg
+                  viewBox={`0 0 ${CORNER_HANDLE_SIZE} ${CORNER_HANDLE_SIZE}`}
+                  className="pointer-events-none absolute"
+                  style={{
+                    width: `${CORNER_HANDLE_SIZE}px`,
+                    height: `${CORNER_HANDLE_SIZE}px`,
+                    left: `${CORNER_HANDLE_VISUAL_OFFSET}px`,
+                    top: `${CORNER_HANDLE_VISUAL_OFFSET}px`,
+                  }}
+                >
+                  <path
+                    d={`M ${CORNER_HANDLE_CENTER + HANDLE_ARC_RADIUS} ${CORNER_HANDLE_CENTER} A ${HANDLE_ARC_RADIUS} ${HANDLE_ARC_RADIUS} 0 0 1 ${CORNER_HANDLE_CENTER} ${CORNER_HANDLE_CENTER + HANDLE_ARC_RADIUS}`}
+                    fill="none"
+                    stroke="rgba(226,232,240,0.8)"
+                    strokeWidth={CORNER_HANDLE_STROKE}
+                    strokeLinecap="round"
+                  />
+                </svg>
+              </button>
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+});
+
+const CanvasViewport = memo(function CanvasViewport({
+  canvasRef,
+  widthStyle,
+  isSpacePressed,
+  isPanning,
+  viewport,
+  items,
+  connections,
+  itemById,
+  selectedIds,
+  selectedId,
+  selectedConnectionIds,
+  hoveredCanvasItemId,
+  hoveredInputPortItemId,
+  hoveredOutputPortItemId,
+  magneticPorts,
+  connectionMode,
+  connectionSnapTargetId,
+  connectionFromItemId,
+  frozenPreviewConnection,
+  pendingConnectionMenu,
+  multiSelectionBounds,
+  isMarqueeSelecting,
+  marqueeRect,
+  getPreviewRenderPoints,
+  getConnectionAnchorCanvasPoint,
+  toCanvasScreenPoint,
+  buildConnectionPath,
+  getRenderedPortOverlayPoint,
+  getMagneticPortKey,
+  onPointerDown,
+  onPointerMove,
+  onPointerUp,
+  onPointerLeave,
+  onWheel,
+  onPaste,
+  onConnectionPointerDown,
+  onInputPortEnter,
+  onInputPortLeave,
+  onOutputPortEnter,
+  onOutputPortLeave,
+  onOutputPortPointerDown,
+  onSelectionGroupPointerDown,
+  onItemMouseEnter,
+  onItemMouseLeave,
+  onItemClick,
+  onItemPointerDown,
+  onCornerResizePointerDown,
+  onPendingMenuPointerDown,
+  onPendingMenuAction,
+}: {
+  canvasRef: React.RefObject<HTMLDivElement | null>;
+  widthStyle: string;
+  isSpacePressed: boolean;
+  isPanning: boolean;
+  viewport: ViewportState;
+  items: CanvasItem[];
+  connections: Connection[];
+  itemById: Record<string, CanvasItem>;
+  selectedIds: string[];
+  selectedId: string | null;
+  selectedConnectionIds: string[];
+  hoveredCanvasItemId: string | null;
+  hoveredInputPortItemId: string | null;
+  hoveredOutputPortItemId: string | null;
+  magneticPorts: MagneticPortMap;
+  connectionMode: ConnectionMode;
+  connectionSnapTargetId: string | null;
+  connectionFromItemId: string | null;
+  frozenPreviewConnection: FrozenPreviewConnection | null;
+  pendingConnectionMenu: PendingConnectionMenu | null;
+  multiSelectionBounds: { left: number; top: number; width: number; height: number } | null;
+  isMarqueeSelecting: boolean;
+  marqueeRect: { x: number; y: number; width: number; height: number } | null;
+  getPreviewRenderPoints: () => { from: { x: number; y: number } | null; to: { x: number; y: number } | null };
+  getConnectionAnchorCanvasPoint: (item: CanvasItem, side: 'left' | 'right') => { x: number; y: number };
+  toCanvasScreenPoint: (point: { x: number; y: number }) => { x: number; y: number };
+  buildConnectionPath: (from: { x: number; y: number }, to: { x: number; y: number }) => string;
+  getRenderedPortOverlayPoint: (item: CanvasItem, side: PortSide) => { x: number; y: number };
+  getMagneticPortKey: (itemId: string, side: PortSide) => string;
+  onPointerDown: (e: React.PointerEvent<HTMLDivElement>) => void;
+  onPointerMove: (e: React.PointerEvent<HTMLDivElement>) => void;
+  onPointerUp: (e?: React.PointerEvent<HTMLDivElement>) => void;
+  onPointerLeave: () => void;
+  onWheel: (e: React.WheelEvent<HTMLDivElement>) => void;
+  onPaste: (e: React.ClipboardEvent<HTMLDivElement>) => void;
+  onConnectionPointerDown: (e: React.PointerEvent<SVGPathElement>, connectionId: string) => void;
+  onInputPortEnter: (itemId: string) => void;
+  onInputPortLeave: (itemId: string) => void;
+  onOutputPortEnter: (itemId: string) => void;
+  onOutputPortLeave: (itemId: string) => void;
+  onOutputPortPointerDown: (
+    e: React.PointerEvent<HTMLElement>,
+    item: CanvasItem,
+    source: 'bridge' | 'button'
+  ) => void;
+  onSelectionGroupPointerDown: (e: React.PointerEvent<HTMLDivElement>) => void;
+  onItemMouseEnter: (itemId: string) => void;
+  onItemMouseLeave: (itemId: string) => void;
+  onItemClick: (e: React.MouseEvent<HTMLDivElement>, itemId: string) => void;
+  onItemPointerDown: (e: React.PointerEvent<HTMLDivElement>, itemId: string) => void;
+  onCornerResizePointerDown: (e: React.PointerEvent<HTMLButtonElement>, item: CanvasItem) => void;
+  onPendingMenuPointerDown: (e: React.PointerEvent<HTMLDivElement>) => void;
+  onPendingMenuAction: (e: React.MouseEvent<HTMLButtonElement>) => void;
+}) {
+  const { from, to } = getPreviewRenderPoints();
+  const canvasRect = canvasRef.current?.getBoundingClientRect();
+  const canvasSize = {
+    width: canvasRect?.width ?? 0,
+    height: canvasRect?.height ?? 0,
+  };
+  const connectionMenuWidth = 360;
+  const connectionMenuHeight = 292;
+  const connectionMenuPadding = 24;
+  const pendingMenuLeft = pendingConnectionMenu
+    ? Math.min(
+        Math.max(pendingConnectionMenu.position.x + 18, connectionMenuPadding),
+        Math.max(connectionMenuPadding, canvasSize.width - connectionMenuWidth - connectionMenuPadding)
+      )
+    : 0;
+  const pendingMenuTop = pendingConnectionMenu
+    ? Math.min(
+        Math.max(pendingConnectionMenu.position.y - 40, connectionMenuPadding),
+        Math.max(connectionMenuPadding, canvasSize.height - connectionMenuHeight - connectionMenuPadding)
+      )
+    : 0;
+
+  return (
+    <div
+      ref={canvasRef}
+      data-canvas="true"
+      tabIndex={0}
+      className={`relative z-0 shrink-0 overflow-hidden select-none ${isSpacePressed ? (isPanning ? 'cursor-grabbing' : 'cursor-grab') : 'cursor-default'}`}
+      style={{ width: widthStyle }}
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
+      onPointerCancel={onPointerUp}
+      onPointerLeave={onPointerLeave}
+      onWheel={onWheel}
+      onPaste={onPaste}
+    >
+      <CanvasBackgroundLayer viewport={viewport} />
+      <CanvasConnectionsLayer
+        canvasSize={canvasSize}
+        connections={connections}
+        itemById={itemById}
+        selectedConnectionIds={selectedConnectionIds}
+        viewport={viewport}
+        previewFrom={from}
+        previewTo={to}
+        frozenPreviewConnection={frozenPreviewConnection}
+        onConnectionPointerDown={onConnectionPointerDown}
+        getConnectionAnchorCanvasPoint={getConnectionAnchorCanvasPoint}
+        toCanvasScreenPoint={toCanvasScreenPoint}
+        buildConnectionPath={buildConnectionPath}
+      />
+      <CanvasPortsLayer
+        items={items}
+        viewport={viewport}
+        hoveredCanvasItemId={hoveredCanvasItemId}
+        hoveredInputPortItemId={hoveredInputPortItemId}
+        hoveredOutputPortItemId={hoveredOutputPortItemId}
+        magneticPorts={magneticPorts}
+        connectionFromItemId={connectionFromItemId}
+        connectionMode={connectionMode}
+        connectionSnapTargetId={connectionSnapTargetId}
+        getMagneticPortKey={getMagneticPortKey}
+        getRenderedPortOverlayPoint={getRenderedPortOverlayPoint}
+        onInputPortEnter={onInputPortEnter}
+        onInputPortLeave={onInputPortLeave}
+        onOutputPortEnter={onOutputPortEnter}
+        onOutputPortLeave={onOutputPortLeave}
+        onOutputPortPointerDown={onOutputPortPointerDown}
+      />
+      {pendingConnectionMenu && (
+        <div className="pointer-events-none absolute inset-0 z-[110]">
+          <div
+            data-connection-create-menu="true"
+            className="pointer-events-auto absolute overflow-hidden rounded-[26px] border border-white/[0.1] bg-[rgba(26,26,28,0.985)] shadow-[0_26px_72px_rgba(0,0,0,0.5)] backdrop-blur-xl"
+            style={{
+              left: pendingMenuLeft,
+              top: pendingMenuTop,
+              width: 320,
+              minHeight: 198,
+            }}
+            onPointerDown={onPendingMenuPointerDown}
+          >
+            <div className="p-3.5">
+              <div className="mb-2.5 px-1 text-xs font-medium tracking-[-0.01em] text-zinc-500/80">
+                引用该节点生成
+              </div>
+              <div className="space-y-1.5">
+                {CONNECTION_MENU_OPTIONS.map((option) => {
+                  const Icon = option.icon;
+                  return (
+                    <button
+                      key={option.id}
+                      type="button"
+                      onPointerDown={(e) => {
+                        e.stopPropagation();
+                      }}
+                      onClick={onPendingMenuAction}
+                      className="group flex min-h-[68px] w-full items-center gap-2.5 rounded-[20px] border border-transparent bg-transparent px-3 py-2.5 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.015)] transition-all duration-300 ease-in-out hover:bg-[rgba(255,255,255,0.038)]"
+                    >
+                      <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-[11px] bg-[rgba(255,255,255,0.055)] text-zinc-50 shadow-[inset_0_1px_0_rgba(255,255,255,0.025)] transition-colors duration-300 group-hover:bg-[rgba(255,255,255,0.07)]">
+                        <Icon size={21} strokeWidth={2} />
+                      </div>
+                      <div className="flex min-w-0 flex-1 items-center pl-1">
+                        <div className="flex min-w-0 flex-1 flex-col justify-center">
+                          <div className="text-[16px] font-medium tracking-[-0.03em] text-zinc-50 transition-transform duration-300 ease-in-out group-hover:translate-y-1">
+                            {option.title}
+                          </div>
+                          <div className="max-h-0 overflow-hidden opacity-0 transition-all duration-300 ease-in-out group-hover:mt-0.5 group-hover:max-h-9 group-hover:opacity-100">
+                            <div className="translate-y-1.5 whitespace-normal break-words text-[11px] font-medium tracking-[-0.01em] text-zinc-500 transition-transform duration-300 ease-in-out group-hover:translate-y-0">
+                              {option.description}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+      <CanvasNodesLayer
+        items={items}
+        viewport={viewport}
+        multiSelectionBounds={multiSelectionBounds}
+        selectedIds={selectedIds}
+        selectedId={selectedId}
+        hoveredCanvasItemId={hoveredCanvasItemId}
+        onSelectionGroupPointerDown={onSelectionGroupPointerDown}
+        onItemMouseEnter={onItemMouseEnter}
+        onItemMouseLeave={onItemMouseLeave}
+        onItemClick={onItemClick}
+        onItemPointerDown={onItemPointerDown}
+        onCornerResizePointerDown={onCornerResizePointerDown}
+      />
+      {isMarqueeSelecting && marqueeRect && (
+        <div
+          className="absolute pointer-events-none border border-dashed border-white/35 bg-white/5"
+          style={{
+            left: marqueeRect.x,
+            top: marqueeRect.y,
+            width: marqueeRect.width,
+            height: marqueeRect.height,
+          }}
+        />
+      )}
+    </div>
+  );
+});
 
 interface GalleryViewProps {
   sessions: ProjectSession[];
@@ -751,6 +1539,15 @@ export default function AIWorkspace() {
   const [connectionSnapTargetId, setConnectionSnapTargetId] = useState<string | null>(null);
   const dragStart = useRef({ x: 0, y: 0 });
   const panStartOffset = useRef({ x: 0, y: 0 });
+  const latestInteractionPointerRef = useRef<{ x: number; y: number } | null>(null);
+  const interactionFrameRef = useRef<number | null>(null);
+  const zoomAnimationFrameRef = useRef<number | null>(null);
+  const viewportRef = useRef({ x: 0, y: 0, scale: 1 });
+  const itemsRef = useRef<CanvasItem[]>([]);
+  const selectedIdRef = useRef<string | null>(null);
+  const reducedMotionRef = useRef(false);
+  const dragItemStartPositionsRef = useRef<Record<string, { x: number; y: number }>>({});
+  const wheelZoomTargetRef = useRef<{ scale: number; anchor: { x: number; y: number } | undefined } | null>(null);
   const marqueeStartRef = useRef<{ x: number; y: number } | null>(null);
   const draggingItemIdsRef = useRef<string[]>([]);
   const magneticPortResetTimerRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
@@ -835,10 +1632,11 @@ export default function AIWorkspace() {
     const selectedItems = items.filter((item) => selectedIds.includes(item.id));
     if (selectedItems.length <= 1) return null;
 
-    const left = Math.min(...selectedItems.map((item) => item.x));
-    const top = Math.min(...selectedItems.map((item) => item.y));
-    const right = Math.max(...selectedItems.map((item) => item.x + item.width));
-    const bottom = Math.max(...selectedItems.map((item) => item.y + item.height));
+    const visualBounds = selectedItems.map(getItemVisualBounds);
+    const left = Math.min(...visualBounds.map((bounds) => bounds.left));
+    const top = Math.min(...visualBounds.map((bounds) => bounds.top));
+    const right = Math.max(...visualBounds.map((bounds) => bounds.left + bounds.width));
+    const bottom = Math.max(...visualBounds.map((bounds) => bounds.top + bounds.height));
 
     return {
       left,
@@ -847,8 +1645,45 @@ export default function AIWorkspace() {
       height: bottom - top,
     };
   }, [items, selectedIds]);
+  const itemById = React.useMemo(
+    () => Object.fromEntries(items.map((item) => [item.id, item] as const)),
+    [items]
+  );
   const SKILL_TOKEN_SELECTOR = '[data-skill-token="true"]';
   const copiedAssistantMessageTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    viewportRef.current = viewport;
+  }, [viewport]);
+
+  useEffect(() => {
+    itemsRef.current = items;
+  }, [items]);
+
+  useEffect(() => {
+    selectedIdRef.current = selectedId;
+  }, [selectedId]);
+
+  useEffect(() => {
+    if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
+      return;
+    }
+
+    const mediaQuery = window.matchMedia('(prefers-reduced-motion: reduce)');
+    const updateReducedMotion = () => {
+      reducedMotionRef.current = mediaQuery.matches;
+    };
+
+    updateReducedMotion();
+
+    if (typeof mediaQuery.addEventListener === 'function') {
+      mediaQuery.addEventListener('change', updateReducedMotion);
+      return () => mediaQuery.removeEventListener('change', updateReducedMotion);
+    }
+
+    mediaQuery.addListener(updateReducedMotion);
+    return () => mediaQuery.removeListener(updateReducedMotion);
+  }, []);
 
   const getAssistantSelectableHost = (node: Node | null): HTMLElement | null => {
     if (!node) return null;
@@ -1443,10 +2278,10 @@ export default function AIWorkspace() {
       type: 'text',
       x: (-viewport.x / viewport.scale) + 100,
       y: (-viewport.y / viewport.scale) + 100,
-      width: 200,
-      height: 40,
+      width: TEXT_CARD_DIMENSIONS.width,
+      height: TEXT_CARD_DIMENSIONS.height,
       rotation: 0,
-      text: '双击编辑文本',
+      textVariant: 'card',
       visible: true,
       locked: false,
     };
@@ -1647,7 +2482,7 @@ export default function AIWorkspace() {
     ]
   );
 
-  const beginConnectionDragFromItem = (
+  const beginConnectionDragFromItem = useCallback((
     item: CanvasItem,
     pointerId: number,
     source: 'bridge' | 'button'
@@ -1686,7 +2521,15 @@ export default function AIWorkspace() {
 
     const portPoint = toCanvasScreenPoint(getRenderedPortOverlayPoint(item, 'right'));
     startDraggingConnection(item.id, portPoint, capturedPointerId);
-  };
+  }, [
+    clearPendingConnectionMenu,
+    clearMagneticPortResetTimer,
+    hoveredOutputPortItemId,
+    hoveredCanvasItemId,
+    hoveredInputPortItemId,
+    connectionMode,
+    getRenderedPortOverlayPoint,
+  ]);
 
   const toggleSelectionId = (ids: string[], id: string) =>
     ids.includes(id) ? ids.filter((entry) => entry !== id) : [...ids, id];
@@ -2000,9 +2843,161 @@ export default function AIWorkspace() {
     resetConnectionInteraction();
   };
 
+  const cancelZoomAnimation = useCallback(() => {
+    if (zoomAnimationFrameRef.current !== null) {
+      cancelAnimationFrame(zoomAnimationFrameRef.current);
+      zoomAnimationFrameRef.current = null;
+    }
+    wheelZoomTargetRef.current = null;
+  }, []);
+
+  const getScaledViewportAtAnchor = useCallback(
+    (
+      currentViewport: { x: number; y: number; scale: number },
+      nextScale: number,
+      anchor?: { x: number; y: number }
+    ) => {
+      const clampedScale = Math.min(Math.max(nextScale, 0.1), 10);
+      if (clampedScale === currentViewport.scale) {
+        return currentViewport;
+      }
+
+      const resolvedAnchor =
+        anchor ??
+        (canvasRef.current
+          ? { x: canvasRef.current.clientWidth / 2, y: canvasRef.current.clientHeight / 2 }
+          : undefined);
+
+      if (!resolvedAnchor) {
+        return {
+          ...currentViewport,
+          scale: clampedScale,
+        };
+      }
+
+      const canvasPoint = {
+        x: (resolvedAnchor.x - currentViewport.x) / currentViewport.scale,
+        y: (resolvedAnchor.y - currentViewport.y) / currentViewport.scale,
+      };
+
+      return {
+        ...currentViewport,
+        scale: clampedScale,
+        x: resolvedAnchor.x - canvasPoint.x * clampedScale,
+        y: resolvedAnchor.y - canvasPoint.y * clampedScale,
+      };
+    },
+    []
+  );
+
+  const flushInteractionFrame = useCallback(() => {
+    interactionFrameRef.current = null;
+    const pointer = latestInteractionPointerRef.current;
+    if (!pointer) return;
+
+    if (isCornerResizing && selectedIdRef.current && cornerResizeStart.current) {
+      const { mouseX, mouseY, width, height, itemId } = cornerResizeStart.current;
+      if (itemId !== selectedIdRef.current) return;
+
+      const resizingItem = itemsRef.current.find((item) => item.id === itemId);
+      if (!resizingItem || resizingItem.type === 'image') {
+        setIsCornerResizing(false);
+        cornerResizeStart.current = null;
+        return;
+      }
+
+      const deltaX = (pointer.x - mouseX) / viewportRef.current.scale;
+      const deltaY = (pointer.y - mouseY) / viewportRef.current.scale;
+
+      if (resizingItem.textVariant === 'card') {
+        const minWidth = 260;
+        const minHeight = 300;
+        const newWidth = Math.max(minWidth, width + deltaX);
+        const newHeight = Math.max(minHeight, height + deltaY);
+
+        setItems((prev) =>
+          prev.map((item) =>
+            item.id === selectedIdRef.current ? { ...item, width: newWidth, height: newHeight } : item
+          )
+        );
+        return;
+      }
+
+      const minSize = 40;
+      const aspect = width / height;
+      const proposedWidth = width + deltaX;
+      const proposedHeight = height + deltaY;
+      const scaleX = proposedWidth / width;
+      const scaleY = proposedHeight / height;
+      const scale = Math.abs(scaleX - 1) >= Math.abs(scaleY - 1) ? scaleX : scaleY;
+      const nextScale = Number.isFinite(scale) ? scale : 1;
+      const newWidth = Math.max(minSize, width * nextScale);
+      const newHeight = Math.max(minSize, Math.max(height * nextScale, newWidth / aspect));
+
+      setItems((prev) =>
+        prev.map((item) =>
+          item.id === selectedIdRef.current ? { ...item, width: newWidth, height: newHeight } : item
+        )
+      );
+      return;
+    }
+
+    if (isPanning) {
+      const dx = pointer.x - dragStart.current.x;
+      const dy = pointer.y - dragStart.current.y;
+      setViewport((prev) => ({
+        ...prev,
+        x: panStartOffset.current.x + dx,
+        y: panStartOffset.current.y + dy,
+      }));
+      return;
+    }
+
+    if (isDragging && selectedIdRef.current) {
+      const dx = (pointer.x - dragStart.current.x) / viewportRef.current.scale;
+      const dy = (pointer.y - dragStart.current.y) / viewportRef.current.scale;
+
+      setItems((prev) =>
+        prev.map((item) =>
+          draggingItemIdsRef.current.includes(item.id)
+            ? {
+                ...item,
+                x: (dragItemStartPositionsRef.current[item.id]?.x ?? item.x) + dx,
+                y: (dragItemStartPositionsRef.current[item.id]?.y ?? item.y) + dy,
+              }
+            : item
+        )
+      );
+    }
+  }, [isCornerResizing, isDragging, isPanning]);
+
+  const scheduleInteractionFrame = useCallback(() => {
+    if (interactionFrameRef.current !== null) return;
+    interactionFrameRef.current = requestAnimationFrame(flushInteractionFrame);
+  }, [flushInteractionFrame]);
+
+  const flushWheelZoom = useCallback(() => {
+    zoomAnimationFrameRef.current = null;
+    const target = wheelZoomTargetRef.current;
+    if (!target) return;
+    wheelZoomTargetRef.current = null;
+
+    setViewport((prev) => getScaledViewportAtAnchor(prev, target.scale, target.anchor));
+  }, [getScaledViewportAtAnchor]);
+
+  const scheduleWheelZoom = useCallback(() => {
+    if (reducedMotionRef.current) {
+      flushWheelZoom();
+      return;
+    }
+    if (zoomAnimationFrameRef.current !== null) return;
+    zoomAnimationFrameRef.current = requestAnimationFrame(flushWheelZoom);
+  }, [flushWheelZoom]);
+
   const beginDraggingSelectedItems = React.useCallback(
     (clientX: number, clientY: number, itemIds: string[], primaryId: string | null) => {
       if (itemIds.length === 0 || !primaryId) return;
+      cancelZoomAnimation();
       clearPendingConnectionMenu();
       setSelectedConnectionIds([]);
       setIsDragging(true);
@@ -2010,8 +3005,13 @@ export default function AIWorkspace() {
       setSelectedId(primaryId);
       setSelectedIds(itemIds);
       dragStart.current = { x: clientX, y: clientY };
+      dragItemStartPositionsRef.current = Object.fromEntries(
+        itemsRef.current
+          .filter((item) => itemIds.includes(item.id))
+          .map((item) => [item.id, { x: item.x, y: item.y }])
+      );
     },
-    [clearPendingConnectionMenu]
+    [cancelZoomAnimation, clearPendingConnectionMenu]
   );
 
   const handleCanvasPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -2043,6 +3043,7 @@ export default function AIWorkspace() {
     }
 
     if (e.button === 0 && isSpacePressed) {
+      cancelZoomAnimation();
       clearPendingConnectionMenu();
       e.preventDefault();
       setIsPanning(true);
@@ -2052,6 +3053,7 @@ export default function AIWorkspace() {
     }
 
     if (e.button === 1) {
+      cancelZoomAnimation();
       clearPendingConnectionMenu();
       e.preventDefault();
       setIsPanning(true);
@@ -2084,45 +3086,14 @@ export default function AIWorkspace() {
 
   const handleCanvasPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
     if (isCornerResizing && selectedId && cornerResizeStart.current) {
-      const { mouseX, mouseY, width, height, itemId } = cornerResizeStart.current;
-      if (itemId !== selectedId) {
-        return;
-      }
-      const resizingItem = items.find((item) => item.id === itemId);
-      if (!resizingItem || resizingItem.type === 'image') {
-        setIsCornerResizing(false);
-        cornerResizeStart.current = null;
-        return;
-      }
-      const deltaX = (e.clientX - mouseX) / viewport.scale;
-      const deltaY = (e.clientY - mouseY) / viewport.scale;
-      const minSize = 40;
-      const aspect = width / height;
-      const proposedWidth = width + deltaX;
-      const proposedHeight = height + deltaY;
-      const scaleX = proposedWidth / width;
-      const scaleY = proposedHeight / height;
-      const scale = Math.abs(scaleX - 1) >= Math.abs(scaleY - 1) ? scaleX : scaleY;
-      const nextScale = Number.isFinite(scale) ? scale : 1;
-      const newWidth = Math.max(minSize, width * nextScale);
-      const newHeight = Math.max(minSize, Math.max(height * nextScale, newWidth / aspect));
-
-      setItems((prev) =>
-        prev.map((item) =>
-          item.id === selectedId ? { ...item, width: newWidth, height: newHeight } : item
-        )
-      );
+      latestInteractionPointerRef.current = { x: e.clientX, y: e.clientY };
+      scheduleInteractionFrame();
       return;
     }
 
     if (isPanning) {
-      const dx = e.clientX - dragStart.current.x;
-      const dy = e.clientY - dragStart.current.y;
-      setViewport(prev => ({
-        ...prev,
-        x: panStartOffset.current.x + dx,
-        y: panStartOffset.current.y + dy,
-      }));
+      latestInteractionPointerRef.current = { x: e.clientX, y: e.clientY };
+      scheduleInteractionFrame();
       return;
     }
 
@@ -2150,14 +3121,8 @@ export default function AIWorkspace() {
     }
 
     if (isDragging && selectedId) {
-      const dx = (e.clientX - dragStart.current.x) / viewport.scale;
-      const dy = (e.clientY - dragStart.current.y) / viewport.scale;
-      setItems(prev => prev.map(item =>
-        draggingItemIdsRef.current.includes(item.id)
-          ? { ...item, x: item.x + dx, y: item.y + dy }
-          : item
-      ));
-      dragStart.current = { x: e.clientX, y: e.clientY };
+      latestInteractionPointerRef.current = { x: e.clientX, y: e.clientY };
+      scheduleInteractionFrame();
     }
   };
 
@@ -2226,38 +3191,30 @@ export default function AIWorkspace() {
     marqueeStartRef.current = null;
     marqueeToggleModeRef.current = false;
     draggingItemIdsRef.current = [];
+    dragItemStartPositionsRef.current = {};
+    latestInteractionPointerRef.current = null;
     cornerResizeStart.current = null;
+    if (interactionFrameRef.current !== null) {
+      cancelAnimationFrame(interactionFrameRef.current);
+      interactionFrameRef.current = null;
+    }
+
+    if (currentSessionId) {
+      requestAnimationFrame(() => {
+        saveCurrentSession();
+      });
+    }
   };
 
   const applyViewportScale = useCallback(
     (nextScale: number, anchor?: { x: number; y: number }) => {
-      setViewport((prev) => {
-        const clampedScale = Math.min(Math.max(nextScale, 0.1), 10);
-        if (clampedScale === prev.scale) {
-          return prev;
-        }
-
-        if (!anchor) {
-          return {
-            ...prev,
-            scale: clampedScale,
-          };
-        }
-
-        const canvasPoint = {
-          x: (anchor.x - prev.x) / prev.scale,
-          y: (anchor.y - prev.y) / prev.scale,
-        };
-
-        return {
-          ...prev,
-          scale: clampedScale,
-          x: anchor.x - canvasPoint.x * clampedScale,
-          y: anchor.y - canvasPoint.y * clampedScale,
-        };
-      });
+      wheelZoomTargetRef.current = {
+        scale: nextScale,
+        anchor,
+      };
+      scheduleWheelZoom();
     },
-    []
+    [scheduleWheelZoom]
   );
 
   const handleWheel = (e: React.WheelEvent) => {
@@ -2270,7 +3227,7 @@ export default function AIWorkspace() {
     const pointerX = e.clientX - rect.left;
     const pointerY = e.clientY - rect.top;
 
-    const oldScale = viewport.scale;
+    const oldScale = wheelZoomTargetRef.current?.scale ?? viewportRef.current.scale;
 
     const direction = e.deltaY > 0 ? -1 : 1;
     const scaleBy = 1.1;
@@ -2278,6 +3235,137 @@ export default function AIWorkspace() {
 
     applyViewportScale(newScale, { x: pointerX, y: pointerY });
   };
+
+  const handleConnectionPointerDown = useCallback(
+    (e: React.PointerEvent<SVGPathElement>, connectionId: string) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (connectionSessionRef.current) {
+        resetConnectionInteraction();
+      }
+      if (e.shiftKey) {
+        setSelectedConnectionIds((prev) => toggleSelectionId(prev, connectionId));
+        return;
+      }
+      setSelectedConnectionIds([connectionId]);
+      setSelectedId(null);
+      setSelectedIds([]);
+    },
+    []
+  );
+
+  const handleInputPortEnter = useCallback((itemId: string) => {
+    setHoveredInputPortItemId(itemId);
+  }, []);
+
+  const handleInputPortLeave = useCallback(
+    (itemId: string) => {
+      if (connectionMode === 'dragging' && connectionSnapTargetId === itemId) return;
+      setHoveredInputPortItemId((prev) => (prev === itemId ? null : prev));
+    },
+    [connectionMode, connectionSnapTargetId]
+  );
+
+  const handleOutputPortEnter = useCallback((itemId: string) => {
+    setHoveredOutputPortItemId(itemId);
+  }, []);
+
+  const handleOutputPortLeave = useCallback((itemId: string) => {
+    if (connectionSessionRef.current?.fromItemId === itemId) return;
+    setHoveredOutputPortItemId((prev) => (prev === itemId ? null : prev));
+  }, []);
+
+  const handleOutputPortPointerDown = useCallback(
+    (e: React.PointerEvent<HTMLElement>, item: CanvasItem, source: 'bridge' | 'button') => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      debugCanvasConnection(source === 'bridge' ? 'out-bridge-pointerdown' : 'out-button-pointerdown', {
+        itemId: item.id,
+        pointerId: e.pointerId,
+        connectionMode,
+        hoveredOutputPortItemId,
+      });
+      beginConnectionDragFromItem(item, e.pointerId, source);
+    },
+    [beginConnectionDragFromItem, connectionMode, hoveredOutputPortItemId]
+  );
+
+  const handleSelectionGroupPointerDown = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      if (e.button !== 0) return;
+      if (isSpacePressed) return;
+      e.preventDefault();
+      e.stopPropagation();
+      beginDraggingSelectedItems(
+        e.clientX,
+        e.clientY,
+        selectedIds,
+        getPrimarySelectedId(selectedIds)
+      );
+    },
+    [beginDraggingSelectedItems, isSpacePressed, selectedIds]
+  );
+
+  const handleItemMouseEnter = useCallback((itemId: string) => {
+    setHoveredCanvasItemId(itemId);
+  }, []);
+
+  const handleItemMouseLeave = useCallback((itemId: string) => {
+    if (connectionSessionRef.current?.fromItemId === itemId) return;
+    setHoveredCanvasItemId((prev) => (prev === itemId ? null : prev));
+  }, []);
+
+  const handleItemClick = useCallback((e: React.MouseEvent<HTMLDivElement>, itemId: string) => {
+    e.stopPropagation();
+    if (e.shiftKey) {
+      setSelectedIds((prev) => {
+        const next = toggleSelectionId(prev, itemId);
+        setSelectedId(getPrimarySelectedId(next));
+        return next;
+      });
+      return;
+    }
+
+    setSelectedConnectionIds([]);
+    setSelectedId(itemId);
+    setSelectedIds([itemId]);
+  }, []);
+
+  const handleItemPointerDown = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>, itemId: string) => {
+      const target = e.target as HTMLElement;
+      if (target.dataset.cornerResize) return;
+      if (target.dataset.port) return;
+      if (isSpacePressed) return;
+      if (e.shiftKey) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const draggingIds = selectedIds.includes(itemId) ? selectedIds : [itemId];
+      beginDraggingSelectedItems(e.clientX, e.clientY, draggingIds, itemId);
+    },
+    [beginDraggingSelectedItems, isSpacePressed, selectedIds]
+  );
+
+  const handleCornerResizePointerDown = useCallback(
+    (e: React.PointerEvent<HTMLButtonElement>, item: CanvasItem) => {
+      if (item.type === 'image') return;
+      cancelZoomAnimation();
+      e.preventDefault();
+      e.stopPropagation();
+      setSelectedId(item.id);
+      setSelectedIds([item.id]);
+      setIsCornerResizing(true);
+      cornerResizeStart.current = {
+        mouseX: e.clientX,
+        mouseY: e.clientY,
+        width: item.width,
+        height: item.height,
+        itemId: item.id,
+      };
+    },
+    [cancelZoomAnimation]
+  );
 
   useEffect(() => {
     const validIds = new Set(items.map((item) => item.id));
@@ -2299,6 +3387,17 @@ export default function AIWorkspace() {
       resetConnectionInteraction();
     }
   }, [items, connectionPointerId, connections]);
+
+  useEffect(() => {
+    return () => {
+      if (interactionFrameRef.current !== null) {
+        cancelAnimationFrame(interactionFrameRef.current);
+      }
+      if (zoomAnimationFrameRef.current !== null) {
+        cancelAnimationFrame(zoomAnimationFrameRef.current);
+      }
+    };
+  }, []);
 
   const handleCancelGenerate = async () => {
     updateActiveStreamMessageStatus('cancelled', '任务已终止');
@@ -3371,6 +4470,9 @@ export default function AIWorkspace() {
     }));
   };
 
+  const isHighFrequencyInteractionActive =
+    isDragging || isCornerResizing || isPanning || isMarqueeSelecting;
+
   const loadSession = (sessionId: string) => {
     const session = sessions.find(s => s.id === sessionId);
     if (!session) return;
@@ -3542,10 +4644,18 @@ export default function AIWorkspace() {
 
   // 监听状态变化并保存当前会话
   useEffect(() => {
-    if (currentSessionId) {
+    if (currentSessionId && !isHighFrequencyInteractionActive) {
       saveCurrentSession();
     }
-  }, [items, chatMessages, viewport, imageCount, activeSkill]);
+  }, [
+    items,
+    chatMessages,
+    viewport,
+    imageCount,
+    activeSkill,
+    currentSessionId,
+    isHighFrequencyInteractionActive,
+  ]);
 
   const enterEditor = (sessionId: string) => {
     const session = sessions.find(s => s.id === sessionId);
@@ -3572,8 +4682,6 @@ export default function AIWorkspace() {
       fileInputRef.current?.click();
     } else if (toolId === 'text') {
       addText();
-    } else if (toolId === 'rectangle') {
-      addShape('rectangle');
     } else {
       setTool(toolId as Tool);
     }
@@ -4066,524 +5174,62 @@ export default function AIWorkspace() {
         </div>
       </div>
 
-      {/* Main Canvas Area */}
-      <div 
-        ref={canvasRef}
-        data-canvas="true"
-        tabIndex={0}
-        className={`relative z-0 shrink-0 overflow-hidden select-none ${isSpacePressed ? (isPanning ? 'cursor-grabbing' : 'cursor-grab') : 'cursor-default'}`}
-        style={{ 
-          width: sidebarCollapsed ? '100%' : 'calc(100% - 500px)',
-          backgroundColor: DARK_THEME.appBg,
-          backgroundImage: `radial-gradient(${DARK_THEME.canvasDot} 0.9px, transparent 0.9px)`,
-          backgroundSize: `${20 * viewport.scale}px ${20 * viewport.scale}px`,
-          backgroundPosition: `${viewport.x}px ${viewport.y}px`,
-        }}
+      <CanvasViewport
+        canvasRef={canvasRef}
+        widthStyle={sidebarCollapsed ? '100%' : 'calc(100% - 500px)'}
+        isSpacePressed={isSpacePressed}
+        isPanning={isPanning}
+        viewport={viewport}
+        items={items}
+        connections={connections}
+        itemById={itemById}
+        selectedIds={selectedIds}
+        selectedId={selectedId}
+        selectedConnectionIds={selectedConnectionIds}
+        hoveredCanvasItemId={hoveredCanvasItemId}
+        hoveredInputPortItemId={hoveredInputPortItemId}
+        hoveredOutputPortItemId={hoveredOutputPortItemId}
+        magneticPorts={magneticPorts}
+        connectionMode={connectionMode}
+        connectionSnapTargetId={connectionSnapTargetId}
+        connectionFromItemId={connectionFromItemId}
+        frozenPreviewConnection={frozenPreviewConnection}
+        pendingConnectionMenu={pendingConnectionMenu}
+        multiSelectionBounds={multiSelectionBounds}
+        isMarqueeSelecting={isMarqueeSelecting}
+        marqueeRect={marqueeRect}
+        getPreviewRenderPoints={getPreviewRenderPoints}
+        getConnectionAnchorCanvasPoint={getConnectionAnchorCanvasPoint}
+        toCanvasScreenPoint={toCanvasScreenPoint}
+        buildConnectionPath={buildConnectionPath}
+        getRenderedPortOverlayPoint={getRenderedPortOverlayPoint}
+        getMagneticPortKey={getMagneticPortKey}
         onPointerDown={handleCanvasPointerDown}
         onPointerMove={handleCanvasPointerMove}
         onPointerUp={handleCanvasPointerUp}
-        onPointerCancel={handleCanvasPointerUp}
         onPointerLeave={handleCanvasPointerLeave}
         onWheel={handleWheel}
         onPaste={handleCanvasPaste}
-      >
-        {(() => {
-          const { from, to } = getPreviewRenderPoints();
-          const canvasRect = canvasRef.current?.getBoundingClientRect();
-          const svgWidth = canvasRect?.width ?? 0;
-          const svgHeight = canvasRect?.height ?? 0;
-          const scaledPortIconSize = PORT_ICON_SIZE * viewport.scale;
-          const scaledPortProximitySize = PORT_PROXIMITY_SIZE * viewport.scale;
-          const scaledPortGlyphSize = scaledPortIconSize * 0.46;
-          const scaledConnectionStrokeWidth = 3.5 * viewport.scale;
-          const scaledSelectedConnectionStrokeWidth = 4.5 * viewport.scale;
-          const scaledDebugConnectionStrokeWidth = 3 * viewport.scale;
-          const connectionMenuWidth = 360;
-          const connectionMenuHeight = 292;
-          const connectionMenuPadding = 24;
-          const pendingMenuLeft = pendingConnectionMenu
-            ? Math.min(
-                Math.max(pendingConnectionMenu.position.x + 18, connectionMenuPadding),
-                Math.max(connectionMenuPadding, svgWidth - connectionMenuWidth - connectionMenuPadding)
-              )
-            : 0;
-          const pendingMenuTop = pendingConnectionMenu
-            ? Math.min(
-                Math.max(pendingConnectionMenu.position.y - 40, connectionMenuPadding),
-                Math.max(connectionMenuPadding, svgHeight - connectionMenuHeight - connectionMenuPadding)
-              )
-            : 0;
-          const showConnectionTestLine = DEBUG_CANVAS_CONNECTIONS && !from;
-          return (
-            <>
-        <svg
-          className="pointer-events-none absolute inset-0 z-[80] h-full w-full overflow-hidden"
-          width={svgWidth}
-          height={svgHeight}
-          viewBox={`0 0 ${Math.max(svgWidth, 1)} ${Math.max(svgHeight, 1)}`}
-          preserveAspectRatio="none"
-        >
-          {connections.map((connection) => {
-            const fromItem = items.find((item) => item.id === connection.fromItemId);
-            const toItem = items.find((item) => item.id === connection.toItemId);
-            if (!fromItem || !toItem) return null;
-            const connectionFrom = toCanvasScreenPoint(getConnectionAnchorCanvasPoint(fromItem, 'right'));
-            const connectionTo = toCanvasScreenPoint(getConnectionAnchorCanvasPoint(toItem, 'left'));
-            const isSelectedConnection = selectedConnectionIds.includes(connection.id);
-            return (
-              <g key={connection.id}>
-                <path
-                  d={buildConnectionPath(connectionFrom, connectionTo)}
-                  fill="none"
-                  stroke="transparent"
-                  strokeWidth="20"
-                  strokeLinecap="round"
-                  className="pointer-events-auto cursor-pointer"
-                  onPointerDown={(e) => {
-                    e.preventDefault();
-                    e.stopPropagation();
-                    if (connectionSessionRef.current) {
-                      resetConnectionInteraction();
-                    }
-                    if (e.shiftKey) {
-                      setSelectedConnectionIds((prev) => toggleSelectionId(prev, connection.id));
-                      return;
-                    }
-                    setSelectedConnectionIds([connection.id]);
-                    setSelectedId(null);
-                    setSelectedIds([]);
-                  }}
-                />
-                <path
-                  d={buildConnectionPath(connectionFrom, connectionTo)}
-                  fill="none"
-                  stroke={DARK_THEME.canvasLine}
-                  strokeOpacity={isSelectedConnection ? 0.98 : 0.9}
-                  strokeWidth={isSelectedConnection ? scaledSelectedConnectionStrokeWidth : scaledConnectionStrokeWidth}
-                  strokeLinecap="round"
-                  pointerEvents="none"
-                />
-              </g>
-            );
-          })}
-          {showConnectionTestLine && (
-            <line
-              x1={40}
-              y1={40}
-              x2={220}
-              y2={120}
-              stroke="#2563eb"
-              strokeWidth={scaledDebugConnectionStrokeWidth}
-              strokeOpacity={1}
-              strokeLinecap="round"
-            />
-          )}
-          {from && to && (
-            <path
-              d={buildConnectionPath(from, to)}
-              fill="none"
-              stroke={DARK_THEME.canvasLine}
-              strokeOpacity="0.9"
-              strokeWidth={scaledConnectionStrokeWidth}
-              strokeLinecap="round"
-              pointerEvents="none"
-            />
-          )}
-          {frozenPreviewConnection && (
-            <path
-              d={buildConnectionPath(frozenPreviewConnection.from, frozenPreviewConnection.to)}
-              fill="none"
-              stroke={DARK_THEME.canvasLine}
-              strokeOpacity="0.5"
-              strokeWidth={scaledConnectionStrokeWidth}
-              strokeLinecap="round"
-              pointerEvents="none"
-            />
-          )}
-        </svg>
-        <div className="absolute inset-0 z-[90] pointer-events-none">
-          <div
-            className="absolute z-[90] overflow-visible"
-            style={{
-              transform: `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.scale})`,
-              transformOrigin: '0 0',
-            }}
-          >
-          {items.map((item) => {
-            const isHoveredItem = hoveredCanvasItemId === item.id;
-            const isHoveredInputPort = hoveredInputPortItemId === item.id;
-            const isHoveredOutputPort = hoveredOutputPortItemId === item.id;
-            const inputMagneticState = magneticPorts[getMagneticPortKey(item.id, 'left')];
-            const outputMagneticState = magneticPorts[getMagneticPortKey(item.id, 'right')];
-            const isMagneticItem = Boolean(inputMagneticState || outputMagneticState);
-            const isConnectionSource = connectionSessionRef.current?.fromItemId === item.id;
-            const isNearPort = isHoveredInputPort || isHoveredOutputPort;
-            const showOutputPort =
-              isHoveredItem || isNearPort || isConnectionSource || isMagneticItem;
-            const showInputPort =
-              isHoveredItem || isNearPort || isMagneticItem || (connectionMode === 'dragging' && connectionSnapTargetId === item.id);
-            const inputPoint = getRenderedPortOverlayPoint(item, 'left');
-            const outputPoint = getRenderedPortOverlayPoint(item, 'right');
-            const inputTransition =
-              inputMagneticState && !inputMagneticState.isTracking
-                ? `left ${PORT_RETURN_DURATION_MS}ms cubic-bezier(0.22, 1, 0.36, 1), top ${PORT_RETURN_DURATION_MS}ms cubic-bezier(0.22, 1, 0.36, 1), opacity 150ms ease`
-                : inputMagneticState
-                  ? 'transform 100ms ease, opacity 150ms ease'
-                  : 'opacity 150ms ease';
-            const outputTransition =
-              outputMagneticState && !outputMagneticState.isTracking
-                ? `left ${PORT_RETURN_DURATION_MS}ms cubic-bezier(0.22, 1, 0.36, 1), top ${PORT_RETURN_DURATION_MS}ms cubic-bezier(0.22, 1, 0.36, 1), opacity 150ms ease`
-                : outputMagneticState
-                  ? 'transform 100ms ease, opacity 150ms ease'
-                  : 'opacity 150ms ease';
-
-            return (
-              <React.Fragment key={`port-overlay-${item.id}`}>
-                <div
-                  data-port-bridge="in"
-                  data-item-id={item.id}
-                  onPointerEnter={() => {
-                    setHoveredInputPortItemId(item.id);
-                  }}
-                  onPointerLeave={() => {
-                    if (connectionMode === 'dragging' && connectionSnapTargetId === item.id) return;
-                    setHoveredInputPortItemId((prev) => (prev === item.id ? null : prev));
-                  }}
-                  className="absolute -translate-x-1/2 -translate-y-1/2 bg-transparent pointer-events-auto"
-                  style={{
-                    left: inputPoint.x,
-                    top: inputPoint.y,
-                    width: PORT_PROXIMITY_SIZE,
-                    height: PORT_PROXIMITY_SIZE,
-                    transition: inputTransition,
-                  }}
-                />
-                <div
-                  data-port="in"
-                  data-item-id={item.id}
-                  className={`absolute -translate-x-1/2 -translate-y-1/2 pointer-events-none transition-opacity duration-150 ${
-                    showInputPort ? 'opacity-100' : 'opacity-0'
-                  }`}
-                  style={{
-                    left: inputPoint.x,
-                    top: inputPoint.y,
-                    width: PORT_ICON_SIZE,
-                    height: PORT_ICON_SIZE,
-                    transform: `translate(-50%, -50%) scale(${inputMagneticState?.isTracking ? 1.04 : 1})`,
-                    transition: inputTransition,
-                  }}
-                >
-                  <ConnectionPortIcon className="h-full w-full" />
-                </div>
-                <div
-                  data-port-bridge="out"
-                  data-item-id={item.id}
-                  onPointerEnter={() => {
-                    setHoveredOutputPortItemId(item.id);
-                  }}
-                  onPointerLeave={() => {
-                    if (connectionSessionRef.current?.fromItemId === item.id) return;
-                    setHoveredOutputPortItemId((prev) => (prev === item.id ? null : prev));
-                  }}
-                  onPointerDown={(e) => {
-                    if (e.button !== 0) return;
-                    e.preventDefault();
-                    e.stopPropagation();
-                    debugCanvasConnection('out-bridge-pointerdown', {
-                      itemId: item.id,
-                      pointerId: e.pointerId,
-                      connectionMode,
-                      hoveredOutputPortItemId,
-                      showOutputPort,
-                    });
-                    beginConnectionDragFromItem(item, e.pointerId, 'bridge');
-                  }}
-                  className="absolute -translate-x-1/2 -translate-y-1/2 bg-transparent pointer-events-auto"
-                  style={{
-                    left: outputPoint.x,
-                    top: outputPoint.y,
-                    width: PORT_PROXIMITY_SIZE,
-                    height: PORT_PROXIMITY_SIZE,
-                    transition: outputTransition,
-                  }}
-                />
-                <button
-                  type="button"
-                  data-port="out"
-                  data-item-id={item.id}
-                  onPointerEnter={() => {
-                    setHoveredOutputPortItemId(item.id);
-                  }}
-                  onPointerLeave={() => {
-                    if (connectionSessionRef.current?.fromItemId === item.id) return;
-                    setHoveredOutputPortItemId((prev) => (prev === item.id ? null : prev));
-                  }}
-                  onPointerDown={(e) => {
-                    if (e.button !== 0) return;
-                    e.preventDefault();
-                    e.stopPropagation();
-                    debugCanvasConnection('out-button-pointerdown', {
-                      itemId: item.id,
-                      pointerId: e.pointerId,
-                      connectionMode,
-                      hoveredOutputPortItemId,
-                      showOutputPort,
-                    });
-                    beginConnectionDragFromItem(item, e.pointerId, 'button');
-                  }}
-                  className={`absolute -translate-x-1/2 -translate-y-1/2 rounded-full bg-transparent transition-opacity duration-150 ${
-                    showOutputPort ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'
-                  }`}
-                  style={{
-                    left: outputPoint.x,
-                    top: outputPoint.y,
-                    width: PORT_ICON_SIZE,
-                    height: PORT_ICON_SIZE,
-                    transform: `translate(-50%, -50%) scale(${outputMagneticState?.isTracking ? 1.04 : 1})`,
-                    transition: outputTransition,
-                  }}
-                  aria-label="开始连线"
-                >
-                  <ConnectionPortIcon className="h-full w-full" />
-                </button>
-              </React.Fragment>
-            );
-          })}
-          </div>
-        </div>
-        {pendingConnectionMenu && (
-          <div className="pointer-events-none absolute inset-0 z-[110]">
-            <div
-              data-connection-create-menu="true"
-              className="pointer-events-auto absolute overflow-hidden rounded-[26px] border border-white/[0.1] bg-[rgba(26,26,28,0.985)] shadow-[0_26px_72px_rgba(0,0,0,0.5)] backdrop-blur-xl"
-              style={{
-                left: pendingMenuLeft,
-                top: pendingMenuTop,
-                width: 320,
-                minHeight: 198,
-              }}
-              onPointerDown={(e) => {
-                e.stopPropagation();
-              }}
-            >
-              <div className="p-3.5">
-                <div className="mb-2.5 px-1 text-xs font-medium tracking-[-0.01em] text-zinc-500/80">
-                  引用该节点生成
-                </div>
-                <div className="space-y-1.5">
-                  {CONNECTION_MENU_OPTIONS.map((option) => {
-                    const Icon = option.icon;
-                    return (
-                      <button
-                        key={option.id}
-                        type="button"
-                        onPointerDown={(e) => {
-                          e.stopPropagation();
-                        }}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          clearPendingConnectionMenu();
-                        }}
-                        className="group flex min-h-[68px] w-full items-center gap-2.5 rounded-[20px] border border-transparent bg-transparent px-3 py-2.5 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.015)] transition-all duration-300 ease-in-out hover:bg-[rgba(255,255,255,0.038)]"
-                      >
-                        <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-[11px] bg-[rgba(255,255,255,0.055)] text-zinc-50 shadow-[inset_0_1px_0_rgba(255,255,255,0.025)] transition-colors duration-300 group-hover:bg-[rgba(255,255,255,0.07)]">
-                          <Icon size={21} strokeWidth={2} />
-                        </div>
-                        <div className="flex min-w-0 flex-1 items-center pl-1">
-                          <div className="flex min-w-0 flex-1 flex-col justify-center">
-                            <div className="text-[16px] font-medium tracking-[-0.03em] text-zinc-50 transition-transform duration-300 ease-in-out group-hover:translate-y-1">
-                              {option.title}
-                            </div>
-                            <div className="max-h-0 overflow-hidden opacity-0 transition-all duration-300 ease-in-out group-hover:mt-0.5 group-hover:max-h-9 group-hover:opacity-100">
-                              <div className="translate-y-1.5 whitespace-normal break-words text-[11px] font-medium tracking-[-0.01em] text-zinc-500 transition-transform duration-300 ease-in-out group-hover:translate-y-0">
-                                {option.description}
-                              </div>
-                            </div>
-                          </div>
-                        </div>
-                      </button>
-                    );
-                  })}
-                </div>
-              </div>
-            </div>
-          </div>
-        )}
-            </>
-          );
-        })()}
-
-        {/* Canvas Content */}
-        <div
-          className="absolute z-[2]"
-          style={{
-            transform: `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.scale})`,
-            transformOrigin: '0 0',
-          }}
-        >
-          {multiSelectionBounds && (
-            <div
-              data-selection-group="true"
-              className="absolute rounded-[28px] border border-white/20 bg-white/[0.06] shadow-[0_18px_40px_rgba(0,0,0,0.16)]"
-              style={{
-                left: multiSelectionBounds.left - 10,
-                top: multiSelectionBounds.top - 10,
-                width: multiSelectionBounds.width + 20,
-                height: multiSelectionBounds.height + 20,
-              }}
-              onPointerDown={(e) => {
-                if (e.button !== 0) return;
-                if (isSpacePressed) return;
-                e.preventDefault();
-                e.stopPropagation();
-                beginDraggingSelectedItems(
-                  e.clientX,
-                  e.clientY,
-                  selectedIds,
-                  getPrimarySelectedId(selectedIds)
-                );
-              }}
-            />
-          )}
-          {items.map(item => (
-              (() => {
-                const isItemSelected = selectedIds.includes(item.id) || selectedId === item.id;
-                const showMultiSelectionGroup = selectedIds.length > 1;
-                const isHoveredItem = hoveredCanvasItemId === item.id;
-                const isHoveredOutputPort = hoveredOutputPortItemId === item.id;
-                const isConnectionSource = connectionSessionRef.current?.fromItemId === item.id;
-                const hasOutgoingConnection = connections.some((connection) => connection.fromItemId === item.id);
-                const hasIncomingConnection = connections.some((connection) => connection.toItemId === item.id);
-                const showOutputPort =
-                  isHoveredItem || isHoveredOutputPort || isConnectionSource || hasOutgoingConnection;
-                const showCornerResizeHandle = isHoveredItem && item.type !== 'image';
-                return (
-              <div
-                key={item.id}
-                data-canvas-item-id={item.id}
-                className={`absolute group cursor-move ${!item.visible ? 'opacity-30' : ''}`}
-                style={{
-                  left: item.x,
-                  top: item.y,
-                  width: item.width,
-                  height: item.height,
-                  transform: `rotate(${item.rotation}deg)`,
-                }}
-              onMouseEnter={() => {
-                setHoveredCanvasItemId(item.id);
-              }}
-              onMouseLeave={() => {
-                if (connectionSessionRef.current?.fromItemId === item.id) return;
-                setHoveredCanvasItemId((prev) => (prev === item.id ? null : prev));
-              }}
-              onClick={(e) => {
-                e.stopPropagation();
-                if (e.shiftKey) {
-                  setSelectedIds((prev) => {
-                    const next = toggleSelectionId(prev, item.id);
-                    setSelectedId(getPrimarySelectedId(next));
-                    return next;
-                  });
-                  return;
-                }
-
-                setSelectedConnectionIds([]);
-                setSelectedId(item.id);
-                setSelectedIds([item.id]);
-              }}
-              onPointerDown={(e) => {
-                const target = e.target as HTMLElement;
-                if (target.dataset.cornerResize) return;
-                if (target.dataset.port) return;
-                if (isSpacePressed) return;
-                if (e.shiftKey) return;
-                e.preventDefault();
-                e.stopPropagation();
-                const draggingIds = selectedIds.includes(item.id) ? selectedIds : [item.id];
-                beginDraggingSelectedItems(e.clientX, e.clientY, draggingIds, item.id);
-              }}
-            >
-              {item.type === 'image' && item.src && (
-                <img
-                  src={item.src}
-                  alt=""
-                  className="w-full h-full object-contain pointer-events-none"
-                  style={{ borderRadius: `${NODE_CORNER_RADIUS}px` }}
-                  draggable={false}
-                />
-              )}
-              {item.type === 'shape' && <div className="w-full h-full rounded" style={{ backgroundColor: item.fill }} />}
-              {item.type === 'text' && <div className="w-full h-full flex items-center justify-center text-sm text-zinc-100">{item.text}</div>}
-              {((isItemSelected && !showMultiSelectionGroup) || isHoveredItem) && (
-                <div
-                  className="absolute inset-[-2px] z-10 border border-dashed border-white/45 pointer-events-none"
-                  style={{ borderRadius: `${NODE_CORNER_RADIUS}px` }}
-                />
-              )}
-              {showCornerResizeHandle && (
-                <button
-                  data-corner-resize="true"
-                  onPointerDown={(e) => {
-                    if (item.type === 'image') return;
-                    e.preventDefault();
-                    e.stopPropagation();
-                    setSelectedId(item.id);
-                    setSelectedIds([item.id]);
-                    setIsCornerResizing(true);
-                    cornerResizeStart.current = {
-                      mouseX: e.clientX,
-                      mouseY: e.clientY,
-                      width: item.width,
-                      height: item.height,
-                      itemId: item.id,
-                    };
-                  }}
-                  className="absolute bg-transparent cursor-nwse-resize flex items-center justify-center overflow-visible"
-                  style={{
-                    width: `${CORNER_HANDLE_HIT_SIZE}px`,
-                    height: `${CORNER_HANDLE_HIT_SIZE}px`,
-                    right: `${CORNER_HANDLE_HIT_OFFSET}px`,
-                    bottom: `${CORNER_HANDLE_HIT_OFFSET}px`,
-                  }}
-                  aria-label="缩放"
-                >
-                  <svg
-                    viewBox={`0 0 ${CORNER_HANDLE_SIZE} ${CORNER_HANDLE_SIZE}`}
-                    className="pointer-events-none absolute"
-                    style={{
-                      width: `${CORNER_HANDLE_SIZE}px`,
-                      height: `${CORNER_HANDLE_SIZE}px`,
-                      left: `${CORNER_HANDLE_VISUAL_OFFSET}px`,
-                      top: `${CORNER_HANDLE_VISUAL_OFFSET}px`,
-                    }}
-                  >
-                    <path
-                      d={`M ${CORNER_HANDLE_CENTER + HANDLE_ARC_RADIUS} ${CORNER_HANDLE_CENTER} A ${HANDLE_ARC_RADIUS} ${HANDLE_ARC_RADIUS} 0 0 1 ${CORNER_HANDLE_CENTER} ${CORNER_HANDLE_CENTER + HANDLE_ARC_RADIUS}`}
-                      fill="none"
-                      stroke="rgba(226,232,240,0.8)"
-                      strokeWidth={CORNER_HANDLE_STROKE}
-                      strokeLinecap="round"
-                    />
-                  </svg>
-                </button>
-              )}
-            </div>
-                );
-              })()
-          ))}
-        </div>
-        {isMarqueeSelecting && marqueeRect && (
-          <div
-            className="absolute pointer-events-none border border-dashed border-white/35 bg-white/5"
-            style={{
-              left: marqueeRect.x,
-              top: marqueeRect.y,
-              width: marqueeRect.width,
-              height: marqueeRect.height,
-            }}
-          />
-        )}
-      </div>
+        onConnectionPointerDown={handleConnectionPointerDown}
+        onInputPortEnter={handleInputPortEnter}
+        onInputPortLeave={handleInputPortLeave}
+        onOutputPortEnter={handleOutputPortEnter}
+        onOutputPortLeave={handleOutputPortLeave}
+        onOutputPortPointerDown={handleOutputPortPointerDown}
+        onSelectionGroupPointerDown={handleSelectionGroupPointerDown}
+        onItemMouseEnter={handleItemMouseEnter}
+        onItemMouseLeave={handleItemMouseLeave}
+        onItemClick={handleItemClick}
+        onItemPointerDown={handleItemPointerDown}
+        onCornerResizePointerDown={handleCornerResizePointerDown}
+        onPendingMenuPointerDown={(e) => {
+          e.stopPropagation();
+        }}
+        onPendingMenuAction={(e) => {
+          e.stopPropagation();
+          clearPendingConnectionMenu();
+        }}
+      />
 
       {/* Zoom Controller - Outside Canvas */}
       <div className="absolute left-4 bottom-4 z-50 flex items-center gap-2 rounded-xl border border-white/10 bg-[rgba(16,18,22,0.88)] p-1.5 shadow-[0_18px_50px_rgba(0,0,0,0.35)] backdrop-blur-xl">
