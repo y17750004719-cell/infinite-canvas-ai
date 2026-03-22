@@ -717,11 +717,11 @@ const CanvasNodesLayer = memo(function CanvasNodesLayer({
                     bottom: `${TEXT_CARD_FRAME_BOTTOM}px`,
                   }}
                 >
-                  <div className="flex h-full w-full items-center">
-                    <div className="w-full max-w-[280px] pl-8 text-left">
+                  <div className="flex h-full w-full items-center justify-center">
+                    <div className="w-full max-w-[560px] text-left">
                       <div className="flex flex-col gap-4">
                       <div className="px-2 text-sm text-zinc-500">尝试：</div>
-                      <div className="flex flex-col items-start gap-2">
+                      <div className="flex w-full flex-col items-start gap-2">
                         {[
                           { icon: Pencil, label: '自己编写内容' },
                           { icon: Video, label: '文字生视频' },
@@ -735,7 +735,7 @@ const CanvasNodesLayer = memo(function CanvasNodesLayer({
                               onPointerDown={(e) => {
                                 e.stopPropagation();
                               }}
-                              className="group/row inline-flex min-w-[188px] items-center justify-start gap-2.5 rounded-[14px] bg-transparent px-3 py-2 text-left transition-colors duration-150 ease-out hover:bg-[rgba(255,255,255,0.038)]"
+                              className="group/row flex w-full items-center justify-start gap-2.5 rounded-[14px] bg-transparent px-3 py-2 text-left transition-colors duration-150 ease-out hover:bg-[rgba(255,255,255,0.038)]"
                             >
                               <Icon
                                 size={16}
