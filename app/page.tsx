@@ -6,7 +6,7 @@ import remarkGfm from 'remark-gfm';
 import { 
   MousePointer2, Type, Image as ImageIcon,
   Share2, History, Settings, Paperclip,
-  Send, Sparkles, X, ChevronDown, Trash2, Edit3, ArrowLeft, FolderOpen, Plus, SlidersHorizontal, Copy, Check, Video, Pencil
+  Send, Sparkles, X, ChevronDown, Trash2, Edit3, ArrowLeft, FolderOpen, Plus, SlidersHorizontal, Copy, Check, Video, Pencil, Package2, Workflow, Clock3
 } from 'lucide-react';
 import { saveSessions, loadSessions, ProjectSession as DBSession } from './lib/db';
 import { ASPECT_RATIOS } from './lib/api-client';
@@ -192,6 +192,7 @@ const TEXT_CARD_DIMENSIONS = {
 const TEXT_CARD_FRAME_INSET_X = 16;
 const TEXT_CARD_FRAME_TOP = 24;
 const TEXT_CARD_FRAME_BOTTOM = 12;
+const TEXT_CARD_GENERATION_PANEL_DEFAULT_WIDTH = 480;
 const NODE_SELECTED_OUTLINE_COLOR = 'rgba(226, 232, 240, 0.76)';
 const NODE_SELECTED_OUTLINE_WIDTH = 2;
 const VIEWPORT_ZOOM_DURATION_MS = 140;
@@ -872,6 +873,12 @@ const CanvasViewport = memo(function CanvasViewport({
   onCornerResizePointerDown,
   onPendingMenuPointerDown,
   onPendingMenuAction,
+  selectedTextCardPanelItem,
+  selectedTextCardPanelInput,
+  isGenerating,
+  onSelectedTextCardPanelInputChange,
+  onSelectedTextCardPanelSubmit,
+  onSelectedTextCardPanelCancel,
 }: {
   canvasRef: React.RefObject<HTMLDivElement | null>;
   widthStyle: string;
@@ -926,6 +933,12 @@ const CanvasViewport = memo(function CanvasViewport({
   onCornerResizePointerDown: (e: React.PointerEvent<HTMLButtonElement>, item: CanvasItem) => void;
   onPendingMenuPointerDown: (e: React.PointerEvent<HTMLDivElement>) => void;
   onPendingMenuAction: (e: React.MouseEvent<HTMLButtonElement>) => void;
+  selectedTextCardPanelItem: CanvasItem | null;
+  selectedTextCardPanelInput: string;
+  isGenerating: boolean;
+  onSelectedTextCardPanelInputChange: (value: string) => void;
+  onSelectedTextCardPanelSubmit: () => void;
+  onSelectedTextCardPanelCancel: () => void;
 }) {
   const { from, to } = getPreviewRenderPoints();
   const canvasRect = canvasRef.current?.getBoundingClientRect();
@@ -946,6 +959,63 @@ const CanvasViewport = memo(function CanvasViewport({
     ? Math.min(
         Math.max(pendingConnectionMenu.position.y - 40, connectionMenuPadding),
         Math.max(connectionMenuPadding, canvasSize.height - connectionMenuHeight - connectionMenuPadding)
+      )
+    : 0;
+  const selectedTextCardPanelFrameBounds = selectedTextCardPanelItem
+    ? getTextCardFrameBounds(selectedTextCardPanelItem)
+    : null;
+  const selectedTextCardPanelCanvasWidth = selectedTextCardPanelFrameBounds
+    ? Math.max(TEXT_CARD_GENERATION_PANEL_DEFAULT_WIDTH, selectedTextCardPanelFrameBounds.width)
+    : 0;
+  const selectedTextCardPanelCanvasHeight = 144;
+  const selectedTextCardPanelCanvasRect =
+    selectedTextCardPanelItem && selectedTextCardPanelFrameBounds
+      ? {
+          left:
+            selectedTextCardPanelItem.x +
+            selectedTextCardPanelFrameBounds.left +
+            (selectedTextCardPanelFrameBounds.width - selectedTextCardPanelCanvasWidth) / 2,
+          top:
+            selectedTextCardPanelItem.y +
+            selectedTextCardPanelFrameBounds.top +
+            selectedTextCardPanelFrameBounds.height +
+            18,
+          width: selectedTextCardPanelCanvasWidth,
+          height: selectedTextCardPanelCanvasHeight,
+        }
+      : null;
+  const selectedTextCardPanelPadding = 24;
+  const selectedTextCardPanelDisplayedWidth = selectedTextCardPanelCanvasRect
+    ? selectedTextCardPanelCanvasRect.width * viewport.scale
+    : 0;
+  const selectedTextCardPanelDisplayedHeight = selectedTextCardPanelCanvasRect
+    ? selectedTextCardPanelCanvasRect.height * viewport.scale
+    : 0;
+  const selectedTextCardPanelScreenPoint = selectedTextCardPanelCanvasRect
+    ? toCanvasScreenPoint({
+        x: selectedTextCardPanelCanvasRect.left,
+        y: selectedTextCardPanelCanvasRect.top,
+      })
+    : null;
+  const selectedTextCardPanelLeft = selectedTextCardPanelScreenPoint
+    ? Math.min(
+        Math.max(
+          selectedTextCardPanelScreenPoint.x,
+          selectedTextCardPanelPadding
+        ),
+        Math.max(
+          selectedTextCardPanelPadding,
+          canvasSize.width - selectedTextCardPanelDisplayedWidth - selectedTextCardPanelPadding
+        )
+      )
+    : 0;
+  const selectedTextCardPanelTop = selectedTextCardPanelScreenPoint
+    ? Math.min(
+        Math.max(selectedTextCardPanelScreenPoint.y, selectedTextCardPanelPadding),
+        Math.max(
+          selectedTextCardPanelPadding,
+          canvasSize.height - selectedTextCardPanelDisplayedHeight - selectedTextCardPanelPadding
+        )
       )
     : 0;
 
@@ -1016,35 +1086,102 @@ const CanvasViewport = memo(function CanvasViewport({
               </div>
               <div className="space-y-1.5">
                 {CONNECTION_MENU_OPTIONS.map((option) => {
-                  const Icon = option.icon;
                   return (
-                    <button
+                    <CanvasActionMenuItem
                       key={option.id}
-                      type="button"
-                      onPointerDown={(e) => {
-                        e.stopPropagation();
-                      }}
+                      title={option.title}
+                      description={option.description}
+                      Icon={option.icon}
                       onClick={onPendingMenuAction}
-                      className="group flex min-h-[68px] w-full items-center gap-2.5 rounded-[20px] border border-transparent bg-transparent px-3 py-2.5 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.015)] transition-all duration-300 ease-in-out hover:bg-[rgba(255,255,255,0.038)]"
-                    >
-                      <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-[11px] bg-[rgba(255,255,255,0.055)] text-zinc-50 shadow-[inset_0_1px_0_rgba(255,255,255,0.025)] transition-colors duration-300 group-hover:bg-[rgba(255,255,255,0.07)]">
-                        <Icon size={21} strokeWidth={2} />
-                      </div>
-                      <div className="flex min-w-0 flex-1 items-center pl-1">
-                        <div className="flex min-w-0 flex-1 flex-col justify-center">
-                          <div className="text-[16px] font-medium tracking-[-0.03em] text-zinc-50 transition-transform duration-300 ease-in-out group-hover:translate-y-1">
-                            {option.title}
-                          </div>
-                          <div className="max-h-0 overflow-hidden opacity-0 transition-all duration-300 ease-in-out group-hover:mt-0.5 group-hover:max-h-9 group-hover:opacity-100">
-                            <div className="translate-y-1.5 whitespace-normal break-words text-[11px] font-medium tracking-[-0.01em] text-zinc-500 transition-transform duration-300 ease-in-out group-hover:translate-y-0">
-                              {option.description}
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    </button>
+                    />
                   );
                 })}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+      {selectedTextCardPanelItem && selectedTextCardPanelFrameBounds && selectedTextCardPanelCanvasRect && (
+        <div className="pointer-events-none absolute inset-0 z-[115]">
+          <div
+            className="pointer-events-auto absolute overflow-hidden rounded-[26px] border border-white/[0.11] bg-[rgba(28,28,31,0.98)] shadow-[0_34px_90px_rgba(0,0,0,0.46),inset_0_1px_0_rgba(255,255,255,0.025)] backdrop-blur-xl"
+            style={{
+              left: selectedTextCardPanelLeft,
+              top: selectedTextCardPanelTop,
+              width: selectedTextCardPanelCanvasRect.width,
+              transform: `scale(${viewport.scale})`,
+              transformOrigin: 'top left',
+            }}
+            onPointerDown={(e) => {
+              e.stopPropagation();
+            }}
+          >
+            <div className="px-5 py-3">
+              <textarea
+                value={selectedTextCardPanelInput}
+                onChange={(e) => {
+                  onSelectedTextCardPanelInputChange(e.target.value);
+                }}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter' && !e.shiftKey && !e.altKey) {
+                    e.preventDefault();
+                    if (isGenerating) {
+                      onSelectedTextCardPanelCancel();
+                    } else {
+                      onSelectedTextCardPanelSubmit();
+                    }
+                  }
+                }}
+                onPointerDown={(e) => {
+                  e.stopPropagation();
+                }}
+                className="panel-scrollbar min-h-[52px] w-full resize-none overflow-y-auto bg-transparent text-[14px] leading-6 text-zinc-100 outline-none placeholder:text-zinc-500"
+                placeholder="描述你想要生成的内容，并在下方调整生成参数。（按下Enter 生成，Shift+Enter 换行）"
+                rows={2}
+              />
+            </div>
+            <div className="flex items-center justify-between border-t border-white/[0.08] bg-[rgba(255,255,255,0.02)] px-5 py-3">
+              <button
+                type="button"
+                onPointerDown={(e) => {
+                  e.stopPropagation();
+                }}
+                className="inline-flex items-center gap-2 text-[13px] font-semibold tracking-[-0.02em] text-zinc-100"
+              >
+                <Sparkles size={15} className="text-zinc-100" />
+                <span>全能语言模型G3</span>
+                <ChevronDown size={14} className="text-zinc-500" />
+              </button>
+              <div className="flex items-center gap-2.5">
+                <button
+                  type="button"
+                  onPointerDown={(e) => {
+                    e.stopPropagation();
+                  }}
+                  onClick={() => {
+                    if (isGenerating) {
+                      onSelectedTextCardPanelCancel();
+                    } else {
+                      onSelectedTextCardPanelSubmit();
+                    }
+                  }}
+                  disabled={!isGenerating && !selectedTextCardPanelInput.trim()}
+                  className="inline-flex h-11 w-11 items-center justify-center rounded-full border border-black/5 bg-[#f5f7fb] text-black shadow-[0_10px_24px_rgba(0,0,0,0.22),inset_0_1px_0_rgba(255,255,255,0.7)] transition-colors hover:bg-white disabled:cursor-not-allowed disabled:opacity-50"
+                  aria-label={isGenerating ? '终止生成' : '开始生成'}
+                  title={isGenerating ? '终止生成' : '开始生成'}
+                >
+                  {isGenerating ? (
+                    <svg className="animate-spin" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <circle cx="12" cy="12" r="9" opacity="0.25" />
+                      <path d="M21 12a9 9 0 0 1-9 9" />
+                    </svg>
+                  ) : (
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M12 18V6" />
+                      <path d="m7 11 5-5 5 5" />
+                    </svg>
+                  )}
+                </button>
               </div>
             </div>
           </div>
@@ -1511,6 +1648,98 @@ const CONNECTION_MENU_OPTIONS = [
   },
 ] as const;
 
+const LEFT_RAIL_ITEMS = [
+  { id: 'assets', label: '资产', icon: Package2 },
+  { id: 'workflow', label: '工作流', icon: Workflow },
+  { id: 'history', label: '历史', icon: Clock3 },
+] as const;
+
+const ADD_NODE_MENU_OPTIONS = [
+  {
+    id: 'text',
+    title: '文本',
+    description: '脚本、广告词、品牌文案',
+    icon: Type,
+    disabled: false,
+  },
+  {
+    id: 'image',
+    title: '图片',
+    description: '海报、封面、参考图',
+    icon: ImageIcon,
+    disabled: false,
+  },
+  {
+    id: 'video',
+    title: '视频',
+    description: '即将支持',
+    icon: Video,
+    disabled: true,
+  },
+] as const;
+
+function CanvasActionMenuItem({
+  title,
+  description,
+  Icon,
+  disabled = false,
+  onClick,
+}: {
+  title: string;
+  description: string;
+  Icon: React.ComponentType<any>;
+  disabled?: boolean;
+  onClick?: (e: React.MouseEvent<HTMLButtonElement>) => void;
+}) {
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      onPointerDown={(e) => {
+        e.stopPropagation();
+      }}
+      onClick={onClick}
+      className={`group flex min-h-[68px] w-full items-center gap-2.5 rounded-[20px] border border-transparent px-3 py-2.5 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.015)] transition-colors duration-200 ${
+        disabled
+          ? 'cursor-not-allowed bg-transparent opacity-55'
+          : 'bg-transparent hover:bg-[rgba(255,255,255,0.038)]'
+      }`}
+    >
+      <div
+        className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-[11px] shadow-[inset_0_1px_0_rgba(255,255,255,0.025)] transition-colors duration-200 ${
+          disabled
+            ? 'bg-[rgba(255,255,255,0.03)] text-zinc-500'
+            : 'bg-[rgba(255,255,255,0.055)] text-zinc-50 group-hover:bg-[rgba(255,255,255,0.07)]'
+        }`}
+      >
+        <Icon size={21} strokeWidth={2} />
+      </div>
+      <div className="flex min-w-0 flex-1 items-center pl-1">
+        <div className={`relative min-w-0 flex-1 ${disabled ? 'flex flex-col justify-center gap-0.5' : 'h-[38px]'}`}>
+          <div
+            className={`min-w-0 text-[16px] font-medium tracking-[-0.03em] ${
+              disabled
+                ? 'text-zinc-500'
+                : 'absolute left-0 top-1/2 -translate-y-1/2 text-zinc-50 transition-transform duration-200 ease-out group-hover:-translate-y-[18px]'
+            }`}
+          >
+            {title}
+          </div>
+          <div
+            className={`min-w-0 whitespace-normal break-words text-[11px] font-medium tracking-[-0.01em] text-zinc-500 ${
+              disabled
+                ? ''
+                : 'pointer-events-none absolute left-0 top-[22px] opacity-0 transition-[opacity,transform] duration-200 ease-out translate-y-1 group-hover:translate-y-0 group-hover:opacity-100'
+            }`}
+          >
+            {description}
+          </div>
+        </div>
+      </div>
+    </button>
+  );
+}
+
 export default function AIWorkspace() {
   const [viewMode, setViewMode] = useState<'gallery' | 'editor'>('gallery');
   const [tool, setTool] = useState<Tool>('select');
@@ -1588,6 +1817,7 @@ export default function AIWorkspace() {
   const [currentSessionId, setCurrentSessionId] = useState<string>('');
   const [showProjectMenu, setShowProjectMenu] = useState(false);
   const [showHistoryPanel, setShowHistoryPanel] = useState(false);
+  const [showAddNodeMenu, setShowAddNodeMenu] = useState(false);
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [editingName, setEditingName] = useState('');
   
@@ -1601,6 +1831,7 @@ export default function AIWorkspace() {
   } | null>(null);
   
   const projectMenuRef = useRef<HTMLDivElement>(null);
+  const addNodeMenuRef = useRef<HTMLDivElement>(null);
   const generationModeMenuRef = useRef<HTMLDivElement>(null);
   const skillsMenuRef = useRef<HTMLDivElement>(null);
   const aspectRatioMenuRef = useRef<HTMLDivElement>(null);
@@ -1627,6 +1858,7 @@ export default function AIWorkspace() {
   const [chatInputFocused, setChatInputFocused] = useState(false);
   const [chatInputHeight, setChatInputHeight] = useState(24);
   const [copiedAssistantMessageId, setCopiedAssistantMessageId] = useState<string | null>(null);
+  const [textCardPanelDrafts, setTextCardPanelDrafts] = useState<Record<string, string>>({});
   const multiSelectionBounds = React.useMemo(() => {
     if (selectedIds.length <= 1) return null;
     const selectedItems = items.filter((item) => selectedIds.includes(item.id));
@@ -1649,6 +1881,14 @@ export default function AIWorkspace() {
     () => Object.fromEntries(items.map((item) => [item.id, item] as const)),
     [items]
   );
+  const selectedTextCardPanelItem = React.useMemo(() => {
+    if (selectedIds.length !== 1 || !selectedId) return null;
+    const item = itemById[selectedId];
+    return item?.type === 'text' && item.textVariant === 'card' ? item : null;
+  }, [itemById, selectedId, selectedIds]);
+  const selectedTextCardPanelInput = selectedTextCardPanelItem
+    ? textCardPanelDrafts[selectedTextCardPanelItem.id] ?? ''
+    : '';
   const SKILL_TOKEN_SELECTOR = '[data-skill-token="true"]';
   const copiedAssistantMessageTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -2199,6 +2439,17 @@ export default function AIWorkspace() {
     setChatInput(editorText);
     syncEditorHeight();
   };
+
+  const handleSelectedTextCardPanelInputChange = useCallback(
+    (value: string) => {
+      if (!selectedTextCardPanelItem) return;
+      setTextCardPanelDrafts((prev) => ({
+        ...prev,
+        [selectedTextCardPanelItem.id]: value,
+      }));
+    },
+    [selectedTextCardPanelItem]
+  );
 
   const handleChatEditorKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
     if ((e.key === 'Backspace' || e.key === 'Delete') && activeSkill && isCaretAtEditorStart()) {
@@ -4234,6 +4485,19 @@ export default function AIWorkspace() {
     }
   };
 
+  const handleSelectedTextCardPanelSubmit = useCallback(() => {
+    if (isGenerating || !selectedTextCardPanelItem) return;
+    const input = (textCardPanelDrafts[selectedTextCardPanelItem.id] ?? '').trim();
+    if (!input) return;
+
+    setTextCardPanelDrafts((prev) => ({
+      ...prev,
+      [selectedTextCardPanelItem.id]: '',
+    }));
+
+    void handleGenerate({ input });
+  }, [isGenerating, selectedTextCardPanelItem, textCardPanelDrafts]);
+
   const openSkillChoiceModal = (choice: SkillChoicePayload) => {
     setPendingSkillChoice(choice);
     setShowSkillChoiceModal(true);
@@ -4687,6 +4951,21 @@ export default function AIWorkspace() {
     }
   };
 
+  const handleAddNodeMenuAction = (optionId: 'text' | 'image' | 'video') => {
+    if (optionId === 'video') return;
+    clearPendingConnectionMenu();
+    setShowAddNodeMenu(false);
+
+    if (optionId === 'text') {
+      addText();
+      return;
+    }
+
+    if (optionId === 'image') {
+      fileInputRef.current?.click();
+    }
+  };
+
   useEffect(() => {
     return () => {
       detachConnectionWindowListeners();
@@ -4784,6 +5063,9 @@ export default function AIWorkspace() {
       if (projectMenuRef.current && !projectMenuRef.current.contains(e.target as Node)) {
         setShowProjectMenu(false);
       }
+      if (addNodeMenuRef.current && !addNodeMenuRef.current.contains(e.target as Node)) {
+        setShowAddNodeMenu(false);
+      }
       if (generationModeMenuRef.current && !generationModeMenuRef.current.contains(e.target as Node)) {
         setShowGenerationModeMenu(false);
       }
@@ -4796,11 +5078,11 @@ export default function AIWorkspace() {
       setShowAvatarMenu(false);
       setShowHistoryPanel(false);
     };
-    if (showAvatarMenu || showProjectMenu || showHistoryPanel || showGenerationModeMenu || showSkillsMenu || showAspectRatioMenu) {
+    if (showAvatarMenu || showProjectMenu || showAddNodeMenu || showHistoryPanel || showGenerationModeMenu || showSkillsMenu || showAspectRatioMenu) {
       document.addEventListener('click', handleClickOutside);
       return () => document.removeEventListener('click', handleClickOutside);
     }
-  }, [showAvatarMenu, showProjectMenu, showHistoryPanel, showGenerationModeMenu, showSkillsMenu, showAspectRatioMenu, editingSessionId]);
+  }, [showAvatarMenu, showProjectMenu, showAddNodeMenu, showHistoryPanel, showGenerationModeMenu, showSkillsMenu, showAspectRatioMenu, editingSessionId]);
 
   useEffect(() => {
     const handleSelectionChange = () => {
@@ -5059,21 +5341,68 @@ export default function AIWorkspace() {
 
       {/* Floating Toolbar - Left Side */}
       <div className="absolute left-4 top-1/2 z-[120] -translate-y-1/2">
-        <div className="flex flex-col gap-1 rounded-[24px] border border-white/10 bg-[rgba(16,18,22,0.86)] p-2 shadow-[0_24px_60px_rgba(0,0,0,0.38)] backdrop-blur-xl">
-          {tools.map((t) => (
+        <div className="relative" ref={addNodeMenuRef}>
+          {showAddNodeMenu && (
+            <div className="pointer-events-none absolute left-full top-0 z-[130] ml-4">
+              <div
+                className="pointer-events-auto w-[320px] overflow-hidden rounded-[26px] border border-white/[0.1] bg-[rgba(26,26,28,0.985)] shadow-[0_26px_72px_rgba(0,0,0,0.5)] backdrop-blur-xl"
+                onPointerDown={(e) => {
+                  e.stopPropagation();
+                }}
+              >
+                <div className="p-3.5">
+                  <div className="mb-2.5 px-1 text-xs font-medium tracking-[-0.01em] text-zinc-500/80">
+                    添加节点
+                  </div>
+                  <div className="space-y-1.5">
+                    {ADD_NODE_MENU_OPTIONS.map((option) => {
+                      return (
+                        <CanvasActionMenuItem
+                          key={option.id}
+                          title={option.title}
+                          description={option.description}
+                          Icon={option.icon}
+                          disabled={option.disabled}
+                          onClick={() => handleAddNodeMenuAction(option.id)}
+                        />
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+          <div className="flex w-[72px] flex-col items-center rounded-[36px] border border-white/10 bg-[rgba(16,18,22,0.9)] px-2 py-3 shadow-[0_24px_60px_rgba(0,0,0,0.38)] backdrop-blur-xl">
             <button
-              key={t.id}
-              onClick={() => handleToolClick(t.id)}
-              className={`flex h-12 w-12 items-center justify-center rounded-xl transition-all ${
-                tool === t.id 
-                  ? 'bg-[rgba(255,255,255,0.12)] text-zinc-50 shadow-[inset_0_0_0_1px_rgba(255,255,255,0.08)]' 
-                  : 'text-zinc-500 hover:bg-white/8 hover:text-zinc-200'
-              }`}
-              title={t.label}
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation();
+                clearPendingConnectionMenu();
+                setShowAddNodeMenu((prev) => !prev);
+              }}
+              className="mb-4 inline-flex h-12 w-12 items-center justify-center rounded-full border border-black/10 bg-[#f8fafc] text-black shadow-[0_10px_24px_rgba(0,0,0,0.24),inset_0_1px_0_rgba(255,255,255,0.7)] transition-colors hover:bg-white"
+              aria-label="添加节点"
+              title="添加节点"
             >
-              <t.icon size={20} />
+              <Plus size={24} strokeWidth={2.5} />
             </button>
-          ))}
+            <div className="flex w-full flex-col items-center gap-3">
+              {LEFT_RAIL_ITEMS.map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                  }}
+                  className="flex w-full flex-col items-center gap-0.5 rounded-[18px] px-1 py-1.5 text-zinc-500 transition-colors hover:bg-white/[0.04] hover:text-zinc-300"
+                  title={item.label}
+                >
+                  <item.icon size={19} strokeWidth={2.1} />
+                  <span className="text-[10px] font-medium tracking-[-0.03em] leading-none">{item.label}</span>
+                </button>
+              ))}
+            </div>
+          </div>
         </div>
       </div>
 
@@ -5229,6 +5558,12 @@ export default function AIWorkspace() {
           e.stopPropagation();
           clearPendingConnectionMenu();
         }}
+        selectedTextCardPanelItem={selectedTextCardPanelItem}
+        selectedTextCardPanelInput={selectedTextCardPanelInput}
+        isGenerating={isGenerating}
+        onSelectedTextCardPanelInputChange={handleSelectedTextCardPanelInputChange}
+        onSelectedTextCardPanelSubmit={handleSelectedTextCardPanelSubmit}
+        onSelectedTextCardPanelCancel={handleCancelGenerate}
       />
 
       {/* Zoom Controller - Outside Canvas */}
