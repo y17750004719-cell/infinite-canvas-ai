@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useRef, useEffect, useCallback, memo } from 'react';
+import React, { useState, useRef, useEffect, useLayoutEffect, useCallback, memo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { 
@@ -8,8 +8,20 @@ import {
   Share2, History, Settings, Paperclip,
   Send, Sparkles, X, ChevronDown, Trash2, Edit3, ArrowLeft, FolderOpen, Plus, SlidersHorizontal, Copy, Check, Video, Pencil, Package2, Workflow, Clock3
 } from 'lucide-react';
-import { saveSessions, loadSessions, ProjectSession as DBSession } from './lib/db';
+import {
+  createEmptySession,
+  deleteSessionFromList,
+  loadSessions,
+  removeSession,
+  renameSessionInList,
+  upsertSession,
+} from './lib/db';
 import { ASPECT_RATIOS } from './lib/api-client';
+import {
+  buildPersistedSession,
+  normalizeProjectSession,
+  shouldFlushScheduledSessionSave,
+} from './lib/session-persistence.mjs';
 
 const DEBUG_CANVAS_CONNECTIONS = false;
 
@@ -133,10 +145,30 @@ interface ProjectSession {
   createdAt: number;
   updatedAt: number;
   items: CanvasItem[];
+  connections?: Connection[];
   messages: ChatMessage[];
   topics?: ChatTopic[];
   activeTopicId?: string;
   viewport: { x: number; y: number; scale: number };
+}
+
+type SessionMutationType = 'create' | 'delete';
+
+interface PendingSessionActionState {
+  type: SessionMutationType;
+  sessionId?: string;
+}
+
+interface WorkspaceUiSnapshot {
+  sessions: ProjectSession[];
+  currentSessionId: string;
+  viewMode: 'gallery' | 'editor';
+  activeSession: ProjectSession | null;
+}
+
+interface PendingSessionSaveState {
+  sessionId: string;
+  epoch: number;
 }
 
 type Tool = 'select' | 'text' | 'image';
@@ -384,80 +416,104 @@ const CanvasConnectionsLayer = memo(function CanvasConnectionsLayer({
   const scaledSelectedConnectionStrokeWidth = 4.5 * viewport.scale;
   const scaledDebugConnectionStrokeWidth = 3 * viewport.scale;
   const showConnectionTestLine = DEBUG_CANVAS_CONNECTIONS && !previewFrom;
+  const resolvedConnections = connections
+    .map((connection) => {
+      const fromItem = itemById[connection.fromItemId];
+      const toItem = itemById[connection.toItemId];
+      if (!fromItem || !toItem) return null;
+
+      const connectionFrom = toCanvasScreenPoint(getConnectionAnchorCanvasPoint(fromItem, 'right'));
+      const connectionTo = toCanvasScreenPoint(getConnectionAnchorCanvasPoint(toItem, 'left'));
+
+      return {
+        connection,
+        path: buildConnectionPath(connectionFrom, connectionTo),
+        isSelectedConnection: selectedConnectionIds.includes(connection.id),
+      };
+    })
+    .filter(Boolean) as Array<{
+    connection: Connection;
+    path: string;
+    isSelectedConnection: boolean;
+  }>;
 
   return (
-    <svg
-      className="pointer-events-none absolute inset-0 z-[80] h-full w-full overflow-hidden"
-      width={canvasSize.width}
-      height={canvasSize.height}
-      viewBox={`0 0 ${Math.max(canvasSize.width, 1)} ${Math.max(canvasSize.height, 1)}`}
-      preserveAspectRatio="none"
-    >
-      {connections.map((connection) => {
-        const fromItem = itemById[connection.fromItemId];
-        const toItem = itemById[connection.toItemId];
-        if (!fromItem || !toItem) return null;
-        const connectionFrom = toCanvasScreenPoint(getConnectionAnchorCanvasPoint(fromItem, 'right'));
-        const connectionTo = toCanvasScreenPoint(getConnectionAnchorCanvasPoint(toItem, 'left'));
-        const isSelectedConnection = selectedConnectionIds.includes(connection.id);
-        return (
-          <g key={connection.id}>
-            <path
-              d={buildConnectionPath(connectionFrom, connectionTo)}
-              fill="none"
-              stroke="transparent"
-              strokeWidth="20"
-              strokeLinecap="round"
-              className="pointer-events-auto cursor-pointer"
-              onPointerDown={(e) => onConnectionPointerDown(e, connection.id)}
-            />
-            <path
-              d={buildConnectionPath(connectionFrom, connectionTo)}
-              fill="none"
-              stroke={DARK_THEME.canvasLine}
-              strokeOpacity={isSelectedConnection ? 0.98 : 0.9}
-              strokeWidth={isSelectedConnection ? scaledSelectedConnectionStrokeWidth : scaledConnectionStrokeWidth}
-              strokeLinecap="round"
-              pointerEvents="none"
-            />
-          </g>
-        );
-      })}
-      {showConnectionTestLine && (
-        <line
-          x1={40}
-          y1={40}
-          x2={220}
-          y2={120}
-          stroke="#2563eb"
-          strokeWidth={scaledDebugConnectionStrokeWidth}
-          strokeOpacity={1}
-          strokeLinecap="round"
-        />
-      )}
-      {previewFrom && previewTo && (
-        <path
-          d={buildConnectionPath(previewFrom, previewTo)}
-          fill="none"
-          stroke={DARK_THEME.canvasLine}
-          strokeOpacity="0.9"
-          strokeWidth={scaledConnectionStrokeWidth}
-          strokeLinecap="round"
-          pointerEvents="none"
-        />
-      )}
-      {frozenPreviewConnection && (
-        <path
-          d={buildConnectionPath(frozenPreviewConnection.from, frozenPreviewConnection.to)}
-          fill="none"
-          stroke={DARK_THEME.canvasLine}
-          strokeOpacity="0.5"
-          strokeWidth={scaledConnectionStrokeWidth}
-          strokeLinecap="round"
-          pointerEvents="none"
-        />
-      )}
-    </svg>
+    <>
+      <svg
+        className="pointer-events-none absolute inset-0 z-[1] h-full w-full overflow-hidden"
+        width={canvasSize.width}
+        height={canvasSize.height}
+        viewBox={`0 0 ${Math.max(canvasSize.width, 1)} ${Math.max(canvasSize.height, 1)}`}
+        preserveAspectRatio="none"
+      >
+        {resolvedConnections.map(({ connection, path, isSelectedConnection }) => (
+          <path
+            key={`visual-${connection.id}`}
+            d={path}
+            fill="none"
+            stroke={DARK_THEME.canvasLine}
+            strokeOpacity={isSelectedConnection ? 0.98 : 0.9}
+            strokeWidth={isSelectedConnection ? scaledSelectedConnectionStrokeWidth : scaledConnectionStrokeWidth}
+            strokeLinecap="round"
+            pointerEvents="none"
+          />
+        ))}
+        {showConnectionTestLine && (
+          <line
+            x1={40}
+            y1={40}
+            x2={220}
+            y2={120}
+            stroke="#2563eb"
+            strokeWidth={scaledDebugConnectionStrokeWidth}
+            strokeOpacity={1}
+            strokeLinecap="round"
+          />
+        )}
+        {previewFrom && previewTo && (
+          <path
+            d={buildConnectionPath(previewFrom, previewTo)}
+            fill="none"
+            stroke={DARK_THEME.canvasLine}
+            strokeOpacity="0.9"
+            strokeWidth={scaledConnectionStrokeWidth}
+            strokeLinecap="round"
+            pointerEvents="none"
+          />
+        )}
+        {frozenPreviewConnection && (
+          <path
+            d={buildConnectionPath(frozenPreviewConnection.from, frozenPreviewConnection.to)}
+            fill="none"
+            stroke={DARK_THEME.canvasLine}
+            strokeOpacity="0.5"
+            strokeWidth={scaledConnectionStrokeWidth}
+            strokeLinecap="round"
+            pointerEvents="none"
+          />
+        )}
+      </svg>
+      <svg
+        className="pointer-events-none absolute inset-0 z-[1] h-full w-full overflow-hidden"
+        width={canvasSize.width}
+        height={canvasSize.height}
+        viewBox={`0 0 ${Math.max(canvasSize.width, 1)} ${Math.max(canvasSize.height, 1)}`}
+        preserveAspectRatio="none"
+      >
+        {resolvedConnections.map(({ connection, path }) => (
+          <path
+            key={`hit-${connection.id}`}
+            d={path}
+            fill="none"
+            stroke="transparent"
+            strokeWidth="20"
+            strokeLinecap="round"
+            className="pointer-events-auto cursor-pointer"
+            onPointerDown={(e) => onConnectionPointerDown(e, connection.id)}
+          />
+        ))}
+      </svg>
+    </>
   );
 });
 
@@ -932,7 +988,7 @@ const CanvasViewport = memo(function CanvasViewport({
   onItemPointerDown: (e: React.PointerEvent<HTMLDivElement>, itemId: string) => void;
   onCornerResizePointerDown: (e: React.PointerEvent<HTMLButtonElement>, item: CanvasItem) => void;
   onPendingMenuPointerDown: (e: React.PointerEvent<HTMLDivElement>) => void;
-  onPendingMenuAction: (e: React.MouseEvent<HTMLButtonElement>) => void;
+  onPendingMenuAction: (optionId: (typeof CONNECTION_MENU_OPTIONS)[number]['id']) => void;
   selectedTextCardPanelItem: CanvasItem | null;
   selectedTextCardPanelInput: string;
   isGenerating: boolean;
@@ -1092,7 +1148,7 @@ const CanvasViewport = memo(function CanvasViewport({
                       title={option.title}
                       description={option.description}
                       Icon={option.icon}
-                      onClick={onPendingMenuAction}
+                      onClick={() => onPendingMenuAction(option.id)}
                     />
                   );
                 })}
@@ -1219,15 +1275,16 @@ const CanvasViewport = memo(function CanvasViewport({
 interface GalleryViewProps {
   sessions: ProjectSession[];
   onEnterEditor: (sessionId: string) => void;
-  onCreateNew: () => void;
+  onCreateNew: () => void | Promise<void>;
   onBack: () => void;
-  onDeleteSession: (id: string, e: React.MouseEvent) => void;
+  onDeleteSession: (id: string, e: React.MouseEvent) => void | Promise<void>;
   editingSessionId: string | null;
   editingName: string;
   onStartEdit: (sessionId: string, name: string, e: React.MouseEvent) => void;
   onEditNameChange: (value: string) => void;
-  onEditNameSubmit: (sessionId: string, name: string) => void;
+  onEditNameSubmit: (sessionId: string, name: string) => void | Promise<void>;
   onCancelEdit: () => void;
+  pendingSessionAction: PendingSessionActionState | null;
 }
 
 function GalleryView({
@@ -1242,7 +1299,11 @@ function GalleryView({
   onEditNameChange,
   onEditNameSubmit,
   onCancelEdit,
+  pendingSessionAction,
 }: GalleryViewProps) {
+  const isSessionMutationPending = pendingSessionAction !== null;
+  const isCreatingSession = pendingSessionAction?.type === 'create';
+
   const getItemPreview = (item: CanvasItem) => {
     if (item.type === 'image' && item.src) {
       return (
@@ -1300,10 +1361,11 @@ function GalleryView({
         <p className="text-sm text-zinc-500 mb-6">创建一个新画布开始你的创作之旅</p>
         <button
           onClick={onCreateNew}
+          disabled={isSessionMutationPending}
           className="flex items-center gap-2 px-4 py-2 rounded-xl border border-white/10 bg-white text-black hover:bg-zinc-200 transition-colors shadow-[0_10px_30px_rgba(255,255,255,0.08)]"
         >
           <Plus size={18} />
-          <span>创建第一个画布</span>
+          <span>{isCreatingSession ? '创建中...' : '创建第一个画布'}</span>
         </button>
       </div>
     );
@@ -1334,7 +1396,7 @@ function GalleryView({
                 key={session.id}
                 className="break-inside-avoid group overflow-hidden rounded-[24px] border border-white/10 bg-[rgba(16,18,22,0.92)] shadow-[0_18px_50px_rgba(0,0,0,0.3)] transition-all cursor-pointer hover:border-white/15 hover:bg-[rgba(22,25,31,0.96)] hover:shadow-[0_28px_70px_rgba(0,0,0,0.38)]"
                 onClick={() => {
-                  if (editingSessionId === session.id) return;
+                  if (editingSessionId === session.id || isSessionMutationPending) return;
                   onEnterEditor(session.id);
                 }}
               >
@@ -1351,6 +1413,7 @@ function GalleryView({
                   {/* Delete Button */}
                   <button
                     onClick={(e) => onDeleteSession(session.id, e)}
+                    disabled={isSessionMutationPending}
                     className="absolute top-2 right-2 z-20 rounded-full border border-white/10 bg-[rgba(18,20,24,0.95)] p-1.5 text-zinc-400 opacity-0 shadow-[0_10px_30px_rgba(0,0,0,0.35)] transition-all group-hover:opacity-100 hover:bg-[rgba(28,31,38,0.98)] hover:text-red-400"
                     title="删除画布"
                   >
@@ -1362,6 +1425,7 @@ function GalleryView({
                     <input
                       autoFocus
                       value={editingName}
+                      disabled={isSessionMutationPending}
                       onChange={(e) => onEditNameChange(e.target.value)}
                       onBlur={() => onEditNameSubmit(session.id, editingName)}
                       onKeyDown={(e) => {
@@ -1386,6 +1450,7 @@ function GalleryView({
                       <h3 className="font-medium text-zinc-100 truncate">{session.name}</h3>
                       <button
                         onClick={(e) => onStartEdit(session.id, session.name, e)}
+                        disabled={isSessionMutationPending}
                         className="p-1.5 rounded-lg hover:bg-white/10 transition-colors opacity-0 group-hover:opacity-100"
                         title="重命名"
                       >
@@ -1402,6 +1467,16 @@ function GalleryView({
             );
           })}
         </div>
+      </div>
+    </div>
+  );
+}
+
+function SessionActionErrorBanner({ message }: { message: string }) {
+  return (
+    <div className="pointer-events-none fixed inset-x-0 top-4 z-[220] flex justify-center px-4">
+      <div className="rounded-2xl border border-red-500/20 bg-[rgba(62,18,23,0.94)] px-4 py-2 text-sm text-red-100 shadow-[0_20px_50px_rgba(0,0,0,0.35)] backdrop-blur-xl">
+        {message}
       </div>
     </div>
   );
@@ -1820,6 +1895,8 @@ export default function AIWorkspace() {
   const [showAddNodeMenu, setShowAddNodeMenu] = useState(false);
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [editingName, setEditingName] = useState('');
+  const [pendingSessionAction, setPendingSessionAction] = useState<PendingSessionActionState | null>(null);
+  const [sessionActionError, setSessionActionError] = useState<string | null>(null);
   
   const [activeSkillJobId, setActiveSkillJobId] = useState<string | null>(null);
   const [activeSkillJobType, setActiveSkillJobType] = useState<'logo' | 'brand' | null>(null);
@@ -1847,6 +1924,14 @@ export default function AIWorkspace() {
   const streamTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const streamMessageIdRef = useRef<string | null>(null);
   const pendingAssistantMessageIdRef = useRef<string | null>(null);
+  const skipNextSessionAutoSaveRef = useRef(false);
+  const sessionsRef = useRef<ProjectSession[]>([]);
+  const currentSessionIdRef = useRef('');
+  const pendingSessionActionRef = useRef<PendingSessionActionState | null>(null);
+  const pendingSessionSaveRef = useRef<PendingSessionSaveState | null>(null);
+  const pendingSessionSaveFrameRef = useRef<number | null>(null);
+  const sessionPersistenceEpochRef = useRef(0);
+  const sessionPersistenceQueueRef = useRef<Promise<void>>(Promise.resolve());
   const assistantTextSelectionRef = useRef<AssistantTextSelectionSession>({
     startedInAssistant: false,
     isPointerDown: false,
@@ -1903,6 +1988,30 @@ export default function AIWorkspace() {
   useEffect(() => {
     selectedIdRef.current = selectedId;
   }, [selectedId]);
+
+  useLayoutEffect(() => {
+    sessionsRef.current = sessions;
+  }, [sessions]);
+
+  useLayoutEffect(() => {
+    currentSessionIdRef.current = currentSessionId;
+  }, [currentSessionId]);
+
+  useLayoutEffect(() => {
+    pendingSessionActionRef.current = pendingSessionAction;
+  }, [pendingSessionAction]);
+
+  useEffect(() => {
+    if (!sessionActionError) return;
+
+    const timeoutId = window.setTimeout(() => {
+      setSessionActionError(null);
+    }, 3200);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [sessionActionError]);
 
   useEffect(() => {
     if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
@@ -2272,6 +2381,39 @@ export default function AIWorkspace() {
     });
   };
 
+  const getViewportCenterCanvasPoint = useCallback(
+    (overrideViewport?: { x: number; y: number; scale: number }) => {
+      const activeViewport = overrideViewport ?? viewport;
+      const canvasRect = canvasRef.current?.getBoundingClientRect();
+      const canvasWidth = canvasRect?.width ?? 0;
+      const canvasHeight = canvasRect?.height ?? 0;
+
+      return {
+        x: (canvasWidth / 2 - activeViewport.x) / activeViewport.scale,
+        y: (canvasHeight / 2 - activeViewport.y) / activeViewport.scale,
+      };
+    },
+    [viewport]
+  );
+
+  const getSpawnPosition = useCallback(
+    (
+      size: { width: number; height: number },
+      orderOffset = 0,
+      overrideViewport?: { x: number; y: number; scale: number }
+    ) => {
+      const center = getViewportCenterCanvasPoint(overrideViewport);
+      const horizontalSpacing = Math.max(size.width + 32, 160);
+      const centeredOffsetX = orderOffset * horizontalSpacing;
+
+      return {
+        x: center.x - size.width / 2 + centeredOffsetX,
+        y: center.y - size.height / 2,
+      };
+    },
+    [getViewportCenterCanvasPoint]
+  );
+
   const addImageToCanvas = async (imageData: string, fileName: string, orderOffset: number = 0) => {
     const response = await fetch('/api/upload', {
       method: 'POST',
@@ -2292,13 +2434,20 @@ export default function AIWorkspace() {
     await new Promise<void>((resolve, reject) => {
       const img = new Image();
       img.onload = () => {
+        const spawnPosition = getSpawnPosition(
+          {
+            width: getConstrainedImageDisplaySize(img.width, img.height).width,
+            height: getConstrainedImageDisplaySize(img.width, img.height).height,
+          },
+          orderOffset
+        );
         const newItem = createImageCanvasItem({
           id: `item-${Date.now()}-${Math.random()}`,
           src: imageUrl,
           naturalWidth: img.width,
           naturalHeight: img.height,
-          x: (-viewport.x / viewport.scale) + 100 + orderOffset * 24,
-          y: (-viewport.y / viewport.scale) + 100 + orderOffset * 24,
+          x: spawnPosition.x,
+          y: spawnPosition.y,
         });
         setItems(prev => [...prev, newItem]);
         resolve();
@@ -2511,8 +2660,7 @@ export default function AIWorkspace() {
     const newItem: CanvasItem = {
       id: `shape-${Date.now()}`,
       type: 'shape',
-      x: (-viewport.x / viewport.scale) + 100,
-      y: (-viewport.y / viewport.scale) + 100,
+      ...getSpawnPosition({ width: 100, height: 100 }),
       width: 100,
       height: 100,
       rotation: 0,
@@ -2527,8 +2675,10 @@ export default function AIWorkspace() {
     const newItem: CanvasItem = {
       id: `text-${Date.now()}`,
       type: 'text',
-      x: (-viewport.x / viewport.scale) + 100,
-      y: (-viewport.y / viewport.scale) + 100,
+      ...getSpawnPosition({
+        width: TEXT_CARD_DIMENSIONS.width,
+        height: TEXT_CARD_DIMENSIONS.height,
+      }),
       width: TEXT_CARD_DIMENSIONS.width,
       height: TEXT_CARD_DIMENSIONS.height,
       rotation: 0,
@@ -2538,6 +2688,28 @@ export default function AIWorkspace() {
     };
     setItems(prev => [...prev, newItem]);
   };
+
+  const createTextItemAtCanvasPoint = useCallback((canvasPoint: { x: number; y: number }) => {
+    const newItem: CanvasItem = {
+      id: `text-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      type: 'text',
+      x: canvasPoint.x - TEXT_CARD_DIMENSIONS.width / 2,
+      y: canvasPoint.y - TEXT_CARD_DIMENSIONS.height / 2,
+      width: TEXT_CARD_DIMENSIONS.width,
+      height: TEXT_CARD_DIMENSIONS.height,
+      rotation: 0,
+      textVariant: 'card',
+      visible: true,
+      locked: false,
+    };
+
+    setItems((prev) => [...prev, newItem]);
+    setSelectedConnectionIds([]);
+    setSelectedId(newItem.id);
+    setSelectedIds([newItem.id]);
+
+    return newItem;
+  }, []);
 
   const getPortCanvasPoint = (item: CanvasItem, side: 'left' | 'right') => ({
     x:
@@ -3450,10 +3622,8 @@ export default function AIWorkspace() {
       interactionFrameRef.current = null;
     }
 
-    if (currentSessionId) {
-      requestAnimationFrame(() => {
-        saveCurrentSession();
-      });
+    if (currentSessionIdRef.current) {
+      scheduleCurrentSessionSave();
     }
   };
 
@@ -4162,13 +4332,21 @@ export default function AIWorkspace() {
           const img = new Image();
           img.crossOrigin = 'anonymous';
           img.onload = () => {
+            const spawnPosition = getSpawnPosition(
+              {
+                width: getConstrainedImageDisplaySize(img.width, img.height).width,
+                height: getConstrainedImageDisplaySize(img.width, img.height).height,
+              },
+              0,
+              currentViewport
+            );
             const newItem = createImageCanvasItem({
               id: `generated-${Date.now()}-brand-logo`,
               src: logoUrl,
               naturalWidth: img.width,
               naturalHeight: img.height,
-              x: (-currentViewport.x / currentViewport.scale) + 120,
-              y: (-currentViewport.y / currentViewport.scale) + 120,
+              x: spawnPosition.x,
+              y: spawnPosition.y,
             });
             setItems(prev => [...prev, newItem]);
           };
@@ -4422,13 +4600,21 @@ export default function AIWorkspace() {
           const img = new Image();
           img.crossOrigin = 'anonymous';
           img.onload = () => {
+            const spawnPosition = getSpawnPosition(
+              {
+                width: getConstrainedImageDisplaySize(img.width, img.height).width,
+                height: getConstrainedImageDisplaySize(img.width, img.height).height,
+              },
+              0,
+              currentViewport
+            );
             const newItem = createImageCanvasItem({
               id: `generated-${Date.now()}`,
               src: imageUrl,
               naturalWidth: img.width,
               naturalHeight: img.height,
-              x: (-currentViewport.x / currentViewport.scale) + 100,
-              y: (-currentViewport.y / currentViewport.scale) + 100,
+              x: spawnPosition.x,
+              y: spawnPosition.y,
             });
             setItems(prev => [...prev, newItem]);
             
@@ -4692,59 +4878,132 @@ export default function AIWorkspace() {
     }
   };
 
-  const saveCurrentSession = () => {
-    if (!currentSessionId) return;
-    setSessions(prev => prev.map(s => {
-      if (s.id === currentSessionId) {
-        // 更新当前活跃的 Topic
-        let topics = s.topics || [];
-        const activeId = s.activeTopicId;
-        
-        if (activeId) {
-          topics = topics.map(t => {
-            if (t.id === activeId) {
-              // 自动命名：如果是新对话且有了第一条消息
-              let title = t.title;
-              if ((title === '新对话' || !title) && chatMessages.length > 0) {
-                title = chatMessages[0].content.substring(0, 20) || '对话项目';
-              }
-              return {
-                ...t,
-                title,
-                messages: chatMessages,
-                activeSkill: activeSkill || null,
-                updatedAt: Date.now()
-              };
-            }
-            return t;
-          });
+  const buildCurrentSessionSnapshot = useCallback((session: ProjectSession) => {
+    let topics = session.topics || [];
+    const activeId = session.activeTopicId;
+
+    if (activeId) {
+      topics = topics.map((topic) => {
+        if (topic.id !== activeId) return topic;
+
+        let title = topic.title;
+        if ((title === '新对话' || !title) && chatMessages.length > 0) {
+          title = chatMessages[0].content.substring(0, 20) || '对话项目';
         }
 
         return {
-          ...s,
+          ...topic,
+          title,
+          messages: chatMessages,
+          activeSkill: activeSkill || null,
           updatedAt: Date.now(),
-          items,
-          messages: chatMessages, // 兼容旧版
-          topics,
-          activeTopicId: activeId,
-          viewport,
         };
-      }
-      return s;
-    }));
-  };
+      });
+    }
+
+    return buildPersistedSession(session, {
+      updatedAt: Date.now(),
+      items,
+      connections,
+      messages: chatMessages,
+      topics,
+      activeTopicId: activeId,
+      viewport,
+    });
+  }, [activeSkill, chatMessages, connections, items, viewport]);
+
+  const enqueueSessionPersistenceTask = useCallback((task: () => Promise<void>) => {
+    const runTask = sessionPersistenceQueueRef.current.catch(() => {}).then(task);
+    sessionPersistenceQueueRef.current = runTask.catch(() => {});
+    return runTask;
+  }, []);
+
+  const cancelPendingSessionSave = useCallback(() => {
+    if (pendingSessionSaveFrameRef.current !== null) {
+      cancelAnimationFrame(pendingSessionSaveFrameRef.current);
+      pendingSessionSaveFrameRef.current = null;
+    }
+    pendingSessionSaveRef.current = null;
+  }, []);
+
+  const interruptSessionPersistence = useCallback(() => {
+    cancelPendingSessionSave();
+    sessionPersistenceEpochRef.current += 1;
+  }, [cancelPendingSessionSave]);
+
+  const flushCurrentSessionSave = useCallback(() => {
+    if (pendingSessionSaveFrameRef.current !== null) {
+      cancelAnimationFrame(pendingSessionSaveFrameRef.current);
+      pendingSessionSaveFrameRef.current = null;
+    }
+
+    const pendingSave = pendingSessionSaveRef.current;
+    pendingSessionSaveRef.current = null;
+    if (!pendingSave) return;
+
+    const latestSessions = sessionsRef.current;
+    const latestCurrentSessionId = currentSessionIdRef.current;
+    const currentEpoch = sessionPersistenceEpochRef.current;
+    const hasPendingMutation = pendingSessionActionRef.current !== null;
+
+    if (
+      !shouldFlushScheduledSessionSave({
+        scheduledSessionId: pendingSave.sessionId,
+        scheduledEpoch: pendingSave.epoch,
+        currentSessionId: latestCurrentSessionId,
+        currentEpoch,
+        sessions: latestSessions,
+        hasPendingMutation,
+      })
+    ) {
+      return;
+    }
+
+    const currentSession = latestSessions.find((session) => session.id === pendingSave.sessionId);
+    if (!currentSession) return;
+
+    const updatedSession = buildCurrentSessionSnapshot(currentSession);
+
+    setSessions((prev) =>
+      prev.map((session) => (session.id === pendingSave.sessionId ? updatedSession : session))
+    );
+
+    void enqueueSessionPersistenceTask(async () => {
+      await upsertSession(updatedSession);
+    }).catch((error) => {
+      console.error('Failed to save current session:', error);
+    });
+  }, [buildCurrentSessionSnapshot, enqueueSessionPersistenceTask]);
+
+  const scheduleCurrentSessionSave = useCallback(() => {
+    if (pendingSessionActionRef.current) return;
+
+    const sessionId = currentSessionIdRef.current;
+    if (!sessionId) return;
+
+    pendingSessionSaveRef.current = {
+      sessionId,
+      epoch: sessionPersistenceEpochRef.current,
+    };
+
+    if (pendingSessionSaveFrameRef.current !== null) {
+      cancelAnimationFrame(pendingSessionSaveFrameRef.current);
+    }
+
+    pendingSessionSaveFrameRef.current = requestAnimationFrame(() => {
+      pendingSessionSaveFrameRef.current = null;
+      flushCurrentSessionSave();
+    });
+  }, [flushCurrentSessionSave]);
 
   const isHighFrequencyInteractionActive =
     isDragging || isCornerResizing || isPanning || isMarqueeSelecting;
 
-  const loadSession = (sessionId: string) => {
-    const session = sessions.find(s => s.id === sessionId);
-    if (!session) return;
-    
+  const applySessionState = (session: ProjectSession) => {
     // 数据迁移逻辑：如果 session 有旧消息但没有 topics，创建一个新的 topic
     let finalTopics = session.topics || [];
     let finalActiveId = session.activeTopicId || '';
-    
+
     if (finalTopics.length === 0 && session.messages && session.messages.length > 0) {
       const initialTopic: ChatTopic = {
         id: `topic-initial-${Date.now()}`,
@@ -4757,7 +5016,6 @@ export default function AIWorkspace() {
       finalTopics = [initialTopic];
       finalActiveId = initialTopic.id;
     } else if (finalTopics.length === 0) {
-      // 没有任何消息的空画布
       const emptyTopic: ChatTopic = {
         id: `topic-empty-${Date.now()}`,
         title: '新对话',
@@ -4769,88 +5027,191 @@ export default function AIWorkspace() {
       finalTopics = [emptyTopic];
       finalActiveId = emptyTopic.id;
     }
-    
-    setItems(normalizeCanvasItems(session.items || []));
-    // 加载当前活跃对话的消息
+
+    const normalizedSession = normalizeProjectSession(session);
     const activeTopic = finalTopics.find(t => t.id === finalActiveId) || finalTopics[0];
+
+    setItems(normalizeCanvasItems(normalizedSession.items || []));
+    setConnections(normalizedSession.connections || []);
     setChatMessages(activeTopic ? activeTopic.messages : []);
     setActiveSkill(inferTopicSkill(activeTopic || null));
     if (!activeTopic || activeTopic.messages.length === 0) {
       setHideWelcomeByCenterSkillPick(false);
     }
-    
+
     setViewport(session.viewport || { x: 0, y: 0, scale: 1 });
-    setCurrentSessionId(sessionId);
+    setCurrentSessionId(session.id);
     setImageCount(activeTopic ? activeTopic.messages.filter(m => m.imageName).length : 0);
     setShowProjectMenu(false);
     setShowHistoryPanel(false);
   };
 
-  const createNewProject = () => {
-    const newTopic: ChatTopic = {
-      id: `topic-${Date.now()}`,
-      title: '新对话',
-      messages: [],
-      activeSkill: null,
-      createdAt: Date.now(),
-      updatedAt: Date.now()
-    };
-    
-    const newSession: ProjectSession = {
-      id: `session-${Date.now()}`,
-      name: `新画布 ${sessions.length + 1}`,
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-      items: [],
-      messages: [],
-      topics: [newTopic],
-      activeTopicId: newTopic.id,
-      viewport: { x: 0, y: 0, scale: 1 },
-    };
-    
-    setSessions(prev => [newSession, ...prev]);
-    setCurrentSessionId(newSession.id);
-    setItems([]);
-    setChatMessages([]);
-    setActiveSkill(null);
-    setHideWelcomeByCenterSkillPick(false);
-    setViewport({ x: 0, y: 0, scale: 1 });
-    setImageCount(0);
-    setShowProjectMenu(false);
-    setShowHistoryPanel(false);
+  const applyLoadedSessionState = (
+    session: ProjectSession,
+    options: { interruptPersistence?: boolean } = {}
+  ) => {
+    if (options.interruptPersistence !== false) {
+      interruptSessionPersistence();
+    }
+    skipNextSessionAutoSaveRef.current = true;
+    applySessionState(session);
   };
 
-  const renameSession = (sessionId: string, newName: string) => {
+  const captureWorkspaceUiSnapshot = (): WorkspaceUiSnapshot => {
+    const currentSession = sessions.find((session) => session.id === currentSessionId) || null;
+
+    if (!currentSession) {
+      return {
+        sessions,
+        currentSessionId,
+        viewMode,
+        activeSession: null,
+      };
+    }
+
+    const currentSessionSnapshot = buildCurrentSessionSnapshot(currentSession);
+
+    return {
+      sessions: sessions.map((session) =>
+        session.id === currentSession.id ? currentSessionSnapshot : session
+      ),
+      currentSessionId,
+      viewMode,
+      activeSession: currentSessionSnapshot,
+    };
+  };
+
+  const restoreWorkspaceUiSnapshot = (snapshot: WorkspaceUiSnapshot) => {
+    interruptSessionPersistence();
+    setSessions(snapshot.sessions);
+    setViewMode(snapshot.viewMode);
+
+    if (snapshot.activeSession) {
+      applyLoadedSessionState(snapshot.activeSession, { interruptPersistence: false });
+    } else {
+      setCurrentSessionId(snapshot.currentSessionId);
+      setShowProjectMenu(false);
+      setShowHistoryPanel(false);
+    }
+
+    syncWorkspaceUrl(
+      snapshot.viewMode === 'editor'
+        ? snapshot.activeSession?.id || snapshot.currentSessionId || null
+        : null
+    );
+  };
+
+  const loadSession = (sessionId: string, sourceSessions: ProjectSession[] = sessions) => {
+    if (pendingSessionAction) return;
+    const session = sourceSessions.find(s => s.id === sessionId);
+    if (!session) return;
+
+    applyLoadedSessionState(session);
+  };
+
+  const syncWorkspaceUrl = (sessionId?: string | null) => {
+    if (typeof window === 'undefined') return;
+    if (sessionId) {
+      window.history.pushState({}, '', `/?workspace=${sessionId}`);
+      return;
+    }
+    window.history.pushState({}, '', '/');
+  };
+
+  const createNewProject = async () => {
+    if (pendingSessionAction) return;
+
+    interruptSessionPersistence();
+    const snapshot = captureWorkspaceUiSnapshot();
+    const now = Date.now();
+    const newSession = createEmptySession({ existingCount: snapshot.sessions.length, now });
+    const nextSessions = [newSession, ...snapshot.sessions];
+
+    setSessionActionError(null);
+    setPendingSessionAction({ type: 'create', sessionId: newSession.id });
+    setSessions(nextSessions);
+    applyLoadedSessionState(newSession);
+    setViewMode('editor');
+    syncWorkspaceUrl(newSession.id);
+
+    try {
+      await enqueueSessionPersistenceTask(async () => {
+        await upsertSession(newSession);
+      });
+    } catch (error) {
+      console.error('Failed to create project:', error);
+      restoreWorkspaceUiSnapshot(snapshot);
+      setSessionActionError('新建画布失败，请重试。');
+    } finally {
+      setPendingSessionAction(null);
+    }
+  };
+
+  const renameSession = async (sessionId: string, newName: string) => {
     const trimmedName = newName.trim();
     if (!trimmedName) {
       setEditingSessionId(null);
       return;
     }
-    setSessions(prev => prev.map(s => 
-      s.id === sessionId ? { ...s, name: trimmedName, updatedAt: Date.now() } : s
-    ));
+
+    const nextSessions = renameSessionInList(sessions, sessionId, trimmedName, Date.now());
+    const updatedSession = nextSessions.find((session) => session.id === sessionId);
+    if (!updatedSession) return;
+
+    try {
+      await enqueueSessionPersistenceTask(async () => {
+        await upsertSession(updatedSession);
+      });
+    } catch (error) {
+      console.error('Failed to rename project:', error);
+      return;
+    }
+
+    setSessions(nextSessions);
     setEditingSessionId(null);
   };
 
-  const deleteSession = (sessionId: string, e: React.MouseEvent) => {
+  const deleteSession = async (sessionId: string, e: React.MouseEvent) => {
     e.stopPropagation();
+    if (pendingSessionAction) return;
     if (!confirm('确定要删除这个画布吗？')) return;
-    
-    const newSessions = sessions.filter(s => s.id !== sessionId);
-    setSessions(newSessions);
-    
-    // 如果有删除数据库的函数可以调用，例如 deleteSessionFromDB
-    // 这里确保数据持久化
-    import('./lib/db').then(db => {
-      db.deleteSessionFromDB(sessionId).catch(console.error);
+
+    interruptSessionPersistence();
+    const snapshot = captureWorkspaceUiSnapshot();
+    const deletionResult = deleteSessionFromList({
+      sessions: snapshot.sessions,
+      sessionId,
+      currentSessionId,
+      now: Date.now(),
     });
-    
-    if (sessionId === currentSessionId) {
-      if (newSessions.length > 0) {
-        loadSession(newSessions[0].id);
-      } else {
-        createNewProject();
-      }
+    const nextSession = deletionResult.sessions.find(
+      (session) => session.id === deletionResult.nextCurrentSessionId
+    ) || null;
+    const shouldPersistFallbackSession =
+      !!nextSession && !snapshot.sessions.some((session) => session.id === nextSession.id);
+
+    setSessionActionError(null);
+    setPendingSessionAction({ type: 'delete', sessionId });
+    setSessions(deletionResult.sessions);
+
+    if (sessionId === currentSessionId && nextSession) {
+      applyLoadedSessionState(nextSession);
+      syncWorkspaceUrl(viewMode === 'editor' ? nextSession.id : null);
+    }
+
+    try {
+      await enqueueSessionPersistenceTask(async () => {
+        await removeSession(sessionId);
+        if (shouldPersistFallbackSession && nextSession) {
+          await upsertSession(nextSession);
+        }
+      });
+    } catch (error) {
+      console.error('Failed to delete project:', error);
+      restoreWorkspaceUiSnapshot(snapshot);
+      setSessionActionError('删除画布失败，请重试。');
+    } finally {
+      setPendingSessionAction(null);
     }
   };
 
@@ -4860,10 +5221,13 @@ export default function AIWorkspace() {
       const savedSessions = await loadSessions();
       
       if (savedSessions && savedSessions.length > 0) {
-        const normalizedSessions = savedSessions.map((session) => ({
-          ...session,
-          items: normalizeCanvasItems(session.items || []),
-        }));
+        const normalizedSessions = savedSessions.map((session) => {
+          const normalizedSession = normalizeProjectSession(session);
+          return {
+            ...normalizedSession,
+            items: normalizeCanvasItems(normalizedSession.items || []),
+          };
+        });
 
         setSessions(normalizedSessions);
         
@@ -4877,65 +5241,41 @@ export default function AIWorkspace() {
         
         setViewMode('editor');
         const targetSession = normalizedSessions.find(s => s.id === workspaceId) || normalizedSessions[0];
-        const targetTopics = targetSession.topics || [];
-        const targetActiveTopic = targetTopics.find((t) => t.id === targetSession.activeTopicId) || targetTopics[0] || null;
-        
-        setCurrentSessionId(targetSession.id);
-        setItems(targetSession.items || []);
-        setChatMessages(targetActiveTopic ? targetActiveTopic.messages : (targetSession.messages || []));
-        setActiveSkill(inferTopicSkill(targetActiveTopic));
-        if (!targetActiveTopic || targetActiveTopic.messages.length === 0) {
-          setHideWelcomeByCenterSkillPick(false);
-        }
-        setViewport(targetSession.viewport || { x: 0, y: 0, scale: 1 });
-        setImageCount((targetActiveTopic ? targetActiveTopic.messages : (targetSession.messages || [])).filter((m: ChatMessage) => m.imageName).length || 0);
+        applyLoadedSessionState(targetSession);
       } else {
-        createNewProject();
+        await createNewProject();
       }
     };
     
     initProject();
   }, []);
 
-  // 自动保存到 IndexedDB
-  useEffect(() => {
-    if (sessions.length > 0 && currentSessionId) {
-      saveSessions(sessions).catch(err => {
-        console.error('Failed to save sessions:', err);
-      });
-    }
-  }, [sessions, currentSessionId]);
-
   // 监听状态变化并保存当前会话
   useEffect(() => {
     if (currentSessionId && !isHighFrequencyInteractionActive) {
-      saveCurrentSession();
+      if (skipNextSessionAutoSaveRef.current) {
+        skipNextSessionAutoSaveRef.current = false;
+        return;
+      }
+      scheduleCurrentSessionSave();
     }
   }, [
     items,
+    connections,
     chatMessages,
     viewport,
     imageCount,
     activeSkill,
     currentSessionId,
     isHighFrequencyInteractionActive,
+    scheduleCurrentSessionSave,
   ]);
 
   const enterEditor = (sessionId: string) => {
+    if (pendingSessionAction) return;
     const session = sessions.find(s => s.id === sessionId);
     if (session) {
-      const targetTopics = session.topics || [];
-      const targetActiveTopic = targetTopics.find((t) => t.id === session.activeTopicId) || targetTopics[0] || null;
-
-      setCurrentSessionId(sessionId);
-      setItems(normalizeCanvasItems(session.items || []));
-      setChatMessages(targetActiveTopic ? targetActiveTopic.messages : (session.messages || []));
-      setActiveSkill(inferTopicSkill(targetActiveTopic));
-      if (!targetActiveTopic || targetActiveTopic.messages.length === 0) {
-        setHideWelcomeByCenterSkillPick(false);
-      }
-      setViewport(session.viewport || { x: 0, y: 0, scale: 1 });
-      setImageCount((targetActiveTopic ? targetActiveTopic.messages : (session.messages || [])).filter((m: ChatMessage) => m.imageName).length || 0);
+      applyLoadedSessionState(session);
       setViewMode('editor');
       window.history.pushState({}, '', `/?workspace=${sessionId}`);
     }
@@ -4965,6 +5305,32 @@ export default function AIWorkspace() {
       fileInputRef.current?.click();
     }
   };
+
+  const handlePendingConnectionMenuAction = useCallback(
+    (optionId: (typeof CONNECTION_MENU_OPTIONS)[number]['id']) => {
+      if (!pendingConnectionMenu) return;
+
+      if (optionId !== 'text') {
+        clearPendingConnectionMenu();
+        return;
+      }
+
+      const spawnPoint = toCanvasPoint(pendingConnectionMenu.position);
+      const newItem = createTextItemAtCanvasPoint(spawnPoint);
+
+      setConnections((prev) => [
+        ...prev,
+        {
+          id: `conn-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+          fromItemId: pendingConnectionMenu.fromItemId,
+          toItemId: newItem.id,
+        },
+      ]);
+
+      clearPendingConnectionMenu();
+    },
+    [pendingConnectionMenu, toCanvasPoint, createTextItemAtCanvasPoint, clearPendingConnectionMenu]
+  );
 
   useEffect(() => {
     return () => {
@@ -5048,7 +5414,7 @@ export default function AIWorkspace() {
   }, [pendingConnectionMenu, clearPendingConnectionMenu]);
 
   useEffect(() => {
-    const handleClickOutside = (e: MouseEvent) => {
+    const handlePointerDownOutside = (e: PointerEvent) => {
       if (editingSessionId) return;
       const now = Date.now();
       const selectionSession = assistantTextSelectionRef.current;
@@ -5079,8 +5445,8 @@ export default function AIWorkspace() {
       setShowHistoryPanel(false);
     };
     if (showAvatarMenu || showProjectMenu || showAddNodeMenu || showHistoryPanel || showGenerationModeMenu || showSkillsMenu || showAspectRatioMenu) {
-      document.addEventListener('click', handleClickOutside);
-      return () => document.removeEventListener('click', handleClickOutside);
+      document.addEventListener('pointerdown', handlePointerDownOutside);
+      return () => document.removeEventListener('pointerdown', handlePointerDownOutside);
     }
   }, [showAvatarMenu, showProjectMenu, showAddNodeMenu, showHistoryPanel, showGenerationModeMenu, showSkillsMenu, showAspectRatioMenu, editingSessionId]);
 
@@ -5244,15 +5610,22 @@ export default function AIWorkspace() {
           const img = new Image();
           img.crossOrigin = 'anonymous';
           img.onload = () => {
-            const offset = processedSkillJobUrlsRef.current.size * 30;
+            const orderOffset = processedSkillJobUrlsRef.current.size - 1;
+            const spawnPosition = getSpawnPosition(
+              {
+                width: getConstrainedImageDisplaySize(img.width, img.height).width,
+                height: getConstrainedImageDisplaySize(img.width, img.height).height,
+              },
+              orderOffset
+            );
 
             const newItem = createImageCanvasItem({
               id: `generated-${Date.now()}-${itemKey}`,
               src: item.localUrl,
               naturalWidth: img.width,
               naturalHeight: img.height,
-              x: (-viewport.x / viewport.scale) + 100 + offset,
-              y: (-viewport.y / viewport.scale) + 100 + offset,
+              x: spawnPosition.x,
+              y: spawnPosition.y,
             });
             setItems(prev => [...prev, newItem]);
           };
@@ -5306,30 +5679,38 @@ export default function AIWorkspace() {
   }, [activeSkillJobId, activeSkillJobType]);
 
   if (viewMode === 'gallery') {
-    return <GalleryView 
-      sessions={sessions} 
-      onEnterEditor={enterEditor} 
-      onCreateNew={() => createNewProject()} 
-      onBack={() => {}} 
-      onDeleteSession={(id, e) => deleteSession(id, e)}
-      editingSessionId={editingSessionId}
-      editingName={editingName}
-      onStartEdit={(sessionId, name, e) => {
-        e.stopPropagation();
-        setEditingSessionId(sessionId);
-        setEditingName(name);
-      }}
-      onEditNameChange={(value) => setEditingName(value)}
-      onEditNameSubmit={(sessionId, name) => renameSession(sessionId, name)}
-      onCancelEdit={() => {
-        setEditingSessionId(null);
-        setEditingName('');
-      }}
-    />;
+    return (
+      <>
+        {sessionActionError && <SessionActionErrorBanner message={sessionActionError} />}
+        <GalleryView 
+          sessions={sessions} 
+          onEnterEditor={enterEditor} 
+          onCreateNew={() => createNewProject()} 
+          onBack={() => {}} 
+          onDeleteSession={(id, e) => deleteSession(id, e)}
+          editingSessionId={editingSessionId}
+          editingName={editingName}
+          onStartEdit={(sessionId, name, e) => {
+            if (pendingSessionAction) return;
+            e.stopPropagation();
+            setEditingSessionId(sessionId);
+            setEditingName(name);
+          }}
+          onEditNameChange={(value) => setEditingName(value)}
+          onEditNameSubmit={(sessionId, name) => renameSession(sessionId, name)}
+          onCancelEdit={() => {
+            setEditingSessionId(null);
+            setEditingName('');
+          }}
+          pendingSessionAction={pendingSessionAction}
+        />
+      </>
+    );
   }
 
   return (
     <div className="relative isolate flex h-screen w-full overflow-hidden bg-[#050608] text-zinc-100">
+      {sessionActionError && <SessionActionErrorBanner message={sessionActionError} />}
       <input
         ref={fileInputRef}
         type="file"
@@ -5443,11 +5824,12 @@ export default function AIWorkspace() {
             <div className="absolute left-0 top-12 z-[130] w-64 overflow-hidden rounded-2xl border border-white/10 bg-[rgba(18,20,24,0.98)] shadow-[0_30px_80px_rgba(0,0,0,0.45)] backdrop-blur-xl">
               <div className="p-2">
                 <button 
+                  disabled={pendingSessionAction !== null}
                   onClick={(e) => { e.stopPropagation(); createNewProject(); }}
-                  className="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-sm text-zinc-200 transition-colors hover:bg-white/8"
+                  className="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-sm text-zinc-200 transition-colors hover:bg-white/8 disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   <span className="text-lg">+</span>
-                  <span>新建画布</span>
+                  <span>{pendingSessionAction?.type === 'create' ? '新建中...' : '新建画布'}</span>
                 </button>
               </div>
               <div className="panel-scrollbar max-h-64 overflow-y-auto border-t border-white/8">
@@ -5463,6 +5845,7 @@ export default function AIWorkspace() {
                       <input
                         autoFocus
                         value={editingName}
+                        disabled={pendingSessionAction !== null}
                         onChange={(e) => setEditingName(e.target.value)}
                         onBlur={() => renameSession(session.id, editingName)}
                         onKeyDown={(e) => { if (e.key === 'Enter') renameSession(session.id, editingName); }}
@@ -5479,15 +5862,17 @@ export default function AIWorkspace() {
                         </div>
                         <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                         <button
+                          disabled={pendingSessionAction !== null}
                           onClick={(e) => { e.stopPropagation(); setEditingSessionId(session.id); setEditingName(session.name); }}
-                          className="rounded-lg p-1.5 transition-colors hover:bg-white/10"
+                          className="rounded-lg p-1.5 transition-colors hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-40"
                           title="重命名"
                         >
                           <Edit3 size={12} className="text-zinc-500" />
                         </button>
                         <button
+                          disabled={pendingSessionAction !== null}
                           onClick={(e) => { e.stopPropagation(); deleteSession(session.id, e); }}
-                          className="p-1.5 hover:bg-red-50 rounded-lg transition-colors"
+                          className="rounded-lg p-1.5 transition-colors hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-40"
                           title="删除"
                         >
                           <Trash2 size={12} className="text-red-500" />
@@ -5554,10 +5939,7 @@ export default function AIWorkspace() {
         onPendingMenuPointerDown={(e) => {
           e.stopPropagation();
         }}
-        onPendingMenuAction={(e) => {
-          e.stopPropagation();
-          clearPendingConnectionMenu();
-        }}
+        onPendingMenuAction={handlePendingConnectionMenuAction}
         selectedTextCardPanelItem={selectedTextCardPanelItem}
         selectedTextCardPanelInput={selectedTextCardPanelInput}
         isGenerating={isGenerating}

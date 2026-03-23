@@ -2,6 +2,13 @@ const DB_NAME = 'zo-design-db';
 const DB_VERSION = 1;
 const STORE_NAME = 'sessions';
 
+export {
+  createEmptySession,
+  deleteSessionFromList,
+  renameSessionInList,
+  upsertSessionInList,
+} from './session-crud.mjs';
+
 let db: IDBDatabase | null = null;
 
 export interface CanvasItem {
@@ -49,6 +56,11 @@ export interface ProjectSession {
   createdAt: number;
   updatedAt: number;
   items: CanvasItem[];
+  connections?: Array<{
+    id: string;
+    fromItemId: string;
+    toItemId: string;
+  }>;
   messages: ChatMessage[]; // 保持兼容性
   topics?: ChatTopic[];    // 新增：对话项目列表
   activeTopicId?: string; // 新增：当前对话 ID
@@ -82,6 +94,14 @@ function openDB(): Promise<IDBDatabase> {
   });
 }
 
+function awaitTransaction(transaction: IDBTransaction): Promise<void> {
+  return new Promise((resolve, reject) => {
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error);
+    transaction.onabort = () => reject(transaction.error);
+  });
+}
+
 export async function saveSessions(sessions: ProjectSession[]): Promise<void> {
   try {
     const database = await openDB();
@@ -94,12 +114,23 @@ export async function saveSessions(sessions: ProjectSession[]): Promise<void> {
       store.put(session);
     }
 
-    return new Promise((resolve, reject) => {
-      transaction.oncomplete = () => resolve();
-      transaction.onerror = () => reject(transaction.error);
-    });
+    await awaitTransaction(transaction);
   } catch (error) {
     console.error('Failed to save sessions:', error);
+    throw error;
+  }
+}
+
+export async function upsertSession(session: ProjectSession): Promise<void> {
+  try {
+    const database = await openDB();
+    const transaction = database.transaction([STORE_NAME], 'readwrite');
+    const store = transaction.objectStore(STORE_NAME);
+
+    store.put(session);
+    await awaitTransaction(transaction);
+  } catch (error) {
+    console.error('Failed to upsert session:', error);
     throw error;
   }
 }
@@ -126,16 +157,17 @@ export async function loadSessions(): Promise<ProjectSession[]> {
 }
 
 export async function deleteSessionFromDB(sessionId: string): Promise<void> {
+  return removeSession(sessionId);
+}
+
+export async function removeSession(sessionId: string): Promise<void> {
   try {
     const database = await openDB();
     const transaction = database.transaction([STORE_NAME], 'readwrite');
     const store = transaction.objectStore(STORE_NAME);
     store.delete(sessionId);
 
-    return new Promise((resolve, reject) => {
-      transaction.oncomplete = () => resolve();
-      transaction.onerror = () => reject(transaction.error);
-    });
+    await awaitTransaction(transaction);
   } catch (error) {
     console.error('Failed to delete session:', error);
     throw error;
@@ -149,10 +181,7 @@ export async function clearAllSessions(): Promise<void> {
     const store = transaction.objectStore(STORE_NAME);
     store.clear();
 
-    return new Promise((resolve, reject) => {
-      transaction.oncomplete = () => resolve();
-      transaction.onerror = () => reject(transaction.error);
-    });
+    await awaitTransaction(transaction);
   } catch (error) {
     console.error('Failed to clear sessions:', error);
     throw error;

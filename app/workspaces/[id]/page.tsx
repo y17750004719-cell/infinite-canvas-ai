@@ -3,7 +3,12 @@
 import React, { useState, useEffect } from 'react';
 import { useRouter, useParams } from 'next/navigation';
 import { ArrowLeft, Edit3, Trash2, Sparkles, Image, Type, Square, FolderOpen, ArrowRight } from 'lucide-react';
-import { loadSessions, deleteSessionFromDB, ProjectSession, CanvasItem } from '../../lib/db';
+import {
+  ProjectSession,
+  CanvasItem,
+  removeSession,
+  loadSessions,
+} from '../../lib/db';
 
 export default function WorkspaceDetailPage() {
   const router = useRouter();
@@ -28,8 +33,14 @@ export default function WorkspaceDetailPage() {
     if (!session || !confirm('确定要删除这个画布吗？此操作不可恢复。')) return;
     
     setDeleting(true);
-    await deleteSessionFromDB(session.id);
-    router.push('/workspaces');
+
+    try {
+      await removeSession(session.id);
+      router.push('/workspaces');
+    } catch (error) {
+      console.error('Failed to delete workspace:', error);
+      setDeleting(false);
+    }
   };
 
   const handleEdit = () => {

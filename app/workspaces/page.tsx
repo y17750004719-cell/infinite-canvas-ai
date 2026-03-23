@@ -3,7 +3,14 @@
 import React, { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
 import { Plus, Trash2, Edit3, ArrowLeft, Sparkles, FolderOpen } from 'lucide-react';
-import { loadSessions, deleteSessionFromDB, ProjectSession } from '../lib/db';
+import {
+  createEmptySession,
+  loadSessions,
+  ProjectSession,
+  removeSession,
+  renameSessionInList,
+  upsertSession,
+} from '../lib/db';
 
 export default function WorkspacesPage() {
   const router = useRouter();
@@ -22,9 +29,15 @@ export default function WorkspacesPage() {
   const handleDelete = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
     if (!confirm('确定要删除这个画布吗？')) return;
-    
-    await deleteSessionFromDB(id);
-    setSessions(prev => prev.filter(s => s.id !== id));
+
+    try {
+      await removeSession(id);
+    } catch (error) {
+      console.error('Failed to delete workspace:', error);
+      return;
+    }
+
+    setSessions((prev) => prev.filter((session) => session.id !== id));
   };
 
   const handleRename = (session: ProjectSession, e: React.MouseEvent) => {
@@ -33,30 +46,41 @@ export default function WorkspacesPage() {
     setEditingName(session.name);
   };
 
-  const handleRenameSubmit = () => {
+  const handleRenameSubmit = async () => {
     if (!editingId || !editingName.trim()) {
       setEditingId(null);
       return;
     }
-    
-    setSessions(prev => prev.map(s => 
-      s.id === editingId ? { ...s, name: editingName.trim(), updatedAt: Date.now() } : s
-    ));
+
+    const nextSessions = renameSessionInList(sessions, editingId, editingName.trim(), Date.now());
+    const updatedSession = nextSessions.find((session) => session.id === editingId);
+    if (!updatedSession) return;
+
+    try {
+      await upsertSession(updatedSession);
+    } catch (error) {
+      console.error('Failed to rename workspace:', error);
+      return;
+    }
+
+    setSessions(nextSessions);
     setEditingId(null);
   };
 
-  const handleCreateNew = () => {
-    const newSession: ProjectSession = {
-      id: `session-${Date.now()}`,
-      name: `新画布 ${sessions.length + 1}`,
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-      items: [],
-      messages: [],
-      viewport: { x: 0, y: 0, scale: 1 },
-    };
-    
-    setSessions(prev => [newSession, ...prev]);
+  const handleCreateNew = async () => {
+    const newSession = createEmptySession({
+      existingCount: sessions.length,
+      now: Date.now(),
+    });
+
+    try {
+      await upsertSession(newSession);
+    } catch (error) {
+      console.error('Failed to create workspace:', error);
+      return;
+    }
+
+    setSessions((prev) => [newSession, ...prev]);
     router.push(`/?workspace=${newSession.id}`);
   };
 

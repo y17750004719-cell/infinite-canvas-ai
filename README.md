@@ -163,6 +163,33 @@ Host github.com
 ssh -T git@github.com
 ```
 
+### 5. 本地开发时出现 `Content Security Policy` / `unsafe-eval` 报错
+
+如果你在 `npm run dev` 的本地页面里看到类似下面的报错：
+
+```text
+Content Security Policy of your site blocks the use of 'eval' in JavaScript
+```
+
+先不要急着改项目代码。当前仓库本身没有配置 `Content-Security-Policy`，也没有业务层的 `eval()` / `new Function()` 调用。这类报错在本地开发环境里更常见的原因是：
+
+- 浏览器扩展注入了 CSP
+- 本机代理 / VPN / 抓包工具修改了 `localhost` 响应头
+- 企业安全软件或浏览器策略拦截了开发脚本
+
+推荐按这个顺序排查：
+
+1. 用浏览器 DevTools 打开 `Network`，选中 `Document` 请求，检查响应头里是否真的带有 `Content-Security-Policy`
+2. 用无扩展窗口或全新浏览器 profile 打开 `http://localhost:3000`
+3. 暂时关闭代理插件、系统代理、VPN、抓包工具、安全软件后再试
+4. 如果普通浏览器有问题，但无扩展窗口正常，基本可以确认是浏览器侧注入，不需要改项目
+
+注意：
+
+- `next dev` 在开发环境下可能依赖被某些严格策略视为不安全的脚本能力
+- 不要为了本地临时报错，直接把 `unsafe-eval` 放进生产环境 CSP
+- 如果必须加兼容，只能做 `development` 环境下的临时放宽，不能带到生产环境
+
 ## GitHub
 
 仓库地址：
