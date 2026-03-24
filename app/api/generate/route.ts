@@ -1,9 +1,16 @@
 import { NextRequest, NextResponse } from "next/server";
 import { chat, chatStream, ImageGenerationError, runImageTask } from "../../lib/api-client";
-import fs from "fs";
-import path from "path";
+import fs from "node:fs";
+import { mkdir, writeFile } from "node:fs/promises";
+import path from "node:path";
+import { createStoredImageName, resolvePublicAssetPath } from "../../lib/api-security.mjs";
 
 const DEBUG_API_LOGS = process.env.LOG_ALL_REQUESTS !== "0";
+const PUBLIC_DIR = path.join(process.cwd(), "public");
+const GENERATED_UPLOADS_DIR = path.join(PUBLIC_DIR, "uploads", "generated");
+const MAX_REFERENCE_IMAGE_BYTES = 12 * 1024 * 1024;
+const MAX_SAVED_IMAGE_BYTES = 20 * 1024 * 1024;
+const ALLOWED_PUBLIC_IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".webp", ".gif"];
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -22,48 +29,62 @@ function debugWarn(...args: unknown[]) {
 }
 
 async function saveImageToLocal(imageUrl: string): Promise<{ filename: string; localUrl: string }> {
-  debugLog("=== Saving image to local ===");
-  debugLog("Image URL:", imageUrl);
-  
-  const timestamp = Date.now();
-  const random = Math.random().toString(36).substring(2, 8);
-  const filename = `image-${timestamp}-${random}.png`;
-  const outputDir = path.join(process.cwd(), "public", "uploads", "generated");
-  const filepath = path.join(outputDir, filename);
-  
-  debugLog("Output directory:", outputDir);
-  debugLog("Output dir exists:", fs.existsSync(outputDir));
-  
-  if (!fs.existsSync(outputDir)) {
-    debugLog("Creating output directory...");
-    fs.mkdirSync(outputDir, { recursive: true });
+  const parsedUrl = new URL(imageUrl);
+  if (!["http:", "https:"].includes(parsedUrl.protocol)) {
+    throw new Error("Unsupported image URL protocol");
   }
-  
+
   try {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 120000);
     
     const response = await fetch(imageUrl, { signal: controller.signal });
     clearTimeout(timeoutId);
-    
-    debugLog("Image fetch response status:", response.status, response.statusText);
-    
+
     if (!response.ok) {
       throw new Error(`Failed to fetch image: ${response.status} ${response.statusText}`);
     }
-    
-    const buffer = await response.arrayBuffer();
-    debugLog("Image buffer size:", buffer.byteLength);
-    
-    fs.writeFileSync(filepath, Buffer.from(buffer));
-    
-    debugLog(`Image saved to: ${filepath}`);
+
+    const contentLength = Number(response.headers.get("content-length") || "0");
+    if (Number.isFinite(contentLength) && contentLength > MAX_SAVED_IMAGE_BYTES) {
+      throw new Error("Generated image is too large to store");
+    }
+
+    const arrayBuffer = await response.arrayBuffer();
+    const buffer = Buffer.from(arrayBuffer);
+    if (buffer.length === 0) {
+      throw new Error("Generated image payload is empty");
+    }
+    if (buffer.length > MAX_SAVED_IMAGE_BYTES) {
+      throw new Error("Generated image is too large to store");
+    }
+
+    const contentType = (response.headers.get("content-type") || "").toLowerCase();
+    const extension = contentType.includes("image/jpeg")
+      ? "jpg"
+      : contentType.includes("image/webp")
+        ? "webp"
+        : contentType.includes("image/gif")
+          ? "gif"
+          : "png";
+    const filename = createStoredImageName(extension);
+    const filepath = path.join(GENERATED_UPLOADS_DIR, filename);
+
+    await mkdir(GENERATED_UPLOADS_DIR, { recursive: true });
+    await writeFile(filepath, buffer);
+
+    debugLog("Stored generated image locally", {
+      status: response.status,
+      sizeBytes: buffer.length,
+      fileName: filename,
+    });
+
     return {
       filename,
       localUrl: `/uploads/generated/${filename}`,
     };
   } catch (error) {
-    console.error("Error saving image:", error);
+    console.error("Error saving generated image:", error instanceof Error ? error.message : String(error));
     throw error;
   }
 }
@@ -241,19 +262,27 @@ function normalizeChatReferenceImage(input: string): string | null {
   }
 
   if (input.startsWith("/")) {
-    const safePath = input.split("?")[0].replace(/^\/+/, "");
-    const filePath = path.join(process.cwd(), "public", safePath);
-    if (!fs.existsSync(filePath)) {
+    const filePath = resolvePublicAssetPath(input, {
+      publicDir: PUBLIC_DIR,
+      allowedExtensions: ALLOWED_PUBLIC_IMAGE_EXTENSIONS,
+    });
+    if (!filePath || !fs.existsSync(filePath)) {
       return null;
     }
+
+    const stats = fs.statSync(filePath);
+    if (!stats.isFile() || stats.size > MAX_REFERENCE_IMAGE_BYTES) {
+      return null;
+    }
+
     const ext = path.extname(filePath).toLowerCase();
     const mimeType = ext === ".jpg" || ext === ".jpeg"
       ? "image/jpeg"
       : ext === ".webp"
         ? "image/webp"
-        : ext === ".gif"
-          ? "image/gif"
-          : "image/png";
+          : ext === ".gif"
+            ? "image/gif"
+            : "image/png";
     const base64 = fs.readFileSync(filePath).toString("base64");
     return `data:${mimeType};base64,${base64}`;
   }
@@ -318,27 +347,12 @@ export async function POST(request: NextRequest) {
   };
 
   try {
-    debugLog("[API][REQ]", {
-      reqId,
-      route: "/api/generate",
-      method: request.method,
-      url: request.url,
-    });
+    const body = await request.json().catch(() => null);
+    if (!body || typeof body !== "object") {
+      logResponse(400, { reason: "invalid_json" });
+      return NextResponse.json({ status: "error", error: "Invalid JSON body" }, { status: 400 });
+    }
 
-    debugLog("=== Environment Check ===");
-    debugLog("API_URL:", process.env.COMFLY_API_URL);
-    debugLog("API_KEY exists:", !!process.env.COMFLY_API_KEY);
-    debugLog("API_KEY length:", process.env.COMFLY_API_KEY?.length);
-    
-    const body = await request.json();
-    debugLog("=== Request Body ===");
-    debugLog("Messages count:", body.messages?.length);
-    debugLog("Size:", body.size);
-    debugLog("Aspect Ratio:", body.aspect_ratio);
-    debugLog("N:", body.n);
-    debugLog("Has reference_images:", !!body.reference_images?.length);
-    debugLog("Skill:", body.skill);
-    
     const { messages: incomingMessages, size, aspect_ratio, n, reference_images, reference_labels, skill, intent } = body as {
       messages: Array<{ role: "user" | "assistant" | "system"; content: string }>;
       size?: string;
@@ -350,6 +364,16 @@ export async function POST(request: NextRequest) {
       intent?: GenerateIntent;
       stream?: boolean;
     };
+
+    debugLog("[API][REQ]", {
+      reqId,
+      route: "/api/generate",
+      method: request.method,
+      messageCount: Array.isArray(incomingMessages) ? incomingMessages.length : 0,
+      hasReferenceImages: Array.isArray(reference_images) && reference_images.length > 0,
+      skill: typeof skill === "string" ? skill : null,
+      intent: intent || "auto",
+    });
 
     if (!incomingMessages || !Array.isArray(incomingMessages)) {
       logResponse(400, { reason: "messages_required" });
@@ -371,7 +395,7 @@ export async function POST(request: NextRequest) {
         } else {
           incomingMessages.unshift({ role: 'user', content: skillContent });
         }
-        debugLog(`Loaded skill: ${skill}`);
+        debugLog("Loaded requested skill content", { reqId, skill });
       }
     }
 
@@ -427,10 +451,12 @@ export async function POST(request: NextRequest) {
         : "";
     const resolved = resolveIntent(intent, latestUserMessage, hasReferenceImages);
 
-    debugLog("=== Intent Resolution ===");
-    debugLog("Requested intent:", intent || "auto");
-    debugLog("Resolved intent:", resolved.intent);
-    debugLog("Ambiguous:", resolved.ambiguous);
+    debugLog("Resolved generation intent", {
+      reqId,
+      requestedIntent: intent || "auto",
+      resolvedIntent: resolved.intent,
+      ambiguous: resolved.ambiguous,
+    });
 
     if (resolved.intent === "chat" && hasReferenceImages) {
       const normalizedChatImages = reference_images
@@ -439,7 +465,8 @@ export async function POST(request: NextRequest) {
 
       if (normalizedChatImages.length > 0) {
         messages = attachImagesToLatestUserMessage(messages, normalizedChatImages);
-        debugLog("Attached images to chat message", {
+        debugLog("Attached normalized reference images to chat message", {
+          reqId,
           count: normalizedChatImages.length,
           skill: skill || null,
         });
@@ -463,18 +490,12 @@ export async function POST(request: NextRequest) {
         ? reference_labels
         : normalizedEditImages.map((_, index) => `image${index + 1}`);
 
-      debugLog("Image edit routing:", {
+      debugLog("Routing request to image edit flow", {
+        reqId,
         editMode: "image_edit",
-        endpoint: "/images/edits",
-        routeMode: "image_task",
-        providerEndpoint: "/images/edits",
-        executionMode: "sync",
         requestedAspectRatio: normalizeAspectRatio(aspect_ratio) || null,
-        sentAspectRatio: normalizeAspectRatio(aspect_ratio) || null,
         referenceCount: normalizedEditImages.length,
         model: IMAGE_MODEL,
-        originalPromptPreview: resolved.prompt.slice(0, 180),
-        finalPromptPreview: resolved.prompt.slice(0, 220),
       });
 
       let imageResult;
@@ -507,7 +528,6 @@ export async function POST(request: NextRequest) {
       }
 
       const imageUrl = imageResult.data[0].url;
-      debugLog("Image edit URL:", imageUrl);
       const savedImage = await saveImageToLocal(imageUrl);
 
       logResponse(200, { mode: "image_edit", skill: skill || null });
@@ -531,14 +551,11 @@ export async function POST(request: NextRequest) {
       const imageSize = resolveImageSize(size, IMAGE_MODEL);
       const requestedAspectRatio = normalizeAspectRatio(aspect_ratio);
       const resolvedAspectRatio = requestedAspectRatio || aspectRatioFromSize(imageSize);
-      debugLog("Image ratio resolution:", {
+      debugLog("Resolved image generation dimensions", {
+        reqId,
         requestedSize,
         requestedAspectRatio: requestedAspectRatio || null,
         resolvedAspectRatio,
-        routeMode: "image_task",
-        providerEndpoint: "/images/generations",
-        executionMode: "sync",
-        referenceCount: 0,
       });
 
       let actualSize = imageSize;
@@ -563,7 +580,10 @@ export async function POST(request: NextRequest) {
           throw error;
         }
 
-        debugWarn("Generate at 2K failed, fallback to 1024x1024", error.message);
+        debugWarn("Generate at 2K failed, fallback to 1024x1024", {
+          reqId,
+          reason: error.message,
+        });
         actualSize = "1024x1024";
         imageResult = await runImageTask({
           model: IMAGE_MODEL,
@@ -576,17 +596,13 @@ export async function POST(request: NextRequest) {
         });
       }
 
-      debugLog("=== generateImage Result ===");
-      debugLog("Result:", JSON.stringify(imageResult, null, 2).substring(0, 500));
-
       if (!imageResult.data || imageResult.data.length === 0) {
-        console.error("No image data in result!");
+        console.error("No image data in generation result");
         logResponse(500, { mode: "image_generate", reason: "no_image_data" });
         return NextResponse.json({ status: "error", error: "No image data returned" }, { status: 500 });
       }
 
       const imageUrl = imageResult.data[0].url;
-      debugLog("Image URL:", imageUrl);
       const savedImage = await saveImageToLocal(imageUrl);
 
       logResponse(200, { mode: "image_generate", skill: skill || null });
@@ -661,13 +677,6 @@ export async function POST(request: NextRequest) {
     });
 
   } catch (error: unknown) {
-    console.error("=== API Error Details ===");
-    console.error("Error:", error);
-    if (error instanceof Error) {
-      console.error("Message:", error.message);
-      console.error("Stack:", error.stack);
-    }
-    
     const errorMessage = error instanceof Error ? error.message : "Unknown error";
     const errorStack = error instanceof Error ? error.stack : "";
     
@@ -675,9 +684,15 @@ export async function POST(request: NextRequest) {
       ? error.statusCode
       : 500;
 
+    console.error("Generate API error", {
+      reqId,
+      statusCode,
+      message: errorMessage,
+    });
+
     logResponse(statusCode, {
       mode: "error",
-      error: error instanceof Error ? error.message : "Unknown error",
+      error: errorMessage,
     });
 
     return NextResponse.json({

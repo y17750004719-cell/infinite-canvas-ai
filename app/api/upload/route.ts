@@ -1,8 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
-import fs from 'fs';
-import path from 'path';
+import { mkdir, writeFile } from 'node:fs/promises';
+import path from 'node:path';
+import { createStoredImageName, parseImageDataUrl } from '../../lib/api-security.mjs';
 
 const LOG_ALL_REQUESTS = process.env.LOG_ALL_REQUESTS !== '0';
+const MAX_UPLOAD_BYTES = 12 * 1024 * 1024;
+
 const log = (...args: unknown[]) => {
   if (LOG_ALL_REQUESTS) {
     console.log(`[${new Date().toISOString()}]`, ...args);
@@ -12,34 +15,31 @@ const log = (...args: unknown[]) => {
 export async function POST(request: NextRequest) {
   const startedAt = Date.now();
   try {
-    log('[API][REQ]', { route: '/api/upload', method: 'POST', url: request.url });
-    const body = await request.json();
-    const { imageData, fileName } = body;
-
-    if (!imageData) {
-      log('[API][RES]', { route: '/api/upload', method: 'POST', status: 400, reason: 'imageData is required', durationMs: Date.now() - startedAt });
-      return NextResponse.json(
-        { error: 'Image data is required' },
-        { status: 400 }
-      );
+    log('[API][REQ]', { route: '/api/upload', method: 'POST' });
+    const body = await request.json().catch(() => null);
+    if (!body || typeof body !== 'object') {
+      log('[API][RES]', {
+        route: '/api/upload',
+        method: 'POST',
+        status: 400,
+        reason: 'invalid_json',
+        durationMs: Date.now() - startedAt,
+      });
+      return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
     }
+    const { imageData } = body;
+
+    const parsedImage = parseImageDataUrl(imageData, {
+      maxBytes: MAX_UPLOAD_BYTES,
+    });
 
     const uploadsDir = path.join(process.cwd(), 'public', 'uploads');
-    
-    if (!fs.existsSync(uploadsDir)) {
-      fs.mkdirSync(uploadsDir, { recursive: true });
-    }
+    await mkdir(uploadsDir, { recursive: true });
 
-    const base64Data = imageData.replace(/^data:image\/\w+;base64,/, '');
-    const buffer = Buffer.from(base64Data, 'base64');
-
-    const ext = fileName?.match(/\.(\w+)$/)?.[1] || 'png';
-    const timestamp = Date.now();
-    const random = Math.random().toString(36).substring(2, 8);
-    const newFileName = `img-${timestamp}-${random}.${ext}`;
+    const newFileName = createStoredImageName(parsedImage.extension);
     const filePath = path.join(uploadsDir, newFileName);
 
-    fs.writeFileSync(filePath, buffer);
+    await writeFile(filePath, parsedImage.buffer);
 
     const url = `/uploads/${newFileName}`;
 
@@ -48,7 +48,7 @@ export async function POST(request: NextRequest) {
       method: 'POST',
       status: 200,
       fileName: newFileName,
-      sizeBytes: buffer.length,
+      sizeBytes: parsedImage.buffer.length,
       durationMs: Date.now() - startedAt,
     });
 
@@ -58,10 +58,36 @@ export async function POST(request: NextRequest) {
       fileName: newFileName,
     });
   } catch (error) {
-    console.error('Upload error:', error);
-    log('[API][RES]', { route: '/api/upload', method: 'POST', status: 500, error: error instanceof Error ? error.message : String(error), durationMs: Date.now() - startedAt });
+    const message = error instanceof Error ? error.message : 'Upload failed';
+    const isInputError =
+      message === 'Image data is required' ||
+      message === 'Invalid image data URL' ||
+      message === 'Image payload is empty' ||
+      message === 'Image payload is too large' ||
+      message.startsWith('Unsupported image type:') ||
+      message === 'Image payload does not match the declared image type';
+
+    if (isInputError) {
+      log('[API][RES]', {
+        route: '/api/upload',
+        method: 'POST',
+        status: 400,
+        reason: message,
+        durationMs: Date.now() - startedAt,
+      });
+      return NextResponse.json({ error: message }, { status: 400 });
+    }
+
+    console.error('Upload error:', message);
+    log('[API][RES]', {
+      route: '/api/upload',
+      method: 'POST',
+      status: 500,
+      error: message,
+      durationMs: Date.now() - startedAt,
+    });
     return NextResponse.json(
-      { error: error instanceof Error ? error.message : 'Upload failed' },
+      { error: 'Upload failed' },
       { status: 500 }
     );
   }

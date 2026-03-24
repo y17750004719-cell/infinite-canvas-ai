@@ -15,13 +15,9 @@
     "next": "14.2.21",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "react-konva": "^18.2.10",
     "react-markdown": "^10.1.0",
     "remark-gfm": "^4.0.1",
-    "tailwind-merge": "^2.6.0",
-    "use-image": "^1.1.1",
-    "uuid": "^11.0.3",
-    "zustand": "^5.0.0"
+    "tailwind-merge": "^2.6.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

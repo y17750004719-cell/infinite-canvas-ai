@@ -18,6 +18,17 @@
   --border: 214.3 31.8% 91.4%;
   --ring: 221.2 83.2% 53.3%;
   --radius: 0.5rem;
+  --font-app: "SF Pro Display", "SF Pro Text", "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  --workspace-max-width: 80rem;
+  --workspace-page-bg: #f8fafc;
+  --workspace-editor-bg: #050608;
+  --workspace-surface: rgba(16, 18, 22, 0.92);
+  --workspace-surface-elevated: rgba(18, 20, 24, 0.95);
+  --workspace-border: rgba(255, 255, 255, 0.1);
+  --workspace-divider-dark: rgba(37, 43, 52, 0.92);
+  --workspace-shadow: 0 18px 50px rgba(0, 0, 0, 0.3);
+  --workspace-shadow-soft: 0 8px 24px rgba(0, 0, 0, 0.28);
+  --workspace-radius-lg: 1.5rem;
 }
 
 .dark {
@@ -44,7 +55,7 @@
 body {
   background: hsl(var(--background));
   color: hsl(var(--foreground));
-  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-family: var(--font-app);
 }
 
 .canvas-container {
@@ -52,4 +63,169 @@ body {
     linear-gradient(to right, hsl(var(--border)) 1px, transparent 1px),
     linear-gradient(to bottom, hsl(var(--border)) 1px, transparent 1px);
   background-size: 20px 20px;
+}
+
+.workspace-content-shell {
+  max-width: var(--workspace-max-width);
+  margin: 0 auto;
+  padding-left: 1rem;
+  padding-right: 1rem;
+}
+
+@media (min-width: 640px) {
+  .workspace-content-shell {
+    padding-left: 1.5rem;
+    padding-right: 1.5rem;
+  }
+}
+
+.workspace-page-shell {
+  background: var(--workspace-page-bg);
+  color: #0f172a;
+}
+
+.workspace-header-bar {
+  border-bottom: 1px solid hsl(var(--border));
+  background: rgba(255, 255, 255, 0.92);
+  backdrop-filter: blur(18px);
+}
+
+.workspace-surface-card {
+  border: 1px solid hsl(var(--border));
+  background: white;
+  box-shadow: 0 12px 32px rgba(15, 23, 42, 0.08);
+}
+
+.workspace-light-icon-button {
+  display: inline-flex;
+  min-height: 44px;
+  min-width: 44px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 0.75rem;
+  transition: background-color 160ms ease, color 160ms ease, opacity 160ms ease;
+}
+
+.workspace-light-icon-button:hover {
+  background: rgba(15, 23, 42, 0.05);
+}
+
+.workspace-light-icon-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.workspace-black-button {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  border-radius: 0.75rem;
+  background: #020617;
+  padding: 0.5rem 1rem;
+  color: white;
+  transition: background-color 160ms ease, opacity 160ms ease;
+}
+
+.workspace-black-button:hover {
+  background: #111827;
+}
+
+.workspace-black-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.workspace-gallery-shell {
+  background: var(--workspace-editor-bg);
+}
+
+.workspace-gallery-header {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  background: rgba(8, 10, 13, 0.92);
+  backdrop-filter: blur(24px);
+}
+
+.workspace-empty-icon {
+  display: flex;
+  height: 5rem;
+  width: 5rem;
+  align-items: center;
+  justify-content: center;
+  border-radius: 1rem;
+  border: 1px solid var(--workspace-border);
+  background: rgba(18, 20, 24, 0.92);
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.35);
+}
+
+.workspace-gallery-card {
+  border-radius: var(--workspace-radius-lg);
+  border: 1px solid var(--workspace-border);
+  background: var(--workspace-surface);
+  box-shadow: var(--workspace-shadow);
+  transition: border-color 160ms ease, background-color 160ms ease, box-shadow 160ms ease;
+}
+
+.workspace-gallery-card:hover {
+  border-color: rgba(255, 255, 255, 0.15);
+  background: rgba(22, 25, 31, 0.96);
+  box-shadow: 0 28px 70px rgba(0, 0, 0, 0.38);
+}
+
+.workspace-primary-button {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  border-radius: 0.75rem;
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  background: white;
+  padding: 0.5rem 1rem;
+  color: black;
+  box-shadow: 0 10px 30px rgba(255, 255, 255, 0.08);
+  transition: background-color 160ms ease, opacity 160ms ease;
+}
+
+.workspace-primary-button:hover {
+  background: #e4e4e7;
+}
+
+.workspace-primary-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.workspace-dark-icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--workspace-border);
+  background: var(--workspace-surface-elevated);
+  box-shadow: var(--workspace-shadow-soft);
+  transition: background-color 160ms ease, opacity 160ms ease, color 160ms ease;
+}
+
+.workspace-dark-icon-button:hover {
+  background: rgba(28, 31, 38, 0.98);
+}
+
+.workspace-dark-icon-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.workspace-divider-dark {
+  border-color: var(--workspace-divider-dark) !important;
+}
+
+.workspace-error-banner {
+  border-radius: 1rem;
+  border: 1px solid rgba(239, 68, 68, 0.2);
+  background: rgba(62, 18, 23, 0.94);
+  padding: 0.5rem 1rem;
+  color: #fee2e2;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(24px);
 }

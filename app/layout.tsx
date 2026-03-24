@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Infinite Canvas AI",
-  description: "AI-powered infinite canvas for creative design",
+  title: "ZO Design Workspace",
+  description: "面向设计师与创意团队的 AI 画布工作区",
 };
 
 export default function RootLayout({
@@ -12,7 +12,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en">
+    <html lang="zh-CN">
       <body className="antialiased">
         {children}
       </body>

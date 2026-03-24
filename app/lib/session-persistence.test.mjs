@@ -68,6 +68,19 @@ test('shouldFlushScheduledSessionSave rejects deleted sessions', () => {
   assert.equal(result, false);
 });
 
+test('shouldFlushScheduledSessionSave rejects saves while a session mutation is pending', () => {
+  const result = shouldFlushScheduledSessionSave({
+    scheduledSessionId: 'session-2',
+    scheduledEpoch: 5,
+    currentSessionId: 'session-2',
+    currentEpoch: 5,
+    sessions: [{ id: 'session-2' }],
+    hasPendingMutation: true,
+  });
+
+  assert.equal(result, false);
+});
+
 test('shouldFlushScheduledSessionSave accepts the latest active session save', () => {
   const result = shouldFlushScheduledSessionSave({
     scheduledSessionId: 'session-2',

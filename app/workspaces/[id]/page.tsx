@@ -16,6 +16,7 @@ export default function WorkspaceDetailPage() {
   const [session, setSession] = useState<ProjectSession | null>(null);
   const [loading, setLoading] = useState(true);
   const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const sessionId = params?.id as string;
 
@@ -33,12 +34,14 @@ export default function WorkspaceDetailPage() {
     if (!session || !confirm('确定要删除这个画布吗？此操作不可恢复。')) return;
     
     setDeleting(true);
+    setDeleteError(null);
 
     try {
       await removeSession(session.id);
       router.push('/workspaces');
     } catch (error) {
       console.error('Failed to delete workspace:', error);
+      setDeleteError('删除画布失败，请重试。');
       setDeleting(false);
     }
   };
@@ -106,7 +109,7 @@ export default function WorkspaceDetailPage() {
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+      <div className="workspace-page-shell min-h-screen flex items-center justify-center">
         <div className="flex items-center gap-2 text-gray-400">
           <Sparkles className="w-5 h-5 animate-pulse" />
           <span>加载中...</span>
@@ -117,7 +120,7 @@ export default function WorkspaceDetailPage() {
 
   if (!session) {
     return (
-      <div className="min-h-screen bg-gray-50 flex flex-col items-center justify-center">
+      <div className="workspace-page-shell min-h-screen flex flex-col items-center justify-center">
         <div className="w-20 h-20 bg-gray-100 rounded-2xl flex items-center justify-center mb-4">
           <Sparkles size={32} className="text-gray-300" />
         </div>
@@ -125,7 +128,7 @@ export default function WorkspaceDetailPage() {
         <p className="text-sm text-gray-400 mb-6">该画布可能被已删除</p>
         <button
           onClick={() => router.push('/workspaces')}
-          className="flex items-center gap-2 px-4 py-2 bg-black text-white rounded-lg hover:bg-gray-800 transition-colors"
+          className="workspace-black-button"
         >
           <ArrowLeft size={18} />
           <span>返回画布列表</span>
@@ -135,27 +138,38 @@ export default function WorkspaceDetailPage() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-50">
+    <div className="workspace-page-shell min-h-screen">
+      {deleteError && (
+        <div className="fixed inset-x-0 top-4 z-20 flex justify-center px-4">
+          <div className="workspace-error-banner text-sm text-red-100">
+            {deleteError}
+          </div>
+        </div>
+      )}
       {/* Header */}
-      <div className="bg-white border-b border-gray-200 sticky top-0 z-10">
-        <div className="max-w-7xl mx-auto px-6 py-4 flex items-center justify-between">
-          <div className="flex items-center gap-4">
+      <div className="workspace-header-bar sticky top-0 z-10">
+        <div className="workspace-content-shell flex flex-wrap items-center justify-between gap-3 py-4">
+          <div className="flex min-w-0 items-center gap-3 sm:gap-4">
             <button 
               onClick={() => router.push('/workspaces')}
-              className="flex items-center gap-2 text-gray-500 hover:text-gray-800 transition-colors"
+              className="workspace-light-icon-button gap-2 px-2 text-gray-500 hover:text-gray-800"
+              aria-label="返回画布列表"
             >
               <ArrowLeft size={20} />
               <span>返回列表</span>
             </button>
             <div className="w-px h-6 bg-gray-200" />
-            <h1 className="text-xl font-semibold text-gray-800">{session.name}</h1>
-            <span className="text-sm text-gray-400">({session.items.length} 个元素)</span>
+            <div className="min-w-0">
+              <h1 className="truncate text-xl font-semibold text-gray-800">{session.name}</h1>
+              <span className="text-sm text-gray-400">({session.items.length} 个元素)</span>
+            </div>
           </div>
           
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <button
               onClick={handleEdit}
-              className="flex items-center gap-2 px-4 py-2 bg-black text-white rounded-lg hover:bg-gray-800 transition-colors"
+              className="workspace-black-button"
+              aria-label={`编辑 ${session.name}`}
             >
               <Edit3 size={18} />
               <span>编辑</span>
@@ -164,16 +178,17 @@ export default function WorkspaceDetailPage() {
             <button
               onClick={handleDelete}
               disabled={deleting}
-              className="flex items-center gap-2 px-4 py-2 text-red-500 hover:bg-red-50 rounded-lg transition-colors disabled:opacity-50"
+              className="workspace-light-icon-button gap-2 px-4 py-2 text-red-500 hover:bg-red-50 disabled:opacity-50"
+              aria-label={`删除 ${session.name}`}
             >
               <Trash2 size={18} />
-              <span>删除</span>
+              <span>{deleting ? '删除中...' : '删除'}</span>
             </button>
           </div>
         </div>
         
         {/* Meta Info */}
-        <div className="max-w-7xl mx-auto px-6 pb-3 flex items-center gap-6 text-sm text-gray-400">
+        <div className="workspace-content-shell flex flex-wrap items-center gap-3 pb-3 text-sm text-gray-400 sm:gap-6">
           <span>创建于: {formatDate(session.createdAt)}</span>
           <span>更新于: {formatDate(session.updatedAt)}</span>
           <span>{session.messages.length} 条对话</span>
@@ -181,7 +196,7 @@ export default function WorkspaceDetailPage() {
       </div>
 
       {/* Content */}
-      <div className="max-w-7xl mx-auto px-6 py-8">
+      <div className="workspace-content-shell py-8">
         {session.items.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-20">
             <div className="w-20 h-20 bg-gray-100 rounded-2xl flex items-center justify-center mb-4">
@@ -191,7 +206,7 @@ export default function WorkspaceDetailPage() {
             <p className="text-sm text-gray-400 mb-6">这个画布还没有任何内容</p>
             <button
               onClick={handleEdit}
-              className="flex items-center gap-2 px-4 py-2 bg-black text-white rounded-lg hover:bg-gray-800 transition-colors"
+              className="workspace-black-button"
             >
               <Edit3 size={18} />
               <span>开始编辑</span>
@@ -202,7 +217,7 @@ export default function WorkspaceDetailPage() {
             {session.items.map(item => (
               <div
                 key={item.id}
-                className="break-inside-avoid group bg-white rounded-2xl overflow-hidden shadow-sm hover:shadow-md transition-all cursor-pointer border border-gray-100"
+                className="workspace-surface-card break-inside-avoid group cursor-pointer overflow-hidden rounded-2xl transition-all hover:shadow-md"
                 onClick={handleEdit}
               >
                 {/* Preview */}
