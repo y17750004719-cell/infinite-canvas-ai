@@ -16,8 +16,10 @@ import {
   normalizeProjectSession,
 } from './lib/session-persistence.mjs';
 import {
+  buildCanvasTextPanelSubmitInput,
   CANVAS_TEXT_GENERATION_CONCURRENCY_LIMIT,
   TEXT_PANEL_MODEL_OPTIONS,
+  getAutoResizedTextareaMetrics,
   buildCanvasTextGenerationRequest,
   buildReferenceImageRequestPayload,
   canEnterManualTextMode,
@@ -25,6 +27,7 @@ import {
   finalizeManualTextCardItem,
   getDefaultTextPanelModelOption,
   getDirectImagePreviewsForTextCard,
+  getDirectTextInputsForTextCard,
   getTextCardVisualState,
   removeCanvasTextGenerationEntry,
   resolveSessionPresentationState,
@@ -206,6 +209,13 @@ const TEXT_CARD_FRAME_BOTTOM = 12;
 const TEXT_CARD_GENERATION_PANEL_DEFAULT_WIDTH = 480;
 const TEXT_CARD_GENERATION_PANEL_BASE_HEIGHT = 144;
 const TEXT_CARD_GENERATION_PANEL_PREVIEW_HEIGHT = 92;
+const TEXT_CARD_PANEL_INPUT_MIN_ROWS = 2;
+const TEXT_CARD_PANEL_INPUT_MAX_ROWS = 6;
+const TEXT_CARD_PANEL_INPUT_LINE_HEIGHT = 24;
+const TEXT_CARD_PANEL_INPUT_MIN_HEIGHT = 52;
+const TEXT_CARD_PANEL_INPUT_MAX_HEIGHT =
+  TEXT_CARD_PANEL_INPUT_MIN_HEIGHT +
+  (TEXT_CARD_PANEL_INPUT_MAX_ROWS - TEXT_CARD_PANEL_INPUT_MIN_ROWS) * TEXT_CARD_PANEL_INPUT_LINE_HEIGHT;
 const TEXT_CARD_BODY_TEXT_CLASSNAME = 'text-[15px] leading-7 tracking-[-0.02em] text-zinc-200';
 const NODE_SELECTED_OUTLINE_COLOR = 'rgba(226, 232, 240, 0.76)';
 const NODE_SELECTED_OUTLINE_WIDTH = 2;
@@ -1110,6 +1120,11 @@ const CanvasViewport = memo(function CanvasViewport({
   onManualTextCardBlur: (itemId: string) => void;
 }) {
   const { from, to } = getPreviewRenderPoints();
+  const selectedTextCardPanelTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const [selectedTextCardPanelInputMetrics, setSelectedTextCardPanelInputMetrics] = useState(() => ({
+    height: TEXT_CARD_PANEL_INPUT_MIN_HEIGHT,
+    isOverflowing: false,
+  }));
   const canvasRect = canvasRef.current?.getBoundingClientRect();
   const canvasSize = {
     width: canvasRect?.width ?? 0,
@@ -1136,9 +1151,36 @@ const CanvasViewport = memo(function CanvasViewport({
   const selectedTextCardPanelCanvasWidth = selectedTextCardPanelFrameBounds
     ? Math.max(TEXT_CARD_GENERATION_PANEL_DEFAULT_WIDTH, selectedTextCardPanelFrameBounds.width)
     : 0;
+  useLayoutEffect(() => {
+    if (!selectedTextCardPanelItem) {
+      setSelectedTextCardPanelInputMetrics((prev) =>
+        prev.height === TEXT_CARD_PANEL_INPUT_MIN_HEIGHT && !prev.isOverflowing
+          ? prev
+          : { height: TEXT_CARD_PANEL_INPUT_MIN_HEIGHT, isOverflowing: false }
+      );
+      return;
+    }
+
+    const textarea = selectedTextCardPanelTextareaRef.current;
+    if (!textarea) return;
+
+    textarea.style.height = '0px';
+
+    const nextMetrics = getAutoResizedTextareaMetrics({
+      scrollHeight: textarea.scrollHeight,
+      minHeight: TEXT_CARD_PANEL_INPUT_MIN_HEIGHT,
+      maxHeight: TEXT_CARD_PANEL_INPUT_MAX_HEIGHT,
+    });
+
+    setSelectedTextCardPanelInputMetrics((prev) =>
+      prev.height === nextMetrics.height && prev.isOverflowing === nextMetrics.isOverflowing ? prev : nextMetrics
+    );
+  }, [selectedTextCardPanelCanvasWidth, selectedTextCardPanelInput, selectedTextCardPanelItem]);
+
   const selectedTextCardPanelCanvasHeight =
     TEXT_CARD_GENERATION_PANEL_BASE_HEIGHT +
-    (linkedImagePreviews.length > 0 ? TEXT_CARD_GENERATION_PANEL_PREVIEW_HEIGHT : 0);
+    (linkedImagePreviews.length > 0 ? TEXT_CARD_GENERATION_PANEL_PREVIEW_HEIGHT : 0) +
+    Math.max(0, selectedTextCardPanelInputMetrics.height - TEXT_CARD_PANEL_INPUT_MIN_HEIGHT);
   const selectedTextCardPanelCanvasRect =
     selectedTextCardPanelItem && selectedTextCardPanelFrameBounds
       ? {
@@ -1314,6 +1356,7 @@ const CanvasViewport = memo(function CanvasViewport({
                 </div>
               )}
               <textarea
+                ref={selectedTextCardPanelTextareaRef}
                 value={selectedTextCardPanelInput}
                 onChange={(e) => {
                   onSelectedTextCardPanelInputChange(e.target.value);
@@ -1332,9 +1375,13 @@ const CanvasViewport = memo(function CanvasViewport({
                   e.stopPropagation();
                 }}
                 onWheel={stopCanvasWheelFromScrollableRegion}
-                className="panel-scrollbar min-h-[52px] w-full resize-none overflow-y-auto bg-transparent text-[14px] leading-6 text-zinc-100 outline-none placeholder:text-zinc-500"
+                className="panel-scrollbar w-full resize-none bg-transparent text-[14px] leading-6 text-zinc-100 outline-none placeholder:text-zinc-500"
                 placeholder="描述你想要生成的内容，并在下方调整生成参数。（按下Enter 生成，Shift+Enter 换行）"
-                rows={2}
+                rows={TEXT_CARD_PANEL_INPUT_MIN_ROWS}
+                style={{
+                  height: `${selectedTextCardPanelInputMetrics.height}px`,
+                  overflowY: selectedTextCardPanelInputMetrics.isOverflowing ? 'auto' : 'hidden',
+                }}
               />
               {selectedTextCardPanelError && (
                 <div className="mt-2 px-0.5 text-[12px] leading-5 text-rose-400">
@@ -2036,6 +2083,15 @@ export default function AIWorkspace() {
   const selectedTextCardPanelLinkedImagePreviews = React.useMemo(
     () =>
       getDirectImagePreviewsForTextCard({
+        textCardId: selectedTextCardPanelItem?.id ?? '',
+        items,
+        connections,
+      }),
+    [connections, items, selectedTextCardPanelItem?.id]
+  );
+  const selectedTextCardPanelLinkedTexts = React.useMemo(
+    () =>
+      getDirectTextInputsForTextCard({
         textCardId: selectedTextCardPanelItem?.id ?? '',
         items,
         connections,
@@ -5004,7 +5060,10 @@ export default function AIWorkspace() {
 
   const handleSelectedTextCardPanelSubmit = useCallback(() => {
     if (!selectedTextCardPanelItem || activeCanvasTextGenerations[selectedTextCardPanelItem.id]) return;
-    const input = (textCardPanelDrafts[selectedTextCardPanelItem.id] ?? '').trim();
+    const input = buildCanvasTextPanelSubmitInput({
+      draft: textCardPanelDrafts[selectedTextCardPanelItem.id] ?? '',
+      linkedTexts: selectedTextCardPanelLinkedTexts,
+    });
     if (!input) return;
 
     void handleCanvasTextGenerate({
@@ -5015,7 +5074,9 @@ export default function AIWorkspace() {
     });
   }, [
     activeCanvasTextGenerations,
+    buildCanvasTextPanelSubmitInput,
     handleCanvasTextGenerate,
+    selectedTextCardPanelLinkedTexts,
     selectedTextCardPanelItem,
     selectedTextCardPanelLinkedImagePreviews,
     selectedTextPanelModel.id,

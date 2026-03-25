@@ -184,6 +184,21 @@ export function shouldPreventScrollableRegionWheelDefault({
   return false;
 }
 
+export function getAutoResizedTextareaMetrics({
+  scrollHeight = 0,
+  minHeight = 0,
+  maxHeight = Number.POSITIVE_INFINITY,
+}) {
+  const safeMinHeight = Math.max(0, minHeight);
+  const safeMaxHeight = Math.max(safeMinHeight, maxHeight);
+  const resolvedHeight = Math.min(Math.max(scrollHeight, safeMinHeight), safeMaxHeight);
+
+  return {
+    height: resolvedHeight,
+    isOverflowing: scrollHeight > safeMaxHeight,
+  };
+}
+
 export function buildReferenceImageRequestPayload(previews) {
   if (!Array.isArray(previews) || previews.length === 0) {
     return {
@@ -210,6 +225,56 @@ export function buildReferenceImageRequestPayload(previews) {
     },
     { referenceImages: [], referenceLabels: [] }
   );
+}
+
+export function getDirectTextInputsForTextCard({
+  textCardId,
+  items,
+  connections,
+}) {
+  if (!textCardId || !Array.isArray(items) || !Array.isArray(connections)) {
+    return [];
+  }
+
+  const itemById = new Map(items.map((item) => [item?.id, item]));
+  const seenTextIds = new Set();
+
+  return connections.flatMap((connection) => {
+    if (connection?.toItemId !== textCardId) return [];
+
+    const sourceItem = itemById.get(connection.fromItemId);
+    if (!sourceItem || sourceItem.id === textCardId || sourceItem.type !== 'text') {
+      return [];
+    }
+
+    const sourceText = typeof sourceItem.text === 'string' ? sourceItem.text.trim() : '';
+    if (!sourceText || seenTextIds.has(sourceItem.id)) {
+      return [];
+    }
+
+    seenTextIds.add(sourceItem.id);
+
+    return [
+      {
+        id: sourceItem.id,
+        text: sourceText,
+      },
+    ];
+  });
+}
+
+export function buildCanvasTextPanelSubmitInput({
+  draft,
+  linkedTexts = [],
+}) {
+  const trimmedDraft = typeof draft === 'string' ? draft.trim() : '';
+  const linkedTextBlocks = Array.isArray(linkedTexts)
+    ? linkedTexts
+        .map((entry) => (typeof entry?.text === 'string' ? entry.text.trim() : ''))
+        .filter(Boolean)
+    : [];
+
+  return [trimmedDraft, ...linkedTextBlocks].filter(Boolean).join('\n\n');
 }
 
 export function buildCanvasTextGenerationRequest({

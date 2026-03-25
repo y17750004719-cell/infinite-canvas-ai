@@ -4,6 +4,8 @@ import assert from 'node:assert/strict';
 import { createEmptySession } from './session-crud.mjs';
 import {
   CANVAS_TEXT_GENERATION_CONCURRENCY_LIMIT,
+  getAutoResizedTextareaMetrics,
+  buildCanvasTextPanelSubmitInput,
   buildCanvasTextGenerationRequest,
   buildReferenceImageRequestPayload,
   canEnterManualTextMode,
@@ -11,6 +13,7 @@ import {
   finalizeManualTextCardItem,
   getDefaultTextPanelModelOption,
   getDirectImagePreviewsForTextCard,
+  getDirectTextInputsForTextCard,
   removeCanvasTextGenerationEntry,
   getTextCardVisualState,
   resolveTextPanelChatModel,
@@ -148,6 +151,119 @@ test('getDirectImagePreviewsForTextCard ignores missing, duplicate, and non-imag
   });
 
   assert.deepEqual(result, [{ id: 'img-1', src: '/a.png', label: 'image1', alt: 'image1' }]);
+});
+
+test('getDirectTextInputsForTextCard returns direct text inputs in connection order', () => {
+  const result = getDirectTextInputsForTextCard({
+    textCardId: 'text-target',
+    items: [
+      { id: 'text-1', type: 'text', text: '第一段' },
+      { id: 'text-2', type: 'text', text: '第二段' },
+      { id: 'text-target', type: 'text', textVariant: 'card', text: '' },
+      { id: 'image-1', type: 'image', src: '/a.png' },
+    ],
+    connections: [
+      { id: 'conn-1', fromItemId: 'text-2', toItemId: 'text-target' },
+      { id: 'conn-2', fromItemId: 'text-1', toItemId: 'text-target' },
+      { id: 'conn-3', fromItemId: 'image-1', toItemId: 'text-target' },
+    ],
+  });
+
+  assert.deepEqual(result, [
+    { id: 'text-2', text: '第二段' },
+    { id: 'text-1', text: '第一段' },
+  ]);
+});
+
+test('getDirectTextInputsForTextCard ignores empty, duplicate, missing, self-target, and non-text sources', () => {
+  const result = getDirectTextInputsForTextCard({
+    textCardId: 'text-target',
+    items: [
+      { id: 'text-1', type: 'text', text: '保留我' },
+      { id: 'text-2', type: 'text', text: '   ' },
+      { id: 'text-target', type: 'text', textVariant: 'card', text: '自己' },
+      { id: 'image-1', type: 'image', src: '/a.png' },
+    ],
+    connections: [
+      { id: 'conn-1', fromItemId: 'text-1', toItemId: 'text-target' },
+      { id: 'conn-2', fromItemId: 'text-1', toItemId: 'text-target' },
+      { id: 'conn-3', fromItemId: 'text-2', toItemId: 'text-target' },
+      { id: 'conn-4', fromItemId: 'text-target', toItemId: 'text-target' },
+      { id: 'conn-5', fromItemId: 'image-1', toItemId: 'text-target' },
+      { id: 'conn-6', fromItemId: 'missing', toItemId: 'text-target' },
+    ],
+  });
+
+  assert.deepEqual(result, [{ id: 'text-1', text: '保留我' }]);
+});
+
+test('buildCanvasTextPanelSubmitInput appends linked text blocks after the draft with double newlines', () => {
+  const result = buildCanvasTextPanelSubmitInput({
+    draft: '详细描述这个图片',
+    linkedTexts: [
+      { id: 'text-2', text: '第二段上下文' },
+      { id: 'text-1', text: '第一段上下文' },
+    ],
+  });
+
+  assert.equal(result, '详细描述这个图片\n\n第二段上下文\n\n第一段上下文');
+});
+
+test('buildCanvasTextPanelSubmitInput can submit linked text even when draft is empty', () => {
+  const result = buildCanvasTextPanelSubmitInput({
+    draft: '   ',
+    linkedTexts: [{ id: 'text-1', text: '上游文本' }],
+  });
+
+  assert.equal(result, '上游文本');
+});
+
+test('buildCanvasTextPanelSubmitInput returns the original draft when no linked text is present', () => {
+  const result = buildCanvasTextPanelSubmitInput({
+    draft: '只发我自己',
+    linkedTexts: [],
+  });
+
+  assert.equal(result, '只发我自己');
+});
+
+test('getAutoResizedTextareaMetrics keeps the minimum height for short content', () => {
+  const result = getAutoResizedTextareaMetrics({
+    scrollHeight: 44,
+    minHeight: 52,
+    maxHeight: 148,
+  });
+
+  assert.deepEqual(result, {
+    height: 52,
+    isOverflowing: false,
+  });
+});
+
+test('getAutoResizedTextareaMetrics grows with content until the maximum height', () => {
+  const result = getAutoResizedTextareaMetrics({
+    scrollHeight: 112,
+    minHeight: 52,
+    maxHeight: 148,
+  });
+
+  assert.deepEqual(result, {
+    height: 112,
+    isOverflowing: false,
+  });
+});
+
+test('getAutoResizedTextareaMetrics clamps to the maximum height and enables internal scrolling', () => {
+  const result = getAutoResizedTextareaMetrics({
+    scrollHeight: 236,
+    minHeight: 52,
+    maxHeight: 148,
+  });
+
+  assert.deepEqual(result, {
+    height: 148,
+    isOverflowing: true,
+  });
 });
 
 test('buildReferenceImageRequestPayload preserves preview order for request images and labels', () => {
