@@ -18,6 +18,31 @@ const normalizeConnections = (connections, items) => {
   );
 };
 
+export function normalizeTextCardPanelDrafts(drafts, items) {
+  if (!isRecord(drafts)) return {};
+
+  const validTextCardIds = new Set(
+    (Array.isArray(items) ? items : [])
+      .filter(
+        (item) =>
+          isRecord(item) &&
+          typeof item.id === 'string' &&
+          item.type === 'text' &&
+          item.textVariant === 'card'
+      )
+      .map((item) => item.id)
+  );
+
+  return Object.entries(drafts).reduce((result, [itemId, value]) => {
+    if (!validTextCardIds.has(itemId)) return result;
+    if (typeof value !== 'string') return result;
+    if (value.trim().length === 0) return result;
+
+    result[itemId] = value;
+    return result;
+  }, {});
+}
+
 export function normalizeProjectSession(session) {
   const normalizedItems = Array.isArray(session?.items) ? session.items : [];
 
@@ -25,6 +50,7 @@ export function normalizeProjectSession(session) {
     ...session,
     items: normalizedItems,
     connections: normalizeConnections(session?.connections, normalizedItems),
+    textCardPanelDrafts: normalizeTextCardPanelDrafts(session?.textCardPanelDrafts, normalizedItems),
   };
 }
 
@@ -37,6 +63,7 @@ export function buildPersistedSession(session, patch) {
   return {
     ...nextSession,
     connections: normalizeConnections(nextSession.connections, nextSession.items),
+    textCardPanelDrafts: normalizeTextCardPanelDrafts(nextSession.textCardPanelDrafts, nextSession.items),
   };
 }
 

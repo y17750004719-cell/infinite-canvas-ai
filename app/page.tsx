@@ -12,9 +12,24 @@ import { ProjectSession } from './lib/db';
 import { ASPECT_RATIOS } from './lib/api-client';
 import {
   buildPersistedSession,
+  normalizeTextCardPanelDrafts,
   normalizeProjectSession,
 } from './lib/session-persistence.mjs';
-import { resolveSessionPresentationState } from './lib/workspace-session-view.mjs';
+import {
+  CANVAS_TEXT_GENERATION_CONCURRENCY_LIMIT,
+  TEXT_PANEL_MODEL_OPTIONS,
+  buildCanvasTextGenerationRequest,
+  buildReferenceImageRequestPayload,
+  canEnterManualTextMode,
+  canStartCanvasTextGeneration,
+  finalizeManualTextCardItem,
+  getDefaultTextPanelModelOption,
+  getDirectImagePreviewsForTextCard,
+  getTextCardVisualState,
+  removeCanvasTextGenerationEntry,
+  resolveSessionPresentationState,
+  shouldPreventScrollableRegionWheelDefault,
+} from './lib/workspace-session-view.mjs';
 import { GalleryView, SessionActionErrorBanner } from './components/workspace/GalleryView';
 import { useWorkspaceSessionController } from './hooks/useWorkspaceSessionController';
 
@@ -45,6 +60,7 @@ interface CanvasItem {
   fill?: string;
   text?: string;
   textVariant?: 'legacy' | 'card';
+  textMode?: 'ai' | 'manual';
   visible: boolean;
   locked: boolean;
 }
@@ -188,6 +204,9 @@ const TEXT_CARD_FRAME_INSET_X = 16;
 const TEXT_CARD_FRAME_TOP = 24;
 const TEXT_CARD_FRAME_BOTTOM = 12;
 const TEXT_CARD_GENERATION_PANEL_DEFAULT_WIDTH = 480;
+const TEXT_CARD_GENERATION_PANEL_BASE_HEIGHT = 144;
+const TEXT_CARD_GENERATION_PANEL_PREVIEW_HEIGHT = 92;
+const TEXT_CARD_BODY_TEXT_CLASSNAME = 'text-[15px] leading-7 tracking-[-0.02em] text-zinc-200';
 const NODE_SELECTED_OUTLINE_COLOR = 'rgba(226, 232, 240, 0.76)';
 const NODE_SELECTED_OUTLINE_WIDTH = 2;
 const VIEWPORT_ZOOM_DURATION_MS = 140;
@@ -265,6 +284,26 @@ const createImageCanvasItem = ({
   };
 };
 
+const stopCanvasWheelFromScrollableRegion: React.WheelEventHandler<HTMLElement> = (e) => {
+  e.stopPropagation();
+
+  const currentTarget = e.currentTarget;
+  if (
+    shouldPreventScrollableRegionWheelDefault({
+      deltaX: e.deltaX,
+      deltaY: e.deltaY,
+      scrollTop: currentTarget.scrollTop,
+      scrollHeight: currentTarget.scrollHeight,
+      clientHeight: currentTarget.clientHeight,
+      scrollLeft: currentTarget.scrollLeft,
+      scrollWidth: currentTarget.scrollWidth,
+      clientWidth: currentTarget.clientWidth,
+    })
+  ) {
+    e.preventDefault();
+  }
+};
+
 const getOriginalImageCopyPayload = (item: CanvasItem) => {
   if (item.type !== 'image' || !item.src) {
     return null;
@@ -279,6 +318,13 @@ const getOriginalImageCopyPayload = (item: CanvasItem) => {
 
 const normalizeCanvasItems = (items: CanvasItem[]): CanvasItem[] =>
   items.map((item) => {
+    if (item.type === 'text' && item.textVariant === 'card') {
+      return {
+        ...item,
+        textMode: item.textMode === 'manual' ? 'manual' : 'ai',
+      };
+    }
+
     if (item.type !== 'image') {
       return item;
     }
@@ -529,6 +575,7 @@ const CanvasPortsLayer = memo(function CanvasPortsLayer({
         }}
       >
         {items.map((item) => {
+          const isManualTextCard = item.type === 'text' && item.textVariant === 'card' && item.textMode === 'manual';
           const isHoveredItem = hoveredCanvasItemId === item.id;
           const isHoveredInputPort = hoveredInputPortItemId === item.id;
           const isHoveredOutputPort = hoveredOutputPortItemId === item.id;
@@ -539,10 +586,11 @@ const CanvasPortsLayer = memo(function CanvasPortsLayer({
           const isNearPort = isHoveredInputPort || isHoveredOutputPort;
           const showOutputPort = isHoveredItem || isNearPort || isConnectionSource || isMagneticItem;
           const showInputPort =
-            isHoveredItem ||
-            isNearPort ||
-            isMagneticItem ||
-            (connectionMode === 'dragging' && connectionSnapTargetId === item.id);
+            !isManualTextCard &&
+            (isHoveredItem ||
+              isNearPort ||
+              isMagneticItem ||
+              (connectionMode === 'dragging' && connectionSnapTargetId === item.id));
           const inputPoint = getRenderedPortOverlayPoint(item, 'left');
           const outputPoint = getRenderedPortOverlayPoint(item, 'right');
           const inputTransition =
@@ -560,37 +608,41 @@ const CanvasPortsLayer = memo(function CanvasPortsLayer({
 
           return (
             <React.Fragment key={`port-overlay-${item.id}`}>
-              <div
-                data-port-bridge="in"
-                data-item-id={item.id}
-                onPointerEnter={() => onInputPortEnter(item.id)}
-                onPointerLeave={() => onInputPortLeave(item.id)}
-                className="absolute -translate-x-1/2 -translate-y-1/2 bg-transparent pointer-events-auto"
-                style={{
-                  left: inputPoint.x,
-                  top: inputPoint.y,
-                  width: PORT_PROXIMITY_SIZE,
-                  height: PORT_PROXIMITY_SIZE,
-                  transition: inputTransition,
-                }}
-              />
-              <div
-                data-port="in"
-                data-item-id={item.id}
-                className={`absolute -translate-x-1/2 -translate-y-1/2 pointer-events-none transition-opacity duration-150 ${
-                  showInputPort ? 'opacity-100' : 'opacity-0'
-                }`}
-                style={{
-                  left: inputPoint.x,
-                  top: inputPoint.y,
-                  width: PORT_ICON_SIZE,
-                  height: PORT_ICON_SIZE,
-                  transform: `translate(-50%, -50%) scale(${inputMagneticState?.isTracking ? 1.04 : 1})`,
-                  transition: inputTransition,
-                }}
-              >
-                <ConnectionPortIcon className="h-full w-full" />
-              </div>
+              {!isManualTextCard && (
+                <>
+                  <div
+                    data-port-bridge="in"
+                    data-item-id={item.id}
+                    onPointerEnter={() => onInputPortEnter(item.id)}
+                    onPointerLeave={() => onInputPortLeave(item.id)}
+                    className="absolute -translate-x-1/2 -translate-y-1/2 bg-transparent pointer-events-auto"
+                    style={{
+                      left: inputPoint.x,
+                      top: inputPoint.y,
+                      width: PORT_PROXIMITY_SIZE,
+                      height: PORT_PROXIMITY_SIZE,
+                      transition: inputTransition,
+                    }}
+                  />
+                  <div
+                    data-port="in"
+                    data-item-id={item.id}
+                    className={`absolute -translate-x-1/2 -translate-y-1/2 pointer-events-none transition-opacity duration-150 ${
+                      showInputPort ? 'opacity-100' : 'opacity-0'
+                    }`}
+                    style={{
+                      left: inputPoint.x,
+                      top: inputPoint.y,
+                      width: PORT_ICON_SIZE,
+                      height: PORT_ICON_SIZE,
+                      transform: `translate(-50%, -50%) scale(${inputMagneticState?.isTracking ? 1.04 : 1})`,
+                      transition: inputTransition,
+                    }}
+                  >
+                    <ConnectionPortIcon className="h-full w-full" />
+                  </div>
+                </>
+              )}
               <div
                 data-port-bridge="out"
                 data-item-id={item.id}
@@ -638,30 +690,44 @@ const CanvasPortsLayer = memo(function CanvasPortsLayer({
 
 const CanvasNodesLayer = memo(function CanvasNodesLayer({
   items,
+  connections,
   viewport,
   multiSelectionBounds,
   selectedIds,
   selectedId,
   hoveredCanvasItemId,
+  activeCanvasTextGenerationItemIds,
+  editingTextCardId,
+  editingTextCardTextareaRef,
   onSelectionGroupPointerDown,
   onItemMouseEnter,
   onItemMouseLeave,
   onItemClick,
+  onItemDoubleClick,
   onItemPointerDown,
   onCornerResizePointerDown,
+  onManualTextCardInputChange,
+  onManualTextCardBlur,
 }: {
   items: CanvasItem[];
+  connections: Connection[];
   viewport: ViewportState;
   multiSelectionBounds: { left: number; top: number; width: number; height: number } | null;
   selectedIds: string[];
   selectedId: string | null;
   hoveredCanvasItemId: string | null;
+  activeCanvasTextGenerationItemIds: Set<string>;
+  editingTextCardId: string | null;
+  editingTextCardTextareaRef: React.RefObject<HTMLTextAreaElement | null>;
   onSelectionGroupPointerDown: (e: React.PointerEvent<HTMLDivElement>) => void;
   onItemMouseEnter: (itemId: string) => void;
   onItemMouseLeave: (itemId: string) => void;
   onItemClick: (e: React.MouseEvent<HTMLDivElement>, itemId: string) => void;
+  onItemDoubleClick: (itemId: string) => void;
   onItemPointerDown: (e: React.PointerEvent<HTMLDivElement>, itemId: string) => void;
   onCornerResizePointerDown: (e: React.PointerEvent<HTMLButtonElement>, item: CanvasItem) => void;
+  onManualTextCardInputChange: (itemId: string, value: string) => void;
+  onManualTextCardBlur: (itemId: string) => void;
 }) {
   return (
     <div
@@ -691,6 +757,15 @@ const CanvasNodesLayer = memo(function CanvasNodesLayer({
         const showCornerResizeHandle = isHoveredItem && item.type !== 'image';
         const isTextCard = item.type === 'text' && item.textVariant === 'card';
         const textCardFrameBounds = isTextCard ? getTextCardFrameBounds(item) : null;
+        const textCardVisualState = isTextCard
+          ? getTextCardVisualState({
+              item,
+              items,
+              connections,
+              generatingItemIds: activeCanvasTextGenerationItemIds,
+              editingItemId: editingTextCardId,
+            })
+          : 'idle';
 
         return (
           <div
@@ -707,6 +782,7 @@ const CanvasNodesLayer = memo(function CanvasNodesLayer({
             onMouseEnter={() => onItemMouseEnter(item.id)}
             onMouseLeave={() => onItemMouseLeave(item.id)}
             onClick={(e) => onItemClick(e, item.id)}
+            onDoubleClick={() => onItemDoubleClick(item.id)}
             onPointerDown={(e) => onItemPointerDown(e, item.id)}
           >
             {item.type === 'image' && item.src && (
@@ -738,38 +814,84 @@ const CanvasNodesLayer = memo(function CanvasNodesLayer({
                   }}
                 >
                   <div className="flex h-full w-full items-center justify-center">
-                    <div className="w-full max-w-[560px] text-left">
-                      <div className="flex flex-col gap-4">
-                      <div className="px-2 text-sm text-zinc-500">尝试：</div>
-                      <div className="flex w-full flex-col items-start gap-2">
-                        {[
-                          { icon: Pencil, label: '自己编写内容' },
-                          { icon: Video, label: '文字生视频' },
-                          { icon: ImageIcon, label: '图片反推提示词' },
-                        ].map((option) => {
-                          const Icon = option.icon;
-                          return (
-                            <button
-                              key={option.label}
-                              type="button"
-                              onPointerDown={(e) => {
-                                e.stopPropagation();
-                              }}
-                              className="group/row flex w-full items-center justify-start gap-2.5 rounded-[14px] bg-transparent px-3 py-2 text-left transition-colors duration-150 ease-out hover:bg-[rgba(255,255,255,0.038)]"
-                            >
-                              <Icon
-                                size={16}
-                                className="shrink-0 text-zinc-400 transition-colors duration-150 group-hover/row:text-zinc-100"
-                              />
-                              <span className="text-[15px] font-medium tracking-[-0.02em] text-zinc-400 transition-colors duration-150 group-hover/row:text-zinc-100">
-                                {option.label}
-                              </span>
-                            </button>
-                          );
-                        })}
+                    {textCardVisualState === 'idle' && (
+                      <div className="w-full max-w-[560px] text-left">
+                        <div className="flex flex-col gap-4">
+                          <div className="px-2 text-sm text-zinc-500">尝试：</div>
+                          <div className="flex w-full flex-col items-start gap-2">
+                            {[
+                              { icon: Pencil, label: '自己编写内容' },
+                              { icon: Video, label: '文字生视频' },
+                              { icon: ImageIcon, label: '图片反推提示词' },
+                            ].map((option) => {
+                              const Icon = option.icon;
+                              return (
+                                <button
+                                  key={option.label}
+                                  type="button"
+                                  onPointerDown={(e) => {
+                                    e.stopPropagation();
+                                  }}
+                                  className="group/row flex w-full items-center justify-start gap-2.5 rounded-[14px] bg-transparent px-3 py-2 text-left transition-colors duration-150 ease-out hover:bg-[rgba(255,255,255,0.038)]"
+                                >
+                                  <Icon
+                                    size={16}
+                                    className="shrink-0 text-zinc-400 transition-colors duration-150 group-hover/row:text-zinc-100"
+                                  />
+                                  <span className="text-[15px] font-medium tracking-[-0.02em] text-zinc-400 transition-colors duration-150 group-hover/row:text-zinc-100">
+                                    {option.label}
+                                  </span>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
                       </div>
+                    )}
+                    {textCardVisualState === 'waiting' && (
+                      <div className="flex h-full w-full items-center justify-center px-8 text-center">
+                        <span className="workspace-text-card-waiting text-[17px] font-medium tracking-[-0.03em] text-zinc-500">
+                          等待生成中……
+                        </span>
                       </div>
-                    </div>
+                    )}
+                    {textCardVisualState === 'content' && (
+                      <div
+                        className="panel-scrollbar h-full w-full overflow-y-auto px-2 py-1"
+                        onWheel={stopCanvasWheelFromScrollableRegion}
+                      >
+                        <div className="min-h-full break-words">
+                          <TextCardMarkdown content={item.text || ''} />
+                        </div>
+                      </div>
+                    )}
+                    {textCardVisualState === 'manual-editing' && (
+                      <textarea
+                        ref={item.id === editingTextCardId ? editingTextCardTextareaRef : null}
+                        value={item.text || ''}
+                        onChange={(e) => onManualTextCardInputChange(item.id, e.target.value)}
+                        onBlur={() => onManualTextCardBlur(item.id)}
+                        onPointerDown={(e) => {
+                          e.stopPropagation();
+                        }}
+                        onDoubleClick={(e) => {
+                          e.stopPropagation();
+                        }}
+                        onWheel={stopCanvasWheelFromScrollableRegion}
+                        className={`panel-scrollbar h-full w-full resize-none bg-transparent px-2 py-1 ${TEXT_CARD_BODY_TEXT_CLASSNAME} outline-none placeholder:text-zinc-500`}
+                        placeholder="请输入文本内容..."
+                      />
+                    )}
+                    {textCardVisualState === 'manual-content' && (
+                      <div
+                        className="panel-scrollbar h-full w-full overflow-y-auto px-2 py-1"
+                        onWheel={stopCanvasWheelFromScrollableRegion}
+                      >
+                        <div className={`min-h-full whitespace-pre-wrap break-words ${TEXT_CARD_BODY_TEXT_CLASSNAME}`}>
+                          {item.text || ''}
+                        </div>
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
@@ -893,11 +1015,25 @@ const CanvasViewport = memo(function CanvasViewport({
   onPendingMenuPointerDown,
   onPendingMenuAction,
   selectedTextCardPanelItem,
+  linkedImagePreviews,
+  activeCanvasTextGenerationItemIds,
+  selectedTextPanelModel,
+  textPanelModelOptions,
+  showTextPanelModelMenu,
+  textPanelModelMenuRef,
   selectedTextCardPanelInput,
-  isGenerating,
+  selectedTextCardPanelError,
+  isSelectedTextCardGenerating,
+  editingTextCardId,
+  editingTextCardTextareaRef,
+  onToggleTextPanelModelMenu,
+  onSelectTextPanelModel,
   onSelectedTextCardPanelInputChange,
   onSelectedTextCardPanelSubmit,
   onSelectedTextCardPanelCancel,
+  onItemDoubleClick,
+  onManualTextCardInputChange,
+  onManualTextCardBlur,
 }: {
   canvasRef: React.RefObject<HTMLDivElement | null>;
   widthStyle: string;
@@ -953,11 +1089,25 @@ const CanvasViewport = memo(function CanvasViewport({
   onPendingMenuPointerDown: (e: React.PointerEvent<HTMLDivElement>) => void;
   onPendingMenuAction: (optionId: (typeof CONNECTION_MENU_OPTIONS)[number]['id']) => void;
   selectedTextCardPanelItem: CanvasItem | null;
+  linkedImagePreviews: Array<{ id: string; src: string; label: string; alt?: string }>;
+  activeCanvasTextGenerationItemIds: Set<string>;
+  selectedTextPanelModel: { id: string; label: string };
+  textPanelModelOptions: Array<{ id: string; label: string }>;
+  showTextPanelModelMenu: boolean;
+  textPanelModelMenuRef: React.RefObject<HTMLDivElement | null>;
   selectedTextCardPanelInput: string;
-  isGenerating: boolean;
+  selectedTextCardPanelError: string | null;
+  isSelectedTextCardGenerating: boolean;
+  editingTextCardId: string | null;
+  editingTextCardTextareaRef: React.RefObject<HTMLTextAreaElement | null>;
+  onToggleTextPanelModelMenu: () => void;
+  onSelectTextPanelModel: (modelId: string) => void;
   onSelectedTextCardPanelInputChange: (value: string) => void;
   onSelectedTextCardPanelSubmit: () => void;
   onSelectedTextCardPanelCancel: () => void;
+  onItemDoubleClick: (itemId: string) => void;
+  onManualTextCardInputChange: (itemId: string, value: string) => void;
+  onManualTextCardBlur: (itemId: string) => void;
 }) {
   const { from, to } = getPreviewRenderPoints();
   const canvasRect = canvasRef.current?.getBoundingClientRect();
@@ -986,7 +1136,9 @@ const CanvasViewport = memo(function CanvasViewport({
   const selectedTextCardPanelCanvasWidth = selectedTextCardPanelFrameBounds
     ? Math.max(TEXT_CARD_GENERATION_PANEL_DEFAULT_WIDTH, selectedTextCardPanelFrameBounds.width)
     : 0;
-  const selectedTextCardPanelCanvasHeight = 144;
+  const selectedTextCardPanelCanvasHeight =
+    TEXT_CARD_GENERATION_PANEL_BASE_HEIGHT +
+    (linkedImagePreviews.length > 0 ? TEXT_CARD_GENERATION_PANEL_PREVIEW_HEIGHT : 0);
   const selectedTextCardPanelCanvasRect =
     selectedTextCardPanelItem && selectedTextCardPanelFrameBounds
       ? {
@@ -1136,6 +1288,31 @@ const CanvasViewport = memo(function CanvasViewport({
             }}
           >
             <div className="px-5 py-3">
+              {linkedImagePreviews.length > 0 && (
+                <div className="mb-3 rounded-[18px] border border-white/[0.08] bg-[rgba(255,255,255,0.025)] p-2.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.025)]">
+                  <div
+                    className="panel-scrollbar flex gap-2 overflow-x-auto pb-1"
+                    onWheel={stopCanvasWheelFromScrollableRegion}
+                  >
+                    {linkedImagePreviews.map((preview) => (
+                      <div
+                        key={preview.id}
+                        className="relative h-20 w-20 shrink-0 overflow-hidden rounded-[14px] border border-white/[0.08] bg-black/25"
+                      >
+                        <img
+                          src={preview.src}
+                          alt={preview.alt || preview.label}
+                          className="h-full w-full object-cover"
+                          draggable={false}
+                        />
+                        <span className="pointer-events-none absolute left-1.5 top-1.5 rounded-full bg-black/70 px-2 py-0.5 text-[10px] font-medium tracking-[0.01em] text-zinc-100">
+                          {preview.label}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
               <textarea
                 value={selectedTextCardPanelInput}
                 onChange={(e) => {
@@ -1144,7 +1321,7 @@ const CanvasViewport = memo(function CanvasViewport({
                 onKeyDown={(e) => {
                   if (e.key === 'Enter' && !e.shiftKey && !e.altKey) {
                     e.preventDefault();
-                    if (isGenerating) {
+                    if (isSelectedTextCardGenerating) {
                       onSelectedTextCardPanelCancel();
                     } else {
                       onSelectedTextCardPanelSubmit();
@@ -1154,23 +1331,66 @@ const CanvasViewport = memo(function CanvasViewport({
                 onPointerDown={(e) => {
                   e.stopPropagation();
                 }}
+                onWheel={stopCanvasWheelFromScrollableRegion}
                 className="panel-scrollbar min-h-[52px] w-full resize-none overflow-y-auto bg-transparent text-[14px] leading-6 text-zinc-100 outline-none placeholder:text-zinc-500"
                 placeholder="描述你想要生成的内容，并在下方调整生成参数。（按下Enter 生成，Shift+Enter 换行）"
                 rows={2}
               />
+              {selectedTextCardPanelError && (
+                <div className="mt-2 px-0.5 text-[12px] leading-5 text-rose-400">
+                  {selectedTextCardPanelError}
+                </div>
+              )}
             </div>
             <div className="flex items-center justify-between border-t border-white/[0.08] bg-[rgba(255,255,255,0.02)] px-5 py-3">
-              <button
-                type="button"
-                onPointerDown={(e) => {
-                  e.stopPropagation();
-                }}
-                className="inline-flex items-center gap-2 text-[13px] font-semibold tracking-[-0.02em] text-zinc-100"
-              >
-                <Sparkles size={15} className="text-zinc-100" />
-                <span>全能语言模型G3</span>
-                <ChevronDown size={14} className="text-zinc-500" />
-              </button>
+              <div className="relative" ref={textPanelModelMenuRef}>
+                {showTextPanelModelMenu && (
+                  <div
+                    className="absolute bottom-full left-0 mb-2 min-w-[248px] overflow-hidden rounded-[18px] border border-white/[0.1] bg-[rgba(24,24,27,0.985)] p-1.5 shadow-[0_24px_64px_rgba(0,0,0,0.42)] backdrop-blur-xl"
+                    onPointerDown={(e) => {
+                      e.stopPropagation();
+                    }}
+                  >
+                    {textPanelModelOptions.map((option) => {
+                      const isSelected = option.id === selectedTextPanelModel.id;
+                      return (
+                        <button
+                          key={option.id}
+                          type="button"
+                          onClick={() => {
+                            onSelectTextPanelModel(option.id);
+                          }}
+                          className={`flex w-full items-center justify-between rounded-[14px] px-3 py-2.5 text-left transition-colors ${
+                            isSelected ? 'bg-white/[0.08] text-zinc-50' : 'text-zinc-300 hover:bg-white/[0.05]'
+                          }`}
+                        >
+                          <div className="min-w-0">
+                            <div className="truncate text-[13px] font-semibold tracking-[-0.02em]">{option.label}</div>
+                            <div className="truncate text-[11px] text-zinc-500">{option.id}</div>
+                          </div>
+                          {isSelected && <Check size={15} className="ml-3 shrink-0 text-zinc-100" />}
+                        </button>
+                      );
+                    })}
+                  </div>
+                )}
+                <button
+                  type="button"
+                  onPointerDown={(e) => {
+                    e.stopPropagation();
+                  }}
+                  onClick={() => {
+                    onToggleTextPanelModelMenu();
+                  }}
+                  className="inline-flex items-center gap-2 text-[13px] font-semibold tracking-[-0.02em] text-zinc-100"
+                  aria-haspopup="menu"
+                  aria-expanded={showTextPanelModelMenu}
+                >
+                  <Sparkles size={15} className="text-zinc-100" />
+                  <span>{selectedTextPanelModel.label}</span>
+                  <ChevronDown size={14} className={`text-zinc-500 transition-transform ${showTextPanelModelMenu ? 'rotate-180' : ''}`} />
+                </button>
+              </div>
               <div className="flex items-center gap-2.5">
                 <button
                   type="button"
@@ -1178,18 +1398,18 @@ const CanvasViewport = memo(function CanvasViewport({
                     e.stopPropagation();
                   }}
                   onClick={() => {
-                    if (isGenerating) {
+                    if (isSelectedTextCardGenerating) {
                       onSelectedTextCardPanelCancel();
                     } else {
                       onSelectedTextCardPanelSubmit();
                     }
                   }}
-                  disabled={!isGenerating && !selectedTextCardPanelInput.trim()}
+                  disabled={!isSelectedTextCardGenerating && !selectedTextCardPanelInput.trim()}
                   className="inline-flex h-11 w-11 items-center justify-center rounded-full border border-black/5 bg-[#f5f7fb] text-black shadow-[0_10px_24px_rgba(0,0,0,0.22),inset_0_1px_0_rgba(255,255,255,0.7)] transition-colors hover:bg-white disabled:cursor-not-allowed disabled:opacity-50"
-                  aria-label={isGenerating ? '终止生成' : '开始生成'}
-                  title={isGenerating ? '终止生成' : '开始生成'}
+                  aria-label={isSelectedTextCardGenerating ? '终止生成' : '开始生成'}
+                  title={isSelectedTextCardGenerating ? '终止生成' : '开始生成'}
                 >
-                  {isGenerating ? (
+                  {isSelectedTextCardGenerating ? (
                     <svg className="animate-spin" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                       <circle cx="12" cy="12" r="9" opacity="0.25" />
                       <path d="M21 12a9 9 0 0 1-9 9" />
@@ -1208,17 +1428,24 @@ const CanvasViewport = memo(function CanvasViewport({
       )}
       <CanvasNodesLayer
         items={items}
+        connections={connections}
         viewport={viewport}
         multiSelectionBounds={multiSelectionBounds}
         selectedIds={selectedIds}
         selectedId={selectedId}
         hoveredCanvasItemId={hoveredCanvasItemId}
+        activeCanvasTextGenerationItemIds={activeCanvasTextGenerationItemIds}
+        editingTextCardId={editingTextCardId}
+        editingTextCardTextareaRef={editingTextCardTextareaRef}
         onSelectionGroupPointerDown={onSelectionGroupPointerDown}
         onItemMouseEnter={onItemMouseEnter}
         onItemMouseLeave={onItemMouseLeave}
         onItemClick={onItemClick}
+        onItemDoubleClick={onItemDoubleClick}
         onItemPointerDown={onItemPointerDown}
         onCornerResizePointerDown={onCornerResizePointerDown}
+        onManualTextCardInputChange={onManualTextCardInputChange}
+        onManualTextCardBlur={onManualTextCardBlur}
       />
       {isMarqueeSelecting && marqueeRect && (
         <div
@@ -1427,6 +1654,88 @@ const MarkdownMessage = memo(function MarkdownMessage({
   );
 });
 
+const TextCardMarkdown = memo(function TextCardMarkdown({
+  content,
+}: {
+  content: string;
+}) {
+  return (
+    <div className="workspace-text-card-markdown text-[15px] leading-7 tracking-[-0.02em] text-zinc-200">
+      <ReactMarkdown
+        remarkPlugins={[remarkGfm]}
+        components={{
+          h1: ({ children }) => <h1 className="mb-3 text-[1.2rem] font-semibold leading-[1.25] text-zinc-50 first:mt-0">{children}</h1>,
+          h2: ({ children }) => <h2 className="mb-3 mt-5 text-[1.08rem] font-semibold leading-[1.3] text-zinc-100 first:mt-0">{children}</h2>,
+          h3: ({ children }) => <h3 className="mb-2 mt-4 text-[1rem] font-semibold leading-[1.35] text-zinc-100 first:mt-0">{children}</h3>,
+          p: ({ children }) => <p className="mt-4 first:mt-0">{children}</p>,
+          ul: ({ children }) => <ul className="mt-4 list-disc space-y-1.5 pl-5 first:mt-0">{children}</ul>,
+          ol: ({ children }) => <ol className="mt-4 list-decimal space-y-1.5 pl-5 first:mt-0">{children}</ol>,
+          li: ({ children }) => <li className="pl-1 marker:text-zinc-500">{children}</li>,
+          blockquote: ({ children }) => <blockquote className="mt-4 border-l border-white/10 pl-4 text-zinc-300 first:mt-0">{children}</blockquote>,
+          strong: ({ children }) => <strong className="font-semibold text-zinc-50">{children}</strong>,
+          em: ({ children }) => <em className="italic text-zinc-100">{children}</em>,
+          code(props) {
+            const { inline, children, className, ...rest } = props as React.HTMLAttributes<HTMLElement> & {
+              inline?: boolean;
+              className?: string;
+            };
+
+            if (inline) {
+              return (
+                <code
+                  {...rest}
+                  className="rounded-md border border-white/10 bg-black/20 px-1.5 py-0.5 text-[0.92em] text-zinc-100"
+                >
+                  {children}
+                </code>
+              );
+            }
+
+            return (
+              <code
+                {...rest}
+                className={className}
+              >
+                {children}
+              </code>
+            );
+          },
+          pre: ({ children }) => (
+            <pre
+              className="panel-scrollbar mt-4 overflow-x-auto rounded-[14px] border border-white/[0.08] bg-black/20 px-3 py-2 text-[13px] leading-6 text-zinc-200 first:mt-0"
+              onWheel={stopCanvasWheelFromScrollableRegion}
+            >
+              {children}
+            </pre>
+          ),
+          a: ({ children, href }) => (
+            <a
+              href={href}
+              target="_blank"
+              rel="noreferrer"
+              className="text-zinc-100 underline decoration-zinc-500 underline-offset-4 hover:text-white"
+            >
+              {children}
+            </a>
+          ),
+          table: ({ children }) => (
+            <div className="mt-4 overflow-x-auto first:mt-0" onWheel={stopCanvasWheelFromScrollableRegion}>
+              <table className="min-w-full border-collapse text-left text-[13px] text-zinc-200">{children}</table>
+            </div>
+          ),
+          thead: ({ children }) => <thead className="border-b border-white/[0.08] text-zinc-100">{children}</thead>,
+          tbody: ({ children }) => <tbody>{children}</tbody>,
+          tr: ({ children }) => <tr className="border-b border-white/[0.06] last:border-b-0">{children}</tr>,
+          th: ({ children }) => <th className="px-3 py-2 font-medium">{children}</th>,
+          td: ({ children }) => <td className="px-3 py-2 text-zinc-300">{children}</td>,
+        }}
+      >
+        {content}
+      </ReactMarkdown>
+    </div>
+  );
+});
+
 function ConnectionPortIcon({
   className = '',
   glyphSize = 14,
@@ -1624,6 +1933,10 @@ export default function AIWorkspace() {
   const [chatInputRows, setChatInputRows] = useState(1);
   const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
   const [isGenerating, setIsGenerating] = useState(false);
+  const [activeCanvasTextGenerations, setActiveCanvasTextGenerations] = useState<
+    Record<string, { status: 'running'; startedAt: number }>
+  >({});
+  const [canvasTextGenerationErrorById, setCanvasTextGenerationErrorById] = useState<Record<string, string>>({});
   const [hasStartedChat, setHasStartedChat] = useState(false);
   const [showAvatarMenu, setShowAvatarMenu] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -1661,18 +1974,22 @@ export default function AIWorkspace() {
   const generationModeMenuRef = useRef<HTMLDivElement>(null);
   const skillsMenuRef = useRef<HTMLDivElement>(null);
   const aspectRatioMenuRef = useRef<HTMLDivElement>(null);
+  const textPanelModelMenuRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const chatFileInputRef = useRef<HTMLInputElement>(null);
   const chatInputEditorRef = useRef<HTMLDivElement>(null);
   const chatContainerRef = useRef<HTMLDivElement>(null);
   const generateAbortRef = useRef<AbortController | null>(null);
+  const canvasTextGenerateAbortControllersRef = useRef<Map<string, AbortController>>(new Map());
+  const suppressCanvasTextAbortErrorItemIdsRef = useRef<Set<string>>(new Set());
   const processedSkillJobUrlsRef = useRef<Set<string>>(new Set());
   const processedSkillChoiceIdsRef = useRef<Set<string>>(new Set());
   const streamQueueRef = useRef('');
   const streamTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const streamMessageIdRef = useRef<string | null>(null);
   const pendingAssistantMessageIdRef = useRef<string | null>(null);
+  const currentSessionIdRef = useRef<string | null>(null);
   const assistantTextSelectionRef = useRef<AssistantTextSelectionSession>({
     startedInAssistant: false,
     isPointerDown: false,
@@ -1684,7 +2001,11 @@ export default function AIWorkspace() {
   const [chatInputFocused, setChatInputFocused] = useState(false);
   const [chatInputHeight, setChatInputHeight] = useState(24);
   const [copiedAssistantMessageId, setCopiedAssistantMessageId] = useState<string | null>(null);
+  const [editingTextCardId, setEditingTextCardId] = useState<string | null>(null);
   const [textCardPanelDrafts, setTextCardPanelDrafts] = useState<Record<string, string>>({});
+  const [selectedTextPanelModelId, setSelectedTextPanelModelId] = useState(getDefaultTextPanelModelOption().id);
+  const [showTextPanelModelMenu, setShowTextPanelModelMenu] = useState(false);
+  const editingTextCardTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const multiSelectionBounds = React.useMemo(() => {
     if (selectedIds.length <= 1) return null;
     const selectedItems = items.filter((item) => selectedIds.includes(item.id));
@@ -1710,13 +2031,41 @@ export default function AIWorkspace() {
   const selectedTextCardPanelItem = React.useMemo(() => {
     if (selectedIds.length !== 1 || !selectedId) return null;
     const item = itemById[selectedId];
-    return item?.type === 'text' && item.textVariant === 'card' ? item : null;
+    return item?.type === 'text' && item.textVariant === 'card' && item.textMode !== 'manual' ? item : null;
   }, [itemById, selectedId, selectedIds]);
+  const selectedTextCardPanelLinkedImagePreviews = React.useMemo(
+    () =>
+      getDirectImagePreviewsForTextCard({
+        textCardId: selectedTextCardPanelItem?.id ?? '',
+        items,
+        connections,
+      }),
+    [connections, items, selectedTextCardPanelItem?.id]
+  );
   const selectedTextCardPanelInput = selectedTextCardPanelItem
     ? textCardPanelDrafts[selectedTextCardPanelItem.id] ?? ''
     : '';
+  const selectedTextCardPanelError = selectedTextCardPanelItem
+    ? canvasTextGenerationErrorById[selectedTextCardPanelItem.id] ?? null
+    : null;
+  const activeCanvasTextGenerationItemIds = React.useMemo(
+    () => new Set(Object.keys(activeCanvasTextGenerations)),
+    [activeCanvasTextGenerations]
+  );
+  const isSelectedTextCardGenerating =
+    !!selectedTextCardPanelItem && !!activeCanvasTextGenerations[selectedTextCardPanelItem.id];
+  const selectedTextPanelModel =
+    TEXT_PANEL_MODEL_OPTIONS.find((option) => option.id === selectedTextPanelModelId) || getDefaultTextPanelModelOption();
   const SKILL_TOKEN_SELECTOR = '[data-skill-token="true"]';
   const copiedAssistantMessageTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    if (!editingTextCardId || !editingTextCardTextareaRef.current) return;
+
+    editingTextCardTextareaRef.current.focus();
+    const textLength = editingTextCardTextareaRef.current.value.length;
+    editingTextCardTextareaRef.current.setSelectionRange(textLength, textLength);
+  }, [editingTextCardId]);
 
   useEffect(() => {
     viewportRef.current = viewport;
@@ -1725,6 +2074,13 @@ export default function AIWorkspace() {
   useEffect(() => {
     itemsRef.current = items;
   }, [items]);
+
+  useEffect(() => {
+    if (!editingTextCardId) return;
+    if (!items.some((item) => item.id === editingTextCardId && item.type === 'text' && item.textVariant === 'card')) {
+      setEditingTextCardId(null);
+    }
+  }, [editingTextCardId, items]);
 
   useEffect(() => {
     selectedIdRef.current = selectedId;
@@ -2317,6 +2673,12 @@ export default function AIWorkspace() {
   const handleSelectedTextCardPanelInputChange = useCallback(
     (value: string) => {
       if (!selectedTextCardPanelItem) return;
+      setCanvasTextGenerationErrorById((prev) => {
+        if (!prev[selectedTextCardPanelItem.id]) return prev;
+        const next = { ...prev };
+        delete next[selectedTextCardPanelItem.id];
+        return next;
+      });
       setTextCardPanelDrafts((prev) => ({
         ...prev,
         [selectedTextCardPanelItem.id]: value,
@@ -2324,6 +2686,77 @@ export default function AIWorkspace() {
     },
     [selectedTextCardPanelItem]
   );
+
+  const handleManualTextCardInputChange = useCallback((itemId: string, value: string) => {
+    setItems((prev) =>
+      prev.map((item) =>
+        item.id === itemId
+          ? {
+              ...item,
+              text: value,
+              textMode: 'manual',
+            }
+          : item
+      )
+    );
+  }, []);
+
+  const finalizeManualTextCardEditing = useCallback((itemId: string) => {
+    setItems((prev) =>
+      prev.map((item) => (item.id === itemId ? finalizeManualTextCardItem(item) : item))
+    );
+    setEditingTextCardId((prev) => (prev === itemId ? null : prev));
+  }, []);
+
+  const handleTextCardDoubleClick = useCallback((itemId: string) => {
+    const item = itemsRef.current.find((entry) => entry.id === itemId);
+    if (!item || item.type !== 'text' || item.textVariant !== 'card') return;
+
+    if (item.textMode === 'manual') {
+      setEditingTextCardId(itemId);
+      return;
+    }
+
+    if (
+      !canEnterManualTextMode({
+        item,
+        items: itemsRef.current,
+        connections,
+        generatingItemIds: activeCanvasTextGenerationItemIds,
+      })
+    ) {
+      return;
+    }
+
+    setItems((prev) =>
+      prev.map((entry) =>
+        entry.id === itemId
+          ? {
+              ...entry,
+              textMode: 'manual',
+            }
+          : entry
+      )
+    );
+    setEditingTextCardId(itemId);
+  }, [activeCanvasTextGenerationItemIds, connections]);
+
+  useEffect(() => {
+    setTextCardPanelDrafts((prev) => {
+      const next = normalizeTextCardPanelDrafts(prev, items);
+      const prevKeys = Object.keys(prev);
+      const nextKeys = Object.keys(next);
+
+      if (
+        prevKeys.length === nextKeys.length &&
+        prevKeys.every((key) => prev[key] === next[key])
+      ) {
+        return prev;
+      }
+
+      return next;
+    });
+  }, [items]);
 
   const handleChatEditorKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
     if ((e.key === 'Backspace' || e.key === 'Delete') && activeSkill && isCaretAtEditorStart()) {
@@ -2408,6 +2841,7 @@ export default function AIWorkspace() {
       height: TEXT_CARD_DIMENSIONS.height,
       rotation: 0,
       textVariant: 'card',
+      textMode: 'ai',
       visible: true,
       locked: false,
     };
@@ -2424,6 +2858,7 @@ export default function AIWorkspace() {
       height: TEXT_CARD_DIMENSIONS.height,
       rotation: 0,
       textVariant: 'card',
+      textMode: 'ai',
       visible: true,
       locked: false,
     };
@@ -3485,12 +3920,15 @@ export default function AIWorkspace() {
       if (target.dataset.port) return;
       if (isSpacePressed) return;
       if (e.shiftKey) return;
+      if (editingTextCardId === itemId) {
+        finalizeManualTextCardEditing(itemId);
+      }
       e.preventDefault();
       e.stopPropagation();
       const draggingIds = selectedIds.includes(itemId) ? selectedIds : [itemId];
       beginDraggingSelectedItems(e.clientX, e.clientY, draggingIds, itemId);
     },
-    [beginDraggingSelectedItems, isSpacePressed, selectedIds]
+    [beginDraggingSelectedItems, editingTextCardId, finalizeManualTextCardEditing, isSpacePressed, selectedIds]
   );
 
   const handleCornerResizePointerDown = useCallback(
@@ -3543,6 +3981,152 @@ export default function AIWorkspace() {
         cancelAnimationFrame(zoomAnimationFrameRef.current);
       }
     };
+  }, []);
+
+  const handleCanvasTextGenerate = useCallback(
+    async ({
+      itemId,
+      input,
+      linkedImagePreviews,
+      modelId,
+    }: {
+      itemId: string;
+      input: string;
+      linkedImagePreviews: Array<{ id: string; src: string; label: string; alt?: string }>;
+      modelId: string;
+    }) => {
+      const trimmedInput = input.trim();
+      if (!itemId || !trimmedInput) return;
+
+      if (
+        !canStartCanvasTextGeneration({
+          itemId,
+          activeGenerations: activeCanvasTextGenerations,
+        })
+      ) {
+        const isDuplicateGeneration = !!activeCanvasTextGenerations[itemId];
+        if (!isDuplicateGeneration) {
+          setCanvasTextGenerationErrorById((prev) => ({
+            ...prev,
+            [itemId]: `当前最多同时生成 ${CANVAS_TEXT_GENERATION_CONCURRENCY_LIMIT} 个文本节点`,
+          }));
+        }
+        return;
+      }
+
+      setCanvasTextGenerationErrorById((prev) => {
+        if (!prev[itemId]) return prev;
+        const next = { ...prev };
+        delete next[itemId];
+        return next;
+      });
+
+      const generationSessionId = currentSessionIdRef.current;
+      const controller = new AbortController();
+      canvasTextGenerateAbortControllersRef.current.set(itemId, controller);
+      setActiveCanvasTextGenerations((prev) => ({
+        ...prev,
+        [itemId]: {
+          status: 'running',
+          startedAt: Date.now(),
+        },
+      }));
+      setShowTextPanelModelMenu(false);
+
+      try {
+        const response = await fetch('/api/generate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(
+            buildCanvasTextGenerationRequest({
+              input: trimmedInput,
+              linkedImagePreviews,
+              modelId,
+            })
+          ),
+          signal: controller.signal,
+        });
+
+        if (!response.ok) {
+          const errorText = await response.text();
+          let errorMessage = `API Error: ${response.status} ${response.statusText}`;
+          try {
+            const errorData = JSON.parse(errorText) as { error?: string };
+            if (errorData.error) {
+              errorMessage = errorData.error;
+            }
+          } catch {
+            if (errorText) {
+              errorMessage = errorText;
+            }
+          }
+          throw new Error(errorMessage);
+        }
+
+        const result = await response.json();
+        if (result.status !== 'completed' || result.result?.type !== 'chat' || typeof result.result?.content !== 'string') {
+          throw new Error(result.error || '未收到有效文本响应，请重试');
+        }
+
+        if (
+          currentSessionIdRef.current !== generationSessionId ||
+          !itemsRef.current.some((item) => item.id === itemId)
+        ) {
+          return;
+        }
+
+        setItems((prev) =>
+          prev.map((item) =>
+            item.id === itemId
+              ? {
+                  ...item,
+                  text: result.result.content,
+                  textMode: 'ai',
+                }
+              : item
+          )
+        );
+      } catch (error) {
+        if (
+          currentSessionIdRef.current !== generationSessionId ||
+          !itemsRef.current.some((item) => item.id === itemId)
+        ) {
+          return;
+        }
+
+        if (error instanceof Error && error.name === 'AbortError') {
+          if (suppressCanvasTextAbortErrorItemIdsRef.current.has(itemId)) {
+            return;
+          }
+          setCanvasTextGenerationErrorById((prev) => ({
+            ...prev,
+            [itemId]: '任务已终止',
+          }));
+          return;
+        }
+
+        console.error('Canvas text generation failed:', error);
+        setCanvasTextGenerationErrorById((prev) => ({
+          ...prev,
+          [itemId]: `生成失败: ${error instanceof Error ? error.message : '未知错误'}`,
+        }));
+      } finally {
+        suppressCanvasTextAbortErrorItemIdsRef.current.delete(itemId);
+        canvasTextGenerateAbortControllersRef.current.delete(itemId);
+        setActiveCanvasTextGenerations((prev) =>
+          removeCanvasTextGenerationEntry({
+            activeGenerations: prev,
+            itemId,
+          })
+        );
+      }
+    },
+    [activeCanvasTextGenerations]
+  );
+
+  const handleCancelCanvasTextGenerate = useCallback((itemId?: string | null) => {
+    if (!itemId) return;
+    canvasTextGenerateAbortControllersRef.current.get(itemId)?.abort();
   }, []);
 
   const handleCancelGenerate = async () => {
@@ -3707,11 +4291,21 @@ export default function AIWorkspace() {
     return { brandBrief, viGuide };
   };
 
-  const handleGenerate = async (options?: { input?: string; skill?: { id: string; label: string } | null }) => {
+  const handleGenerate = async (options?: {
+    input?: string;
+    skill?: { id: string; label: string } | null;
+    referenceImagesOverride?: Array<{ id?: string; src: string; label: string; alt?: string }>;
+    modelOverride?: string;
+  }) => {
     const currentChatInput = options?.input ?? chatInput;
     if (!currentChatInput.trim()) return;
 
-    const currentReferenceImages = [...chatReferenceImages];
+    const overrideReferencePayload = options?.referenceImagesOverride
+      ? buildReferenceImageRequestPayload(options.referenceImagesOverride)
+      : null;
+    const currentReferenceImages = overrideReferencePayload
+      ? [...overrideReferencePayload.referenceImages]
+      : [...chatReferenceImages];
     const currentSkill = options?.skill ?? activeSkill;
     const currentViewport = { ...viewport };
     const currentImageCount = imageCount;
@@ -4092,6 +4686,9 @@ export default function AIWorkspace() {
         messages: messagesForAPI,
         intent: generationMode,
       };
+      if (typeof options?.modelOverride === 'string' && options.modelOverride.trim()) {
+        requestBody.model = options.modelOverride.trim();
+      }
       if (generationMode === 'image' && imageAspectRatio !== 'auto') {
         requestBody.aspect_ratio = imageAspectRatio;
       }
@@ -4099,15 +4696,24 @@ export default function AIWorkspace() {
       if (currentSkill?.id === 'brand') {
         requestBody.intent = 'chat';
       }
-      const shouldRequestStream = generationMode !== 'image' && currentReferenceImages.length === 0;
+      const referencesForRequest = currentSkill?.id === 'brand'
+        ? mergedBrandLogoReferences
+        : overrideReferencePayload
+          ? overrideReferencePayload.referenceImages
+          : currentReferenceImages;
+      const referenceLabelsForRequest = currentSkill?.id === 'brand'
+        ? mergedBrandLogoReferences.map((_, index) => `image${index + 1}`)
+        : overrideReferencePayload
+          ? overrideReferencePayload.referenceLabels
+          : currentReferenceImages.map((_, index) => `image${index + 1}`);
+      const shouldRequestStream = generationMode !== 'image' && referencesForRequest.length === 0;
       if (shouldRequestStream) {
         requestBody.stream = true;
       }
-      
-      const referencesForRequest = currentSkill?.id === 'brand' ? mergedBrandLogoReferences : currentReferenceImages;
+
       if (referencesForRequest.length > 0) {
         requestBody.reference_images = referencesForRequest;
-        requestBody.reference_labels = referencesForRequest.map((_, index) => `image${index + 1}`);
+        requestBody.reference_labels = referenceLabelsForRequest;
       }
       
       if (currentSkill) {
@@ -4397,17 +5003,24 @@ export default function AIWorkspace() {
   };
 
   const handleSelectedTextCardPanelSubmit = useCallback(() => {
-    if (isGenerating || !selectedTextCardPanelItem) return;
+    if (!selectedTextCardPanelItem || activeCanvasTextGenerations[selectedTextCardPanelItem.id]) return;
     const input = (textCardPanelDrafts[selectedTextCardPanelItem.id] ?? '').trim();
     if (!input) return;
 
-    setTextCardPanelDrafts((prev) => ({
-      ...prev,
-      [selectedTextCardPanelItem.id]: '',
-    }));
-
-    void handleGenerate({ input });
-  }, [isGenerating, selectedTextCardPanelItem, textCardPanelDrafts]);
+    void handleCanvasTextGenerate({
+      itemId: selectedTextCardPanelItem.id,
+      input,
+      linkedImagePreviews: selectedTextCardPanelLinkedImagePreviews,
+      modelId: selectedTextPanelModel.id,
+    });
+  }, [
+    activeCanvasTextGenerations,
+    handleCanvasTextGenerate,
+    selectedTextCardPanelItem,
+    selectedTextCardPanelLinkedImagePreviews,
+    selectedTextPanelModel.id,
+    textCardPanelDrafts,
+  ]);
 
   const openSkillChoiceModal = (choice: SkillChoicePayload) => {
     setPendingSkillChoice(choice);
@@ -4495,13 +5108,14 @@ export default function AIWorkspace() {
     return buildPersistedSession(session, {
       updatedAt: Date.now(),
       items,
+      textCardPanelDrafts,
       connections,
       messages: chatMessages,
       topics,
       activeTopicId: activeId,
       viewport,
     });
-  }, [activeSkill, chatMessages, connections, items, viewport]);
+  }, [activeSkill, chatMessages, connections, items, textCardPanelDrafts, viewport]);
 
   const resolveCurrentSessionPresentationState = useCallback((session: ProjectSession) => {
     return resolveSessionPresentationState({
@@ -4518,6 +5132,8 @@ export default function AIWorkspace() {
     setConnections(resolvedState.connections || []);
     setChatMessages(resolvedState.chatMessages || []);
     setActiveSkill(resolvedState.activeSkill || null);
+    setEditingTextCardId(null);
+    setTextCardPanelDrafts(resolvedState.normalizedSession?.textCardPanelDrafts || {});
     if (resolvedState.shouldResetWelcome) {
       setHideWelcomeByCenterSkillPick(false);
     }
@@ -4533,13 +5149,14 @@ export default function AIWorkspace() {
   const sessionSaveSignal = React.useMemo(
     () => ({
       items,
+      textCardPanelDrafts,
       connections,
       chatMessages,
       viewport,
       imageCount,
       activeSkill,
     }),
-    [activeSkill, chatMessages, connections, imageCount, items, viewport]
+    [activeSkill, chatMessages, connections, imageCount, items, textCardPanelDrafts, viewport]
   );
 
   const {
@@ -4568,6 +5185,20 @@ export default function AIWorkspace() {
   const getCurrentSession = () => sessions.find(s => s.id === currentSessionId);
   
   const currentProjectName = getCurrentSession()?.name || '新画布';
+
+  useEffect(() => {
+    currentSessionIdRef.current = currentSessionId;
+  }, [currentSessionId]);
+
+  useEffect(() => {
+    canvasTextGenerateAbortControllersRef.current.forEach((controller, itemId) => {
+      suppressCanvasTextAbortErrorItemIdsRef.current.add(itemId);
+      controller.abort();
+    });
+    canvasTextGenerateAbortControllersRef.current.clear();
+    setActiveCanvasTextGenerations({});
+    setCanvasTextGenerationErrorById({});
+  }, [currentSessionId, viewMode]);
 
   // 对话项目管理函数
   const getCurrentTopic = () => {
@@ -4863,14 +5494,17 @@ export default function AIWorkspace() {
       if (aspectRatioMenuRef.current && !aspectRatioMenuRef.current.contains(e.target as Node)) {
         setShowAspectRatioMenu(false);
       }
+      if (textPanelModelMenuRef.current && !textPanelModelMenuRef.current.contains(e.target as Node)) {
+        setShowTextPanelModelMenu(false);
+      }
       setShowAvatarMenu(false);
       setShowHistoryPanel(false);
     };
-    if (showAvatarMenu || showProjectMenu || showAddNodeMenu || showHistoryPanel || showGenerationModeMenu || showSkillsMenu || showAspectRatioMenu) {
+    if (showAvatarMenu || showProjectMenu || showAddNodeMenu || showHistoryPanel || showGenerationModeMenu || showSkillsMenu || showAspectRatioMenu || showTextPanelModelMenu) {
       document.addEventListener('pointerdown', handlePointerDownOutside);
       return () => document.removeEventListener('pointerdown', handlePointerDownOutside);
     }
-  }, [showAvatarMenu, showProjectMenu, showAddNodeMenu, showHistoryPanel, showGenerationModeMenu, showSkillsMenu, showAspectRatioMenu, editingSessionId]);
+  }, [showAvatarMenu, showProjectMenu, showAddNodeMenu, showHistoryPanel, showGenerationModeMenu, showSkillsMenu, showAspectRatioMenu, showTextPanelModelMenu, editingSessionId]);
 
   useEffect(() => {
     const handleSelectionChange = () => {
@@ -5368,11 +6002,28 @@ export default function AIWorkspace() {
         }}
         onPendingMenuAction={handlePendingConnectionMenuAction}
         selectedTextCardPanelItem={selectedTextCardPanelItem}
+        linkedImagePreviews={selectedTextCardPanelLinkedImagePreviews}
+        activeCanvasTextGenerationItemIds={activeCanvasTextGenerationItemIds}
+        selectedTextPanelModel={selectedTextPanelModel}
+        textPanelModelOptions={TEXT_PANEL_MODEL_OPTIONS}
+        showTextPanelModelMenu={showTextPanelModelMenu}
+        textPanelModelMenuRef={textPanelModelMenuRef}
         selectedTextCardPanelInput={selectedTextCardPanelInput}
-        isGenerating={isGenerating}
+        selectedTextCardPanelError={selectedTextCardPanelError}
+        isSelectedTextCardGenerating={isSelectedTextCardGenerating}
+        editingTextCardId={editingTextCardId}
+        editingTextCardTextareaRef={editingTextCardTextareaRef}
+        onToggleTextPanelModelMenu={() => setShowTextPanelModelMenu((prev) => !prev)}
+        onSelectTextPanelModel={(modelId) => {
+          setSelectedTextPanelModelId(modelId);
+          setShowTextPanelModelMenu(false);
+        }}
         onSelectedTextCardPanelInputChange={handleSelectedTextCardPanelInputChange}
         onSelectedTextCardPanelSubmit={handleSelectedTextCardPanelSubmit}
-        onSelectedTextCardPanelCancel={handleCancelGenerate}
+        onSelectedTextCardPanelCancel={() => handleCancelCanvasTextGenerate(selectedTextCardPanelItem?.id ?? null)}
+        onItemDoubleClick={handleTextCardDoubleClick}
+        onManualTextCardInputChange={handleManualTextCardInputChange}
+        onManualTextCardBlur={finalizeManualTextCardEditing}
       />
 
       {/* Zoom Controller - Outside Canvas */}

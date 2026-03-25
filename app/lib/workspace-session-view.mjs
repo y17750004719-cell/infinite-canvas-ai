@@ -1,4 +1,279 @@
 const DEFAULT_VIEWPORT = { x: 0, y: 0, scale: 1 };
+export const CANVAS_TEXT_GENERATION_CONCURRENCY_LIMIT = 5;
+
+export const TEXT_PANEL_MODEL_OPTIONS = [
+  {
+    id: 'gemini-3.1-flash-lite-preview-thinking-medium',
+    label: 'Gemini 3.1 Flash Lite',
+  },
+];
+
+export function getDefaultTextPanelModelOption() {
+  return TEXT_PANEL_MODEL_OPTIONS[0];
+}
+
+export function resolveTextPanelChatModel(requestedModel, fallbackModel = getDefaultTextPanelModelOption()?.id) {
+  const normalizedRequestedModel = typeof requestedModel === 'string' ? requestedModel.trim() : '';
+  const allowedModelIds = new Set(TEXT_PANEL_MODEL_OPTIONS.map((option) => option.id));
+
+  if (normalizedRequestedModel && allowedModelIds.has(normalizedRequestedModel)) {
+    return normalizedRequestedModel;
+  }
+
+  return fallbackModel;
+}
+
+export function finalizeManualTextCardItem(item) {
+  if (!item || item.type !== 'text' || item.textVariant !== 'card' || item.textMode !== 'manual') {
+    return item;
+  }
+
+  const trimmedText = typeof item.text === 'string' ? item.text.trim() : '';
+  if (trimmedText.length === 0) {
+    return {
+      ...item,
+      text: '',
+      textMode: 'ai',
+    };
+  }
+
+  return {
+    ...item,
+    textMode: 'manual',
+  };
+}
+
+export function getTextCardVisualState({
+  item,
+  items,
+  connections,
+  generatingItemIds = null,
+  generatingItemId = null,
+  editingItemId = null,
+}) {
+  if (!item || item.type !== 'text' || item.textVariant !== 'card') {
+    return 'idle';
+  }
+
+  const activeGeneratingItemIds =
+    generatingItemIds instanceof Set
+      ? generatingItemIds
+      : typeof generatingItemId === 'string' && generatingItemId
+        ? new Set([generatingItemId])
+        : null;
+
+  if (item.textMode === 'manual') {
+    if (editingItemId === item.id) {
+      return 'manual-editing';
+    }
+
+    if (typeof item.text === 'string' && item.text.trim().length > 0) {
+      return 'manual-content';
+    }
+
+    return 'idle';
+  }
+
+  if (activeGeneratingItemIds?.has(item.id)) {
+    return 'waiting';
+  }
+
+  if (typeof item.text === 'string' && item.text.trim().length > 0) {
+    return 'content';
+  }
+
+  return 'idle';
+}
+
+export function canEnterManualTextMode({
+  item,
+  items,
+  connections,
+  generatingItemIds = null,
+  generatingItemId = null,
+}) {
+  if (!item || item.type !== 'text' || item.textVariant !== 'card') {
+    return false;
+  }
+
+  if (item.textMode === 'manual') {
+    return false;
+  }
+
+  if (typeof item.text === 'string' && item.text.trim().length > 0) {
+    return false;
+  }
+
+  const activeGeneratingItemIds =
+    generatingItemIds instanceof Set
+      ? generatingItemIds
+      : typeof generatingItemId === 'string' && generatingItemId
+        ? new Set([generatingItemId])
+        : null;
+
+  if (activeGeneratingItemIds?.has(item.id)) {
+    return false;
+  }
+
+  if (!Array.isArray(connections)) {
+    return true;
+  }
+
+  return !connections.some((connection) => connection?.toItemId === item.id);
+}
+
+export function canStartCanvasTextGeneration({
+  itemId,
+  activeGenerations,
+  limit = CANVAS_TEXT_GENERATION_CONCURRENCY_LIMIT,
+}) {
+  if (!itemId || !activeGenerations || typeof activeGenerations !== 'object') {
+    return false;
+  }
+
+  if (activeGenerations[itemId]) {
+    return false;
+  }
+
+  return Object.keys(activeGenerations).length < limit;
+}
+
+export function removeCanvasTextGenerationEntry({
+  activeGenerations,
+  itemId,
+}) {
+  if (!activeGenerations || typeof activeGenerations !== 'object' || !itemId || !activeGenerations[itemId]) {
+    return activeGenerations || {};
+  }
+
+  const next = { ...activeGenerations };
+  delete next[itemId];
+  return next;
+}
+
+export function shouldPreventScrollableRegionWheelDefault({
+  deltaX = 0,
+  deltaY = 0,
+  scrollTop = 0,
+  scrollHeight = 0,
+  clientHeight = 0,
+  scrollLeft = 0,
+  scrollWidth = 0,
+  clientWidth = 0,
+}) {
+  const hasVerticalOverflow = scrollHeight > clientHeight;
+  const hasHorizontalOverflow = scrollWidth > clientWidth;
+  const verticalMaxScroll = Math.max(0, scrollHeight - clientHeight);
+  const horizontalMaxScroll = Math.max(0, scrollWidth - clientWidth);
+
+  const isAtTop = scrollTop <= 0;
+  const isAtBottom = scrollTop >= verticalMaxScroll - 1;
+  const isAtLeft = scrollLeft <= 0;
+  const isAtRight = scrollLeft >= horizontalMaxScroll - 1;
+
+  if (hasVerticalOverflow) {
+    if (deltaY < 0 && isAtTop) return true;
+    if (deltaY > 0 && isAtBottom) return true;
+  }
+
+  if (hasHorizontalOverflow) {
+    if (deltaX < 0 && isAtLeft) return true;
+    if (deltaX > 0 && isAtRight) return true;
+  }
+
+  return false;
+}
+
+export function buildReferenceImageRequestPayload(previews) {
+  if (!Array.isArray(previews) || previews.length === 0) {
+    return {
+      referenceImages: [],
+      referenceLabels: [],
+    };
+  }
+
+  return previews.reduce(
+    (result, preview) => {
+      if (
+        !preview ||
+        typeof preview.src !== 'string' ||
+        preview.src.length === 0 ||
+        typeof preview.label !== 'string' ||
+        preview.label.length === 0
+      ) {
+        return result;
+      }
+
+      result.referenceImages.push(preview.src);
+      result.referenceLabels.push(preview.label);
+      return result;
+    },
+    { referenceImages: [], referenceLabels: [] }
+  );
+}
+
+export function buildCanvasTextGenerationRequest({
+  input,
+  linkedImagePreviews = [],
+  modelId,
+}) {
+  const trimmedInput = typeof input === 'string' ? input.trim() : '';
+  const resolvedModel = resolveTextPanelChatModel(modelId);
+  const references = buildReferenceImageRequestPayload(linkedImagePreviews);
+
+  const request = {
+    messages: [{ role: 'user', content: trimmedInput }],
+    intent: 'chat',
+  };
+
+  if (resolvedModel) {
+    request.model = resolvedModel;
+  }
+
+  if (references.referenceImages.length > 0) {
+    request.reference_images = references.referenceImages;
+    request.reference_labels = references.referenceLabels;
+  }
+
+  return request;
+}
+
+export function getDirectImagePreviewsForTextCard({
+  textCardId,
+  items,
+  connections,
+}) {
+  if (!textCardId || !Array.isArray(items) || !Array.isArray(connections)) {
+    return [];
+  }
+
+  const itemById = new Map(items.map((item) => [item?.id, item]));
+  const seenImageIds = new Set();
+
+  return connections.flatMap((connection) => {
+    if (connection?.toItemId !== textCardId) return [];
+
+    const sourceItem = itemById.get(connection.fromItemId);
+    if (!sourceItem || sourceItem.type !== 'image' || typeof sourceItem.src !== 'string' || sourceItem.src.length === 0) {
+      return [];
+    }
+
+    if (seenImageIds.has(sourceItem.id)) {
+      return [];
+    }
+
+    seenImageIds.add(sourceItem.id);
+
+    return [
+      {
+        id: sourceItem.id,
+        src: sourceItem.src,
+        label: `image${seenImageIds.size}`,
+        alt: `image${seenImageIds.size}`,
+      },
+    ];
+  });
+}
 
 /**
  * @param {{

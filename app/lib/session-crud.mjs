@@ -23,6 +23,7 @@ export function createEmptySession({
     updatedAt: now,
     items: [],
     connections: [],
+    textCardPanelDrafts: {},
     messages: [],
     topics: [topic],
     activeTopicId: topic.id,

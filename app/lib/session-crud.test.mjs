@@ -21,6 +21,7 @@ test('createEmptySession creates a persisted-ready empty canvas', () => {
   assert.deepEqual(session.items, []);
   assert.deepEqual(session.connections, []);
   assert.deepEqual(session.messages, []);
+  assert.deepEqual(session.textCardPanelDrafts, {});
   assert.equal(session.topics?.length, 1);
   assert.equal(session.viewport.scale, 1);
 });

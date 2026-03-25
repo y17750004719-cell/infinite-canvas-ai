@@ -4,6 +4,7 @@ import fs from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createStoredImageName, resolvePublicAssetPath } from "../../lib/api-security.mjs";
+import { resolveTextPanelChatModel } from "../../lib/workspace-session-view.mjs";
 
 const DEBUG_API_LOGS = process.env.LOG_ALL_REQUESTS !== "0";
 const PUBLIC_DIR = path.join(process.cwd(), "public");
@@ -353,7 +354,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ status: "error", error: "Invalid JSON body" }, { status: 400 });
     }
 
-    const { messages: incomingMessages, size, aspect_ratio, n, reference_images, reference_labels, skill, intent } = body as {
+    const { messages: incomingMessages, size, aspect_ratio, n, reference_images, reference_labels, skill, intent, model } = body as {
       messages: Array<{ role: "user" | "assistant" | "system"; content: string }>;
       size?: string;
       aspect_ratio?: string;
@@ -362,6 +363,7 @@ export async function POST(request: NextRequest) {
       reference_labels?: string[];
       skill?: string;
       intent?: GenerateIntent;
+      model?: string;
       stream?: boolean;
     };
 
@@ -373,6 +375,7 @@ export async function POST(request: NextRequest) {
       hasReferenceImages: Array.isArray(reference_images) && reference_images.length > 0,
       skill: typeof skill === "string" ? skill : null,
       intent: intent || "auto",
+      model: typeof model === "string" ? model : null,
     });
 
     if (!incomingMessages || !Array.isArray(incomingMessages)) {
@@ -624,12 +627,13 @@ export async function POST(request: NextRequest) {
     }
 
     if (body.stream === true) {
+      const resolvedChatModel = resolveTextPanelChatModel(model, AGENT_MODEL);
       const encoder = new TextEncoder();
       const stream = new ReadableStream({
         async start(controller) {
           try {
             for await (const event of chatStream({
-              model: AGENT_MODEL,
+              model: resolvedChatModel,
               messages,
               signal: request.signal,
               stream: true,
@@ -656,8 +660,9 @@ export async function POST(request: NextRequest) {
       });
     }
 
+    const resolvedChatModel = resolveTextPanelChatModel(model, AGENT_MODEL);
     const chatResult = await chat({
-      model: AGENT_MODEL,
+      model: resolvedChatModel,
       messages,
       signal: request.signal,
     });
@@ -672,7 +677,7 @@ export async function POST(request: NextRequest) {
         type: 'chat',
         content: finalContent,
         reasoningContent,
-        model: AGENT_MODEL,
+        model: resolvedChatModel,
       }
     });
 

@@ -25,6 +25,7 @@ export interface CanvasItem {
   fill?: string;
   text?: string;
   textVariant?: 'legacy' | 'card';
+  textMode?: 'ai' | 'manual';
   visible: boolean;
   locked: boolean;
 }
@@ -56,6 +57,7 @@ export interface ProjectSession {
   createdAt: number;
   updatedAt: number;
   items: CanvasItem[];
+  textCardPanelDrafts?: Record<string, string>;
   connections?: Array<{
     id: string;
     fromItemId: string;
