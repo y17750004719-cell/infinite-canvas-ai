@@ -19,19 +19,25 @@ import {
   buildCanvasTextPanelSubmitInput,
   CANVAS_TEXT_GENERATION_CONCURRENCY_LIMIT,
   TEXT_PANEL_MODEL_OPTIONS,
-  getAutoResizedTextareaMetrics,
+  canItemAcceptIncomingConnection,
   buildCanvasTextGenerationRequest,
   buildReferenceImageRequestPayload,
   canEnterManualTextMode,
   canStartCanvasTextGeneration,
   finalizeManualTextCardItem,
   getDefaultTextPanelModelOption,
+  getDisplayableTextCardPanelDraft,
   getDirectImagePreviewsForTextCard,
   getDirectTextInputsForTextCard,
+  isEventInsideTextCardPanel,
+  shouldSubmitTextCardPanelEnter,
+  shouldFocusTextCardPanelInputOnPointerDown,
+  getTextCardPanelPlaceholder,
   getTextCardVisualState,
   removeCanvasTextGenerationEntry,
   resolveSessionPresentationState,
   shouldPreventScrollableRegionWheelDefault,
+  syncAutoResizedTextareaLayout,
 } from './lib/workspace-session-view.mjs';
 import { GalleryView, SessionActionErrorBanner } from './components/workspace/GalleryView';
 import { useWorkspaceSessionController } from './hooks/useWorkspaceSessionController';
@@ -207,7 +213,7 @@ const TEXT_CARD_FRAME_INSET_X = 16;
 const TEXT_CARD_FRAME_TOP = 24;
 const TEXT_CARD_FRAME_BOTTOM = 12;
 const TEXT_CARD_GENERATION_PANEL_DEFAULT_WIDTH = 480;
-const TEXT_CARD_GENERATION_PANEL_BASE_HEIGHT = 144;
+const TEXT_CARD_GENERATION_PANEL_BASE_HEIGHT = 156;
 const TEXT_CARD_GENERATION_PANEL_PREVIEW_HEIGHT = 92;
 const TEXT_CARD_PANEL_INPUT_MIN_ROWS = 2;
 const TEXT_CARD_PANEL_INPUT_MAX_ROWS = 6;
@@ -585,7 +591,7 @@ const CanvasPortsLayer = memo(function CanvasPortsLayer({
         }}
       >
         {items.map((item) => {
-          const isManualTextCard = item.type === 'text' && item.textVariant === 'card' && item.textMode === 'manual';
+          const acceptsIncomingConnection = canItemAcceptIncomingConnection(item);
           const isHoveredItem = hoveredCanvasItemId === item.id;
           const isHoveredInputPort = hoveredInputPortItemId === item.id;
           const isHoveredOutputPort = hoveredOutputPortItemId === item.id;
@@ -596,7 +602,7 @@ const CanvasPortsLayer = memo(function CanvasPortsLayer({
           const isNearPort = isHoveredInputPort || isHoveredOutputPort;
           const showOutputPort = isHoveredItem || isNearPort || isConnectionSource || isMagneticItem;
           const showInputPort =
-            !isManualTextCard &&
+            acceptsIncomingConnection &&
             (isHoveredItem ||
               isNearPort ||
               isMagneticItem ||
@@ -618,7 +624,7 @@ const CanvasPortsLayer = memo(function CanvasPortsLayer({
 
           return (
             <React.Fragment key={`port-overlay-${item.id}`}>
-              {!isManualTextCard && (
+              {acceptsIncomingConnection && (
                 <>
                   <div
                     data-port-bridge="in"
@@ -1026,6 +1032,7 @@ const CanvasViewport = memo(function CanvasViewport({
   onPendingMenuAction,
   selectedTextCardPanelItem,
   linkedImagePreviews,
+  selectedTextCardPanelLinkedTexts,
   activeCanvasTextGenerationItemIds,
   selectedTextPanelModel,
   textPanelModelOptions,
@@ -1100,6 +1107,7 @@ const CanvasViewport = memo(function CanvasViewport({
   onPendingMenuAction: (optionId: (typeof CONNECTION_MENU_OPTIONS)[number]['id']) => void;
   selectedTextCardPanelItem: CanvasItem | null;
   linkedImagePreviews: Array<{ id: string; src: string; label: string; alt?: string }>;
+  selectedTextCardPanelLinkedTexts: Array<{ id: string; text: string }>;
   activeCanvasTextGenerationItemIds: Set<string>;
   selectedTextPanelModel: { id: string; label: string };
   textPanelModelOptions: Array<{ id: string; label: string }>;
@@ -1151,6 +1159,13 @@ const CanvasViewport = memo(function CanvasViewport({
   const selectedTextCardPanelCanvasWidth = selectedTextCardPanelFrameBounds
     ? Math.max(TEXT_CARD_GENERATION_PANEL_DEFAULT_WIDTH, selectedTextCardPanelFrameBounds.width)
     : 0;
+  const selectedTextCardPanelDisplayInput = getDisplayableTextCardPanelDraft(selectedTextCardPanelInput);
+  const focusSelectedTextCardPanelInput = useCallback(() => {
+    const textarea = selectedTextCardPanelTextareaRef.current;
+    if (!textarea) return;
+
+    textarea.focus();
+  }, []);
   useLayoutEffect(() => {
     if (!selectedTextCardPanelItem) {
       setSelectedTextCardPanelInputMetrics((prev) =>
@@ -1164,10 +1179,7 @@ const CanvasViewport = memo(function CanvasViewport({
     const textarea = selectedTextCardPanelTextareaRef.current;
     if (!textarea) return;
 
-    textarea.style.height = '0px';
-
-    const nextMetrics = getAutoResizedTextareaMetrics({
-      scrollHeight: textarea.scrollHeight,
+    const nextMetrics = syncAutoResizedTextareaLayout(textarea, {
       minHeight: TEXT_CARD_PANEL_INPUT_MIN_HEIGHT,
       maxHeight: TEXT_CARD_PANEL_INPUT_MAX_HEIGHT,
     });
@@ -1175,12 +1187,16 @@ const CanvasViewport = memo(function CanvasViewport({
     setSelectedTextCardPanelInputMetrics((prev) =>
       prev.height === nextMetrics.height && prev.isOverflowing === nextMetrics.isOverflowing ? prev : nextMetrics
     );
-  }, [selectedTextCardPanelCanvasWidth, selectedTextCardPanelInput, selectedTextCardPanelItem]);
+  }, [selectedTextCardPanelCanvasWidth, selectedTextCardPanelDisplayInput, selectedTextCardPanelItem]);
 
   const selectedTextCardPanelCanvasHeight =
     TEXT_CARD_GENERATION_PANEL_BASE_HEIGHT +
     (linkedImagePreviews.length > 0 ? TEXT_CARD_GENERATION_PANEL_PREVIEW_HEIGHT : 0) +
     Math.max(0, selectedTextCardPanelInputMetrics.height - TEXT_CARD_PANEL_INPUT_MIN_HEIGHT);
+  const selectedTextCardPanelPlaceholder = getTextCardPanelPlaceholder({
+    linkedImageCount: linkedImagePreviews.length,
+    linkedTextCount: selectedTextCardPanelLinkedTexts.length,
+  });
   const selectedTextCardPanelCanvasRect =
     selectedTextCardPanelItem && selectedTextCardPanelFrameBounds
       ? {
@@ -1317,6 +1333,7 @@ const CanvasViewport = memo(function CanvasViewport({
       {selectedTextCardPanelItem && selectedTextCardPanelFrameBounds && selectedTextCardPanelCanvasRect && (
         <div className="pointer-events-none absolute inset-0 z-[115]">
           <div
+            data-text-card-panel="true"
             className="pointer-events-auto absolute overflow-hidden rounded-[26px] border border-white/[0.11] bg-[rgba(28,28,31,0.98)] shadow-[0_34px_90px_rgba(0,0,0,0.46),inset_0_1px_0_rgba(255,255,255,0.025)] backdrop-blur-xl"
             style={{
               left: selectedTextCardPanelLeft,
@@ -1355,44 +1372,74 @@ const CanvasViewport = memo(function CanvasViewport({
                   </div>
                 </div>
               )}
-              <textarea
-                ref={selectedTextCardPanelTextareaRef}
-                value={selectedTextCardPanelInput}
-                onChange={(e) => {
-                  onSelectedTextCardPanelInputChange(e.target.value);
-                }}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && !e.shiftKey && !e.altKey) {
-                    e.preventDefault();
-                    if (isSelectedTextCardGenerating) {
-                      onSelectedTextCardPanelCancel();
-                    } else {
-                      onSelectedTextCardPanelSubmit();
-                    }
-                  }
-                }}
+              <div
+                data-text-card-panel-input-shell="true"
+                className="rounded-[20px] border border-white/[0.09] bg-[rgba(7,8,10,0.34)] px-4 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] transition-colors duration-150 hover:border-white/[0.14] focus-within:border-white/[0.18] focus-within:bg-[rgba(9,10,13,0.42)]"
                 onPointerDown={(e) => {
                   e.stopPropagation();
+                  if (!shouldFocusTextCardPanelInputOnPointerDown(e.target as HTMLElement | null)) {
+                    return;
+                  }
+
+                  e.preventDefault();
+                  focusSelectedTextCardPanelInput();
                 }}
-                onWheel={stopCanvasWheelFromScrollableRegion}
-                className="panel-scrollbar w-full resize-none bg-transparent text-[14px] leading-6 text-zinc-100 outline-none placeholder:text-zinc-500"
-                placeholder="描述你想要生成的内容，并在下方调整生成参数。（按下Enter 生成，Shift+Enter 换行）"
-                rows={TEXT_CARD_PANEL_INPUT_MIN_ROWS}
-                style={{
-                  height: `${selectedTextCardPanelInputMetrics.height}px`,
-                  overflowY: selectedTextCardPanelInputMetrics.isOverflowing ? 'auto' : 'hidden',
-                }}
-              />
+              >
+                <textarea
+                  data-text-card-panel-input="true"
+                  ref={selectedTextCardPanelTextareaRef}
+                  value={selectedTextCardPanelDisplayInput}
+                  onChange={(e) => {
+                    onSelectedTextCardPanelInputChange(e.target.value);
+                  }}
+                  onKeyDown={(e) => {
+                    if (
+                      shouldSubmitTextCardPanelEnter({
+                        key: e.key,
+                        shiftKey: e.shiftKey,
+                        altKey: e.altKey,
+                        isComposing: e.nativeEvent.isComposing,
+                      })
+                    ) {
+                      e.preventDefault();
+                      if (isSelectedTextCardGenerating) {
+                        onSelectedTextCardPanelCancel();
+                      } else {
+                        onSelectedTextCardPanelSubmit();
+                      }
+                    }
+                  }}
+                  onPointerDown={(e) => {
+                    e.stopPropagation();
+                  }}
+                  onWheel={stopCanvasWheelFromScrollableRegion}
+                  autoFocus={false}
+                  readOnly={false}
+                  disabled={false}
+                  spellCheck={false}
+                  className="panel-scrollbar w-full resize-none bg-transparent text-[14px] leading-6 text-zinc-100 caret-zinc-100 outline-none placeholder:text-zinc-500 [user-select:text] [-webkit-user-select:text] cursor-text"
+                  placeholder={selectedTextCardPanelPlaceholder}
+                  rows={TEXT_CARD_PANEL_INPUT_MIN_ROWS}
+                  style={{
+                    height: `${selectedTextCardPanelInputMetrics.height}px`,
+                    overflowY: selectedTextCardPanelInputMetrics.isOverflowing ? 'auto' : 'hidden',
+                  }}
+                />
+              </div>
               {selectedTextCardPanelError && (
                 <div className="mt-2 px-0.5 text-[12px] leading-5 text-rose-400">
                   {selectedTextCardPanelError}
                 </div>
               )}
             </div>
-            <div className="flex items-center justify-between border-t border-white/[0.08] bg-[rgba(255,255,255,0.02)] px-5 py-3">
+            <div
+              data-text-card-panel-control="true"
+              className="flex items-center justify-between border-t border-white/[0.08] bg-[rgba(255,255,255,0.02)] px-5 py-3"
+            >
               <div className="relative" ref={textPanelModelMenuRef}>
                 {showTextPanelModelMenu && (
                   <div
+                    data-text-card-panel-control="true"
                     className="absolute bottom-full left-0 mb-2 min-w-[248px] overflow-hidden rounded-[18px] border border-white/[0.1] bg-[rgba(24,24,27,0.985)] p-1.5 shadow-[0_24px_64px_rgba(0,0,0,0.42)] backdrop-blur-xl"
                     onPointerDown={(e) => {
                       e.stopPropagation();
@@ -1422,6 +1469,7 @@ const CanvasViewport = memo(function CanvasViewport({
                   </div>
                 )}
                 <button
+                  data-text-card-panel-control="true"
                   type="button"
                   onPointerDown={(e) => {
                     e.stopPropagation();
@@ -1440,6 +1488,7 @@ const CanvasViewport = memo(function CanvasViewport({
               </div>
               <div className="flex items-center gap-2.5">
                 <button
+                  data-text-card-panel-control="true"
                   type="button"
                   onPointerDown={(e) => {
                     e.stopPropagation();
@@ -3254,6 +3303,7 @@ export default function AIWorkspace() {
 
     for (const item of items) {
       if (item.id === fromItemId) continue;
+      if (!canItemAcceptIncomingConnection(item)) continue;
       const port = toCanvasScreenPoint(getConnectionAnchorCanvasPoint(item, 'left'));
       const distance = Math.hypot(port.x - x, port.y - y);
       if (distance > SNAP_DISTANCE) continue;
@@ -3671,6 +3721,10 @@ export default function AIWorkspace() {
       connectionMode,
       activeFromItemId: connectionSessionRef.current?.fromItemId ?? null,
     });
+
+    if (isEventInsideTextCardPanel(target)) {
+      return;
+    }
 
     if (e.button === 0) {
       e.preventDefault();
@@ -6064,6 +6118,7 @@ export default function AIWorkspace() {
         onPendingMenuAction={handlePendingConnectionMenuAction}
         selectedTextCardPanelItem={selectedTextCardPanelItem}
         linkedImagePreviews={selectedTextCardPanelLinkedImagePreviews}
+        selectedTextCardPanelLinkedTexts={selectedTextCardPanelLinkedTexts}
         activeCanvasTextGenerationItemIds={activeCanvasTextGenerationItemIds}
         selectedTextPanelModel={selectedTextPanelModel}
         textPanelModelOptions={TEXT_PANEL_MODEL_OPTIONS}

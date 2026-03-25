@@ -4,7 +4,9 @@ import assert from 'node:assert/strict';
 import { createEmptySession } from './session-crud.mjs';
 import {
   CANVAS_TEXT_GENERATION_CONCURRENCY_LIMIT,
+  canItemAcceptIncomingConnection,
   getAutoResizedTextareaMetrics,
+  syncAutoResizedTextareaLayout,
   buildCanvasTextPanelSubmitInput,
   buildCanvasTextGenerationRequest,
   buildReferenceImageRequestPayload,
@@ -14,7 +16,12 @@ import {
   getDefaultTextPanelModelOption,
   getDirectImagePreviewsForTextCard,
   getDirectTextInputsForTextCard,
+  getDisplayableTextCardPanelDraft,
+  getTextCardPanelPlaceholder,
   removeCanvasTextGenerationEntry,
+  isEventInsideTextCardPanel,
+  shouldSubmitTextCardPanelEnter,
+  shouldFocusTextCardPanelInputOnPointerDown,
   getTextCardVisualState,
   resolveTextPanelChatModel,
   resolveSessionPresentationState,
@@ -227,6 +234,140 @@ test('buildCanvasTextPanelSubmitInput returns the original draft when no linked 
   assert.equal(result, '只发我自己');
 });
 
+test('getTextCardPanelPlaceholder uses pure text chat copy when no linked references exist', () => {
+  const result = getTextCardPanelPlaceholder({
+    linkedImageCount: 0,
+    linkedTextCount: 0,
+  });
+
+  assert.equal(result, '输入你想发送的文本内容…（按 Enter 发送，Shift+Enter 换行）');
+});
+
+test('getTextCardPanelPlaceholder keeps generation copy when linked references exist', () => {
+  const result = getTextCardPanelPlaceholder({
+    linkedImageCount: 1,
+    linkedTextCount: 0,
+  });
+
+  assert.equal(result, '描述你想要生成的内容，并在下方调整生成参数。（按下Enter 生成，Shift+Enter 换行）');
+});
+
+test('getDisplayableTextCardPanelDraft returns empty string for whitespace-only drafts', () => {
+  assert.equal(getDisplayableTextCardPanelDraft('   '), '');
+  assert.equal(getDisplayableTextCardPanelDraft('\n\n\t  '), '');
+});
+
+test('getDisplayableTextCardPanelDraft preserves non-empty text', () => {
+  assert.equal(getDisplayableTextCardPanelDraft('  保留这句文案'), '  保留这句文案');
+});
+
+test('isEventInsideTextCardPanel returns true for targets inside the text card panel', () => {
+  const target = {
+    closest(selector) {
+      return selector === '[data-text-card-panel="true"]' ? {} : null;
+    },
+  };
+
+  assert.equal(isEventInsideTextCardPanel(target), true);
+});
+
+test('isEventInsideTextCardPanel returns false for targets outside the text card panel', () => {
+  const target = {
+    closest() {
+      return null;
+    },
+  };
+
+  assert.equal(isEventInsideTextCardPanel(target), false);
+});
+
+test('shouldFocusTextCardPanelInputOnPointerDown focuses the input for shell clicks', () => {
+  const target = {
+    closest(selector) {
+      if (selector === '[data-text-card-panel-control="true"]') return null;
+      if (selector === '[data-text-card-panel-input="true"]') return null;
+      if (selector === '[data-text-card-panel="true"]') return {};
+      return null;
+    },
+  };
+
+  assert.equal(shouldFocusTextCardPanelInputOnPointerDown(target), true);
+});
+
+test('shouldFocusTextCardPanelInputOnPointerDown skips focusing when clicking controls or the textarea itself', () => {
+  const controlTarget = {
+    closest(selector) {
+      if (selector === '[data-text-card-panel-control="true"]') return {};
+      return null;
+    },
+  };
+  const inputTarget = {
+    closest(selector) {
+      if (selector === '[data-text-card-panel-control="true"]') return null;
+      if (selector === '[data-text-card-panel-input="true"]') return {};
+      if (selector === '[data-text-card-panel="true"]') return {};
+      return null;
+    },
+  };
+
+  assert.equal(shouldFocusTextCardPanelInputOnPointerDown(controlTarget), false);
+  assert.equal(shouldFocusTextCardPanelInputOnPointerDown(inputTarget), false);
+});
+
+test('shouldSubmitTextCardPanelEnter ignores enter during IME composition', () => {
+  const result = shouldSubmitTextCardPanelEnter({
+    key: 'Enter',
+    shiftKey: false,
+    altKey: false,
+    isComposing: true,
+  });
+
+  assert.equal(result, false);
+});
+
+test('shouldSubmitTextCardPanelEnter allows plain enter when not composing', () => {
+  const result = shouldSubmitTextCardPanelEnter({
+    key: 'Enter',
+    shiftKey: false,
+    altKey: false,
+    isComposing: false,
+  });
+
+  assert.equal(result, true);
+});
+
+test('canItemAcceptIncomingConnection rejects image nodes', () => {
+  const result = canItemAcceptIncomingConnection({
+    id: 'image-1',
+    type: 'image',
+    src: '/a.png',
+  });
+
+  assert.equal(result, false);
+});
+
+test('canItemAcceptIncomingConnection keeps ai text cards as valid incoming targets', () => {
+  const result = canItemAcceptIncomingConnection({
+    id: 'text-1',
+    type: 'text',
+    textVariant: 'card',
+    textMode: 'ai',
+  });
+
+  assert.equal(result, true);
+});
+
+test('canItemAcceptIncomingConnection rejects manual text cards', () => {
+  const result = canItemAcceptIncomingConnection({
+    id: 'text-1',
+    type: 'text',
+    textVariant: 'card',
+    textMode: 'manual',
+  });
+
+  assert.equal(result, false);
+});
+
 test('getAutoResizedTextareaMetrics keeps the minimum height for short content', () => {
   const result = getAutoResizedTextareaMetrics({
     scrollHeight: 44,
@@ -264,6 +405,28 @@ test('getAutoResizedTextareaMetrics clamps to the maximum height and enables int
     height: 148,
     isOverflowing: true,
   });
+});
+
+test('syncAutoResizedTextareaLayout restores a usable height even when measured metrics stay unchanged', () => {
+  const textarea = {
+    scrollHeight: 44,
+    style: {
+      height: '0px',
+      overflowY: 'hidden',
+    },
+  };
+
+  const result = syncAutoResizedTextareaLayout(textarea, {
+    minHeight: 52,
+    maxHeight: 148,
+  });
+
+  assert.deepEqual(result, {
+    height: 52,
+    isOverflowing: false,
+  });
+  assert.equal(textarea.style.height, '52px');
+  assert.equal(textarea.style.overflowY, 'hidden');
 });
 
 test('buildReferenceImageRequestPayload preserves preview order for request images and labels', () => {

@@ -43,6 +43,18 @@ export function finalizeManualTextCardItem(item) {
   };
 }
 
+export function canItemAcceptIncomingConnection(item) {
+  if (!item || item.type === 'image') {
+    return false;
+  }
+
+  if (item.type === 'text' && item.textVariant === 'card' && item.textMode === 'manual') {
+    return false;
+  }
+
+  return true;
+}
+
 export function getTextCardVisualState({
   item,
   items,
@@ -197,6 +209,91 @@ export function getAutoResizedTextareaMetrics({
     height: resolvedHeight,
     isOverflowing: scrollHeight > safeMaxHeight,
   };
+}
+
+export function syncAutoResizedTextareaLayout(
+  textarea,
+  {
+    minHeight = 0,
+    maxHeight = Number.POSITIVE_INFINITY,
+  } = {}
+) {
+  if (!textarea?.style) {
+    return getAutoResizedTextareaMetrics({
+      scrollHeight: 0,
+      minHeight,
+      maxHeight,
+    });
+  }
+
+  textarea.style.height = 'auto';
+
+  const metrics = getAutoResizedTextareaMetrics({
+    scrollHeight: textarea.scrollHeight,
+    minHeight,
+    maxHeight,
+  });
+
+  textarea.style.height = `${metrics.height}px`;
+  textarea.style.overflowY = metrics.isOverflowing ? 'auto' : 'hidden';
+
+  return metrics;
+}
+
+export function getTextCardPanelPlaceholder({
+  linkedImageCount = 0,
+  linkedTextCount = 0,
+}) {
+  if (linkedImageCount > 0 || linkedTextCount > 0) {
+    return '描述你想要生成的内容，并在下方调整生成参数。（按下Enter 生成，Shift+Enter 换行）';
+  }
+
+  return '输入你想发送的文本内容…（按 Enter 发送，Shift+Enter 换行）';
+}
+
+export function getDisplayableTextCardPanelDraft(rawDraft) {
+  if (typeof rawDraft !== 'string') {
+    return '';
+  }
+
+  return rawDraft.trim().length === 0 ? '' : rawDraft;
+}
+
+function matchesClosest(target, selector) {
+  return !!target && typeof target.closest === 'function' && !!target.closest(selector);
+}
+
+export function isEventInsideTextCardPanel(target) {
+  return matchesClosest(target, '[data-text-card-panel="true"]');
+}
+
+export function shouldFocusTextCardPanelInputOnPointerDown(target) {
+  if (!isEventInsideTextCardPanel(target)) {
+    return false;
+  }
+
+  if (matchesClosest(target, '[data-text-card-panel-control="true"]')) {
+    return false;
+  }
+
+  if (matchesClosest(target, '[data-text-card-panel-input="true"]')) {
+    return false;
+  }
+
+  return true;
+}
+
+export function shouldSubmitTextCardPanelEnter({
+  key,
+  shiftKey = false,
+  altKey = false,
+  isComposing = false,
+}) {
+  if (isComposing) return false;
+  if (key !== 'Enter') return false;
+  if (shiftKey || altKey) return false;
+
+  return true;
 }
 
 export function buildReferenceImageRequestPayload(previews) {
