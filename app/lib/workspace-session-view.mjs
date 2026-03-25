@@ -374,6 +374,16 @@ export function buildCanvasTextPanelSubmitInput({
   return [trimmedDraft, ...linkedTextBlocks].filter(Boolean).join('\n\n');
 }
 
+export function canSubmitTextCardPanel({
+  draft,
+  linkedTexts = [],
+}) {
+  return buildCanvasTextPanelSubmitInput({
+    draft,
+    linkedTexts,
+  }).length > 0;
+}
+
 export function buildCanvasTextGenerationRequest({
   input,
   linkedImagePreviews = [],

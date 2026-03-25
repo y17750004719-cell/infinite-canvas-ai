@@ -19,6 +19,7 @@ import {
   buildCanvasTextPanelSubmitInput,
   CANVAS_TEXT_GENERATION_CONCURRENCY_LIMIT,
   TEXT_PANEL_MODEL_OPTIONS,
+  canSubmitTextCardPanel,
   canItemAcceptIncomingConnection,
   buildCanvasTextGenerationRequest,
   buildReferenceImageRequestPayload,
@@ -1039,6 +1040,7 @@ const CanvasViewport = memo(function CanvasViewport({
   showTextPanelModelMenu,
   textPanelModelMenuRef,
   selectedTextCardPanelInput,
+  selectedTextCardPanelCanSubmit,
   selectedTextCardPanelError,
   isSelectedTextCardGenerating,
   editingTextCardId,
@@ -1114,6 +1116,7 @@ const CanvasViewport = memo(function CanvasViewport({
   showTextPanelModelMenu: boolean;
   textPanelModelMenuRef: React.RefObject<HTMLDivElement | null>;
   selectedTextCardPanelInput: string;
+  selectedTextCardPanelCanSubmit: boolean;
   selectedTextCardPanelError: string | null;
   isSelectedTextCardGenerating: boolean;
   editingTextCardId: string | null;
@@ -1500,7 +1503,7 @@ const CanvasViewport = memo(function CanvasViewport({
                       onSelectedTextCardPanelSubmit();
                     }
                   }}
-                  disabled={!isSelectedTextCardGenerating && !selectedTextCardPanelInput.trim()}
+                  disabled={!isSelectedTextCardGenerating && !selectedTextCardPanelCanSubmit}
                   className="inline-flex h-11 w-11 items-center justify-center rounded-full border border-black/5 bg-[#f5f7fb] text-black shadow-[0_10px_24px_rgba(0,0,0,0.22),inset_0_1px_0_rgba(255,255,255,0.7)] transition-colors hover:bg-white disabled:cursor-not-allowed disabled:opacity-50"
                   aria-label={isSelectedTextCardGenerating ? '终止生成' : '开始生成'}
                   title={isSelectedTextCardGenerating ? '终止生成' : '开始生成'}
@@ -2150,6 +2153,18 @@ export default function AIWorkspace() {
   const selectedTextCardPanelInput = selectedTextCardPanelItem
     ? textCardPanelDrafts[selectedTextCardPanelItem.id] ?? ''
     : '';
+  const selectedTextCardPanelSubmitInput = React.useMemo(
+    () =>
+      buildCanvasTextPanelSubmitInput({
+        draft: selectedTextCardPanelInput,
+        linkedTexts: selectedTextCardPanelLinkedTexts,
+      }),
+    [selectedTextCardPanelInput, selectedTextCardPanelLinkedTexts]
+  );
+  const selectedTextCardPanelCanSubmit = canSubmitTextCardPanel({
+    draft: selectedTextCardPanelInput,
+    linkedTexts: selectedTextCardPanelLinkedTexts,
+  });
   const selectedTextCardPanelError = selectedTextCardPanelItem
     ? canvasTextGenerationErrorById[selectedTextCardPanelItem.id] ?? null
     : null;
@@ -5114,10 +5129,7 @@ export default function AIWorkspace() {
 
   const handleSelectedTextCardPanelSubmit = useCallback(() => {
     if (!selectedTextCardPanelItem || activeCanvasTextGenerations[selectedTextCardPanelItem.id]) return;
-    const input = buildCanvasTextPanelSubmitInput({
-      draft: textCardPanelDrafts[selectedTextCardPanelItem.id] ?? '',
-      linkedTexts: selectedTextCardPanelLinkedTexts,
-    });
+    const input = selectedTextCardPanelSubmitInput;
     if (!input) return;
 
     void handleCanvasTextGenerate({
@@ -5128,13 +5140,11 @@ export default function AIWorkspace() {
     });
   }, [
     activeCanvasTextGenerations,
-    buildCanvasTextPanelSubmitInput,
     handleCanvasTextGenerate,
-    selectedTextCardPanelLinkedTexts,
     selectedTextCardPanelItem,
     selectedTextCardPanelLinkedImagePreviews,
+    selectedTextCardPanelSubmitInput,
     selectedTextPanelModel.id,
-    textCardPanelDrafts,
   ]);
 
   const openSkillChoiceModal = (choice: SkillChoicePayload) => {
@@ -6125,6 +6135,7 @@ export default function AIWorkspace() {
         showTextPanelModelMenu={showTextPanelModelMenu}
         textPanelModelMenuRef={textPanelModelMenuRef}
         selectedTextCardPanelInput={selectedTextCardPanelInput}
+        selectedTextCardPanelCanSubmit={selectedTextCardPanelCanSubmit}
         selectedTextCardPanelError={selectedTextCardPanelError}
         isSelectedTextCardGenerating={isSelectedTextCardGenerating}
         editingTextCardId={editingTextCardId}

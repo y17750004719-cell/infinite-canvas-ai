@@ -5,6 +5,7 @@ import { createEmptySession } from './session-crud.mjs';
 import {
   CANVAS_TEXT_GENERATION_CONCURRENCY_LIMIT,
   canItemAcceptIncomingConnection,
+  canSubmitTextCardPanel,
   getAutoResizedTextareaMetrics,
   syncAutoResizedTextareaLayout,
   buildCanvasTextPanelSubmitInput,
@@ -232,6 +233,24 @@ test('buildCanvasTextPanelSubmitInput returns the original draft when no linked 
   });
 
   assert.equal(result, '只发我自己');
+});
+
+test('canSubmitTextCardPanel returns true when linked text exists even if the draft is empty', () => {
+  const result = canSubmitTextCardPanel({
+    draft: '   ',
+    linkedTexts: [{ id: 'text-1', text: '上游文本' }],
+  });
+
+  assert.equal(result, true);
+});
+
+test('canSubmitTextCardPanel returns false when both draft and linked text are empty', () => {
+  const result = canSubmitTextCardPanel({
+    draft: '   ',
+    linkedTexts: [],
+  });
+
+  assert.equal(result, false);
 });
 
 test('getTextCardPanelPlaceholder uses pure text chat copy when no linked references exist', () => {
