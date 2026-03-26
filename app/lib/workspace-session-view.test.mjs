@@ -5,11 +5,19 @@ import { createEmptySession } from './session-crud.mjs';
 import {
   CANVAS_TEXT_GENERATION_CONCURRENCY_LIMIT,
   canItemAcceptIncomingConnection,
+  canSubmitImageCardPanel,
   canSubmitTextCardPanel,
+  getDefaultImageCardModelOption,
   getAutoResizedTextareaMetrics,
   syncAutoResizedTextareaLayout,
+  appendImageCardOutput,
+  buildAsyncImageTaskRequests,
+  buildCanvasImageGenerationRequest,
+  buildCanvasImagePanelSubmitInput,
+  buildImageCardOutputsState,
   buildCanvasTextPanelSubmitInput,
   buildCanvasTextGenerationRequest,
+  createCanvasCardItemAtCanvasPoint,
   buildReferenceImageRequestPayload,
   canEnterManualTextMode,
   canStartCanvasTextGeneration,
@@ -19,6 +27,12 @@ import {
   getDirectTextInputsForTextCard,
   getDisplayableTextCardPanelDraft,
   getTextCardPanelPlaceholder,
+  getImageCardQualitySummary,
+  getImageCardFrameSizeForAspectRatio,
+  getImageCardItemSizeForFrameSize,
+  getImageCardItemSizeForNaturalImage,
+  isImageAssetItem,
+  isImageCardItem,
   removeCanvasTextGenerationEntry,
   isEventInsideTextCardPanel,
   shouldSubmitTextCardPanelEnter,
@@ -26,6 +40,10 @@ import {
   getTextCardVisualState,
   resolveTextPanelChatModel,
   resolveSessionPresentationState,
+  resolveImageCardModel,
+  normalizeImageCardAspectRatio,
+  resolveFloatingPopoverOffset,
+  resolveImageGenerationFallbackSizes,
   shouldPreventScrollableRegionWheelDefault,
 } from './workspace-session-view.mjs';
 
@@ -355,11 +373,61 @@ test('shouldSubmitTextCardPanelEnter allows plain enter when not composing', () 
   assert.equal(result, true);
 });
 
-test('canItemAcceptIncomingConnection rejects image nodes', () => {
+test('canItemAcceptIncomingConnection allows image cards as incoming targets', () => {
+  const result = canItemAcceptIncomingConnection({
+    id: 'image-card-1',
+    type: 'image',
+    imageVariant: 'card',
+  });
+
+  assert.equal(result, true);
+});
+
+test('canItemAcceptIncomingConnection rejects legacy image assets', () => {
   const result = canItemAcceptIncomingConnection({
     id: 'image-1',
     type: 'image',
     src: '/a.png',
+  });
+
+  assert.equal(result, false);
+});
+
+test('isImageCardItem returns true for image component cards', () => {
+  const result = isImageCardItem({
+    id: 'image-card-1',
+    type: 'image',
+    imageVariant: 'card',
+  });
+
+  assert.equal(result, true);
+});
+
+test('isImageCardItem returns false for legacy image assets with src only', () => {
+  const result = isImageCardItem({
+    id: 'image-asset-1',
+    type: 'image',
+    src: '/a.png',
+  });
+
+  assert.equal(result, false);
+});
+
+test('isImageAssetItem returns true for legacy image assets with src only', () => {
+  const result = isImageAssetItem({
+    id: 'image-asset-1',
+    type: 'image',
+    src: '/a.png',
+  });
+
+  assert.equal(result, true);
+});
+
+test('isImageAssetItem returns false for image cards', () => {
+  const result = isImageAssetItem({
+    id: 'image-card-1',
+    type: 'image',
+    imageVariant: 'card',
   });
 
   assert.equal(result, false);
@@ -457,6 +525,438 @@ test('buildReferenceImageRequestPayload preserves preview order for request imag
   assert.deepEqual(result, {
     referenceImages: ['/b.png', '/a.png'],
     referenceLabels: ['image1', 'image2'],
+  });
+});
+
+test('getDirectImagePreviewsForTextCard also returns direct image previews for image card targets in connection order', () => {
+  const result = getDirectImagePreviewsForTextCard({
+    textCardId: 'image-card-1',
+    items: [
+      { id: 'img-1', type: 'image', src: '/a.png' },
+      { id: 'img-2', type: 'image', src: '/b.png' },
+      { id: 'image-card-1', type: 'image', imageVariant: 'card' },
+    ],
+    connections: [
+      { id: 'conn-1', fromItemId: 'img-2', toItemId: 'image-card-1' },
+      { id: 'conn-2', fromItemId: 'img-1', toItemId: 'image-card-1' },
+    ],
+  });
+
+  assert.deepEqual(result, [
+    { id: 'img-2', src: '/b.png', label: 'image1', alt: 'image1' },
+    { id: 'img-1', src: '/a.png', label: 'image2', alt: 'image2' },
+  ]);
+});
+
+test('canSubmitImageCardPanel returns true when prompt exists', () => {
+  const result = canSubmitImageCardPanel({
+    draft: '生成一张极简海报',
+    linkedImagePreviews: [],
+    linkedTexts: [],
+  });
+
+  assert.equal(result, true);
+});
+
+test('canSubmitImageCardPanel returns true when only linked reference images exist', () => {
+  const result = canSubmitImageCardPanel({
+    draft: '   ',
+    linkedImagePreviews: [{ id: 'img-1', src: '/a.png', label: 'image1' }],
+    linkedTexts: [],
+  });
+
+  assert.equal(result, true);
+});
+
+test('buildCanvasImagePanelSubmitInput appends linked text blocks after the draft with double newlines', () => {
+  const result = buildCanvasImagePanelSubmitInput({
+    draft: '生成包装静物图',
+    linkedTexts: [
+      { id: 'text-2', text: '第二段约束' },
+      { id: 'text-1', text: '第一段约束' },
+    ],
+  });
+
+  assert.equal(result, '生成包装静物图\n\n第二段约束\n\n第一段约束');
+});
+
+test('buildCanvasImagePanelSubmitInput can submit linked text even when draft is empty', () => {
+  const result = buildCanvasImagePanelSubmitInput({
+    draft: '   ',
+    linkedTexts: [{ id: 'text-1', text: '上游文案' }],
+  });
+
+  assert.equal(result, '上游文案');
+});
+
+test('canSubmitImageCardPanel returns true when only linked text exists', () => {
+  const result = canSubmitImageCardPanel({
+    draft: '   ',
+    linkedImagePreviews: [],
+    linkedTexts: [{ id: 'text-1', text: '上游文案' }],
+  });
+
+  assert.equal(result, true);
+});
+
+test('canSubmitImageCardPanel returns false when both prompt and references are empty', () => {
+  const result = canSubmitImageCardPanel({
+    draft: '   ',
+    linkedImagePreviews: [],
+    linkedTexts: [],
+  });
+
+  assert.equal(result, false);
+});
+
+test('buildCanvasImageGenerationRequest only uses current prompt, direct image previews, and aspect ratio', () => {
+  const result = buildCanvasImageGenerationRequest({
+    input: '请做一张科技感 KV',
+    linkedImagePreviews: [
+      { id: 'img-2', src: '/b.png', label: 'image1', alt: 'image1' },
+      { id: 'img-1', src: '/a.png', label: 'image2', alt: 'image2' },
+    ],
+    modelId: 'gemini-3.1-flash-image-preview',
+    size: '2048x2048',
+    count: 4,
+    aspectRatio: '16:9',
+  });
+
+  assert.deepEqual(result, {
+    messages: [{ role: 'user', content: '请做一张科技感 KV' }],
+    intent: 'image',
+    model: 'gemini-3.1-flash-image-preview',
+    size: '2048x2048',
+    n: 4,
+    aspect_ratio: '16:9',
+    reference_images: ['/b.png', '/a.png'],
+    reference_labels: ['image1', 'image2'],
+  });
+});
+
+test('buildCanvasImageGenerationRequest preserves 4K size requests for image cards', () => {
+  const result = buildCanvasImageGenerationRequest({
+    input: '请生成一张高精度产品海报',
+    linkedImagePreviews: [],
+    modelId: 'gemini-3.1-flash-image-preview',
+    size: '4096x4096',
+    count: 1,
+    aspectRatio: '1:1',
+  });
+
+  assert.deepEqual(result, {
+    messages: [{ role: 'user', content: '请生成一张高精度产品海报' }],
+    intent: 'image',
+    model: 'gemini-3.1-flash-image-preview',
+    size: '4096x4096',
+    n: 1,
+    aspect_ratio: '1:1',
+  });
+});
+
+test('buildCanvasImageGenerationRequest preserves requested multi-image counts for supplier-native flows', () => {
+  const result = buildCanvasImageGenerationRequest({
+    input: '生成静物海报\n\n上游文案',
+    linkedImagePreviews: [
+      { id: 'img-2', src: '/b.png', label: 'image1', alt: 'image1' },
+      { id: 'img-1', src: '/a.png', label: 'image2', alt: 'image2' },
+    ],
+    modelId: 'gemini-3.1-flash-image-preview',
+    size: '2048x2048',
+    count: 2,
+    aspectRatio: '3:4',
+  });
+
+  assert.deepEqual(result, {
+    messages: [{ role: 'user', content: '生成静物海报\n\n上游文案' }],
+    intent: 'image',
+    model: 'gemini-3.1-flash-image-preview',
+    size: '2048x2048',
+    n: 2,
+    aspect_ratio: '3:4',
+    reference_images: ['/b.png', '/a.png'],
+    reference_labels: ['image1', 'image2'],
+  });
+});
+
+test('buildCanvasImageGenerationRequest includes async execution mode when requested', () => {
+  const result = buildCanvasImageGenerationRequest({
+    input: '生成一张科技海报',
+    linkedImagePreviews: [],
+    modelId: 'gemini-3.1-flash-image-preview',
+    size: '2048x2048',
+    count: 1,
+    aspectRatio: '1:1',
+    executionMode: 'async',
+  });
+
+  assert.deepEqual(result, {
+    messages: [{ role: 'user', content: '生成一张科技海报' }],
+    intent: 'image',
+    model: 'gemini-3.1-flash-image-preview',
+    size: '2048x2048',
+    n: 1,
+    aspect_ratio: '1:1',
+    executionMode: 'async',
+  });
+});
+
+test('buildAsyncImageTaskRequests expands multi-image generation into async single-image requests', () => {
+  const result = buildAsyncImageTaskRequests({
+    input: '生成包装海报\n\n上游文案',
+    linkedImagePreviews: [
+      { id: 'img-2', src: '/b.png', label: 'image1', alt: 'image1' },
+      { id: 'img-1', src: '/a.png', label: 'image2', alt: 'image2' },
+    ],
+    modelId: 'gemini-3.1-flash-image-preview',
+    size: '2048x2048',
+    count: 2,
+    aspectRatio: '3:4',
+  });
+
+  assert.equal(result.length, 2);
+  assert.deepEqual(result[0], {
+    messages: [{ role: 'user', content: '生成包装海报\n\n上游文案' }],
+    intent: 'image',
+    model: 'gemini-3.1-flash-image-preview',
+    size: '2048x2048',
+    n: 1,
+    aspect_ratio: '3:4',
+    reference_images: ['/b.png', '/a.png'],
+    reference_labels: ['image1', 'image2'],
+    executionMode: 'async',
+  });
+  assert.deepEqual(result[1], result[0]);
+});
+
+test('createCanvasCardItemAtCanvasPoint creates a text card centered on the spawn point', () => {
+  const result = createCanvasCardItemAtCanvasPoint({
+    kind: 'text',
+    id: 'text-1',
+    canvasPoint: { x: 400, y: 300 },
+    width: 380,
+    height: 430,
+  });
+
+  assert.deepEqual(result, {
+    id: 'text-1',
+    type: 'text',
+    x: 210,
+    y: 85,
+    width: 380,
+    height: 430,
+    rotation: 0,
+    textVariant: 'card',
+    textMode: 'ai',
+    visible: true,
+    locked: false,
+  });
+});
+
+test('createCanvasCardItemAtCanvasPoint creates an image card centered on the spawn point', () => {
+  const result = createCanvasCardItemAtCanvasPoint({
+    kind: 'image',
+    id: 'image-card-1',
+    canvasPoint: { x: 500, y: 320 },
+    width: 380,
+    height: 430,
+  });
+
+  assert.deepEqual(result, {
+    id: 'image-card-1',
+    type: 'image',
+    x: 310,
+    y: 105,
+    width: 380,
+    height: 430,
+    rotation: 0,
+    imageVariant: 'card',
+    visible: true,
+    locked: false,
+  });
+});
+
+test('resolveFloatingPopoverOffset returns unscaled anchor offset inside the panel root', () => {
+  const result = resolveFloatingPopoverOffset({
+    panelRect: { left: 100, top: 220 },
+    anchorRect: { left: 190, top: 300 },
+    scale: 2,
+  });
+
+  assert.deepEqual(result, {
+    left: 45,
+    top: 40,
+  });
+});
+
+test('resolveFloatingPopoverOffset can position a popover below the panel with a fixed screen gap', () => {
+  const result = resolveFloatingPopoverOffset({
+    panelRect: { left: 100, top: 220, bottom: 620 },
+    anchorRect: { left: 190, top: 300 },
+    scale: 2,
+    placement: 'below-panel',
+    gap: 12,
+  });
+
+  assert.deepEqual(result, {
+    left: 45,
+    top: 206,
+  });
+});
+
+test('resolveImageGenerationFallbackSizes returns the 4K to 2K to 1K fallback chain', () => {
+  const result = resolveImageGenerationFallbackSizes('4096x4096');
+
+  assert.deepEqual(result, ['4096x4096', '2048x2048', '1024x1024']);
+});
+
+test('buildCanvasImageGenerationRequest falls back to the default image model for unsupported overrides', () => {
+  const result = buildCanvasImageGenerationRequest({
+    input: '生成一张海报',
+    linkedImagePreviews: [],
+    modelId: 'unsupported-image-model',
+    size: '1024x1024',
+    count: 2,
+    aspectRatio: 'auto',
+  });
+
+  assert.deepEqual(result, {
+    messages: [{ role: 'user', content: '生成一张海报' }],
+    intent: 'image',
+    model: 'gemini-3.1-flash-image-preview',
+    size: '1024x1024',
+    n: 2,
+  });
+});
+
+test('getDefaultImageCardModelOption returns Gemini 3.1 Flash Image as the default image-card model', () => {
+  const result = getDefaultImageCardModelOption();
+
+  assert.deepEqual(result, {
+    id: 'gemini-3.1-flash-image-preview',
+    label: 'Gemini 3.1 Flash Image',
+  });
+});
+
+test('resolveImageCardModel accepts the supported image model', () => {
+  const result = resolveImageCardModel('gemini-3.1-flash-image-preview');
+
+  assert.equal(result, 'gemini-3.1-flash-image-preview');
+});
+
+test('normalizeImageCardAspectRatio maps auto and empty values to 1:1', () => {
+  assert.equal(normalizeImageCardAspectRatio('auto'), '1:1');
+  assert.equal(normalizeImageCardAspectRatio(''), '1:1');
+  assert.equal(normalizeImageCardAspectRatio(undefined), '1:1');
+});
+
+test('normalizeImageCardAspectRatio preserves valid explicit aspect ratios', () => {
+  assert.equal(normalizeImageCardAspectRatio('16:9'), '16:9');
+  assert.equal(normalizeImageCardAspectRatio('4:1'), '4:1');
+});
+
+test('getImageCardQualitySummary combines aspect ratio and size label into a single trigger label', () => {
+  assert.equal(getImageCardQualitySummary({ aspectRatio: '1:1', size: '1024x1024' }), '1:1 · 1K');
+  assert.equal(getImageCardQualitySummary({ aspectRatio: '9:16', size: '2048x2048' }), '9:16 · 2K');
+  assert.equal(getImageCardQualitySummary({ aspectRatio: '16:9', size: '4096x4096' }), '16:9 · 4K');
+});
+
+test('getImageCardQualitySummary normalizes legacy aspect ratios and falls back to the raw size when needed', () => {
+  assert.equal(getImageCardQualitySummary({ aspectRatio: 'auto', size: '1024x1024' }), '1:1 · 1K');
+  assert.equal(getImageCardQualitySummary({ aspectRatio: '', size: '1536x1024' }), '1:1 · 1536x1024');
+});
+
+test('getImageCardFrameSizeForAspectRatio keeps frame width and derives height from the selected aspect ratio', () => {
+  const landscape = getImageCardFrameSizeForAspectRatio('16:9', 348);
+  const portrait = getImageCardFrameSizeForAspectRatio('9:16', 348);
+
+  assert.equal(landscape.width, 348);
+  assert.ok(Math.abs(landscape.height - 195.75) < 0.001);
+  assert.equal(portrait.width, 348);
+  assert.ok(Math.abs(portrait.height - 618.6666666667) < 0.001);
+});
+
+test('getImageCardItemSizeForFrameSize rebuilds outer item size from the frame size', () => {
+  const result = getImageCardItemSizeForFrameSize(348, 195.75);
+
+  assert.deepEqual(result, {
+    width: 380,
+    height: 231.75,
+  });
+});
+
+test('getImageCardItemSizeForNaturalImage derives the image card item size from the real output dimensions', () => {
+  const result = getImageCardItemSizeForNaturalImage(1024, 1792, 348);
+
+  assert.equal(result.width, 380);
+  assert.equal(result.height, 645);
+});
+
+test('buildImageCardOutputsState stores all outputs and activates the first output by default', () => {
+  const result = buildImageCardOutputsState([
+    { src: '/uploads/generated/a.png', naturalWidth: 1024, naturalHeight: 1024 },
+    { src: '/uploads/generated/b.png', naturalWidth: 1024, naturalHeight: 1024 },
+  ]);
+
+  assert.deepEqual(result, {
+    src: '/uploads/generated/a.png',
+    naturalWidth: 1024,
+    naturalHeight: 1024,
+    imageOutputs: [
+      { src: '/uploads/generated/a.png', naturalWidth: 1024, naturalHeight: 1024 },
+      { src: '/uploads/generated/b.png', naturalWidth: 1024, naturalHeight: 1024 },
+    ],
+    activeImageOutputIndex: 0,
+  });
+});
+
+test('buildImageCardOutputsState clamps an out-of-range active index to the available outputs', () => {
+  const result = buildImageCardOutputsState(
+    [{ src: '/uploads/generated/a.png', naturalWidth: 1024, naturalHeight: 1024 }],
+    7
+  );
+
+  assert.deepEqual(result, {
+    src: '/uploads/generated/a.png',
+    naturalWidth: 1024,
+    naturalHeight: 1024,
+    imageOutputs: [{ src: '/uploads/generated/a.png', naturalWidth: 1024, naturalHeight: 1024 }],
+    activeImageOutputIndex: 0,
+  });
+});
+
+test('appendImageCardOutput appends a new output and preserves the current active output when one already exists', () => {
+  const result = appendImageCardOutput({
+    existingOutputs: [{ src: '/uploads/generated/a.png', naturalWidth: 1024, naturalHeight: 1024 }],
+    existingActiveIndex: 0,
+    nextOutput: { src: '/uploads/generated/b.png', naturalWidth: 1024, naturalHeight: 1792 },
+  });
+
+  assert.deepEqual(result, {
+    src: '/uploads/generated/a.png',
+    naturalWidth: 1024,
+    naturalHeight: 1024,
+    imageOutputs: [
+      { src: '/uploads/generated/a.png', naturalWidth: 1024, naturalHeight: 1024 },
+      { src: '/uploads/generated/b.png', naturalWidth: 1024, naturalHeight: 1792 },
+    ],
+    activeImageOutputIndex: 0,
+  });
+});
+
+test('appendImageCardOutput activates the first completed output when the image card was empty', () => {
+  const result = appendImageCardOutput({
+    existingOutputs: [],
+    existingActiveIndex: 0,
+    nextOutput: { src: '/uploads/generated/a.png', naturalWidth: 1024, naturalHeight: 1024 },
+  });
+
+  assert.deepEqual(result, {
+    src: '/uploads/generated/a.png',
+    naturalWidth: 1024,
+    naturalHeight: 1024,
+    imageOutputs: [{ src: '/uploads/generated/a.png', naturalWidth: 1024, naturalHeight: 1024 }],
+    activeImageOutputIndex: 0,
   });
 });
 

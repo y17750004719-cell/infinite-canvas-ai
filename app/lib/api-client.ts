@@ -44,6 +44,40 @@ function debugError(...args: unknown[]) {
   }
 }
 
+function getErrorDiagnostics(error: unknown) {
+  if (!(error instanceof Error)) {
+    return {
+      errorType: typeof error,
+      errorValue: String(error),
+    };
+  }
+
+  const cause = error.cause as
+    | {
+        name?: unknown;
+        message?: unknown;
+        code?: unknown;
+        errno?: unknown;
+        syscall?: unknown;
+        address?: unknown;
+        port?: unknown;
+      }
+    | undefined;
+
+  return {
+    errorName: error.name,
+    errorMessage: error.message,
+    causeName: typeof cause?.name === "string" ? cause.name : null,
+    causeMessage: typeof cause?.message === "string" ? cause.message : null,
+    causeCode: typeof cause?.code === "string" ? cause.code : null,
+    causeErrno: typeof cause?.errno === "number" || typeof cause?.errno === "string" ? cause.errno : null,
+    causeSyscall: typeof cause?.syscall === "string" ? cause.syscall : null,
+    causeAddress: typeof cause?.address === "string" ? cause.address : null,
+    causePort: typeof cause?.port === "number" ? cause.port : null,
+    stackPreview: error.stack?.split("\n").slice(0, 3).join("\n") || null,
+  };
+}
+
 export interface GenerationRequest {
   model: string;
   prompt: string;
@@ -314,6 +348,50 @@ function extractTaskData(payload: AsyncImageTaskResultResponse): Array<{ url: st
   return toImageEntries(payload);
 }
 
+function getArrayLength(value: unknown): number {
+  return Array.isArray(value) ? value.length : 0;
+}
+
+function summarizeImagePayloadCounts(payload: unknown): {
+  rawDataCount: number;
+  nestedDataCount: number;
+  resultDataCount: number;
+  outputDataCount: number;
+  extractedCount: number;
+} {
+  if (!payload || typeof payload !== "object") {
+    return {
+      rawDataCount: 0,
+      nestedDataCount: 0,
+      resultDataCount: 0,
+      outputDataCount: 0,
+      extractedCount: 0,
+    };
+  }
+
+  const record = payload as Record<string, unknown>;
+  const nestedData =
+    record.data && !Array.isArray(record.data) && typeof record.data === "object"
+      ? (record.data as Record<string, unknown>).data
+      : undefined;
+  const resultData =
+    record.result && typeof record.result === "object"
+      ? (record.result as Record<string, unknown>).data
+      : undefined;
+  const outputData =
+    record.output && typeof record.output === "object"
+      ? (record.output as Record<string, unknown>).data
+      : undefined;
+
+  return {
+    rawDataCount: getArrayLength(record.data),
+    nestedDataCount: getArrayLength(nestedData),
+    resultDataCount: getArrayLength(resultData),
+    outputDataCount: getArrayLength(outputData),
+    extractedCount: toImageEntries(payload).length,
+  };
+}
+
 function dataUrlToBlob(dataUrl: string): { blob: Blob; mimeType: string } {
   const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
   if (!match) {
@@ -334,15 +412,23 @@ async function referenceToBlob(input: string, signal?: AbortSignal): Promise<{ b
     return dataUrlToBlob(input);
   }
 
-  const response = await fetch(input, { signal });
-  if (!response.ok) {
-    throw new ImageGenerationError(`Failed to fetch reference image: ${response.status} ${response.statusText}`, response.status);
+  try {
+    const response = await fetch(input, { signal });
+    if (!response.ok) {
+      throw new ImageGenerationError(`Failed to fetch reference image: ${response.status} ${response.statusText}`, response.status);
+    }
+    const blob = await response.blob();
+    return {
+      blob,
+      mimeType: blob.type || "image/png",
+    };
+  } catch (error) {
+    basicLog("[SUPPLIER][REFERENCE_ERR]", {
+      referencePreview: input.slice(0, 120),
+      ...getErrorDiagnostics(error),
+    });
+    throw error;
   }
-  const blob = await response.blob();
-  return {
-    blob,
-    mimeType: blob.type || "image/png",
-  };
 }
 
 export async function editImage(request: EditRequest): Promise<GenerationResponse> {
@@ -398,6 +484,7 @@ export async function editImage(request: EditRequest): Promise<GenerationRespons
     endpointBase: API_URL,
     endpoint: executionMode === "async" ? "/images/edits?async=true" : "/images/edits",
     model: request.model,
+    n: request.n || 1,
     formFieldImageCount: imageEntries.length,
     hasMask: Boolean(request.mask),
     sentAspectRatio: request.aspect_ratio || null,
@@ -453,6 +540,16 @@ export async function editImage(request: EditRequest): Promise<GenerationRespons
 
     if (executionMode === "sync") {
       const payload = await response.json() as GenerationResponse;
+      const counts = summarizeImagePayloadCounts(payload);
+      basicLog("[SUPPLIER][PARSE]", {
+        endpoint: "/images/edits",
+        executionMode,
+        rawDataCount: counts.rawDataCount,
+        nestedDataCount: counts.nestedDataCount,
+        resultDataCount: counts.resultDataCount,
+        outputDataCount: counts.outputDataCount,
+        extractedCount: counts.extractedCount,
+      });
       if (!payload.data || payload.data.length === 0) {
         const extracted = toImageEntries(payload);
         if (extracted.length === 0) {
@@ -500,6 +597,25 @@ export async function editImage(request: EditRequest): Promise<GenerationRespons
     const result = await pollAsyncImageTask(taskId, request.signal);
     return result;
   } catch (error) {
+    basicLog("[SUPPLIER][ERR]", {
+      endpoint: "/images/edits",
+      executionMode,
+      model: request.model,
+      n: request.n || 1,
+      formFieldImageCount: request.images.length,
+      hasMask: Boolean(request.mask),
+      ...getErrorDiagnostics(error),
+    });
+    debugError("[SUPPLIER][ERR]", {
+      endpoint: "/images/edits",
+      executionMode,
+      model: request.model,
+      n: request.n || 1,
+      formFieldImageCount: request.images.length,
+      hasMask: Boolean(request.mask),
+      ...getErrorDiagnostics(error),
+    });
+
     if (error instanceof Error && error.name === "AbortError") {
       if (request.signal?.aborted) {
         throw new ImageGenerationError("Request cancelled by user", 499);
@@ -789,6 +905,16 @@ export async function generateImage(
 
       if (executionMode === "sync") {
         const syncResult = await response.json() as GenerationResponse;
+        const counts = summarizeImagePayloadCounts(syncResult);
+        basicLog("[SUPPLIER][PARSE]", {
+          endpoint: "/images/generations",
+          executionMode,
+          rawDataCount: counts.rawDataCount,
+          nestedDataCount: counts.nestedDataCount,
+          resultDataCount: counts.resultDataCount,
+          outputDataCount: counts.outputDataCount,
+          extractedCount: counts.extractedCount,
+        });
         debugLog("generateImage sync success:", JSON.stringify(syncResult, null, 2).substring(0, 300));
         return syncResult;
       }

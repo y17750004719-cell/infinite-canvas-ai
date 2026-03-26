@@ -22,6 +22,9 @@ export interface CanvasItem {
   src?: string;
   naturalWidth?: number;
   naturalHeight?: number;
+  imageVariant?: 'card';
+  imageOutputs?: Array<{ src: string; naturalWidth: number; naturalHeight: number }>;
+  activeImageOutputIndex?: number;
   fill?: string;
   text?: string;
   textVariant?: 'legacy' | 'card';
@@ -58,6 +61,11 @@ export interface ProjectSession {
   updatedAt: number;
   items: CanvasItem[];
   textCardPanelDrafts?: Record<string, string>;
+  imageCardPanelDrafts?: Record<string, string>;
+  imageCardModelById?: Record<string, string>;
+  imageCardSizeById?: Record<string, string>;
+  imageCardCountById?: Record<string, number>;
+  imageCardAspectRatioById?: Record<string, string>;
   connections?: Array<{
     id: string;
     fromItemId: string;

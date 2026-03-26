@@ -4,7 +4,7 @@ import fs from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createStoredImageName, resolvePublicAssetPath } from "../../lib/api-security.mjs";
-import { resolveTextPanelChatModel } from "../../lib/workspace-session-view.mjs";
+import { resolveImageCardModel, resolveImageGenerationFallbackSizes, resolveTextPanelChatModel } from "../../lib/workspace-session-view.mjs";
 
 const DEBUG_API_LOGS = process.env.LOG_ALL_REQUESTS !== "0";
 const PUBLIC_DIR = path.join(process.cwd(), "public");
@@ -27,6 +27,40 @@ function debugWarn(...args: unknown[]) {
   if (DEBUG_API_LOGS) {
     console.warn(`[${nowIso()}]`, ...args);
   }
+}
+
+function getErrorDiagnostics(error: unknown) {
+  if (!(error instanceof Error)) {
+    return {
+      errorType: typeof error,
+      errorValue: String(error),
+    };
+  }
+
+  const cause = error.cause as
+    | {
+        name?: unknown;
+        message?: unknown;
+        code?: unknown;
+        errno?: unknown;
+        syscall?: unknown;
+        address?: unknown;
+        port?: unknown;
+      }
+    | undefined;
+
+  return {
+    errorName: error.name,
+    errorMessage: error.message,
+    causeName: typeof cause?.name === "string" ? cause.name : null,
+    causeMessage: typeof cause?.message === "string" ? cause.message : null,
+    causeCode: typeof cause?.code === "string" ? cause.code : null,
+    causeErrno: typeof cause?.errno === "number" || typeof cause?.errno === "string" ? cause.errno : null,
+    causeSyscall: typeof cause?.syscall === "string" ? cause.syscall : null,
+    causeAddress: typeof cause?.address === "string" ? cause.address : null,
+    causePort: typeof cause?.port === "number" ? cause.port : null,
+    stackPreview: error.stack?.split("\n").slice(0, 3).join("\n") || null,
+  };
 }
 
 async function saveImageToLocal(imageUrl: string): Promise<{ filename: string; localUrl: string }> {
@@ -90,9 +124,18 @@ async function saveImageToLocal(imageUrl: string): Promise<{ filename: string; l
   }
 }
 
+async function saveImagesToLocal(imageUrls: string[]): Promise<Array<{ filename: string; localUrl: string }>> {
+  const validUrls = Array.isArray(imageUrls) ? imageUrls.filter((url) => typeof url === "string" && url.length > 0) : [];
+  if (validUrls.length === 0) {
+    return [];
+  }
+
+  return Promise.all(validUrls.map((imageUrl) => saveImageToLocal(imageUrl)));
+}
+
 const AGENT_MODEL = "gemini-3.1-flash-lite-preview-thinking-medium";
 const IMAGE_MODEL = "gemini-3.1-flash-image-preview";
-const DEFAULT_IMAGE_SIZES = ["2048x2048", "1024x1024", "1024x1792", "1792x1024"];
+const DEFAULT_IMAGE_SIZES = ["2048x2048", "1024x1024", "4096x4096", "1024x1792", "1792x1024"];
 const ALLOWED_ASPECT_RATIOS = new Set([
   "1:1",
   "1:4",
@@ -354,7 +397,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ status: "error", error: "Invalid JSON body" }, { status: 400 });
     }
 
-    const { messages: incomingMessages, size, aspect_ratio, n, reference_images, reference_labels, skill, intent, model } = body as {
+    const { messages: incomingMessages, size, aspect_ratio, n, reference_images, reference_labels, skill, intent, model, executionMode } = body as {
       messages: Array<{ role: "user" | "assistant" | "system"; content: string }>;
       size?: string;
       aspect_ratio?: string;
@@ -364,6 +407,7 @@ export async function POST(request: NextRequest) {
       skill?: string;
       intent?: GenerateIntent;
       model?: string;
+      executionMode?: "sync" | "async";
       stream?: boolean;
     };
 
@@ -376,6 +420,7 @@ export async function POST(request: NextRequest) {
       skill: typeof skill === "string" ? skill : null,
       intent: intent || "auto",
       model: typeof model === "string" ? model : null,
+      executionMode: executionMode === "async" ? "async" : "sync",
     });
 
     if (!incomingMessages || !Array.isArray(incomingMessages)) {
@@ -461,6 +506,8 @@ export async function POST(request: NextRequest) {
       ambiguous: resolved.ambiguous,
     });
 
+    const resolvedExecutionMode = executionMode === "async" ? "async" : "sync";
+
     if (resolved.intent === "chat" && hasReferenceImages) {
       const normalizedChatImages = reference_images
         .map((img) => normalizeChatReferenceImage(img))
@@ -477,6 +524,7 @@ export async function POST(request: NextRequest) {
     }
 
     if (resolved.intent === "image" && hasReferenceImages) {
+      const resolvedImageModel = resolveImageCardModel(model, IMAGE_MODEL);
       const normalizedEditImages = reference_images
         .map((img) => normalizeChatReferenceImage(img))
         .filter((img): img is string => !!img);
@@ -498,22 +546,33 @@ export async function POST(request: NextRequest) {
         editMode: "image_edit",
         requestedAspectRatio: normalizeAspectRatio(aspect_ratio) || null,
         referenceCount: normalizedEditImages.length,
-        model: IMAGE_MODEL,
+        model: resolvedImageModel,
+      });
+      debugLog("Dispatching image edit supplier task", {
+        reqId,
+        n: n || 1,
+        referenceCount: normalizedEditImages.length,
+        resolvedImageModel,
+        resolvedAspectRatio: normalizeAspectRatio(aspect_ratio) || null,
       });
 
       let imageResult;
       try {
         imageResult = await runImageTask({
-          model: IMAGE_MODEL,
+          model: resolvedImageModel,
           prompt: resolved.prompt,
           images: normalizedEditImages,
           aspect_ratio: normalizeAspectRatio(aspect_ratio) || undefined,
           n: n || 1,
-          executionMode: "sync",
+          executionMode: resolvedExecutionMode,
           signal: request.signal,
         });
       } catch (error) {
         const message = error instanceof Error ? error.message : "Unknown edits error";
+        debugLog("Image edit supplier task failed", {
+          reqId,
+          ...getErrorDiagnostics(error),
+        });
         const normalizedMessage = message.toLowerCase();
         if (
           normalizedMessage.includes("aspect_ratio") ||
@@ -530,8 +589,19 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({ status: "error", error: "Edits failed: no image data returned" }, { status: 500 });
       }
 
-      const imageUrl = imageResult.data[0].url;
-      const savedImage = await saveImageToLocal(imageUrl);
+      debugLog("Image edit supplier returned outputs", {
+        reqId,
+        dataCount: imageResult.data.length,
+        urlPresencePreview: imageResult.data.slice(0, 2).map((entry) => typeof entry?.url === "string" && entry.url.length > 0),
+      });
+
+      const savedImages = await saveImagesToLocal(imageResult.data.map((entry) => entry.url));
+      const primarySavedImage = savedImages[0];
+      debugLog("Saved image edit outputs locally", {
+        reqId,
+        savedCount: savedImages.length,
+        savedFiles: savedImages.map((image) => image.filename),
+      });
 
       logResponse(200, { mode: "image_edit", skill: skill || null });
       return NextResponse.json({
@@ -539,19 +609,21 @@ export async function POST(request: NextRequest) {
         result: {
           type: "image",
           ...imageResult,
-          model: IMAGE_MODEL,
+          model: resolvedImageModel,
           mode: "image_edit",
           analyzedPrompt: resolved.prompt,
           referenceLabels,
-          savedFile: savedImage.filename,
-          localUrl: savedImage.localUrl,
+          savedFile: primarySavedImage?.filename,
+          localUrl: primarySavedImage?.localUrl,
+          outputs: savedImages,
         },
       });
     }
 
     if (resolved.intent === "image") {
+      const resolvedImageModel = resolveImageCardModel(model, IMAGE_MODEL);
       const requestedSize = typeof size === "string" ? size : "";
-      const imageSize = resolveImageSize(size, IMAGE_MODEL);
+      const imageSize = resolveImageSize(size, resolvedImageModel);
       const requestedAspectRatio = normalizeAspectRatio(aspect_ratio);
       const resolvedAspectRatio = requestedAspectRatio || aspectRatioFromSize(imageSize);
       debugLog("Resolved image generation dimensions", {
@@ -560,43 +632,56 @@ export async function POST(request: NextRequest) {
         requestedAspectRatio: requestedAspectRatio || null,
         resolvedAspectRatio,
       });
-
       let actualSize = imageSize;
       let imageResult;
-      try {
-        imageResult = await runImageTask({
-          model: IMAGE_MODEL,
-          prompt: resolved.prompt,
-          size: imageSize,
-          aspect_ratio: resolvedAspectRatio,
-          n: n || 1,
-          executionMode: "sync",
-          signal: request.signal,
-        });
-      } catch (error) {
-        const shouldFallbackTo1K =
-          imageSize === "2048x2048" &&
-          error instanceof ImageGenerationError &&
-          [429, 502, 503, 504].includes(error.statusCode || 0);
+      const fallbackSizes = resolveImageGenerationFallbackSizes(imageSize);
+      debugLog("Dispatching image generate supplier task", {
+        reqId,
+        n: n || 1,
+        resolvedImageModel,
+        requestedSize,
+        resolvedAspectRatio,
+        fallbackSizes,
+      });
+      let lastError: unknown = null;
 
-        if (!shouldFallbackTo1K) {
-          throw error;
+      for (let index = 0; index < fallbackSizes.length; index += 1) {
+        const candidateSize = fallbackSizes[index];
+
+        try {
+          imageResult = await runImageTask({
+            model: resolvedImageModel,
+            prompt: resolved.prompt,
+            size: candidateSize,
+            aspect_ratio: resolvedAspectRatio,
+            n: n || 1,
+            executionMode: resolvedExecutionMode,
+            signal: request.signal,
+          });
+          actualSize = candidateSize;
+          lastError = null;
+          break;
+        } catch (error) {
+          lastError = error;
+          const canRetryWithLowerSize =
+            index < fallbackSizes.length - 1 &&
+            error instanceof ImageGenerationError &&
+            [429, 502, 503, 504].includes(error.statusCode || 0);
+
+          if (!canRetryWithLowerSize) {
+            throw error;
+          }
+
+          const nextSize = fallbackSizes[index + 1];
+          debugWarn(`Generate at ${candidateSize} failed, fallback to ${nextSize}`, {
+            reqId,
+            reason: error.message,
+          });
         }
+      }
 
-        debugWarn("Generate at 2K failed, fallback to 1024x1024", {
-          reqId,
-          reason: error.message,
-        });
-        actualSize = "1024x1024";
-        imageResult = await runImageTask({
-          model: IMAGE_MODEL,
-          prompt: resolved.prompt,
-          size: actualSize,
-          aspect_ratio: resolvedAspectRatio,
-          n: n || 1,
-          executionMode: "sync",
-          signal: request.signal,
-        });
+      if (!imageResult && lastError) {
+        throw lastError;
       }
 
       if (!imageResult.data || imageResult.data.length === 0) {
@@ -605,8 +690,19 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({ status: "error", error: "No image data returned" }, { status: 500 });
       }
 
-      const imageUrl = imageResult.data[0].url;
-      const savedImage = await saveImageToLocal(imageUrl);
+      debugLog("Image generate supplier returned outputs", {
+        reqId,
+        dataCount: imageResult.data.length,
+        urlPresencePreview: imageResult.data.slice(0, 2).map((entry) => typeof entry?.url === "string" && entry.url.length > 0),
+      });
+
+      const savedImages = await saveImagesToLocal(imageResult.data.map((entry) => entry.url));
+      const primarySavedImage = savedImages[0];
+      debugLog("Saved image generate outputs locally", {
+        reqId,
+        savedCount: savedImages.length,
+        savedFiles: savedImages.map((image) => image.filename),
+      });
 
       logResponse(200, { mode: "image_generate", skill: skill || null });
       return NextResponse.json({
@@ -614,14 +710,15 @@ export async function POST(request: NextRequest) {
         result: {
           type: "image",
           ...imageResult,
-          model: IMAGE_MODEL,
+          model: resolvedImageModel,
           mode: "generate",
           requestedSize: imageSize,
           actualSize,
           analyzedPrompt: resolved.prompt,
           referenceLabels: [],
-          savedFile: savedImage.filename,
-          localUrl: savedImage.localUrl,
+          savedFile: primarySavedImage?.filename,
+          localUrl: primarySavedImage?.localUrl,
+          outputs: savedImages,
         },
       });
     }
@@ -693,6 +790,7 @@ export async function POST(request: NextRequest) {
       reqId,
       statusCode,
       message: errorMessage,
+      ...getErrorDiagnostics(error),
     });
 
     logResponse(statusCode, {

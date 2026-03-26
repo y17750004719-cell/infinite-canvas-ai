@@ -8,8 +8,19 @@ export const TEXT_PANEL_MODEL_OPTIONS = [
   },
 ];
 
+export const IMAGE_CARD_MODEL_OPTIONS = [
+  {
+    id: 'gemini-3.1-flash-image-preview',
+    label: 'Gemini 3.1 Flash Image',
+  },
+];
+
 export function getDefaultTextPanelModelOption() {
   return TEXT_PANEL_MODEL_OPTIONS[0];
+}
+
+export function getDefaultImageCardModelOption() {
+  return IMAGE_CARD_MODEL_OPTIONS[0];
 }
 
 export function resolveTextPanelChatModel(requestedModel, fallbackModel = getDefaultTextPanelModelOption()?.id) {
@@ -21,6 +32,135 @@ export function resolveTextPanelChatModel(requestedModel, fallbackModel = getDef
   }
 
   return fallbackModel;
+}
+
+export function resolveImageCardModel(requestedModel, fallbackModel = getDefaultImageCardModelOption()?.id) {
+  const normalizedRequestedModel = typeof requestedModel === 'string' ? requestedModel.trim() : '';
+  const allowedModelIds = new Set(IMAGE_CARD_MODEL_OPTIONS.map((option) => option.id));
+
+  if (normalizedRequestedModel && allowedModelIds.has(normalizedRequestedModel)) {
+    return normalizedRequestedModel;
+  }
+
+  return fallbackModel;
+}
+
+export function normalizeImageCardAspectRatio(value, fallbackValue = '1:1') {
+  const normalizedValue = typeof value === 'string' ? value.trim() : '';
+
+  if (!normalizedValue || normalizedValue === 'auto') {
+    return fallbackValue;
+  }
+
+  return normalizedValue;
+}
+
+function parseAspectRatioParts(value) {
+  const normalizedAspectRatio = normalizeImageCardAspectRatio(value);
+  const match = normalizedAspectRatio.match(/^(\d+):(\d+)$/);
+  if (!match) {
+    return null;
+  }
+
+  const widthRatio = Number(match[1]);
+  const heightRatio = Number(match[2]);
+  if (!Number.isFinite(widthRatio) || !Number.isFinite(heightRatio) || widthRatio <= 0 || heightRatio <= 0) {
+    return null;
+  }
+
+  return {
+    widthRatio,
+    heightRatio,
+  };
+}
+
+export function getImageCardFrameSizeForAspectRatio(aspectRatio, frameWidth = 348) {
+  const safeFrameWidth = Number.isFinite(frameWidth) && frameWidth > 0 ? frameWidth : 348;
+  const parts = parseAspectRatioParts(aspectRatio);
+
+  if (!parts) {
+    return {
+      width: safeFrameWidth,
+      height: safeFrameWidth,
+    };
+  }
+
+  return {
+    width: safeFrameWidth,
+    height: safeFrameWidth * (parts.heightRatio / parts.widthRatio),
+  };
+}
+
+export function getImageCardItemSizeForFrameSize(
+  frameWidth,
+  frameHeight,
+  {
+    frameInsetX = 16,
+    frameTopInset = 24,
+    frameBottomInset = 12,
+  } = {}
+) {
+  const safeFrameWidth = Number.isFinite(frameWidth) && frameWidth > 0 ? frameWidth : 348;
+  const safeFrameHeight = Number.isFinite(frameHeight) && frameHeight > 0 ? frameHeight : safeFrameWidth;
+  const safeInsetX = Number.isFinite(frameInsetX) ? frameInsetX : 16;
+  const safeFrameTopInset = Number.isFinite(frameTopInset) ? frameTopInset : 24;
+  const safeFrameBottomInset = Number.isFinite(frameBottomInset) ? frameBottomInset : 12;
+
+  return {
+    width: safeFrameWidth + safeInsetX * 2,
+    height: safeFrameHeight + safeFrameTopInset + safeFrameBottomInset,
+  };
+}
+
+export function getImageCardItemSizeForNaturalImage(
+  naturalWidth,
+  naturalHeight,
+  frameWidth = 348,
+  insets
+) {
+  const safeFrameWidth = Number.isFinite(frameWidth) && frameWidth > 0 ? frameWidth : 348;
+  const safeNaturalWidth = Number.isFinite(naturalWidth) && naturalWidth > 0 ? naturalWidth : safeFrameWidth;
+  const safeNaturalHeight = Number.isFinite(naturalHeight) && naturalHeight > 0 ? naturalHeight : safeFrameWidth;
+
+  return getImageCardItemSizeForFrameSize(
+    safeFrameWidth,
+    safeFrameWidth * (safeNaturalHeight / safeNaturalWidth),
+    insets
+  );
+}
+
+export function getImageCardQualitySummary({ aspectRatio, size }) {
+  const normalizedAspectRatio = normalizeImageCardAspectRatio(aspectRatio);
+  const normalizedSize = typeof size === 'string' ? size.trim() : '';
+
+  let sizeLabel = normalizedSize;
+  if (normalizedSize === '1024x1024') {
+    sizeLabel = '1K';
+  } else if (normalizedSize === '2048x2048') {
+    sizeLabel = '2K';
+  } else if (normalizedSize === '4096x4096') {
+    sizeLabel = '4K';
+  }
+
+  return `${normalizedAspectRatio} · ${sizeLabel}`;
+}
+
+export function resolveImageGenerationFallbackSizes(requestedSize) {
+  const normalizedSize = typeof requestedSize === 'string' ? requestedSize.trim() : '';
+
+  if (normalizedSize === '4096x4096') {
+    return ['4096x4096', '2048x2048', '1024x1024'];
+  }
+
+  if (normalizedSize === '2048x2048') {
+    return ['2048x2048', '1024x1024'];
+  }
+
+  if (normalizedSize) {
+    return [normalizedSize];
+  }
+
+  return ['2048x2048', '1024x1024'];
 }
 
 export function finalizeManualTextCardItem(item) {
@@ -43,9 +183,21 @@ export function finalizeManualTextCardItem(item) {
   };
 }
 
+export function isImageCardItem(item) {
+  return !!item && item.type === 'image' && item.imageVariant === 'card';
+}
+
+export function isImageAssetItem(item) {
+  return !!item && item.type === 'image' && !isImageCardItem(item) && typeof item.src === 'string' && item.src.length > 0;
+}
+
 export function canItemAcceptIncomingConnection(item) {
-  if (!item || item.type === 'image') {
+  if (!item) {
     return false;
+  }
+
+  if (item.type === 'image') {
+    return isImageCardItem(item);
   }
 
   if (item.type === 'text' && item.textVariant === 'card' && item.textMode === 'manual') {
@@ -53,6 +205,70 @@ export function canItemAcceptIncomingConnection(item) {
   }
 
   return true;
+}
+
+export function createCanvasCardItemAtCanvasPoint({
+  kind,
+  id,
+  canvasPoint,
+  width,
+  height,
+}) {
+  const baseItem = {
+    id,
+    x: canvasPoint.x - width / 2,
+    y: canvasPoint.y - height / 2,
+    width,
+    height,
+    rotation: 0,
+    visible: true,
+    locked: false,
+  };
+
+  if (kind === 'image') {
+    return {
+      ...baseItem,
+      type: 'image',
+      imageVariant: 'card',
+    };
+  }
+
+  return {
+    ...baseItem,
+    type: 'text',
+    textVariant: 'card',
+    textMode: 'ai',
+  };
+}
+
+export function resolveFloatingPopoverOffset({
+  panelRect,
+  anchorRect,
+  scale,
+  placement = 'anchor',
+  gap = 0,
+}) {
+  if (!panelRect || !anchorRect || !Number.isFinite(scale) || scale <= 0) {
+    return null;
+  }
+
+  const normalizedGap = Number.isFinite(gap) ? gap : 0;
+
+  if (placement === 'below-panel') {
+    const panelHeight = typeof panelRect.bottom === 'number'
+      ? panelRect.bottom - panelRect.top
+      : 0;
+
+    return {
+      left: (anchorRect.left - panelRect.left) / scale,
+      top: (panelHeight + normalizedGap) / scale,
+    };
+  }
+
+  return {
+    left: (anchorRect.left - panelRect.left) / scale,
+    top: (anchorRect.top - panelRect.top) / scale,
+  };
 }
 
 export function getTextCardVisualState({
@@ -374,6 +590,16 @@ export function buildCanvasTextPanelSubmitInput({
   return [trimmedDraft, ...linkedTextBlocks].filter(Boolean).join('\n\n');
 }
 
+export function buildCanvasImagePanelSubmitInput({
+  draft,
+  linkedTexts = [],
+}) {
+  return buildCanvasTextPanelSubmitInput({
+    draft,
+    linkedTexts,
+  });
+}
+
 export function canSubmitTextCardPanel({
   draft,
   linkedTexts = [],
@@ -382,6 +608,20 @@ export function canSubmitTextCardPanel({
     draft,
     linkedTexts,
   }).length > 0;
+}
+
+export function canSubmitImageCardPanel({
+  draft,
+  linkedTexts = [],
+  linkedImagePreviews = [],
+}) {
+  const submitInput = buildCanvasImagePanelSubmitInput({
+    draft,
+    linkedTexts,
+  });
+  const references = buildReferenceImageRequestPayload(linkedImagePreviews);
+
+  return submitInput.length > 0 || references.referenceImages.length > 0;
 }
 
 export function buildCanvasTextGenerationRequest({
@@ -408,6 +648,137 @@ export function buildCanvasTextGenerationRequest({
   }
 
   return request;
+}
+
+export function buildCanvasImageGenerationRequest({
+  input,
+  linkedImagePreviews = [],
+  modelId,
+  size,
+  count,
+  aspectRatio = 'auto',
+  executionMode = 'sync',
+}) {
+  const trimmedInput = typeof input === 'string' ? input.trim() : '';
+  const references = buildReferenceImageRequestPayload(linkedImagePreviews);
+  const resolvedModel = resolveImageCardModel(modelId);
+
+  const request = {
+    messages: [{ role: 'user', content: trimmedInput }],
+    intent: 'image',
+  };
+
+  if (resolvedModel) {
+    request.model = resolvedModel;
+  }
+
+  if (typeof size === 'string' && size.trim()) {
+    request.size = size.trim();
+  }
+
+  if (Number.isFinite(count) && count > 0) {
+    request.n = count;
+  }
+
+  if (typeof aspectRatio === 'string' && aspectRatio.trim() && aspectRatio !== 'auto') {
+    request.aspect_ratio = aspectRatio;
+  }
+
+  if (executionMode === 'async') {
+    request.executionMode = 'async';
+  }
+
+  if (references.referenceImages.length > 0) {
+    request.reference_images = references.referenceImages;
+    request.reference_labels = references.referenceLabels;
+  }
+
+  return request;
+}
+
+export function buildAsyncImageTaskRequests({
+  input,
+  linkedImagePreviews = [],
+  modelId,
+  size,
+  count,
+  aspectRatio = 'auto',
+}) {
+  const safeCount = Number.isFinite(count) && count > 0 ? Math.floor(count) : 0;
+  if (safeCount <= 0) {
+    return [];
+  }
+
+  return Array.from({ length: safeCount }, () =>
+    buildCanvasImageGenerationRequest({
+      input,
+      linkedImagePreviews,
+      modelId,
+      size,
+      count: 1,
+      aspectRatio,
+      executionMode: 'async',
+    })
+  );
+}
+
+export function buildImageCardOutputsState(outputs, requestedActiveIndex = 0) {
+  if (!Array.isArray(outputs) || outputs.length === 0) {
+    return {
+      src: '',
+      naturalWidth: undefined,
+      naturalHeight: undefined,
+      imageOutputs: [],
+      activeImageOutputIndex: 0,
+    };
+  }
+
+  const normalizedOutputs = outputs.filter(
+    (output) =>
+      output &&
+      typeof output.src === 'string' &&
+      output.src.length > 0 &&
+      Number.isFinite(output.naturalWidth) &&
+      output.naturalWidth > 0 &&
+      Number.isFinite(output.naturalHeight) &&
+      output.naturalHeight > 0
+  );
+
+  if (normalizedOutputs.length === 0) {
+    return {
+      src: '',
+      naturalWidth: undefined,
+      naturalHeight: undefined,
+      imageOutputs: [],
+      activeImageOutputIndex: 0,
+    };
+  }
+
+  const safeIndex = Math.min(
+    Math.max(0, Number.isFinite(requestedActiveIndex) ? requestedActiveIndex : 0),
+    normalizedOutputs.length - 1
+  );
+  const activeOutput = normalizedOutputs[safeIndex];
+
+  return {
+    src: activeOutput.src,
+    naturalWidth: activeOutput.naturalWidth,
+    naturalHeight: activeOutput.naturalHeight,
+    imageOutputs: normalizedOutputs,
+    activeImageOutputIndex: safeIndex,
+  };
+}
+
+export function appendImageCardOutput({
+  existingOutputs = [],
+  existingActiveIndex = 0,
+  nextOutput,
+}) {
+  const normalizedExistingOutputs = Array.isArray(existingOutputs) ? existingOutputs : [];
+  const nextOutputs = nextOutput ? [...normalizedExistingOutputs, nextOutput] : normalizedExistingOutputs;
+  const nextActiveIndex = normalizedExistingOutputs.length === 0 ? nextOutputs.length - 1 : existingActiveIndex;
+
+  return buildImageCardOutputsState(nextOutputs, nextActiveIndex);
 }
 
 export function getDirectImagePreviewsForTextCard({

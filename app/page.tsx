@@ -16,26 +16,44 @@ import {
   normalizeProjectSession,
 } from './lib/session-persistence.mjs';
 import {
+  appendImageCardOutput,
+  buildAsyncImageTaskRequests,
+  buildImageCardOutputsState,
+  buildCanvasImageGenerationRequest,
+  buildCanvasImagePanelSubmitInput,
   buildCanvasTextPanelSubmitInput,
   CANVAS_TEXT_GENERATION_CONCURRENCY_LIMIT,
+  IMAGE_CARD_MODEL_OPTIONS,
   TEXT_PANEL_MODEL_OPTIONS,
+  canSubmitImageCardPanel,
   canSubmitTextCardPanel,
   canItemAcceptIncomingConnection,
   buildCanvasTextGenerationRequest,
   buildReferenceImageRequestPayload,
   canEnterManualTextMode,
   canStartCanvasTextGeneration,
+  createCanvasCardItemAtCanvasPoint,
   finalizeManualTextCardItem,
+  getDefaultImageCardModelOption,
   getDefaultTextPanelModelOption,
   getDisplayableTextCardPanelDraft,
   getDirectImagePreviewsForTextCard,
   getDirectTextInputsForTextCard,
+  getImageCardFrameSizeForAspectRatio,
+  getImageCardItemSizeForFrameSize,
+  getImageCardItemSizeForNaturalImage,
+  getImageCardQualitySummary,
   isEventInsideTextCardPanel,
+  isImageAssetItem,
+  isImageCardItem,
   shouldSubmitTextCardPanelEnter,
   shouldFocusTextCardPanelInputOnPointerDown,
   getTextCardPanelPlaceholder,
   getTextCardVisualState,
+  normalizeImageCardAspectRatio,
   removeCanvasTextGenerationEntry,
+  resolveFloatingPopoverOffset,
+  resolveImageCardModel,
   resolveSessionPresentationState,
   shouldPreventScrollableRegionWheelDefault,
   syncAutoResizedTextareaLayout,
@@ -67,6 +85,9 @@ interface CanvasItem {
   src?: string;
   naturalWidth?: number;
   naturalHeight?: number;
+  imageVariant?: 'card';
+  imageOutputs?: Array<{ src: string; naturalWidth: number; naturalHeight: number }>;
+  activeImageOutputIndex?: number;
   fill?: string;
   text?: string;
   textVariant?: 'legacy' | 'card';
@@ -210,6 +231,7 @@ const TEXT_CARD_DIMENSIONS = {
   width: 380,
   height: 430,
 } as const;
+const IMAGE_CARD_DIMENSIONS = TEXT_CARD_DIMENSIONS;
 const TEXT_CARD_FRAME_INSET_X = 16;
 const TEXT_CARD_FRAME_TOP = 24;
 const TEXT_CARD_FRAME_BOTTOM = 12;
@@ -224,6 +246,23 @@ const TEXT_CARD_PANEL_INPUT_MAX_HEIGHT =
   TEXT_CARD_PANEL_INPUT_MIN_HEIGHT +
   (TEXT_CARD_PANEL_INPUT_MAX_ROWS - TEXT_CARD_PANEL_INPUT_MIN_ROWS) * TEXT_CARD_PANEL_INPUT_LINE_HEIGHT;
 const TEXT_CARD_BODY_TEXT_CLASSNAME = 'text-[15px] leading-7 tracking-[-0.02em] text-zinc-200';
+const IMAGE_CARD_PANEL_PROMPT_PLACEHOLDER = '描述你想生成的图片内容…（按 Enter 生成，Shift+Enter 换行）';
+const IMAGE_CARD_MENU_OPTIONS = [
+  { icon: ImageIcon, label: '图生图' },
+  { icon: Video, label: '图生视频' },
+  { icon: SlidersHorizontal, label: '图片换背景' },
+  { icon: Sparkles, label: '首帧图生视频' },
+] as const;
+const IMAGE_CARD_SIZE_OPTIONS = [
+  { id: '1024x1024', label: '1K' },
+  { id: '2048x2048', label: '2K' },
+  { id: '4096x4096', label: '4K' },
+] as const;
+const IMAGE_CARD_COUNT_OPTIONS = [
+  { id: 1, label: 'X1' },
+  { id: 2, label: 'X2' },
+  { id: 4, label: 'X4' },
+] as const;
 const NODE_SELECTED_OUTLINE_COLOR = 'rgba(226, 232, 240, 0.76)';
 const NODE_SELECTED_OUTLINE_WIDTH = 2;
 const VIEWPORT_ZOOM_DURATION_MS = 140;
@@ -244,6 +283,37 @@ const DARK_THEME = {
   canvasLine: 'rgba(229, 231, 235, 0.86)',
   portFill: '#090b0f',
   portStroke: 'rgba(229, 231, 235, 0.78)',
+};
+
+const getImageCardAspectRatioShortLabel = (aspectRatioId: string) =>
+  normalizeImageCardAspectRatio(aspectRatioId);
+
+const getImageCardAspectRatioPreviewSize = (aspectRatioId: string) => {
+  const normalizedAspectRatioId = normalizeImageCardAspectRatio(aspectRatioId);
+
+  const match = normalizedAspectRatioId.match(/^(\d+):(\d+)$/);
+  if (!match) {
+    return { width: 18, height: 18 };
+  }
+
+  const widthRatio = Number(match[1]);
+  const heightRatio = Number(match[2]);
+  if (!Number.isFinite(widthRatio) || !Number.isFinite(heightRatio) || widthRatio <= 0 || heightRatio <= 0) {
+    return { width: 18, height: 18 };
+  }
+
+  const maxPreviewEdge = 18;
+  if (widthRatio >= heightRatio) {
+    return {
+      width: maxPreviewEdge,
+      height: Math.max(7, (heightRatio / widthRatio) * maxPreviewEdge),
+    };
+  }
+
+  return {
+    width: Math.max(7, (widthRatio / heightRatio) * maxPreviewEdge),
+    height: maxPreviewEdge,
+  };
 };
 
 const getConstrainedImageDisplaySize = (
@@ -301,6 +371,85 @@ const createImageCanvasItem = ({
   };
 };
 
+const IMAGE_CARD_DEFAULT_FRAME_WIDTH = IMAGE_CARD_DIMENSIONS.width - TEXT_CARD_FRAME_INSET_X * 2;
+
+const getImageCardFrameWidthFromItem = (item: Pick<CanvasItem, 'width'> | null | undefined) => {
+  const frameWidth = (item?.width ?? 0) - TEXT_CARD_FRAME_INSET_X * 2;
+  return Number.isFinite(frameWidth) && frameWidth > 0 ? frameWidth : IMAGE_CARD_DEFAULT_FRAME_WIDTH;
+};
+
+const resizeCanvasItemFromCenter = (
+  item: CanvasItem,
+  nextSize: {
+    width: number;
+    height: number;
+  }
+): CanvasItem => {
+  const safeWidth = Number.isFinite(nextSize.width) && nextSize.width > 0 ? nextSize.width : item.width;
+  const safeHeight = Number.isFinite(nextSize.height) && nextSize.height > 0 ? nextSize.height : item.height;
+  const centerX = item.x + item.width / 2;
+  const centerY = item.y + item.height / 2;
+
+  return {
+    ...item,
+    width: safeWidth,
+    height: safeHeight,
+    x: centerX - safeWidth / 2,
+    y: centerY - safeHeight / 2,
+  };
+};
+
+const resizeImageCardItemToAspectRatio = (item: CanvasItem, aspectRatio: string): CanvasItem => {
+  const frameWidth = getImageCardFrameWidthFromItem(item);
+  const frameSize = getImageCardFrameSizeForAspectRatio(aspectRatio, frameWidth);
+  const nextSize = getImageCardItemSizeForFrameSize(frameSize.width, frameSize.height, {
+    frameInsetX: TEXT_CARD_FRAME_INSET_X,
+    frameTopInset: TEXT_CARD_FRAME_TOP,
+    frameBottomInset: TEXT_CARD_FRAME_BOTTOM,
+  });
+
+  return resizeCanvasItemFromCenter(item, nextSize);
+};
+
+const resizeImageCardItemToNaturalImage = (
+  item: CanvasItem,
+  naturalWidth: number,
+  naturalHeight: number
+): CanvasItem => {
+  const frameWidth = getImageCardFrameWidthFromItem(item);
+  const nextSize = getImageCardItemSizeForNaturalImage(naturalWidth, naturalHeight, frameWidth, {
+    frameInsetX: TEXT_CARD_FRAME_INSET_X,
+    frameTopInset: TEXT_CARD_FRAME_TOP,
+    frameBottomInset: TEXT_CARD_FRAME_BOTTOM,
+  });
+
+  return resizeCanvasItemFromCenter(item, nextSize);
+};
+
+const extractCanvasGeneratedImageUrls = (result: any): string[] => {
+  if (Array.isArray(result?.result?.outputs) && result.result.outputs.length > 0) {
+    return result.result.outputs
+      .map((entry: { localUrl?: string }) => (typeof entry?.localUrl === 'string' ? entry.localUrl : ''))
+      .filter(Boolean);
+  }
+
+  return typeof result?.result?.localUrl === 'string' ? [result.result.localUrl] : [];
+};
+
+const loadCanvasGeneratedImageMeta = (localUrl: string) =>
+  new Promise<{ src: string; naturalWidth: number; naturalHeight: number }>((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      resolve({
+        src: localUrl,
+        naturalWidth: img.naturalWidth || img.width || IMAGE_CARD_DIMENSIONS.width,
+        naturalHeight: img.naturalHeight || img.height || IMAGE_CARD_DIMENSIONS.height,
+      });
+    };
+    img.onerror = () => reject(new Error('生成图片加载失败'));
+    img.src = localUrl;
+  });
+
 const stopCanvasWheelFromScrollableRegion: React.WheelEventHandler<HTMLElement> = (e) => {
   e.stopPropagation();
 
@@ -346,6 +495,29 @@ const normalizeCanvasItems = (items: CanvasItem[]): CanvasItem[] =>
       return item;
     }
 
+    if (isImageCardItem(item)) {
+      if (Array.isArray(item.imageOutputs) && item.imageOutputs.length > 0) {
+        const nextOutputState = buildImageCardOutputsState(item.imageOutputs, item.activeImageOutputIndex ?? 0);
+        return {
+          ...resizeImageCardItemToNaturalImage(
+            {
+              ...item,
+              ...nextOutputState,
+            },
+            nextOutputState.naturalWidth ?? item.naturalWidth ?? IMAGE_CARD_DEFAULT_FRAME_WIDTH,
+            nextOutputState.naturalHeight ?? item.naturalHeight ?? IMAGE_CARD_DEFAULT_FRAME_WIDTH
+          ),
+          ...nextOutputState,
+        };
+      }
+
+      if (typeof item.src === 'string' && item.src && Number.isFinite(item.naturalWidth) && Number.isFinite(item.naturalHeight)) {
+        return resizeImageCardItemToNaturalImage(item, item.naturalWidth ?? IMAGE_CARD_DEFAULT_FRAME_WIDTH, item.naturalHeight ?? IMAGE_CARD_DEFAULT_FRAME_WIDTH);
+      }
+
+      return item;
+    }
+
     const sourceWidth = item.naturalWidth ?? item.width;
     const sourceHeight = item.naturalHeight ?? item.height;
     const { width, height } = getConstrainedImageDisplaySize(sourceWidth, sourceHeight);
@@ -358,7 +530,7 @@ const normalizeCanvasItems = (items: CanvasItem[]): CanvasItem[] =>
   });
 
 const getItemVisualBounds = (item: CanvasItem) => {
-  if (item.type === 'text' && item.textVariant === 'card') {
+  if ((item.type === 'text' && item.textVariant === 'card') || isImageCardItem(item)) {
     return {
       left: item.x + TEXT_CARD_FRAME_INSET_X,
       top: item.y + TEXT_CARD_FRAME_TOP,
@@ -714,8 +886,10 @@ const CanvasNodesLayer = memo(function CanvasNodesLayer({
   selectedId,
   hoveredCanvasItemId,
   activeCanvasTextGenerationItemIds,
+  activeCanvasImageGenerationItemIds,
   editingTextCardId,
   editingTextCardTextareaRef,
+  onImageCardOutputSelect,
   onSelectionGroupPointerDown,
   onItemMouseEnter,
   onItemMouseLeave,
@@ -734,8 +908,10 @@ const CanvasNodesLayer = memo(function CanvasNodesLayer({
   selectedId: string | null;
   hoveredCanvasItemId: string | null;
   activeCanvasTextGenerationItemIds: Set<string>;
+  activeCanvasImageGenerationItemIds: Set<string>;
   editingTextCardId: string | null;
   editingTextCardTextareaRef: React.RefObject<HTMLTextAreaElement | null>;
+  onImageCardOutputSelect: (itemId: string, outputIndex: number) => void;
   onSelectionGroupPointerDown: (e: React.PointerEvent<HTMLDivElement>) => void;
   onItemMouseEnter: (itemId: string) => void;
   onItemMouseLeave: (itemId: string) => void;
@@ -773,7 +949,8 @@ const CanvasNodesLayer = memo(function CanvasNodesLayer({
         const isHoveredItem = hoveredCanvasItemId === item.id;
         const showCornerResizeHandle = isHoveredItem && item.type !== 'image';
         const isTextCard = item.type === 'text' && item.textVariant === 'card';
-        const textCardFrameBounds = isTextCard ? getTextCardFrameBounds(item) : null;
+        const isImageCard = isImageCardItem(item);
+        const textCardFrameBounds = isTextCard || isImageCard ? getTextCardFrameBounds(item) : null;
         const textCardVisualState = isTextCard
           ? getTextCardVisualState({
               item,
@@ -783,6 +960,17 @@ const CanvasNodesLayer = memo(function CanvasNodesLayer({
               editingItemId: editingTextCardId,
             })
           : 'idle';
+        const imageCardVisualState = isImageCard
+          ? activeCanvasImageGenerationItemIds.has(item.id)
+            ? item.src
+              ? 'content'
+              : 'waiting'
+            : item.src
+              ? 'content'
+              : 'idle'
+          : 'idle';
+        const imageOutputCount = Array.isArray(item.imageOutputs) ? item.imageOutputs.length : 0;
+        const activeImageOutputIndex = Number.isFinite(item.activeImageOutputIndex) ? item.activeImageOutputIndex ?? 0 : 0;
 
         return (
           <div
@@ -802,7 +990,7 @@ const CanvasNodesLayer = memo(function CanvasNodesLayer({
             onDoubleClick={() => onItemDoubleClick(item.id)}
             onPointerDown={(e) => onItemPointerDown(e, item.id)}
           >
-            {item.type === 'image' && item.src && (
+            {isImageAssetItem(item) && item.src && (
               <img
                 src={item.src}
                 alt=""
@@ -810,6 +998,108 @@ const CanvasNodesLayer = memo(function CanvasNodesLayer({
                 style={{ borderRadius: `${NODE_CORNER_RADIUS}px` }}
                 draggable={false}
               />
+            )}
+            {isImageCard && (
+              <div className="relative h-full w-full">
+                <div className="absolute left-4 top-0 inline-flex items-center gap-1.5 text-sm font-medium text-zinc-500">
+                  <ImageIcon size={14} strokeWidth={2.1} />
+                  <span>Image</span>
+                </div>
+                <div
+                  className="absolute overflow-hidden rounded-[22px] bg-[#1f1f22]"
+                  style={{
+                    left: `${TEXT_CARD_FRAME_INSET_X}px`,
+                    top: `${TEXT_CARD_FRAME_TOP}px`,
+                    right: `${TEXT_CARD_FRAME_INSET_X}px`,
+                    bottom: `${TEXT_CARD_FRAME_BOTTOM}px`,
+                  }}
+                >
+                  <div className="flex h-full w-full items-center justify-center">
+                    {imageCardVisualState === 'idle' && (
+                      <div className="w-full max-w-[560px] px-8 py-10 text-left">
+                        <div className="flex flex-col gap-4">
+                          <div className="px-2 text-sm text-zinc-500">尝试：</div>
+                          <div className="flex w-full flex-col items-start gap-2">
+                            {IMAGE_CARD_MENU_OPTIONS.map((option) => {
+                              const Icon = option.icon;
+                              return (
+                                <button
+                                  key={option.label}
+                                  type="button"
+                                  onPointerDown={(e) => {
+                                    e.stopPropagation();
+                                  }}
+                                  className="group/row flex w-full items-center justify-start gap-2.5 rounded-[14px] bg-transparent px-3 py-2 text-left transition-colors duration-150 ease-out hover:bg-[rgba(255,255,255,0.038)]"
+                                >
+                                  <Icon
+                                    size={16}
+                                    className="shrink-0 text-zinc-400 transition-colors duration-150 group-hover/row:text-zinc-100"
+                                  />
+                                  <span className="text-[15px] font-medium tracking-[-0.02em] text-zinc-400 transition-colors duration-150 group-hover/row:text-zinc-100">
+                                    {option.label}
+                                  </span>
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                    {imageCardVisualState === 'waiting' && (
+                      <div className="flex h-full w-full items-center justify-center px-8 py-10 text-center">
+                        <span className="workspace-text-card-waiting text-[17px] font-medium tracking-[-0.03em] text-zinc-500">
+                          图片生成中……
+                        </span>
+                      </div>
+                    )}
+                    {imageCardVisualState === 'content' && item.src && (
+                      <div className="relative h-full w-full overflow-hidden bg-black/20">
+                        <img
+                          src={item.src}
+                          alt=""
+                          className="h-full w-full object-cover pointer-events-none"
+                          draggable={false}
+                        />
+                        {imageOutputCount > 1 && (
+                          <div className="absolute inset-x-3 bottom-3 flex items-center justify-between gap-3">
+                            <button
+                              type="button"
+                              onPointerDown={(e) => {
+                                e.stopPropagation();
+                              }}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onImageCardOutputSelect(item.id, activeImageOutputIndex - 1);
+                              }}
+                              className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-black/55 text-zinc-100 transition-colors hover:bg-black/70"
+                              aria-label="查看上一张"
+                            >
+                              <ArrowLeft size={15} />
+                            </button>
+                            <div className="rounded-full border border-white/10 bg-black/55 px-3 py-1 text-[12px] font-medium text-zinc-100">
+                              {activeImageOutputIndex + 1} / {imageOutputCount}
+                            </div>
+                            <button
+                              type="button"
+                              onPointerDown={(e) => {
+                                e.stopPropagation();
+                              }}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onImageCardOutputSelect(item.id, activeImageOutputIndex + 1);
+                              }}
+                              className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-black/55 text-zinc-100 transition-colors hover:bg-black/70"
+                              aria-label="查看下一张"
+                            >
+                              <ArrowLeft size={15} className="rotate-180" />
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              </div>
             )}
             {item.type === 'shape' && <div className="h-full w-full rounded" style={{ backgroundColor: item.fill }} />}
             {item.type === 'text' && item.textVariant !== 'card' && (
@@ -915,7 +1205,7 @@ const CanvasNodesLayer = memo(function CanvasNodesLayer({
             )}
             {isItemSelected &&
               !showMultiSelectionGroup &&
-              (isTextCard && textCardFrameBounds ? (
+              ((isTextCard || isImageCard) && textCardFrameBounds ? (
                 <div
                   className="absolute z-10 pointer-events-none"
                   style={{
@@ -1034,7 +1324,10 @@ const CanvasViewport = memo(function CanvasViewport({
   selectedTextCardPanelItem,
   linkedImagePreviews,
   selectedTextCardPanelLinkedTexts,
+  selectedImageCardPanelItem,
+  selectedImageCardPanelLinkedImagePreviews,
   activeCanvasTextGenerationItemIds,
+  activeCanvasImageGenerationItemIds,
   selectedTextPanelModel,
   textPanelModelOptions,
   showTextPanelModelMenu,
@@ -1043,6 +1336,23 @@ const CanvasViewport = memo(function CanvasViewport({
   selectedTextCardPanelCanSubmit,
   selectedTextCardPanelError,
   isSelectedTextCardGenerating,
+  selectedImageCardPanelInput,
+  selectedImageCardPanelCanSubmit,
+  selectedImageCardPanelError,
+  selectedImageCardModel,
+  imageCardModelOptions,
+  selectedImageCardPanelSize,
+  selectedImageCardPanelCount,
+  selectedImageCardPanelAspectRatio,
+  isSelectedImageCardGenerating,
+  showImageCardModelMenu,
+  imageCardModelMenuRef,
+  showImageCardQualityMenu,
+  imageCardQualityMenuRef,
+  imageCardQualityPopoverRef,
+  showImageCardCountMenu,
+  imageCardCountMenuRef,
+  imageCardCountPopoverRef,
   editingTextCardId,
   editingTextCardTextareaRef,
   onToggleTextPanelModelMenu,
@@ -1050,9 +1360,20 @@ const CanvasViewport = memo(function CanvasViewport({
   onSelectedTextCardPanelInputChange,
   onSelectedTextCardPanelSubmit,
   onSelectedTextCardPanelCancel,
+  onToggleImageCardModelMenu,
+  onSelectImageCardModel,
+  onToggleImageCardQualityMenu,
+  onSelectImageCardSize,
+  onToggleImageCardCountMenu,
+  onSelectImageCardCount,
+  onSelectImageCardAspectRatio,
+  onSelectedImageCardPanelInputChange,
+  onSelectedImageCardPanelSubmit,
+  onSelectedImageCardPanelCancel,
   onItemDoubleClick,
   onManualTextCardInputChange,
   onManualTextCardBlur,
+  onImageCardOutputSelect,
 }: {
   canvasRef: React.RefObject<HTMLDivElement | null>;
   widthStyle: string;
@@ -1110,7 +1431,10 @@ const CanvasViewport = memo(function CanvasViewport({
   selectedTextCardPanelItem: CanvasItem | null;
   linkedImagePreviews: Array<{ id: string; src: string; label: string; alt?: string }>;
   selectedTextCardPanelLinkedTexts: Array<{ id: string; text: string }>;
+  selectedImageCardPanelItem: CanvasItem | null;
+  selectedImageCardPanelLinkedImagePreviews: Array<{ id: string; src: string; label: string; alt?: string }>;
   activeCanvasTextGenerationItemIds: Set<string>;
+  activeCanvasImageGenerationItemIds: Set<string>;
   selectedTextPanelModel: { id: string; label: string };
   textPanelModelOptions: Array<{ id: string; label: string }>;
   showTextPanelModelMenu: boolean;
@@ -1119,6 +1443,23 @@ const CanvasViewport = memo(function CanvasViewport({
   selectedTextCardPanelCanSubmit: boolean;
   selectedTextCardPanelError: string | null;
   isSelectedTextCardGenerating: boolean;
+  selectedImageCardPanelInput: string;
+  selectedImageCardPanelCanSubmit: boolean;
+  selectedImageCardPanelError: string | null;
+  selectedImageCardModel: { id: string; label: string };
+  imageCardModelOptions: Array<{ id: string; label: string }>;
+  selectedImageCardPanelSize: string;
+  selectedImageCardPanelCount: number;
+  selectedImageCardPanelAspectRatio: string;
+  isSelectedImageCardGenerating: boolean;
+  showImageCardModelMenu: boolean;
+  imageCardModelMenuRef: React.RefObject<HTMLDivElement | null>;
+  showImageCardQualityMenu: boolean;
+  imageCardQualityMenuRef: React.RefObject<HTMLDivElement | null>;
+  imageCardQualityPopoverRef: React.RefObject<HTMLDivElement | null>;
+  showImageCardCountMenu: boolean;
+  imageCardCountMenuRef: React.RefObject<HTMLDivElement | null>;
+  imageCardCountPopoverRef: React.RefObject<HTMLDivElement | null>;
   editingTextCardId: string | null;
   editingTextCardTextareaRef: React.RefObject<HTMLTextAreaElement | null>;
   onToggleTextPanelModelMenu: () => void;
@@ -1126,13 +1467,32 @@ const CanvasViewport = memo(function CanvasViewport({
   onSelectedTextCardPanelInputChange: (value: string) => void;
   onSelectedTextCardPanelSubmit: () => void;
   onSelectedTextCardPanelCancel: () => void;
+  onToggleImageCardModelMenu: () => void;
+  onSelectImageCardModel: (modelId: string) => void;
+  onToggleImageCardQualityMenu: () => void;
+  onSelectImageCardSize: (sizeId: string) => void;
+  onToggleImageCardCountMenu: () => void;
+  onSelectImageCardCount: (count: number) => void;
+  onSelectImageCardAspectRatio: (aspectRatioId: string) => void;
+  onSelectedImageCardPanelInputChange: (value: string) => void;
+  onSelectedImageCardPanelSubmit: () => void;
+  onSelectedImageCardPanelCancel: () => void;
   onItemDoubleClick: (itemId: string) => void;
   onManualTextCardInputChange: (itemId: string, value: string) => void;
   onManualTextCardBlur: (itemId: string) => void;
+  onImageCardOutputSelect: (itemId: string, outputIndex: number) => void;
 }) {
   const { from, to } = getPreviewRenderPoints();
   const selectedTextCardPanelTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const selectedImageCardPanelTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const selectedImageCardPanelRootRef = useRef<HTMLDivElement | null>(null);
+  const [selectedImageCardQualityPopoverOffset, setSelectedImageCardQualityPopoverOffset] = useState<{ left: number; top: number } | null>(null);
+  const [selectedImageCardCountPopoverOffset, setSelectedImageCardCountPopoverOffset] = useState<{ left: number; top: number } | null>(null);
   const [selectedTextCardPanelInputMetrics, setSelectedTextCardPanelInputMetrics] = useState(() => ({
+    height: TEXT_CARD_PANEL_INPUT_MIN_HEIGHT,
+    isOverflowing: false,
+  }));
+  const [selectedImageCardPanelInputMetrics, setSelectedImageCardPanelInputMetrics] = useState(() => ({
     height: TEXT_CARD_PANEL_INPUT_MIN_HEIGHT,
     isOverflowing: false,
   }));
@@ -1159,12 +1519,25 @@ const CanvasViewport = memo(function CanvasViewport({
   const selectedTextCardPanelFrameBounds = selectedTextCardPanelItem
     ? getTextCardFrameBounds(selectedTextCardPanelItem)
     : null;
+  const selectedImageCardPanelFrameBounds = selectedImageCardPanelItem
+    ? getTextCardFrameBounds(selectedImageCardPanelItem)
+    : null;
   const selectedTextCardPanelCanvasWidth = selectedTextCardPanelFrameBounds
     ? Math.max(TEXT_CARD_GENERATION_PANEL_DEFAULT_WIDTH, selectedTextCardPanelFrameBounds.width)
     : 0;
+  const selectedImageCardPanelCanvasWidth = selectedImageCardPanelFrameBounds
+    ? Math.max(TEXT_CARD_GENERATION_PANEL_DEFAULT_WIDTH, selectedImageCardPanelFrameBounds.width)
+    : 0;
   const selectedTextCardPanelDisplayInput = getDisplayableTextCardPanelDraft(selectedTextCardPanelInput);
+  const selectedImageCardPanelDisplayInput = getDisplayableTextCardPanelDraft(selectedImageCardPanelInput);
   const focusSelectedTextCardPanelInput = useCallback(() => {
     const textarea = selectedTextCardPanelTextareaRef.current;
+    if (!textarea) return;
+
+    textarea.focus();
+  }, []);
+  const focusSelectedImageCardPanelInput = useCallback(() => {
+    const textarea = selectedImageCardPanelTextareaRef.current;
     if (!textarea) return;
 
     textarea.focus();
@@ -1191,11 +1564,85 @@ const CanvasViewport = memo(function CanvasViewport({
       prev.height === nextMetrics.height && prev.isOverflowing === nextMetrics.isOverflowing ? prev : nextMetrics
     );
   }, [selectedTextCardPanelCanvasWidth, selectedTextCardPanelDisplayInput, selectedTextCardPanelItem]);
+  useLayoutEffect(() => {
+    if (!selectedImageCardPanelItem) {
+      setSelectedImageCardPanelInputMetrics((prev) =>
+        prev.height === TEXT_CARD_PANEL_INPUT_MIN_HEIGHT && !prev.isOverflowing
+          ? prev
+          : { height: TEXT_CARD_PANEL_INPUT_MIN_HEIGHT, isOverflowing: false }
+      );
+      return;
+    }
+
+    const textarea = selectedImageCardPanelTextareaRef.current;
+    if (!textarea) return;
+
+    const nextMetrics = syncAutoResizedTextareaLayout(textarea, {
+      minHeight: TEXT_CARD_PANEL_INPUT_MIN_HEIGHT,
+      maxHeight: TEXT_CARD_PANEL_INPUT_MAX_HEIGHT,
+    });
+
+    setSelectedImageCardPanelInputMetrics((prev) =>
+      prev.height === nextMetrics.height && prev.isOverflowing === nextMetrics.isOverflowing ? prev : nextMetrics
+    );
+  }, [selectedImageCardPanelCanvasWidth, selectedImageCardPanelDisplayInput, selectedImageCardPanelItem]);
+  useLayoutEffect(() => {
+    if (!showImageCardQualityMenu || !selectedImageCardPanelItem) {
+      setSelectedImageCardQualityPopoverOffset(null);
+      return;
+    }
+
+    const panelElement = selectedImageCardPanelRootRef.current;
+    const anchorElement = imageCardQualityMenuRef.current;
+    if (!panelElement || !anchorElement || viewport.scale <= 0) {
+      return;
+    }
+
+    const panelRect = panelElement.getBoundingClientRect();
+    const anchorRect = anchorElement.getBoundingClientRect();
+
+    setSelectedImageCardQualityPopoverOffset(
+      resolveFloatingPopoverOffset({
+        panelRect,
+        anchorRect,
+        scale: viewport.scale,
+        placement: 'below-panel',
+        gap: 12,
+      })
+    );
+  }, [imageCardQualityMenuRef, selectedImageCardPanelItem, showImageCardQualityMenu, viewport.scale]);
+  useLayoutEffect(() => {
+    if (!showImageCardCountMenu || !selectedImageCardPanelItem) {
+      setSelectedImageCardCountPopoverOffset(null);
+      return;
+    }
+
+    const panelElement = selectedImageCardPanelRootRef.current;
+    const anchorElement = imageCardCountMenuRef.current;
+    if (!panelElement || !anchorElement || viewport.scale <= 0) {
+      return;
+    }
+
+    const panelRect = panelElement.getBoundingClientRect();
+    const anchorRect = anchorElement.getBoundingClientRect();
+
+    setSelectedImageCardCountPopoverOffset(
+      resolveFloatingPopoverOffset({
+        panelRect,
+        anchorRect,
+        scale: viewport.scale,
+      })
+    );
+  }, [imageCardCountMenuRef, selectedImageCardPanelItem, showImageCardCountMenu, viewport.scale]);
 
   const selectedTextCardPanelCanvasHeight =
     TEXT_CARD_GENERATION_PANEL_BASE_HEIGHT +
     (linkedImagePreviews.length > 0 ? TEXT_CARD_GENERATION_PANEL_PREVIEW_HEIGHT : 0) +
     Math.max(0, selectedTextCardPanelInputMetrics.height - TEXT_CARD_PANEL_INPUT_MIN_HEIGHT);
+  const selectedImageCardPanelCanvasHeight =
+    TEXT_CARD_GENERATION_PANEL_BASE_HEIGHT +
+    (selectedImageCardPanelLinkedImagePreviews.length > 0 ? TEXT_CARD_GENERATION_PANEL_PREVIEW_HEIGHT : 0) +
+    Math.max(0, selectedImageCardPanelInputMetrics.height - TEXT_CARD_PANEL_INPUT_MIN_HEIGHT);
   const selectedTextCardPanelPlaceholder = getTextCardPanelPlaceholder({
     linkedImageCount: linkedImagePreviews.length,
     linkedTextCount: selectedTextCardPanelLinkedTexts.length,
@@ -1214,6 +1661,22 @@ const CanvasViewport = memo(function CanvasViewport({
             18,
           width: selectedTextCardPanelCanvasWidth,
           height: selectedTextCardPanelCanvasHeight,
+        }
+      : null;
+  const selectedImageCardPanelCanvasRect =
+    selectedImageCardPanelItem && selectedImageCardPanelFrameBounds
+      ? {
+          left:
+            selectedImageCardPanelItem.x +
+            selectedImageCardPanelFrameBounds.left +
+            (selectedImageCardPanelFrameBounds.width - selectedImageCardPanelCanvasWidth) / 2,
+          top:
+            selectedImageCardPanelItem.y +
+            selectedImageCardPanelFrameBounds.top +
+            selectedImageCardPanelFrameBounds.height +
+            18,
+          width: selectedImageCardPanelCanvasWidth,
+          height: selectedImageCardPanelCanvasHeight,
         }
       : null;
   const selectedTextCardPanelPadding = 24;
@@ -1247,6 +1710,39 @@ const CanvasViewport = memo(function CanvasViewport({
         Math.max(
           selectedTextCardPanelPadding,
           canvasSize.height - selectedTextCardPanelDisplayedHeight - selectedTextCardPanelPadding
+        )
+      )
+    : 0;
+  const selectedImageCardPanelDisplayedWidth = selectedImageCardPanelCanvasRect
+    ? selectedImageCardPanelCanvasRect.width * viewport.scale
+    : 0;
+  const selectedImageCardPanelDisplayedHeight = selectedImageCardPanelCanvasRect
+    ? selectedImageCardPanelCanvasRect.height * viewport.scale
+    : 0;
+  const selectedImageCardPanelScreenPoint = selectedImageCardPanelCanvasRect
+    ? toCanvasScreenPoint({
+        x: selectedImageCardPanelCanvasRect.left,
+        y: selectedImageCardPanelCanvasRect.top,
+      })
+    : null;
+  const selectedImageCardPanelLeft = selectedImageCardPanelScreenPoint
+    ? Math.min(
+        Math.max(
+          selectedImageCardPanelScreenPoint.x,
+          selectedTextCardPanelPadding
+        ),
+        Math.max(
+          selectedTextCardPanelPadding,
+          canvasSize.width - selectedImageCardPanelDisplayedWidth - selectedTextCardPanelPadding
+        )
+      )
+    : 0;
+  const selectedImageCardPanelTop = selectedImageCardPanelScreenPoint
+    ? Math.min(
+        Math.max(selectedImageCardPanelScreenPoint.y, selectedTextCardPanelPadding),
+        Math.max(
+          selectedTextCardPanelPadding,
+          canvasSize.height - selectedImageCardPanelDisplayedHeight - selectedTextCardPanelPadding
         )
       )
     : 0;
@@ -1525,6 +2021,367 @@ const CanvasViewport = memo(function CanvasViewport({
           </div>
         </div>
       )}
+      {selectedImageCardPanelItem && selectedImageCardPanelFrameBounds && selectedImageCardPanelCanvasRect && (
+        <div className="pointer-events-none absolute inset-0 z-[115]">
+          <div
+            data-text-card-panel="true"
+            ref={selectedImageCardPanelRootRef}
+            className="pointer-events-auto absolute overflow-hidden rounded-[26px] border border-white/[0.11] bg-[rgba(28,28,31,0.98)] shadow-[0_34px_90px_rgba(0,0,0,0.46),inset_0_1px_0_rgba(255,255,255,0.025)] backdrop-blur-xl"
+            style={{
+              left: selectedImageCardPanelLeft,
+              top: selectedImageCardPanelTop,
+              width: selectedImageCardPanelCanvasRect.width,
+              transform: `scale(${viewport.scale})`,
+              transformOrigin: 'top left',
+            }}
+            onPointerDown={(e) => {
+              e.stopPropagation();
+            }}
+          >
+            <div className="px-5 py-3">
+              {selectedImageCardPanelLinkedImagePreviews.length > 0 && (
+                <div className="mb-3 rounded-[18px] border border-white/[0.08] bg-[rgba(255,255,255,0.025)] p-2.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.025)]">
+                  <div
+                    className="panel-scrollbar flex gap-2 overflow-x-auto pb-1"
+                    onWheel={stopCanvasWheelFromScrollableRegion}
+                  >
+                    {selectedImageCardPanelLinkedImagePreviews.map((preview) => (
+                      <div
+                        key={preview.id}
+                        className="relative h-20 w-20 shrink-0 overflow-hidden rounded-[14px] border border-white/[0.08] bg-black/25"
+                      >
+                        <img
+                          src={preview.src}
+                          alt={preview.alt || preview.label}
+                          className="h-full w-full object-cover"
+                          draggable={false}
+                        />
+                        <span className="pointer-events-none absolute left-1.5 top-1.5 rounded-full bg-black/70 px-2 py-0.5 text-[10px] font-medium tracking-[0.01em] text-zinc-100">
+                          {preview.label}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+              <div
+                data-text-card-panel-input-shell="true"
+                className="rounded-[20px] border border-white/[0.09] bg-[rgba(7,8,10,0.34)] px-4 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] transition-colors duration-150 hover:border-white/[0.14] focus-within:border-white/[0.18] focus-within:bg-[rgba(9,10,13,0.42)]"
+                onPointerDown={(e) => {
+                  e.stopPropagation();
+                  if (!shouldFocusTextCardPanelInputOnPointerDown(e.target as HTMLElement | null)) {
+                    return;
+                  }
+
+                  e.preventDefault();
+                  focusSelectedImageCardPanelInput();
+                }}
+              >
+                <textarea
+                  data-text-card-panel-input="true"
+                  ref={selectedImageCardPanelTextareaRef}
+                  value={selectedImageCardPanelDisplayInput}
+                  onChange={(e) => {
+                    onSelectedImageCardPanelInputChange(e.target.value);
+                  }}
+                  onKeyDown={(e) => {
+                    if (
+                      shouldSubmitTextCardPanelEnter({
+                        key: e.key,
+                        shiftKey: e.shiftKey,
+                        altKey: e.altKey,
+                        isComposing: e.nativeEvent.isComposing,
+                      })
+                    ) {
+                      e.preventDefault();
+                      if (isSelectedImageCardGenerating) {
+                        onSelectedImageCardPanelCancel();
+                      } else {
+                        onSelectedImageCardPanelSubmit();
+                      }
+                    }
+                  }}
+                  onPointerDown={(e) => {
+                    e.stopPropagation();
+                  }}
+                  onWheel={stopCanvasWheelFromScrollableRegion}
+                  autoFocus={false}
+                  readOnly={false}
+                  disabled={false}
+                  spellCheck={false}
+                  className="panel-scrollbar w-full resize-none bg-transparent text-[14px] leading-6 text-zinc-100 caret-zinc-100 outline-none placeholder:text-zinc-500 [user-select:text] [-webkit-user-select:text] cursor-text"
+                  placeholder={IMAGE_CARD_PANEL_PROMPT_PLACEHOLDER}
+                  rows={TEXT_CARD_PANEL_INPUT_MIN_ROWS}
+                  style={{
+                    height: `${selectedImageCardPanelInputMetrics.height}px`,
+                    overflowY: selectedImageCardPanelInputMetrics.isOverflowing ? 'auto' : 'hidden',
+                  }}
+                />
+              </div>
+              {selectedImageCardPanelError && (
+                <div className="mt-2 px-0.5 text-[12px] leading-5 text-rose-400">
+                  {selectedImageCardPanelError}
+                </div>
+              )}
+            </div>
+            <div
+              data-text-card-panel-control="true"
+              className="flex items-center justify-between border-t border-white/[0.08] bg-[rgba(255,255,255,0.02)] px-5 py-3"
+            >
+              <div className="flex min-w-0 items-center gap-5">
+                <div className="relative" ref={imageCardModelMenuRef}>
+                  {showImageCardModelMenu && (
+                    <div
+                      data-text-card-panel-control="true"
+                      className="absolute bottom-full left-0 mb-2 min-w-[248px] overflow-hidden rounded-[18px] border border-white/[0.1] bg-[rgba(24,24,27,0.985)] p-1.5 shadow-[0_24px_64px_rgba(0,0,0,0.42)] backdrop-blur-xl"
+                      onPointerDown={(e) => {
+                        e.stopPropagation();
+                      }}
+                    >
+                      {imageCardModelOptions.map((option) => {
+                        const isSelected = option.id === selectedImageCardModel.id;
+                        return (
+                          <button
+                            key={option.id}
+                            type="button"
+                            onClick={() => {
+                              onSelectImageCardModel(option.id);
+                            }}
+                            className={`flex w-full items-center justify-between rounded-[14px] px-3 py-2.5 text-left transition-colors ${
+                              isSelected ? 'bg-white/[0.08] text-zinc-50' : 'text-zinc-300 hover:bg-white/[0.05]'
+                            }`}
+                          >
+                            <div className="min-w-0">
+                              <div className="truncate text-[13px] font-semibold tracking-[-0.02em]">{option.label}</div>
+                              <div className="truncate text-[11px] text-zinc-500">{option.id}</div>
+                            </div>
+                            {isSelected && <Check size={15} className="ml-3 shrink-0 text-zinc-100" />}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                  <button
+                    data-text-card-panel-control="true"
+                    type="button"
+                    onPointerDown={(e) => {
+                      e.stopPropagation();
+                    }}
+                    onClick={() => {
+                      onToggleImageCardModelMenu();
+                    }}
+                    className="inline-flex max-w-[220px] items-center gap-2 text-[13px] font-semibold tracking-[-0.02em] text-zinc-100"
+                    aria-haspopup="menu"
+                    aria-expanded={showImageCardModelMenu}
+                  >
+                    <Sparkles size={15} className="shrink-0 text-zinc-100" />
+                    <span className="truncate">{selectedImageCardModel.label}</span>
+                    <ChevronDown size={14} className={`shrink-0 text-zinc-500 transition-transform ${showImageCardModelMenu ? 'rotate-180' : ''}`} />
+                  </button>
+                </div>
+                <div className="relative flex items-center gap-5" ref={imageCardQualityMenuRef}>
+                  <button
+                    data-text-card-panel-control="true"
+                    type="button"
+                    onPointerDown={(e) => {
+                      e.stopPropagation();
+                    }}
+                    onClick={() => {
+                      onToggleImageCardQualityMenu();
+                    }}
+                    className="inline-flex items-center gap-2 text-[13px] font-semibold tracking-[-0.02em] text-zinc-100"
+                    aria-haspopup="menu"
+                    aria-expanded={showImageCardQualityMenu}
+                  >
+                    <span>
+                      {getImageCardQualitySummary({
+                        aspectRatio: selectedImageCardPanelAspectRatio,
+                        size: selectedImageCardPanelSize,
+                      })}
+                    </span>
+                    <ChevronDown size={14} className={`text-zinc-500 transition-transform ${showImageCardQualityMenu ? 'rotate-180' : ''}`} />
+                  </button>
+                  <div className="relative" ref={imageCardCountMenuRef}>
+                  <button
+                    data-text-card-panel-control="true"
+                    type="button"
+                    onPointerDown={(e) => {
+                      e.stopPropagation();
+                    }}
+                    onClick={() => {
+                      onToggleImageCardCountMenu();
+                    }}
+                    className="inline-flex items-center gap-2 text-[13px] font-semibold tracking-[-0.02em] text-zinc-100"
+                    aria-haspopup="menu"
+                    aria-expanded={showImageCardCountMenu}
+                  >
+                    <span>{IMAGE_CARD_COUNT_OPTIONS.find((item) => item.id === selectedImageCardPanelCount)?.label || `X${selectedImageCardPanelCount}`}</span>
+                    <ChevronDown size={14} className={`text-zinc-500 transition-transform ${showImageCardCountMenu ? 'rotate-180' : ''}`} />
+                  </button>
+                  </div>
+                </div>
+              </div>
+              <div className="flex items-center gap-2.5">
+                <button
+                  data-text-card-panel-control="true"
+                  type="button"
+                  onPointerDown={(e) => {
+                    e.stopPropagation();
+                  }}
+                  onClick={() => {
+                    if (isSelectedImageCardGenerating) {
+                      onSelectedImageCardPanelCancel();
+                    } else {
+                      onSelectedImageCardPanelSubmit();
+                    }
+                  }}
+                  disabled={!isSelectedImageCardGenerating && !selectedImageCardPanelCanSubmit}
+                  className="inline-flex h-11 w-11 items-center justify-center rounded-full border border-black/5 bg-[#f5f7fb] text-black shadow-[0_10px_24px_rgba(0,0,0,0.22),inset_0_1px_0_rgba(255,255,255,0.7)] transition-colors hover:bg-white disabled:cursor-not-allowed disabled:opacity-50"
+                  aria-label={isSelectedImageCardGenerating ? '终止生成' : '开始生图'}
+                  title={isSelectedImageCardGenerating ? '终止生成' : '开始生图'}
+                >
+                  {isSelectedImageCardGenerating ? (
+                    <svg className="animate-spin" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <circle cx="12" cy="12" r="9" opacity="0.25" />
+                      <path d="M21 12a9 9 0 0 1-9 9" />
+                    </svg>
+                  ) : (
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M12 18V6" />
+                      <path d="m7 11 5-5 5 5" />
+                    </svg>
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+          {showImageCardQualityMenu && selectedImageCardQualityPopoverOffset && (
+            <div
+              ref={imageCardQualityPopoverRef}
+              data-text-card-panel-control="true"
+              className="pointer-events-auto absolute overflow-hidden rounded-[22px] border border-white/[0.1] bg-[rgba(24,24,27,0.985)] p-3 shadow-[0_24px_64px_rgba(0,0,0,0.42)] backdrop-blur-xl"
+              style={{
+                left: selectedImageCardPanelLeft + selectedImageCardQualityPopoverOffset.left * viewport.scale,
+                top: selectedImageCardPanelTop + selectedImageCardQualityPopoverOffset.top * viewport.scale,
+                width: 292,
+                transform: `scale(${viewport.scale})`,
+                transformOrigin: 'top left',
+              }}
+              onPointerDown={(e) => {
+                e.stopPropagation();
+              }}
+            >
+              <div className="rounded-[18px] border border-white/[0.06] bg-[rgba(255,255,255,0.025)] p-3">
+                <div className="mb-2.5 flex items-center justify-between">
+                  <span className="text-[11px] font-medium tracking-[0.04em] text-zinc-500">比例</span>
+                  <span className="text-[11px] font-medium text-zinc-400">
+                    {getImageCardAspectRatioShortLabel(selectedImageCardPanelAspectRatio)}
+                  </span>
+                </div>
+                <div className="grid grid-cols-4 gap-1.5">
+                  {ASPECT_RATIOS.filter((option) => option.id !== 'auto').map((option) => {
+                    const isSelected = option.id === selectedImageCardPanelAspectRatio;
+                    const previewSize = getImageCardAspectRatioPreviewSize(option.id);
+                    return (
+                      <button
+                        key={option.id}
+                        type="button"
+                        onClick={() => {
+                          onSelectImageCardAspectRatio(option.id);
+                        }}
+                        className={`flex min-h-[58px] flex-col items-center justify-center gap-1.5 rounded-[14px] border px-1.5 py-2 text-center transition-colors ${
+                          isSelected
+                            ? 'border-white/[0.14] bg-white/[0.09] text-zinc-50 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]'
+                            : 'border-white/[0.06] bg-[rgba(255,255,255,0.02)] text-zinc-300 hover:border-white/[0.12] hover:bg-white/[0.05]'
+                        }`}
+                      >
+                        <span className="flex h-7 w-7 items-center justify-center rounded-[10px] border border-white/[0.08] bg-[rgba(7,8,10,0.28)]">
+                          <span
+                            className={`rounded-[6px] border ${
+                              isSelected ? 'border-zinc-100/80 bg-zinc-100/10' : 'border-zinc-400/60 bg-white/[0.03]'
+                            }`}
+                            style={{
+                              width: `${previewSize.width}px`,
+                              height: `${previewSize.height}px`,
+                            }}
+                          />
+                        </span>
+                        <span className="text-[11px] font-semibold tracking-[-0.02em]">
+                          {option.id}
+                        </span>
+                      </button>
+                    );
+                  })}
+                </div>
+                <div className="mt-3.5 border-t border-white/[0.06] pt-3.5">
+                  <div className="mb-2.5 flex items-center justify-between">
+                    <span className="text-[11px] font-medium tracking-[0.04em] text-zinc-500">清晰度</span>
+                    <span className="text-[11px] font-medium text-zinc-400">
+                      {IMAGE_CARD_SIZE_OPTIONS.find((item) => item.id === selectedImageCardPanelSize)?.label || selectedImageCardPanelSize}
+                    </span>
+                  </div>
+                  <div className="inline-flex w-full items-center rounded-[14px] border border-white/[0.06] bg-[rgba(255,255,255,0.03)] p-1">
+                    {IMAGE_CARD_SIZE_OPTIONS.map((option) => {
+                      const isSelected = option.id === selectedImageCardPanelSize;
+                      return (
+                        <button
+                          key={option.id}
+                          type="button"
+                          onClick={() => {
+                            onSelectImageCardSize(option.id);
+                          }}
+                          className={`flex-1 rounded-[11px] px-2.5 py-1.5 text-[12px] font-semibold tracking-[-0.02em] transition-colors ${
+                            isSelected
+                              ? 'bg-[#f5f7fb] text-black shadow-[0_8px_20px_rgba(0,0,0,0.18)]'
+                              : 'text-zinc-300 hover:bg-white/[0.05]'
+                          }`}
+                        >
+                          {option.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+            </div>
+          )}
+          {showImageCardCountMenu && selectedImageCardCountPopoverOffset && (
+            <div
+              ref={imageCardCountPopoverRef}
+              data-text-card-panel-control="true"
+              className="pointer-events-auto absolute min-w-[124px] overflow-hidden rounded-[18px] border border-white/[0.1] bg-[rgba(24,24,27,0.985)] p-1.5 shadow-[0_24px_64px_rgba(0,0,0,0.42)] backdrop-blur-xl"
+              style={{
+                left: selectedImageCardPanelLeft + selectedImageCardCountPopoverOffset.left * viewport.scale,
+                top: selectedImageCardPanelTop + selectedImageCardCountPopoverOffset.top * viewport.scale - 8,
+                transform: `translateY(-100%) scale(${viewport.scale})`,
+                transformOrigin: 'top left',
+              }}
+              onPointerDown={(e) => {
+                e.stopPropagation();
+              }}
+            >
+              {IMAGE_CARD_COUNT_OPTIONS.map((option) => {
+                const isSelected = option.id === selectedImageCardPanelCount;
+                return (
+                  <button
+                    key={option.id}
+                    type="button"
+                    onClick={() => {
+                      onSelectImageCardCount(option.id);
+                    }}
+                    className={`flex w-full items-center justify-between rounded-[14px] px-3 py-2.5 text-left transition-colors ${
+                      isSelected ? 'bg-white/[0.08] text-zinc-50' : 'text-zinc-300 hover:bg-white/[0.05]'
+                    }`}
+                  >
+                    <span className="text-[13px] font-semibold tracking-[-0.02em]">{option.label}</span>
+                    {isSelected && <Check size={15} className="ml-3 shrink-0 text-zinc-100" />}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
       <CanvasNodesLayer
         items={items}
         connections={connections}
@@ -1534,8 +2391,10 @@ const CanvasViewport = memo(function CanvasViewport({
         selectedId={selectedId}
         hoveredCanvasItemId={hoveredCanvasItemId}
         activeCanvasTextGenerationItemIds={activeCanvasTextGenerationItemIds}
+        activeCanvasImageGenerationItemIds={activeCanvasImageGenerationItemIds}
         editingTextCardId={editingTextCardId}
         editingTextCardTextareaRef={editingTextCardTextareaRef}
+        onImageCardOutputSelect={onImageCardOutputSelect}
         onSelectionGroupPointerDown={onSelectionGroupPointerDown}
         onItemMouseEnter={onItemMouseEnter}
         onItemMouseLeave={onItemMouseLeave}
@@ -2035,7 +2894,11 @@ export default function AIWorkspace() {
   const [activeCanvasTextGenerations, setActiveCanvasTextGenerations] = useState<
     Record<string, { status: 'running'; startedAt: number }>
   >({});
+  const [activeCanvasImageGenerations, setActiveCanvasImageGenerations] = useState<
+    Record<string, { status: 'running'; startedAt: number; total: number; completed: number; failed: number }>
+  >({});
   const [canvasTextGenerationErrorById, setCanvasTextGenerationErrorById] = useState<Record<string, string>>({});
+  const [canvasImageGenerationErrorById, setCanvasImageGenerationErrorById] = useState<Record<string, string>>({});
   const [hasStartedChat, setHasStartedChat] = useState(false);
   const [showAvatarMenu, setShowAvatarMenu] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
@@ -2082,6 +2945,8 @@ export default function AIWorkspace() {
   const generateAbortRef = useRef<AbortController | null>(null);
   const canvasTextGenerateAbortControllersRef = useRef<Map<string, AbortController>>(new Map());
   const suppressCanvasTextAbortErrorItemIdsRef = useRef<Set<string>>(new Set());
+  const canvasImageGenerateAbortControllersRef = useRef<Map<string, AbortController>>(new Map());
+  const suppressCanvasImageAbortErrorItemIdsRef = useRef<Set<string>>(new Set());
   const processedSkillJobUrlsRef = useRef<Set<string>>(new Set());
   const processedSkillChoiceIdsRef = useRef<Set<string>>(new Set());
   const streamQueueRef = useRef('');
@@ -2102,9 +2967,22 @@ export default function AIWorkspace() {
   const [copiedAssistantMessageId, setCopiedAssistantMessageId] = useState<string | null>(null);
   const [editingTextCardId, setEditingTextCardId] = useState<string | null>(null);
   const [textCardPanelDrafts, setTextCardPanelDrafts] = useState<Record<string, string>>({});
+  const [imageCardPanelDrafts, setImageCardPanelDrafts] = useState<Record<string, string>>({});
+  const [imageCardModelById, setImageCardModelById] = useState<Record<string, string>>({});
+  const [imageCardSizeById, setImageCardSizeById] = useState<Record<string, string>>({});
+  const [imageCardCountById, setImageCardCountById] = useState<Record<string, number>>({});
+  const [imageCardAspectRatioById, setImageCardAspectRatioById] = useState<Record<string, string>>({});
   const [selectedTextPanelModelId, setSelectedTextPanelModelId] = useState(getDefaultTextPanelModelOption().id);
   const [showTextPanelModelMenu, setShowTextPanelModelMenu] = useState(false);
+  const [showImageCardModelMenu, setShowImageCardModelMenu] = useState(false);
+  const [showImageCardQualityMenu, setShowImageCardQualityMenu] = useState(false);
+  const [showImageCardCountMenu, setShowImageCardCountMenu] = useState(false);
   const editingTextCardTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const imageCardModelMenuRef = useRef<HTMLDivElement | null>(null);
+  const imageCardQualityMenuRef = useRef<HTMLDivElement | null>(null);
+  const imageCardQualityPopoverRef = useRef<HTMLDivElement | null>(null);
+  const imageCardCountMenuRef = useRef<HTMLDivElement | null>(null);
+  const imageCardCountPopoverRef = useRef<HTMLDivElement | null>(null);
   const multiSelectionBounds = React.useMemo(() => {
     if (selectedIds.length <= 1) return null;
     const selectedItems = items.filter((item) => selectedIds.includes(item.id));
@@ -2132,6 +3010,11 @@ export default function AIWorkspace() {
     const item = itemById[selectedId];
     return item?.type === 'text' && item.textVariant === 'card' && item.textMode !== 'manual' ? item : null;
   }, [itemById, selectedId, selectedIds]);
+  const selectedImageCardPanelItem = React.useMemo(() => {
+    if (selectedIds.length !== 1 || !selectedId) return null;
+    const item = itemById[selectedId];
+    return isImageCardItem(item) ? item : null;
+  }, [itemById, selectedId, selectedIds]);
   const selectedTextCardPanelLinkedImagePreviews = React.useMemo(
     () =>
       getDirectImagePreviewsForTextCard({
@@ -2153,6 +3036,39 @@ export default function AIWorkspace() {
   const selectedTextCardPanelInput = selectedTextCardPanelItem
     ? textCardPanelDrafts[selectedTextCardPanelItem.id] ?? ''
     : '';
+  const selectedImageCardPanelLinkedImagePreviews = React.useMemo(
+    () =>
+      getDirectImagePreviewsForTextCard({
+        textCardId: selectedImageCardPanelItem?.id ?? '',
+        items,
+        connections,
+      }),
+    [connections, items, selectedImageCardPanelItem?.id]
+  );
+  const selectedImageCardPanelLinkedTexts = React.useMemo(
+    () =>
+      getDirectTextInputsForTextCard({
+        textCardId: selectedImageCardPanelItem?.id ?? '',
+        items,
+        connections,
+      }),
+    [connections, items, selectedImageCardPanelItem?.id]
+  );
+  const selectedImageCardPanelInput = selectedImageCardPanelItem
+    ? imageCardPanelDrafts[selectedImageCardPanelItem.id] ?? ''
+    : '';
+  const selectedImageCardPanelModelId = selectedImageCardPanelItem
+    ? resolveImageCardModel(imageCardModelById[selectedImageCardPanelItem.id], getDefaultImageCardModelOption().id)
+    : getDefaultImageCardModelOption().id;
+  const selectedImageCardPanelSize = selectedImageCardPanelItem
+    ? imageCardSizeById[selectedImageCardPanelItem.id] ?? IMAGE_CARD_SIZE_OPTIONS[0].id
+    : IMAGE_CARD_SIZE_OPTIONS[0].id;
+  const selectedImageCardPanelCount = selectedImageCardPanelItem
+    ? imageCardCountById[selectedImageCardPanelItem.id] ?? IMAGE_CARD_COUNT_OPTIONS[0].id
+    : IMAGE_CARD_COUNT_OPTIONS[0].id;
+  const selectedImageCardPanelAspectRatio = selectedImageCardPanelItem
+    ? normalizeImageCardAspectRatio(imageCardAspectRatioById[selectedImageCardPanelItem.id], '1:1')
+    : '1:1';
   const selectedTextCardPanelSubmitInput = React.useMemo(
     () =>
       buildCanvasTextPanelSubmitInput({
@@ -2165,15 +3081,39 @@ export default function AIWorkspace() {
     draft: selectedTextCardPanelInput,
     linkedTexts: selectedTextCardPanelLinkedTexts,
   });
+  const selectedImageCardPanelSubmitInput = React.useMemo(
+    () =>
+      buildCanvasImagePanelSubmitInput({
+        draft: selectedImageCardPanelInput,
+        linkedTexts: selectedImageCardPanelLinkedTexts,
+      }),
+    [selectedImageCardPanelInput, selectedImageCardPanelLinkedTexts]
+  );
+  const selectedImageCardPanelCanSubmit = canSubmitImageCardPanel({
+    draft: selectedImageCardPanelInput,
+    linkedTexts: selectedImageCardPanelLinkedTexts,
+    linkedImagePreviews: selectedImageCardPanelLinkedImagePreviews,
+  });
   const selectedTextCardPanelError = selectedTextCardPanelItem
     ? canvasTextGenerationErrorById[selectedTextCardPanelItem.id] ?? null
+    : null;
+  const selectedImageCardPanelError = selectedImageCardPanelItem
+    ? canvasImageGenerationErrorById[selectedImageCardPanelItem.id] ?? null
     : null;
   const activeCanvasTextGenerationItemIds = React.useMemo(
     () => new Set(Object.keys(activeCanvasTextGenerations)),
     [activeCanvasTextGenerations]
   );
+  const activeCanvasImageGenerationItemIds = React.useMemo(
+    () => new Set(Object.keys(activeCanvasImageGenerations)),
+    [activeCanvasImageGenerations]
+  );
   const isSelectedTextCardGenerating =
     !!selectedTextCardPanelItem && !!activeCanvasTextGenerations[selectedTextCardPanelItem.id];
+  const isSelectedImageCardGenerating =
+    !!selectedImageCardPanelItem && !!activeCanvasImageGenerations[selectedImageCardPanelItem.id];
+  const selectedImageCardModel =
+    IMAGE_CARD_MODEL_OPTIONS.find((option) => option.id === selectedImageCardPanelModelId) || getDefaultImageCardModelOption();
   const selectedTextPanelModel =
     TEXT_PANEL_MODEL_OPTIONS.find((option) => option.id === selectedTextPanelModelId) || getDefaultTextPanelModelOption();
   const SKILL_TOKEN_SELECTOR = '[data-skill-token="true"]';
@@ -2201,6 +3141,40 @@ export default function AIWorkspace() {
       setEditingTextCardId(null);
     }
   }, [editingTextCardId, items]);
+
+  useEffect(() => {
+    const imageCardIds = new Set(items.filter((item) => isImageCardItem(item)).map((item) => item.id));
+
+    setImageCardPanelDrafts((prev) => {
+      const nextEntries = Object.entries(prev).filter(([itemId]) => imageCardIds.has(itemId));
+      return nextEntries.length === Object.keys(prev).length ? prev : Object.fromEntries(nextEntries);
+    });
+
+    setImageCardModelById((prev) => {
+      const nextEntries = Object.entries(prev).filter(([itemId]) => imageCardIds.has(itemId));
+      return nextEntries.length === Object.keys(prev).length ? prev : Object.fromEntries(nextEntries);
+    });
+
+    setImageCardSizeById((prev) => {
+      const nextEntries = Object.entries(prev).filter(([itemId]) => imageCardIds.has(itemId));
+      return nextEntries.length === Object.keys(prev).length ? prev : Object.fromEntries(nextEntries);
+    });
+
+    setImageCardCountById((prev) => {
+      const nextEntries = Object.entries(prev).filter(([itemId]) => imageCardIds.has(itemId));
+      return nextEntries.length === Object.keys(prev).length ? prev : Object.fromEntries(nextEntries);
+    });
+
+    setImageCardAspectRatioById((prev) => {
+      const nextEntries = Object.entries(prev).filter(([itemId]) => imageCardIds.has(itemId));
+      return nextEntries.length === Object.keys(prev).length ? prev : Object.fromEntries(nextEntries);
+    });
+
+    setCanvasImageGenerationErrorById((prev) => {
+      const nextEntries = Object.entries(prev).filter(([itemId]) => imageCardIds.has(itemId));
+      return nextEntries.length === Object.keys(prev).length ? prev : Object.fromEntries(nextEntries);
+    });
+  }, [items]);
 
   useEffect(() => {
     selectedIdRef.current = selectedId;
@@ -2807,6 +3781,23 @@ export default function AIWorkspace() {
     [selectedTextCardPanelItem]
   );
 
+  const handleSelectedImageCardPanelInputChange = useCallback(
+    (value: string) => {
+      if (!selectedImageCardPanelItem) return;
+      setCanvasImageGenerationErrorById((prev) => {
+        if (!prev[selectedImageCardPanelItem.id]) return prev;
+        const next = { ...prev };
+        delete next[selectedImageCardPanelItem.id];
+        return next;
+      });
+      setImageCardPanelDrafts((prev) => ({
+        ...prev,
+        [selectedImageCardPanelItem.id]: value,
+      }));
+    },
+    [selectedImageCardPanelItem]
+  );
+
   const handleManualTextCardInputChange = useCallback((itemId: string, value: string) => {
     setItems((prev) =>
       prev.map((item) =>
@@ -2818,6 +3809,29 @@ export default function AIWorkspace() {
             }
           : item
       )
+    );
+  }, []);
+
+  const handleImageCardOutputSelect = useCallback((itemId: string, outputIndex: number) => {
+    setItems((prev) =>
+      prev.map((item) => {
+        if (item.id !== itemId || !Array.isArray(item.imageOutputs) || item.imageOutputs.length === 0) {
+          return item;
+        }
+
+        const nextOutputState = buildImageCardOutputsState(item.imageOutputs, outputIndex);
+        return {
+          ...resizeImageCardItemToNaturalImage(
+            {
+              ...item,
+              ...nextOutputState,
+            },
+            nextOutputState.naturalWidth ?? item.naturalWidth ?? IMAGE_CARD_DEFAULT_FRAME_WIDTH,
+            nextOutputState.naturalHeight ?? item.naturalHeight ?? IMAGE_CARD_DEFAULT_FRAME_WIDTH
+          ),
+          ...nextOutputState,
+        };
+      })
     );
   }, []);
 
@@ -2968,20 +3982,49 @@ export default function AIWorkspace() {
     setItems(prev => [...prev, newItem]);
   };
 
-  const createTextItemAtCanvasPoint = useCallback((canvasPoint: { x: number; y: number }) => {
+  const addImageCard = useCallback(() => {
     const newItem: CanvasItem = {
-      id: `text-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-      type: 'text',
-      x: canvasPoint.x - TEXT_CARD_DIMENSIONS.width / 2,
-      y: canvasPoint.y - TEXT_CARD_DIMENSIONS.height / 2,
-      width: TEXT_CARD_DIMENSIONS.width,
-      height: TEXT_CARD_DIMENSIONS.height,
+      id: `image-card-${Date.now()}`,
+      type: 'image',
+      ...getSpawnPosition({
+        width: IMAGE_CARD_DIMENSIONS.width,
+        height: IMAGE_CARD_DIMENSIONS.height,
+      }),
+      width: IMAGE_CARD_DIMENSIONS.width,
+      height: IMAGE_CARD_DIMENSIONS.height,
       rotation: 0,
-      textVariant: 'card',
-      textMode: 'ai',
+      imageVariant: 'card',
       visible: true,
       locked: false,
     };
+    setItems((prev) => [...prev, newItem]);
+  }, [getSpawnPosition]);
+
+  const createTextItemAtCanvasPoint = useCallback((canvasPoint: { x: number; y: number }) => {
+    const newItem = createCanvasCardItemAtCanvasPoint({
+      kind: 'text',
+      id: `text-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      canvasPoint,
+      width: TEXT_CARD_DIMENSIONS.width,
+      height: TEXT_CARD_DIMENSIONS.height,
+    }) as CanvasItem;
+
+    setItems((prev) => [...prev, newItem]);
+    setSelectedConnectionIds([]);
+    setSelectedId(newItem.id);
+    setSelectedIds([newItem.id]);
+
+    return newItem;
+  }, []);
+
+  const createImageCardItemAtCanvasPoint = useCallback((canvasPoint: { x: number; y: number }) => {
+    const newItem = createCanvasCardItemAtCanvasPoint({
+      kind: 'image',
+      id: `image-card-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      canvasPoint,
+      width: IMAGE_CARD_DIMENSIONS.width,
+      height: IMAGE_CARD_DIMENSIONS.height,
+    }) as CanvasItem;
 
     setItems((prev) => [...prev, newItem]);
     setSelectedConnectionIds([]);
@@ -4254,6 +5297,300 @@ export default function AIWorkspace() {
     canvasTextGenerateAbortControllersRef.current.get(itemId)?.abort();
   }, []);
 
+  const handleCanvasImageGenerate = useCallback(
+    async ({
+      itemId,
+      input,
+      linkedImagePreviews,
+      modelId,
+      size,
+      count,
+      aspectRatio,
+    }: {
+      itemId: string;
+      input: string;
+      linkedImagePreviews: Array<{ id: string; src: string; label: string; alt?: string }>;
+      modelId: string;
+      size: string;
+      count: number;
+      aspectRatio: string;
+    }) => {
+      if (!itemId) return;
+      if (activeCanvasImageGenerations[itemId]) return;
+
+      const trimmedInput = typeof input === 'string' ? input.trim() : '';
+      const hasReferences = linkedImagePreviews.length > 0;
+      if (!trimmedInput && !hasReferences) return;
+
+      const requestImageGeneration = async (requestBody: Record<string, unknown>, signal: AbortSignal) => {
+        const response = await fetch('/api/generate', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(requestBody),
+          signal,
+        });
+
+        if (!response.ok) {
+          const errorText = await response.text();
+          let errorMessage = `API Error: ${response.status} ${response.statusText}`;
+          try {
+            const errorData = JSON.parse(errorText) as { error?: string };
+            if (errorData.error) {
+              errorMessage = errorData.error;
+            }
+          } catch {
+            if (errorText) {
+              errorMessage = errorText;
+            }
+          }
+          throw new Error(errorMessage);
+        }
+
+        const result = await response.json();
+        if (result.status !== 'completed' || result.result?.type !== 'image') {
+          throw new Error(result.error || '未收到有效图片响应，请重试');
+        }
+
+        const outputUrls = extractCanvasGeneratedImageUrls(result);
+        if (outputUrls.length === 0) {
+          throw new Error('未收到有效图片响应，请重试');
+        }
+
+        return Promise.all(outputUrls.map((localUrl) => loadCanvasGeneratedImageMeta(localUrl)));
+      };
+
+      setCanvasImageGenerationErrorById((prev) => {
+        if (!prev[itemId]) return prev;
+        const next = { ...prev };
+        delete next[itemId];
+        return next;
+      });
+
+      const generationSessionId = currentSessionIdRef.current;
+      const controller = new AbortController();
+      canvasImageGenerateAbortControllersRef.current.set(itemId, controller);
+      setActiveCanvasImageGenerations((prev) => ({
+        ...prev,
+        [itemId]: {
+          status: 'running',
+          startedAt: Date.now(),
+          total: count > 1 ? count : 1,
+          completed: 0,
+          failed: 0,
+        },
+      }));
+      setShowImageCardModelMenu(false);
+      setShowImageCardQualityMenu(false);
+      setShowImageCardCountMenu(false);
+      setItems((prev) =>
+        prev.map((item) =>
+          item.id === itemId && isImageCardItem(item)
+            ? {
+                ...item,
+                src: '',
+                naturalWidth: undefined,
+                naturalHeight: undefined,
+                imageOutputs: [],
+                activeImageOutputIndex: 0,
+              }
+            : item
+        )
+      );
+
+      try {
+        if (count <= 1) {
+          const outputMetas = await requestImageGeneration(
+            buildCanvasImageGenerationRequest({
+              input: trimmedInput,
+              linkedImagePreviews,
+              modelId,
+              size,
+              count,
+              aspectRatio,
+            }),
+            controller.signal
+          );
+
+          if (
+            currentSessionIdRef.current !== generationSessionId ||
+            !itemsRef.current.some((item) => item.id === itemId)
+          ) {
+            return;
+          }
+
+          setItems((prev) =>
+            prev.map((item) => {
+              if (item.id !== itemId) {
+                return item;
+              }
+
+              const nextOutputState = buildImageCardOutputsState(outputMetas, 0);
+              return {
+                ...resizeImageCardItemToNaturalImage(
+                  {
+                    ...item,
+                    imageVariant: 'card',
+                    ...nextOutputState,
+                  },
+                  nextOutputState.naturalWidth ?? item.naturalWidth ?? IMAGE_CARD_DEFAULT_FRAME_WIDTH,
+                  nextOutputState.naturalHeight ?? item.naturalHeight ?? IMAGE_CARD_DEFAULT_FRAME_WIDTH
+                ),
+                imageVariant: 'card',
+                ...nextOutputState,
+              };
+            })
+          );
+        } else {
+          const asyncRequests = buildAsyncImageTaskRequests({
+            input: trimmedInput,
+            linkedImagePreviews,
+            modelId,
+            size,
+            count,
+            aspectRatio,
+          });
+
+          const taskResults = await Promise.allSettled(
+            asyncRequests.map(async (requestBody) => {
+              const outputMetas = await requestImageGeneration(requestBody, controller.signal);
+
+              if (
+                currentSessionIdRef.current !== generationSessionId ||
+                !itemsRef.current.some((item) => item.id === itemId)
+              ) {
+                return { completed: 0 };
+              }
+
+              for (const outputMeta of outputMetas) {
+                setItems((prev) =>
+                  prev.map((item) => {
+                    if (item.id !== itemId) {
+                      return item;
+                    }
+
+                    const nextOutputState = appendImageCardOutput({
+                      existingOutputs: item.imageOutputs,
+                      existingActiveIndex: item.activeImageOutputIndex ?? 0,
+                      nextOutput: outputMeta,
+                    });
+
+                    return {
+                      ...resizeImageCardItemToNaturalImage(
+                        {
+                          ...item,
+                          imageVariant: 'card',
+                          ...nextOutputState,
+                        },
+                        nextOutputState.naturalWidth ?? item.naturalWidth ?? IMAGE_CARD_DEFAULT_FRAME_WIDTH,
+                        nextOutputState.naturalHeight ?? item.naturalHeight ?? IMAGE_CARD_DEFAULT_FRAME_WIDTH
+                      ),
+                      imageVariant: 'card',
+                      ...nextOutputState,
+                    };
+                  })
+                );
+              }
+
+              setActiveCanvasImageGenerations((prev) => {
+                const entry = prev[itemId];
+                if (!entry) return prev;
+                return {
+                  ...prev,
+                  [itemId]: {
+                    ...entry,
+                    completed: Math.min(entry.total, entry.completed + outputMetas.length),
+                  },
+                };
+              });
+
+              return { completed: outputMetas.length };
+            })
+          );
+
+          if (
+            currentSessionIdRef.current !== generationSessionId ||
+            !itemsRef.current.some((item) => item.id === itemId)
+          ) {
+            return;
+          }
+
+          const failures = taskResults.filter((result) => result.status === 'rejected');
+          const completedCount = taskResults.reduce((total, result) => {
+            if (result.status !== 'fulfilled') return total;
+            return total + (result.value?.completed ?? 0);
+          }, 0);
+
+          if (controller.signal.aborted) {
+            throw new DOMException('Aborted', 'AbortError');
+          }
+
+          if (failures.length > 0) {
+            setActiveCanvasImageGenerations((prev) => {
+              const entry = prev[itemId];
+              if (!entry) return prev;
+              return {
+                ...prev,
+                [itemId]: {
+                  ...entry,
+                  failed: failures.length,
+                },
+              };
+            });
+
+            if (completedCount === 0) {
+              const firstReason = failures[0]?.reason;
+              throw firstReason instanceof Error ? firstReason : new Error('未收到有效图片响应，请重试');
+            }
+
+            setCanvasImageGenerationErrorById((prev) => ({
+              ...prev,
+              [itemId]: `请求 ${asyncRequests.length} 张，成功 ${completedCount} 张`,
+            }));
+          }
+        }
+      } catch (error) {
+        if (
+          currentSessionIdRef.current !== generationSessionId ||
+          !itemsRef.current.some((item) => item.id === itemId)
+        ) {
+          return;
+        }
+
+        if (error instanceof Error && error.name === 'AbortError') {
+          if (suppressCanvasImageAbortErrorItemIdsRef.current.has(itemId)) {
+            return;
+          }
+          setCanvasImageGenerationErrorById((prev) => ({
+            ...prev,
+            [itemId]: '任务已终止',
+          }));
+          return;
+        }
+
+        console.error('Canvas image generation failed:', error);
+        setCanvasImageGenerationErrorById((prev) => ({
+          ...prev,
+          [itemId]: `生成失败: ${error instanceof Error ? error.message : '未知错误'}`,
+        }));
+      } finally {
+        suppressCanvasImageAbortErrorItemIdsRef.current.delete(itemId);
+        canvasImageGenerateAbortControllersRef.current.delete(itemId);
+        setActiveCanvasImageGenerations((prev) => {
+          if (!prev[itemId]) return prev;
+          const next = { ...prev };
+          delete next[itemId];
+          return next;
+        });
+      }
+    },
+    [activeCanvasImageGenerations]
+  );
+
+  const handleCancelCanvasImageGenerate = useCallback((itemId?: string | null) => {
+    if (!itemId) return;
+    canvasImageGenerateAbortControllersRef.current.get(itemId)?.abort();
+  }, []);
+
   const handleCancelGenerate = async () => {
     updateActiveStreamMessageStatus('cancelled', '任务已终止');
     updatePendingAssistantMessage((msg) => ({
@@ -5147,6 +6484,34 @@ export default function AIWorkspace() {
     selectedTextPanelModel.id,
   ]);
 
+  const handleSelectedImageCardPanelSubmit = useCallback(() => {
+    if (!selectedImageCardPanelItem || activeCanvasImageGenerations[selectedImageCardPanelItem.id]) return;
+
+    const input = selectedImageCardPanelSubmitInput;
+    const hasReferences = selectedImageCardPanelLinkedImagePreviews.length > 0;
+    if (!input.trim() && !hasReferences) return;
+
+    void handleCanvasImageGenerate({
+      itemId: selectedImageCardPanelItem.id,
+      input,
+      linkedImagePreviews: selectedImageCardPanelLinkedImagePreviews,
+      modelId: selectedImageCardPanelModelId,
+      size: selectedImageCardPanelSize,
+      count: selectedImageCardPanelCount,
+      aspectRatio: selectedImageCardPanelAspectRatio,
+    });
+  }, [
+    activeCanvasImageGenerations,
+    handleCanvasImageGenerate,
+    selectedImageCardPanelCount,
+    selectedImageCardPanelAspectRatio,
+    selectedImageCardPanelItem,
+    selectedImageCardPanelLinkedImagePreviews,
+    selectedImageCardPanelSubmitInput,
+    selectedImageCardPanelModelId,
+    selectedImageCardPanelSize,
+  ]);
+
   const openSkillChoiceModal = (choice: SkillChoicePayload) => {
     setPendingSkillChoice(choice);
     setShowSkillChoiceModal(true);
@@ -5234,13 +6599,18 @@ export default function AIWorkspace() {
       updatedAt: Date.now(),
       items,
       textCardPanelDrafts,
+      imageCardPanelDrafts,
+      imageCardModelById,
+      imageCardSizeById,
+      imageCardCountById,
+      imageCardAspectRatioById,
       connections,
       messages: chatMessages,
       topics,
       activeTopicId: activeId,
       viewport,
     });
-  }, [activeSkill, chatMessages, connections, items, textCardPanelDrafts, viewport]);
+  }, [activeSkill, chatMessages, connections, imageCardAspectRatioById, imageCardCountById, imageCardModelById, imageCardPanelDrafts, imageCardSizeById, items, textCardPanelDrafts, viewport]);
 
   const resolveCurrentSessionPresentationState = useCallback((session: ProjectSession) => {
     return resolveSessionPresentationState({
@@ -5259,6 +6629,11 @@ export default function AIWorkspace() {
     setActiveSkill(resolvedState.activeSkill || null);
     setEditingTextCardId(null);
     setTextCardPanelDrafts(resolvedState.normalizedSession?.textCardPanelDrafts || {});
+    setImageCardPanelDrafts(resolvedState.normalizedSession?.imageCardPanelDrafts || {});
+    setImageCardModelById(resolvedState.normalizedSession?.imageCardModelById || {});
+    setImageCardSizeById(resolvedState.normalizedSession?.imageCardSizeById || {});
+    setImageCardCountById(resolvedState.normalizedSession?.imageCardCountById || {});
+    setImageCardAspectRatioById(resolvedState.normalizedSession?.imageCardAspectRatioById || {});
     if (resolvedState.shouldResetWelcome) {
       setHideWelcomeByCenterSkillPick(false);
     }
@@ -5275,13 +6650,18 @@ export default function AIWorkspace() {
     () => ({
       items,
       textCardPanelDrafts,
+      imageCardPanelDrafts,
+      imageCardModelById,
+      imageCardSizeById,
+      imageCardCountById,
+      imageCardAspectRatioById,
       connections,
       chatMessages,
       viewport,
       imageCount,
       activeSkill,
     }),
-    [activeSkill, chatMessages, connections, imageCount, items, textCardPanelDrafts, viewport]
+    [activeSkill, chatMessages, connections, imageCardAspectRatioById, imageCardCountById, imageCardModelById, imageCardPanelDrafts, imageCardSizeById, imageCount, items, textCardPanelDrafts, viewport]
   );
 
   const {
@@ -5321,8 +6701,15 @@ export default function AIWorkspace() {
       controller.abort();
     });
     canvasTextGenerateAbortControllersRef.current.clear();
+    canvasImageGenerateAbortControllersRef.current.forEach((controller, itemId) => {
+      suppressCanvasImageAbortErrorItemIdsRef.current.add(itemId);
+      controller.abort();
+    });
+    canvasImageGenerateAbortControllersRef.current.clear();
     setActiveCanvasTextGenerations({});
+    setActiveCanvasImageGenerations({});
     setCanvasTextGenerationErrorById({});
+    setCanvasImageGenerationErrorById({});
   }, [currentSessionId, viewMode]);
 
   // 对话项目管理函数
@@ -5461,7 +6848,7 @@ export default function AIWorkspace() {
 
   const handleToolClick = (toolId: string) => {
     if (toolId === 'image') {
-      fileInputRef.current?.click();
+      addImageCard();
     } else if (toolId === 'text') {
       addText();
     } else {
@@ -5480,7 +6867,7 @@ export default function AIWorkspace() {
     }
 
     if (optionId === 'image') {
-      fileInputRef.current?.click();
+      addImageCard();
     }
   };
 
@@ -5488,13 +6875,16 @@ export default function AIWorkspace() {
     (optionId: (typeof CONNECTION_MENU_OPTIONS)[number]['id']) => {
       if (!pendingConnectionMenu) return;
 
-      if (optionId !== 'text') {
+      if (optionId !== 'text' && optionId !== 'image') {
         clearPendingConnectionMenu();
         return;
       }
 
       const spawnPoint = toCanvasPoint(pendingConnectionMenu.position);
-      const newItem = createTextItemAtCanvasPoint(spawnPoint);
+      const newItem =
+        optionId === 'image'
+          ? createImageCardItemAtCanvasPoint(spawnPoint)
+          : createTextItemAtCanvasPoint(spawnPoint);
 
       setConnections((prev) => [
         ...prev,
@@ -5507,7 +6897,7 @@ export default function AIWorkspace() {
 
       clearPendingConnectionMenu();
     },
-    [pendingConnectionMenu, toCanvasPoint, createTextItemAtCanvasPoint, clearPendingConnectionMenu]
+    [pendingConnectionMenu, toCanvasPoint, createImageCardItemAtCanvasPoint, createTextItemAtCanvasPoint, clearPendingConnectionMenu]
   );
 
   useEffect(() => {
@@ -5622,14 +7012,29 @@ export default function AIWorkspace() {
       if (textPanelModelMenuRef.current && !textPanelModelMenuRef.current.contains(e.target as Node)) {
         setShowTextPanelModelMenu(false);
       }
+      if (imageCardModelMenuRef.current && !imageCardModelMenuRef.current.contains(e.target as Node)) {
+        setShowImageCardModelMenu(false);
+      }
+      const isInsideImageCardQualityMenu =
+        !!imageCardQualityMenuRef.current?.contains(e.target as Node) ||
+        !!imageCardQualityPopoverRef.current?.contains(e.target as Node);
+      if (!isInsideImageCardQualityMenu) {
+        setShowImageCardQualityMenu(false);
+      }
+      const isInsideImageCardCountMenu =
+        !!imageCardCountMenuRef.current?.contains(e.target as Node) ||
+        !!imageCardCountPopoverRef.current?.contains(e.target as Node);
+      if (!isInsideImageCardCountMenu) {
+        setShowImageCardCountMenu(false);
+      }
       setShowAvatarMenu(false);
       setShowHistoryPanel(false);
     };
-    if (showAvatarMenu || showProjectMenu || showAddNodeMenu || showHistoryPanel || showGenerationModeMenu || showSkillsMenu || showAspectRatioMenu || showTextPanelModelMenu) {
+    if (showAvatarMenu || showProjectMenu || showAddNodeMenu || showHistoryPanel || showGenerationModeMenu || showSkillsMenu || showAspectRatioMenu || showImageCardModelMenu || showImageCardQualityMenu || showImageCardCountMenu || showTextPanelModelMenu) {
       document.addEventListener('pointerdown', handlePointerDownOutside);
       return () => document.removeEventListener('pointerdown', handlePointerDownOutside);
     }
-  }, [showAvatarMenu, showProjectMenu, showAddNodeMenu, showHistoryPanel, showGenerationModeMenu, showSkillsMenu, showAspectRatioMenu, showTextPanelModelMenu, editingSessionId]);
+  }, [showAvatarMenu, showProjectMenu, showAddNodeMenu, showHistoryPanel, showGenerationModeMenu, showSkillsMenu, showAspectRatioMenu, showImageCardModelMenu, showImageCardQualityMenu, showImageCardCountMenu, showTextPanelModelMenu, editingSessionId]);
 
   useEffect(() => {
     const handleSelectionChange = () => {
@@ -6129,7 +7534,10 @@ export default function AIWorkspace() {
         selectedTextCardPanelItem={selectedTextCardPanelItem}
         linkedImagePreviews={selectedTextCardPanelLinkedImagePreviews}
         selectedTextCardPanelLinkedTexts={selectedTextCardPanelLinkedTexts}
+        selectedImageCardPanelItem={selectedImageCardPanelItem}
+        selectedImageCardPanelLinkedImagePreviews={selectedImageCardPanelLinkedImagePreviews}
         activeCanvasTextGenerationItemIds={activeCanvasTextGenerationItemIds}
+        activeCanvasImageGenerationItemIds={activeCanvasImageGenerationItemIds}
         selectedTextPanelModel={selectedTextPanelModel}
         textPanelModelOptions={TEXT_PANEL_MODEL_OPTIONS}
         showTextPanelModelMenu={showTextPanelModelMenu}
@@ -6138,6 +7546,23 @@ export default function AIWorkspace() {
         selectedTextCardPanelCanSubmit={selectedTextCardPanelCanSubmit}
         selectedTextCardPanelError={selectedTextCardPanelError}
         isSelectedTextCardGenerating={isSelectedTextCardGenerating}
+        selectedImageCardPanelInput={selectedImageCardPanelInput}
+        selectedImageCardPanelCanSubmit={selectedImageCardPanelCanSubmit}
+        selectedImageCardPanelError={selectedImageCardPanelError}
+        selectedImageCardModel={selectedImageCardModel}
+        imageCardModelOptions={IMAGE_CARD_MODEL_OPTIONS}
+        selectedImageCardPanelSize={selectedImageCardPanelSize}
+        selectedImageCardPanelCount={selectedImageCardPanelCount}
+        selectedImageCardPanelAspectRatio={selectedImageCardPanelAspectRatio}
+        isSelectedImageCardGenerating={isSelectedImageCardGenerating}
+        showImageCardModelMenu={showImageCardModelMenu}
+        imageCardModelMenuRef={imageCardModelMenuRef}
+        showImageCardQualityMenu={showImageCardQualityMenu}
+        imageCardQualityMenuRef={imageCardQualityMenuRef}
+        imageCardQualityPopoverRef={imageCardQualityPopoverRef}
+        showImageCardCountMenu={showImageCardCountMenu}
+        imageCardCountMenuRef={imageCardCountMenuRef}
+        imageCardCountPopoverRef={imageCardCountPopoverRef}
         editingTextCardId={editingTextCardId}
         editingTextCardTextareaRef={editingTextCardTextareaRef}
         onToggleTextPanelModelMenu={() => setShowTextPanelModelMenu((prev) => !prev)}
@@ -6148,9 +7573,68 @@ export default function AIWorkspace() {
         onSelectedTextCardPanelInputChange={handleSelectedTextCardPanelInputChange}
         onSelectedTextCardPanelSubmit={handleSelectedTextCardPanelSubmit}
         onSelectedTextCardPanelCancel={() => handleCancelCanvasTextGenerate(selectedTextCardPanelItem?.id ?? null)}
+        onToggleImageCardModelMenu={() => {
+          setShowImageCardQualityMenu(false);
+          setShowImageCardCountMenu(false);
+          setShowImageCardModelMenu((prev) => !prev);
+        }}
+        onSelectImageCardModel={(modelId) => {
+          if (!selectedImageCardPanelItem) return;
+          setImageCardModelById((prev) => ({
+            ...prev,
+            [selectedImageCardPanelItem.id]: resolveImageCardModel(modelId, getDefaultImageCardModelOption().id),
+          }));
+          setShowImageCardModelMenu(false);
+        }}
+        onToggleImageCardQualityMenu={() => {
+          setShowImageCardModelMenu(false);
+          setShowImageCardCountMenu(false);
+          setShowImageCardQualityMenu((prev) => !prev);
+        }}
+        onSelectImageCardSize={(sizeId) => {
+          if (!selectedImageCardPanelItem) return;
+          setImageCardSizeById((prev) => ({
+            ...prev,
+            [selectedImageCardPanelItem.id]: sizeId,
+          }));
+          setShowImageCardQualityMenu(false);
+        }}
+        onToggleImageCardCountMenu={() => {
+          setShowImageCardModelMenu(false);
+          setShowImageCardQualityMenu(false);
+          setShowImageCardCountMenu((prev) => !prev);
+        }}
+        onSelectImageCardCount={(count) => {
+          if (!selectedImageCardPanelItem) return;
+          setImageCardCountById((prev) => ({
+            ...prev,
+            [selectedImageCardPanelItem.id]: count,
+          }));
+          setShowImageCardCountMenu(false);
+        }}
+        onSelectImageCardAspectRatio={(aspectRatioId) => {
+          if (!selectedImageCardPanelItem) return;
+          const normalizedAspectRatio = normalizeImageCardAspectRatio(aspectRatioId);
+          setImageCardAspectRatioById((prev) => ({
+            ...prev,
+            [selectedImageCardPanelItem.id]: normalizedAspectRatio,
+          }));
+          setItems((prev) =>
+            prev.map((item) =>
+              item.id === selectedImageCardPanelItem.id && isImageCardItem(item)
+                ? resizeImageCardItemToAspectRatio(item, normalizedAspectRatio)
+                : item
+            )
+          );
+          setShowImageCardQualityMenu(false);
+        }}
+        onSelectedImageCardPanelInputChange={handleSelectedImageCardPanelInputChange}
+        onSelectedImageCardPanelSubmit={handleSelectedImageCardPanelSubmit}
+        onSelectedImageCardPanelCancel={() => handleCancelCanvasImageGenerate(selectedImageCardPanelItem?.id ?? null)}
         onItemDoubleClick={handleTextCardDoubleClick}
         onManualTextCardInputChange={handleManualTextCardInputChange}
         onManualTextCardBlur={finalizeManualTextCardEditing}
+        onImageCardOutputSelect={handleImageCardOutputSelect}
       />
 
       {/* Zoom Controller - Outside Canvas */}

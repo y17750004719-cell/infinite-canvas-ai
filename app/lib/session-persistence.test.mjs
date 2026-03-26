@@ -60,6 +60,61 @@ test('buildPersistedSession keeps valid text card panel drafts for existing text
   });
 });
 
+test('buildPersistedSession keeps valid image card panel state for existing image card items', () => {
+  const session = {
+    id: 'session-1',
+    name: 'Canvas',
+    createdAt: 1,
+    updatedAt: 1,
+    items: [
+      { id: 'image-card-1', type: 'image', imageVariant: 'card' },
+      { id: 'image-asset-1', type: 'image', src: '/asset.png' },
+    ],
+    messages: [],
+    viewport: { x: 0, y: 0, scale: 1 },
+  };
+
+  const result = buildPersistedSession(session, {
+    items: session.items,
+    imageCardPanelDrafts: {
+      'image-card-1': '保留这个提示词',
+      'image-asset-1': 'drop asset',
+    },
+    imageCardModelById: {
+      'image-card-1': 'gemini-3.1-flash-image-preview',
+      'image-asset-1': 'drop asset',
+    },
+    imageCardSizeById: {
+      'image-card-1': '2048x2048',
+      'missing': 'drop missing',
+    },
+    imageCardCountById: {
+      'image-card-1': 4,
+      'image-asset-1': 2,
+    },
+    imageCardAspectRatioById: {
+      'image-card-1': '16:9',
+      'image-asset-1': '1:1',
+    },
+  });
+
+  assert.deepEqual(result.imageCardPanelDrafts, {
+    'image-card-1': '保留这个提示词',
+  });
+  assert.deepEqual(result.imageCardModelById, {
+    'image-card-1': 'gemini-3.1-flash-image-preview',
+  });
+  assert.deepEqual(result.imageCardSizeById, {
+    'image-card-1': '2048x2048',
+  });
+  assert.deepEqual(result.imageCardCountById, {
+    'image-card-1': 4,
+  });
+  assert.deepEqual(result.imageCardAspectRatioById, {
+    'image-card-1': '16:9',
+  });
+});
+
 test('buildPersistedSession preserves manual text card mode on items', () => {
   const session = {
     id: 'session-1',
@@ -102,6 +157,11 @@ test('normalizeProjectSession falls back missing text card panel drafts to an em
   });
 
   assert.deepEqual(result.textCardPanelDrafts, {});
+  assert.deepEqual(result.imageCardPanelDrafts, {});
+  assert.deepEqual(result.imageCardModelById, {});
+  assert.deepEqual(result.imageCardSizeById, {});
+  assert.deepEqual(result.imageCardCountById, {});
+  assert.deepEqual(result.imageCardAspectRatioById, {});
 });
 
 test('normalizeProjectSession removes orphan, invalid, and blank text card panel drafts', () => {
@@ -124,6 +184,55 @@ test('normalizeProjectSession removes orphan, invalid, and blank text card panel
 
   assert.deepEqual(result.textCardPanelDrafts, {
     'text-1': '保留这个草稿',
+  });
+});
+
+test('normalizeProjectSession removes orphan and invalid image card state while keeping valid image card fields', () => {
+  const result = normalizeProjectSession({
+    id: 'session-1',
+    items: [
+      { id: 'image-card-1', type: 'image', imageVariant: 'card' },
+      { id: 'image-asset-1', type: 'image', src: '/asset.png' },
+    ],
+    imageCardPanelDrafts: {
+      'image-card-1': '保留这个草稿',
+      'image-asset-1': 'drop asset',
+      'missing': 'drop missing',
+      'blank': '   ',
+    },
+    imageCardModelById: {
+      'image-card-1': 'gemini-3.1-flash-image-preview',
+      'image-asset-1': 'drop asset',
+    },
+    imageCardSizeById: {
+      'image-card-1': '1024x1024',
+      'missing': '2048x2048',
+    },
+    imageCardCountById: {
+      'image-card-1': 2,
+      'image-asset-1': 4,
+      'missing': 0,
+    },
+    imageCardAspectRatioById: {
+      'image-card-1': '1:1',
+      'image-asset-1': '16:9',
+    },
+  });
+
+  assert.deepEqual(result.imageCardPanelDrafts, {
+    'image-card-1': '保留这个草稿',
+  });
+  assert.deepEqual(result.imageCardModelById, {
+    'image-card-1': 'gemini-3.1-flash-image-preview',
+  });
+  assert.deepEqual(result.imageCardSizeById, {
+    'image-card-1': '1024x1024',
+  });
+  assert.deepEqual(result.imageCardCountById, {
+    'image-card-1': 2,
+  });
+  assert.deepEqual(result.imageCardAspectRatioById, {
+    'image-card-1': '1:1',
   });
 });
 

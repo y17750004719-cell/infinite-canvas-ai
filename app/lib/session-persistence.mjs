@@ -43,6 +43,87 @@ export function normalizeTextCardPanelDrafts(drafts, items) {
   }, {});
 }
 
+function getValidImageCardIds(items) {
+  return new Set(
+    (Array.isArray(items) ? items : [])
+      .filter(
+        (item) =>
+          isRecord(item) &&
+          typeof item.id === 'string' &&
+          item.type === 'image' &&
+          item.imageVariant === 'card'
+      )
+      .map((item) => item.id)
+  );
+}
+
+export function normalizeImageCardPanelDrafts(drafts, items) {
+  if (!isRecord(drafts)) return {};
+
+  const validImageCardIds = getValidImageCardIds(items);
+
+  return Object.entries(drafts).reduce((result, [itemId, value]) => {
+    if (!validImageCardIds.has(itemId)) return result;
+    if (typeof value !== 'string') return result;
+    if (value.trim().length === 0) return result;
+
+    result[itemId] = value;
+    return result;
+  }, {});
+}
+
+export function normalizeImageCardModelById(values, items) {
+  if (!isRecord(values)) return {};
+
+  const validImageCardIds = getValidImageCardIds(items);
+  return Object.entries(values).reduce((result, [itemId, value]) => {
+    if (!validImageCardIds.has(itemId)) return result;
+    if (typeof value !== 'string' || value.trim().length === 0) return result;
+
+    result[itemId] = value.trim();
+    return result;
+  }, {});
+}
+
+export function normalizeImageCardSizeById(values, items) {
+  if (!isRecord(values)) return {};
+
+  const validImageCardIds = getValidImageCardIds(items);
+  return Object.entries(values).reduce((result, [itemId, value]) => {
+    if (!validImageCardIds.has(itemId)) return result;
+    if (typeof value !== 'string' || value.trim().length === 0) return result;
+
+    result[itemId] = value.trim();
+    return result;
+  }, {});
+}
+
+export function normalizeImageCardCountById(values, items) {
+  if (!isRecord(values)) return {};
+
+  const validImageCardIds = getValidImageCardIds(items);
+  return Object.entries(values).reduce((result, [itemId, value]) => {
+    if (!validImageCardIds.has(itemId)) return result;
+    if (!Number.isFinite(value) || value <= 0) return result;
+
+    result[itemId] = value;
+    return result;
+  }, {});
+}
+
+export function normalizeImageCardAspectRatioById(values, items) {
+  if (!isRecord(values)) return {};
+
+  const validImageCardIds = getValidImageCardIds(items);
+  return Object.entries(values).reduce((result, [itemId, value]) => {
+    if (!validImageCardIds.has(itemId)) return result;
+    if (typeof value !== 'string' || value.trim().length === 0) return result;
+
+    result[itemId] = value.trim();
+    return result;
+  }, {});
+}
+
 export function normalizeProjectSession(session) {
   const normalizedItems = Array.isArray(session?.items) ? session.items : [];
 
@@ -51,6 +132,11 @@ export function normalizeProjectSession(session) {
     items: normalizedItems,
     connections: normalizeConnections(session?.connections, normalizedItems),
     textCardPanelDrafts: normalizeTextCardPanelDrafts(session?.textCardPanelDrafts, normalizedItems),
+    imageCardPanelDrafts: normalizeImageCardPanelDrafts(session?.imageCardPanelDrafts, normalizedItems),
+    imageCardModelById: normalizeImageCardModelById(session?.imageCardModelById, normalizedItems),
+    imageCardSizeById: normalizeImageCardSizeById(session?.imageCardSizeById, normalizedItems),
+    imageCardCountById: normalizeImageCardCountById(session?.imageCardCountById, normalizedItems),
+    imageCardAspectRatioById: normalizeImageCardAspectRatioById(session?.imageCardAspectRatioById, normalizedItems),
   };
 }
 
@@ -64,6 +150,11 @@ export function buildPersistedSession(session, patch) {
     ...nextSession,
     connections: normalizeConnections(nextSession.connections, nextSession.items),
     textCardPanelDrafts: normalizeTextCardPanelDrafts(nextSession.textCardPanelDrafts, nextSession.items),
+    imageCardPanelDrafts: normalizeImageCardPanelDrafts(nextSession.imageCardPanelDrafts, nextSession.items),
+    imageCardModelById: normalizeImageCardModelById(nextSession.imageCardModelById, nextSession.items),
+    imageCardSizeById: normalizeImageCardSizeById(nextSession.imageCardSizeById, nextSession.items),
+    imageCardCountById: normalizeImageCardCountById(nextSession.imageCardCountById, nextSession.items),
+    imageCardAspectRatioById: normalizeImageCardAspectRatioById(nextSession.imageCardAspectRatioById, nextSession.items),
   };
 }
 
