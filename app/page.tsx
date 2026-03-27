@@ -37,6 +37,7 @@ import {
   getDefaultImageCardModelOption,
   getDefaultTextPanelModelOption,
   getDisplayableTextCardPanelDraft,
+  getGeneratedImageHistoryEntries,
   getDirectImagePreviewsForTextCard,
   getDirectTextInputsForTextCard,
   getImageCardFrameSizeForAspectRatio,
@@ -44,8 +45,13 @@ import {
   getImageCardItemSizeForNaturalImage,
   getImageCardQualitySummary,
   isEventInsideTextCardPanel,
+  extractImageFilesFromClipboardItems,
+  getReplacedImageAssetItem,
   isImageAssetItem,
   isImageCardItem,
+  reorderIncomingImageConnections,
+  resolveCanvasImagePasteTarget,
+  shouldHandleCanvasImagePaste,
   shouldSubmitTextCardPanelEnter,
   shouldFocusTextCardPanelInputOnPointerDown,
   getTextCardPanelPlaceholder,
@@ -1174,6 +1180,7 @@ const CanvasNodesLayer = memo(function CanvasNodesLayer({
                     )}
                     {textCardVisualState === 'manual-editing' && (
                       <textarea
+                        data-manual-text-card-editor="true"
                         ref={item.id === editingTextCardId ? editingTextCardTextareaRef : null}
                         value={item.text || ''}
                         onChange={(e) => onManualTextCardInputChange(item.id, e.target.value)}
@@ -1374,6 +1381,12 @@ const CanvasViewport = memo(function CanvasViewport({
   onManualTextCardInputChange,
   onManualTextCardBlur,
   onImageCardOutputSelect,
+  draggingPanelReference,
+  dragOverPanelReference,
+  onPanelReferenceDragStart,
+  onPanelReferenceDragOver,
+  onPanelReferenceDrop,
+  onPanelReferenceDragEnd,
 }: {
   canvasRef: React.RefObject<HTMLDivElement | null>;
   widthStyle: string;
@@ -1481,6 +1494,24 @@ const CanvasViewport = memo(function CanvasViewport({
   onManualTextCardInputChange: (itemId: string, value: string) => void;
   onManualTextCardBlur: (itemId: string) => void;
   onImageCardOutputSelect: (itemId: string, outputIndex: number) => void;
+  draggingPanelReference: { targetItemId: string; sourceItemId: string } | null;
+  dragOverPanelReference: { targetItemId: string; sourceItemId: string } | null;
+  onPanelReferenceDragStart: (
+    e: React.DragEvent<HTMLDivElement>,
+    targetItemId: string,
+    sourceItemId: string
+  ) => void;
+  onPanelReferenceDragOver: (
+    e: React.DragEvent<HTMLDivElement>,
+    targetItemId: string,
+    sourceItemId: string
+  ) => void;
+  onPanelReferenceDrop: (
+    e: React.DragEvent<HTMLDivElement>,
+    targetItemId: string,
+    sourceItemId: string
+  ) => void;
+  onPanelReferenceDragEnd: () => void;
 }) {
   const { from, to } = getPreviewRenderPoints();
   const selectedTextCardPanelTextareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -1855,7 +1886,26 @@ const CanvasViewport = memo(function CanvasViewport({
                     {linkedImagePreviews.map((preview) => (
                       <div
                         key={preview.id}
-                        className="relative h-20 w-20 shrink-0 overflow-hidden rounded-[14px] border border-white/[0.08] bg-black/25"
+                        draggable
+                        onDragStart={(e) => {
+                          onPanelReferenceDragStart(e, selectedTextCardPanelItem.id, preview.id);
+                        }}
+                        onDragOver={(e) => {
+                          onPanelReferenceDragOver(e, selectedTextCardPanelItem.id, preview.id);
+                        }}
+                        onDrop={(e) => {
+                          onPanelReferenceDrop(e, selectedTextCardPanelItem.id, preview.id);
+                        }}
+                        onDragEnd={onPanelReferenceDragEnd}
+                        className={`relative h-20 w-20 shrink-0 overflow-hidden rounded-[14px] border bg-black/25 transition-all ${
+                          draggingPanelReference?.targetItemId === selectedTextCardPanelItem.id &&
+                          draggingPanelReference.sourceItemId === preview.id
+                            ? 'border-white/[0.08] opacity-50'
+                            : dragOverPanelReference?.targetItemId === selectedTextCardPanelItem.id &&
+                                dragOverPanelReference.sourceItemId === preview.id
+                              ? 'border-white/30 ring-1 ring-zinc-100'
+                              : 'border-white/[0.08]'
+                        } cursor-move`}
                       >
                         <img
                           src={preview.src}
@@ -2048,7 +2098,26 @@ const CanvasViewport = memo(function CanvasViewport({
                     {selectedImageCardPanelLinkedImagePreviews.map((preview) => (
                       <div
                         key={preview.id}
-                        className="relative h-20 w-20 shrink-0 overflow-hidden rounded-[14px] border border-white/[0.08] bg-black/25"
+                        draggable
+                        onDragStart={(e) => {
+                          onPanelReferenceDragStart(e, selectedImageCardPanelItem.id, preview.id);
+                        }}
+                        onDragOver={(e) => {
+                          onPanelReferenceDragOver(e, selectedImageCardPanelItem.id, preview.id);
+                        }}
+                        onDrop={(e) => {
+                          onPanelReferenceDrop(e, selectedImageCardPanelItem.id, preview.id);
+                        }}
+                        onDragEnd={onPanelReferenceDragEnd}
+                        className={`relative h-20 w-20 shrink-0 overflow-hidden rounded-[14px] border bg-black/25 transition-all ${
+                          draggingPanelReference?.targetItemId === selectedImageCardPanelItem.id &&
+                          draggingPanelReference.sourceItemId === preview.id
+                            ? 'border-white/[0.08] opacity-50'
+                            : dragOverPanelReference?.targetItemId === selectedImageCardPanelItem.id &&
+                                dragOverPanelReference.sourceItemId === preview.id
+                              ? 'border-white/30 ring-1 ring-zinc-100'
+                              : 'border-white/[0.08]'
+                        } cursor-move`}
                       >
                         <img
                           src={preview.src}
@@ -2913,11 +2982,20 @@ export default function AIWorkspace() {
   const [chatReferenceImages, setChatReferenceImages] = useState<string[]>([]);
   const [draggingImageIndex, setDraggingImageIndex] = useState<number | null>(null);
   const [dragOverImageIndex, setDragOverImageIndex] = useState<number | null>(null);
+  const [draggingPanelReference, setDraggingPanelReference] = useState<{
+    targetItemId: string;
+    sourceItemId: string;
+  } | null>(null);
+  const [dragOverPanelReference, setDragOverPanelReference] = useState<{
+    targetItemId: string;
+    sourceItemId: string;
+  } | null>(null);
   const [imageCount, setImageCount] = useState(0);
   
   // 项目管理状态
   const [showProjectMenu, setShowProjectMenu] = useState(false);
   const [showHistoryPanel, setShowHistoryPanel] = useState(false);
+  const [showGeneratedImageHistoryPanel, setShowGeneratedImageHistoryPanel] = useState(false);
   const [showAddNodeMenu, setShowAddNodeMenu] = useState(false);
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [editingName, setEditingName] = useState('');
@@ -2933,6 +3011,7 @@ export default function AIWorkspace() {
   
   const projectMenuRef = useRef<HTMLDivElement>(null);
   const addNodeMenuRef = useRef<HTMLDivElement>(null);
+  const generatedImageHistoryPanelRef = useRef<HTMLDivElement>(null);
   const generationModeMenuRef = useRef<HTMLDivElement>(null);
   const skillsMenuRef = useRef<HTMLDivElement>(null);
   const aspectRatioMenuRef = useRef<HTMLDivElement>(null);
@@ -3014,6 +3093,11 @@ export default function AIWorkspace() {
     if (selectedIds.length !== 1 || !selectedId) return null;
     const item = itemById[selectedId];
     return isImageCardItem(item) ? item : null;
+  }, [itemById, selectedId, selectedIds]);
+  const selectedImageAssetItem = React.useMemo(() => {
+    if (selectedIds.length !== 1 || !selectedId) return null;
+    const item = itemById[selectedId];
+    return isImageAssetItem(item) ? item : null;
   }, [itemById, selectedId, selectedIds]);
   const selectedTextCardPanelLinkedImagePreviews = React.useMemo(
     () =>
@@ -3589,91 +3673,191 @@ export default function AIWorkspace() {
     [getViewportCenterCanvasPoint]
   );
 
-  const addImageToCanvas = async (imageData: string, fileName: string, orderOffset: number = 0) => {
-    const response = await fetch('/api/upload', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        imageData,
-        fileName,
-      }),
-    });
+  const addImageToCanvas = useCallback(
+    async (imageData: string, fileName: string, orderOffset: number = 0) => {
+      const response = await fetch('/api/upload', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          imageData,
+          fileName,
+        }),
+      });
 
-    if (!response.ok) {
-      throw new Error(`Upload failed: ${response.status}`);
-    }
+      if (!response.ok) {
+        throw new Error(`Upload failed: ${response.status}`);
+      }
 
-    const data = await response.json();
-    const imageUrl = data.url;
+      const data = await response.json();
+      const imageUrl = data.url;
 
-    await new Promise<void>((resolve, reject) => {
-      const img = new Image();
-      img.onload = () => {
-        const spawnPosition = getSpawnPosition(
-          {
-            width: getConstrainedImageDisplaySize(img.width, img.height).width,
-            height: getConstrainedImageDisplaySize(img.width, img.height).height,
-          },
-          orderOffset
-        );
-        const newItem = createImageCanvasItem({
-          id: `item-${Date.now()}-${Math.random()}`,
-          src: imageUrl,
-          naturalWidth: img.width,
-          naturalHeight: img.height,
-          x: spawnPosition.x,
-          y: spawnPosition.y,
-        });
-        setItems(prev => [...prev, newItem]);
-        resolve();
-      };
-      img.onerror = () => reject(new Error('图片加载失败'));
-      img.src = imageUrl;
-    });
-  };
+      await new Promise<void>((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => {
+          const spawnPosition = getSpawnPosition(
+            {
+              width: getConstrainedImageDisplaySize(img.width, img.height).width,
+              height: getConstrainedImageDisplaySize(img.width, img.height).height,
+            },
+            orderOffset
+          );
+          const newItem = createImageCanvasItem({
+            id: `item-${Date.now()}-${Math.random()}`,
+            src: imageUrl,
+            naturalWidth: img.width,
+            naturalHeight: img.height,
+            x: spawnPosition.x,
+            y: spawnPosition.y,
+          });
+          setItems((prev) => [...prev, newItem]);
+          resolve();
+        };
+        img.onerror = () => reject(new Error('图片加载失败'));
+        img.src = imageUrl;
+      });
+    },
+    [getSpawnPosition]
+  );
+
+  const addGeneratedHistoryImageToCanvas = useCallback(
+    async ({
+      src,
+      naturalWidth,
+      naturalHeight,
+    }: {
+      src: string;
+      naturalWidth?: number;
+      naturalHeight?: number;
+    }) => {
+      const resolvedMeta =
+        Number.isFinite(naturalWidth) &&
+        naturalWidth > 0 &&
+        Number.isFinite(naturalHeight) &&
+        naturalHeight > 0
+          ? {
+              naturalWidth,
+              naturalHeight,
+            }
+          : await new Promise<{ naturalWidth: number; naturalHeight: number }>((resolve, reject) => {
+              const img = new Image();
+              img.onload = () => {
+                resolve({
+                  naturalWidth: img.width,
+                  naturalHeight: img.height,
+                });
+              };
+              img.onerror = () => reject(new Error('图片加载失败'));
+              img.src = src;
+            });
+
+      const displaySize = getConstrainedImageDisplaySize(
+        resolvedMeta.naturalWidth,
+        resolvedMeta.naturalHeight
+      );
+      const spawnPosition = getSpawnPosition(displaySize);
+      const newItem = createImageCanvasItem({
+        id: `history-image-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        src,
+        naturalWidth: resolvedMeta.naturalWidth,
+        naturalHeight: resolvedMeta.naturalHeight,
+        x: spawnPosition.x,
+        y: spawnPosition.y,
+      });
+
+      setItems((prev) => [...prev, newItem]);
+    },
+    [getSpawnPosition]
+  );
+
+  const replaceImageAssetItemFromFile = useCallback(
+    async (itemId: string, file: File) => {
+      const base64Data = await readAsDataURL(file);
+      const fallbackName = file.name || `pasted-${Date.now()}.${file.type.split('/')[1] || 'png'}`;
+      const response = await fetch('/api/upload', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          imageData: base64Data,
+          fileName: fallbackName,
+        }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`Upload failed: ${response.status}`);
+      }
+
+      const data = await response.json();
+      const imageUrl = data.url;
+
+      const imageMeta = await new Promise<{ src: string; naturalWidth: number; naturalHeight: number }>((resolve, reject) => {
+        const img = new Image();
+        img.onload = () => {
+          resolve({
+            src: imageUrl,
+            naturalWidth: img.width,
+            naturalHeight: img.height,
+          });
+        };
+        img.onerror = () => reject(new Error('图片加载失败'));
+        img.src = imageUrl;
+      });
+
+      setItems((prev) =>
+        prev.map((item) => (item.id === itemId ? getReplacedImageAssetItem(item, imageMeta) : item))
+      );
+    },
+    []
+  );
+
+  const uploadImageFilesToCanvas = useCallback(
+    async (files: File[], fallbackPrefix: 'upload' | 'pasted' = 'upload') => {
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        try {
+          const base64Data = await readAsDataURL(file);
+          const fallbackName =
+            file.name || `${fallbackPrefix}-${Date.now()}-${i + 1}.${file.type.split('/')[1] || 'png'}`;
+          await addImageToCanvas(base64Data, fallbackName, i);
+        } catch (error) {
+          console.error(
+            fallbackPrefix === 'pasted' ? 'Canvas paste upload failed:' : 'Upload failed:',
+            error
+          );
+        }
+      }
+    },
+    [addImageToCanvas]
+  );
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files) return;
 
-    const list = Array.from(files);
-    for (let i = 0; i < list.length; i++) {
-      const file = list[i];
-      try {
-        const base64Data = await readAsDataURL(file);
-        await addImageToCanvas(base64Data, file.name, i);
-      } catch (error) {
-        console.error('Upload failed:', error);
-      }
-    }
-
+    await uploadImageFilesToCanvas(Array.from(files), 'upload');
     e.target.value = '';
   };
 
-  const handleCanvasPaste = async (e: React.ClipboardEvent<HTMLDivElement>) => {
-    const items = Array.from(e.clipboardData.items || []);
-    const imageFiles = items
-      .filter((item) => item.type.startsWith('image/'))
-      .map((item) => item.getAsFile())
-      .filter((file): file is File => file !== null);
-
-    if (imageFiles.length === 0) {
-      return;
-    }
-
-    e.preventDefault();
-
-    for (let i = 0; i < imageFiles.length; i++) {
-      const file = imageFiles[i];
-      try {
-        const base64Data = await readAsDataURL(file);
-        const fallbackName = file.name || `pasted-${Date.now()}-${i + 1}.png`;
-        await addImageToCanvas(base64Data, fallbackName, i);
-      } catch (error) {
-        console.error('Canvas paste upload failed:', error);
+  const handleCanvasPaste = useCallback(
+    async (e: React.ClipboardEvent<HTMLDivElement> | ClipboardEvent) => {
+      const imageFiles = extractImageFilesFromClipboardItems(e.clipboardData?.items);
+      if (imageFiles.length === 0) {
+        return;
       }
-    }
-  };
+
+      e.preventDefault();
+      const pasteTarget = resolveCanvasImagePasteTarget({
+        selectedId: selectedImageAssetItem?.id ?? selectedId,
+        selectedIds,
+        itemById,
+      });
+      if (pasteTarget.mode === 'replace') {
+        await replaceImageAssetItemFromFile(pasteTarget.itemId, imageFiles[0]);
+        return;
+      }
+      await uploadImageFilesToCanvas(imageFiles, 'pasted');
+    },
+    [itemById, replaceImageAssetItemFromFile, selectedId, selectedIds, selectedImageAssetItem?.id, uploadImageFilesToCanvas]
+  );
 
   const handleChatImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
@@ -3700,11 +3884,7 @@ export default function AIWorkspace() {
   };
 
   const handleChatPaste = async (e: React.ClipboardEvent<HTMLDivElement>) => {
-    const items = Array.from(e.clipboardData.items || []);
-    const imageFiles = items
-      .filter((item) => item.type.startsWith('image/'))
-      .map((item) => item.getAsFile())
-      .filter((file): file is File => file !== null);
+    const imageFiles = extractImageFilesFromClipboardItems(e.clipboardData.items);
 
     if (imageFiles.length === 0) {
       const text = e.clipboardData.getData('text/plain');
@@ -3947,6 +4127,74 @@ export default function AIWorkspace() {
     setDraggingImageIndex(null);
     setDragOverImageIndex(null);
   };
+
+  const handlePanelReferenceDragStart = useCallback(
+    (e: React.DragEvent<HTMLDivElement>, targetItemId: string, sourceItemId: string) => {
+      e.stopPropagation();
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', sourceItemId);
+      setDraggingPanelReference({
+        targetItemId,
+        sourceItemId,
+      });
+      setDragOverPanelReference(null);
+    },
+    []
+  );
+
+  const handlePanelReferenceDragOver = useCallback(
+    (e: React.DragEvent<HTMLDivElement>, targetItemId: string, sourceItemId: string) => {
+      if (!draggingPanelReference || draggingPanelReference.targetItemId !== targetItemId) {
+        return;
+      }
+
+      e.preventDefault();
+      e.stopPropagation();
+      if (
+        !dragOverPanelReference ||
+        dragOverPanelReference.targetItemId !== targetItemId ||
+        dragOverPanelReference.sourceItemId !== sourceItemId
+      ) {
+        setDragOverPanelReference({
+          targetItemId,
+          sourceItemId,
+        });
+      }
+    },
+    [dragOverPanelReference, draggingPanelReference]
+  );
+
+  const handlePanelReferenceDrop = useCallback(
+    (e: React.DragEvent<HTMLDivElement>, targetItemId: string, sourceItemId: string) => {
+      if (!draggingPanelReference || draggingPanelReference.targetItemId !== targetItemId) {
+        return;
+      }
+
+      e.preventDefault();
+      e.stopPropagation();
+
+      if (draggingPanelReference.sourceItemId !== sourceItemId) {
+        setConnections((prev) =>
+          reorderIncomingImageConnections({
+            connections: prev,
+            itemById: Object.fromEntries(itemsRef.current.map((item) => [item.id, item] as const)),
+            targetItemId,
+            fromImageItemId: draggingPanelReference.sourceItemId,
+            toImageItemId: sourceItemId,
+          })
+        );
+      }
+
+      setDraggingPanelReference(null);
+      setDragOverPanelReference(null);
+    },
+    [setConnections, draggingPanelReference]
+  );
+
+  const handlePanelReferenceDragEnd = useCallback(() => {
+    setDraggingPanelReference(null);
+    setDragOverPanelReference(null);
+  }, []);
 
   const addShape = (shapeType: 'rectangle' | 'circle') => {
     const newItem: CanvasItem = {
@@ -6688,6 +6936,10 @@ export default function AIWorkspace() {
 
   // 项目管理函数
   const getCurrentSession = () => sessions.find(s => s.id === currentSessionId);
+  const generatedImageHistoryEntries = React.useMemo(
+    () => getGeneratedImageHistoryEntries({ sessions }),
+    [sessions]
+  );
   
   const currentProjectName = getCurrentSession()?.name || '新画布';
 
@@ -6871,6 +7123,13 @@ export default function AIWorkspace() {
     }
   };
 
+  const handleLeftRailItemClick = useCallback((itemId: (typeof LEFT_RAIL_ITEMS)[number]['id']) => {
+    if (itemId === 'history') {
+      setShowGeneratedImageHistoryPanel((prev) => !prev);
+      return;
+    }
+  }, []);
+
   const handlePendingConnectionMenuAction = useCallback(
     (optionId: (typeof CONNECTION_MENU_OPTIONS)[number]['id']) => {
       if (!pendingConnectionMenu) return;
@@ -6967,6 +7226,19 @@ export default function AIWorkspace() {
   }, [selectedId, selectedIds, connectionPointerId, selectedConnectionIds, pendingConnectionMenu, clearPendingConnectionMenu]);
 
   useEffect(() => {
+    const handleWindowPaste = (e: ClipboardEvent) => {
+      if (e.defaultPrevented) return;
+      if (!shouldHandleCanvasImagePaste(e.target)) return;
+      void handleCanvasPaste(e);
+    };
+
+    window.addEventListener('paste', handleWindowPaste);
+    return () => {
+      window.removeEventListener('paste', handleWindowPaste);
+    };
+  }, [handleCanvasPaste]);
+
+  useEffect(() => {
     if (!pendingConnectionMenu) return;
 
     const handlePointerDownOutsideMenu = (e: PointerEvent) => {
@@ -7000,6 +7272,9 @@ export default function AIWorkspace() {
       if (addNodeMenuRef.current && !addNodeMenuRef.current.contains(e.target as Node)) {
         setShowAddNodeMenu(false);
       }
+      if (generatedImageHistoryPanelRef.current && !generatedImageHistoryPanelRef.current.contains(e.target as Node)) {
+        setShowGeneratedImageHistoryPanel(false);
+      }
       if (generationModeMenuRef.current && !generationModeMenuRef.current.contains(e.target as Node)) {
         setShowGenerationModeMenu(false);
       }
@@ -7030,11 +7305,11 @@ export default function AIWorkspace() {
       setShowAvatarMenu(false);
       setShowHistoryPanel(false);
     };
-    if (showAvatarMenu || showProjectMenu || showAddNodeMenu || showHistoryPanel || showGenerationModeMenu || showSkillsMenu || showAspectRatioMenu || showImageCardModelMenu || showImageCardQualityMenu || showImageCardCountMenu || showTextPanelModelMenu) {
+    if (showAvatarMenu || showProjectMenu || showAddNodeMenu || showGeneratedImageHistoryPanel || showHistoryPanel || showGenerationModeMenu || showSkillsMenu || showAspectRatioMenu || showImageCardModelMenu || showImageCardQualityMenu || showImageCardCountMenu || showTextPanelModelMenu) {
       document.addEventListener('pointerdown', handlePointerDownOutside);
       return () => document.removeEventListener('pointerdown', handlePointerDownOutside);
     }
-  }, [showAvatarMenu, showProjectMenu, showAddNodeMenu, showHistoryPanel, showGenerationModeMenu, showSkillsMenu, showAspectRatioMenu, showImageCardModelMenu, showImageCardQualityMenu, showImageCardCountMenu, showTextPanelModelMenu, editingSessionId]);
+  }, [showAvatarMenu, showProjectMenu, showAddNodeMenu, showGeneratedImageHistoryPanel, showHistoryPanel, showGenerationModeMenu, showSkillsMenu, showAspectRatioMenu, showImageCardModelMenu, showImageCardQualityMenu, showImageCardCountMenu, showTextPanelModelMenu, editingSessionId]);
 
   useEffect(() => {
     const handleSelectionChange = () => {
@@ -7339,37 +7614,96 @@ export default function AIWorkspace() {
               </div>
             </div>
           )}
-          <div className="flex w-[72px] flex-col items-center rounded-[36px] border border-white/10 bg-[rgba(16,18,22,0.9)] px-2 py-3 shadow-[0_24px_60px_rgba(0,0,0,0.38)] backdrop-blur-xl">
-            <button
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation();
-                clearPendingConnectionMenu();
-                setShowAddNodeMenu((prev) => !prev);
-              }}
-              className="mb-4 inline-flex h-12 w-12 items-center justify-center rounded-full border border-black/10 bg-[#f8fafc] text-black shadow-[0_10px_24px_rgba(0,0,0,0.24),inset_0_1px_0_rgba(255,255,255,0.7)] transition-colors hover:bg-white"
-              aria-label="添加节点"
-              title="添加节点"
-            >
-              <Plus size={24} strokeWidth={2.5} />
-            </button>
-            <div className="flex w-full flex-col items-center gap-3">
-              {LEFT_RAIL_ITEMS.map((item) => (
-                <button
-                  key={item.id}
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                  }}
-                  className="flex w-full flex-col items-center gap-0.5 rounded-[18px] px-1 py-1.5 text-zinc-500 transition-colors hover:bg-white/[0.04] hover:text-zinc-300"
-                  title={item.label}
-                  aria-label={item.label}
-                >
-                  <item.icon size={19} strokeWidth={2.1} />
-                  <span className="text-[10px] font-medium tracking-[-0.03em] leading-none">{item.label}</span>
-                </button>
-              ))}
+          <div ref={generatedImageHistoryPanelRef} className="relative">
+            <div className="flex w-[72px] flex-col items-center rounded-[36px] border border-white/10 bg-[rgba(16,18,22,0.9)] px-2 py-3 shadow-[0_24px_60px_rgba(0,0,0,0.38)] backdrop-blur-xl">
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  clearPendingConnectionMenu();
+                  setShowAddNodeMenu((prev) => !prev);
+                }}
+                className="mb-4 inline-flex h-12 w-12 items-center justify-center rounded-full border border-black/10 bg-[#f8fafc] text-black shadow-[0_10px_24px_rgba(0,0,0,0.24),inset_0_1px_0_rgba(255,255,255,0.7)] transition-colors hover:bg-white"
+                aria-label="添加节点"
+                title="添加节点"
+              >
+                <Plus size={24} strokeWidth={2.5} />
+              </button>
+              <div className="flex w-full flex-col items-center gap-3">
+                {LEFT_RAIL_ITEMS.map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (item.id === 'history') {
+                        handleLeftRailItemClick(item.id);
+                      }
+                    }}
+                    className={`flex w-full flex-col items-center gap-0.5 rounded-[18px] px-1 py-1.5 transition-colors hover:bg-white/[0.04] ${
+                      item.id === 'history' && showGeneratedImageHistoryPanel
+                        ? 'bg-white/[0.08] text-zinc-100'
+                        : 'text-zinc-500 hover:text-zinc-300'
+                    }`}
+                    title={item.label}
+                    aria-label={item.label}
+                  >
+                    <item.icon size={19} strokeWidth={2.1} />
+                    <span className="text-[10px] font-medium tracking-[-0.03em] leading-none">{item.label}</span>
+                  </button>
+                ))}
+              </div>
             </div>
+            {showGeneratedImageHistoryPanel && (
+              <div className="absolute left-full top-0 z-[150] ml-3 w-[384px] overflow-hidden rounded-[28px] border border-white/10 bg-[rgba(12,14,18,0.92)] shadow-[0_28px_80px_rgba(0,0,0,0.42)] backdrop-blur-xl">
+                <div className="flex items-center justify-between border-b border-white/[0.08] px-5 py-4">
+                  <div className="min-w-0 flex-1">
+                    <div className="text-[13px] font-semibold tracking-[-0.02em] text-zinc-100">生成历史</div>
+                    <div className="mt-1 pr-4 text-[11px] leading-5 text-zinc-500">所有 session 的生成图片，最新添加优先</div>
+                  </div>
+                  <div className="ml-3 shrink-0 rounded-full border border-white/[0.08] bg-white/[0.04] px-2.5 py-1 text-[11px] font-medium text-zinc-300">
+                    {generatedImageHistoryEntries.length}
+                  </div>
+                </div>
+                {generatedImageHistoryEntries.length > 0 ? (
+                  <div className="panel-scrollbar max-h-[520px] overflow-y-auto p-5" onWheel={stopCanvasWheelFromScrollableRegion}>
+                    <div className="grid grid-cols-2 gap-3">
+                      {generatedImageHistoryEntries.map((entry) => (
+                        <button
+                          key={entry.id}
+                          type="button"
+                          onClick={() => {
+                            void addGeneratedHistoryImageToCanvas(entry);
+                          }}
+                          className="group overflow-hidden rounded-[20px] border border-white/[0.08] bg-white/[0.03] text-left transition-all hover:-translate-y-0.5 hover:border-white/[0.14] hover:bg-white/[0.05]"
+                        >
+                          <div className="aspect-square overflow-hidden bg-black/30">
+                            <img
+                              src={entry.src}
+                              alt="历史生成图"
+                              className="h-full w-full object-cover transition-transform duration-200 group-hover:scale-[1.03]"
+                              draggable={false}
+                            />
+                          </div>
+                          <div className="flex items-center justify-between gap-2 px-3 py-2.5">
+                            <span className="truncate text-[11px] font-medium text-zinc-200">
+                              {entry.source === 'chat' ? '聊天生成' : 'Image 生成'}
+                            </span>
+                            <span className="shrink-0 text-[10px] uppercase tracking-[0.08em] text-zinc-500">
+                              Add
+                            </span>
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="px-5 py-10 text-center text-[12px] leading-6 text-zinc-500">
+                    暂无生成图片历史
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -7635,6 +7969,12 @@ export default function AIWorkspace() {
         onManualTextCardInputChange={handleManualTextCardInputChange}
         onManualTextCardBlur={finalizeManualTextCardEditing}
         onImageCardOutputSelect={handleImageCardOutputSelect}
+        draggingPanelReference={draggingPanelReference}
+        dragOverPanelReference={dragOverPanelReference}
+        onPanelReferenceDragStart={handlePanelReferenceDragStart}
+        onPanelReferenceDragOver={handlePanelReferenceDragOver}
+        onPanelReferenceDrop={handlePanelReferenceDrop}
+        onPanelReferenceDragEnd={handlePanelReferenceDragEnd}
       />
 
       {/* Zoom Controller - Outside Canvas */}

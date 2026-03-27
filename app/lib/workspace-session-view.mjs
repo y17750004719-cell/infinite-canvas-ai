@@ -191,6 +191,114 @@ export function isImageAssetItem(item) {
   return !!item && item.type === 'image' && !isImageCardItem(item) && typeof item.src === 'string' && item.src.length > 0;
 }
 
+export function extractImageFilesFromClipboardItems(items) {
+  return Array.from(items || [])
+    .filter((item) => item && typeof item.type === 'string' && item.type.startsWith('image/'))
+    .map((item) => (typeof item.getAsFile === 'function' ? item.getAsFile() : null))
+    .filter((file) => file !== null);
+}
+
+export function shouldHandleCanvasImagePaste(target) {
+  if (!target || typeof target !== 'object') {
+    return true;
+  }
+
+  const resolvedTarget =
+    target && typeof target === 'object' && 'nodeType' in target && target.nodeType === 3 && 'parentElement' in target
+      ? target.parentElement
+      : target;
+
+  if (!resolvedTarget || typeof resolvedTarget !== 'object') {
+    return true;
+  }
+
+  const tagName =
+    'tagName' in resolvedTarget && typeof resolvedTarget.tagName === 'string'
+      ? resolvedTarget.tagName.toLowerCase()
+      : '';
+
+  if (tagName === 'input' || tagName === 'textarea' || tagName === 'select') {
+    return false;
+  }
+
+  if ('isContentEditable' in resolvedTarget && resolvedTarget.isContentEditable) {
+    return false;
+  }
+
+  if (typeof resolvedTarget.closest === 'function') {
+    const editableAncestor = resolvedTarget.closest(
+      'input, textarea, select, [contenteditable]:not([contenteditable="false"])'
+    );
+    if (editableAncestor) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+export function resolveCanvasImagePasteTarget({
+  selectedId,
+  selectedIds,
+  itemById,
+}) {
+  if (!selectedId || !Array.isArray(selectedIds) || selectedIds.length !== 1) {
+    return { mode: 'create' };
+  }
+
+  const item = itemById?.[selectedId];
+  if (isImageAssetItem(item)) {
+    return {
+      mode: 'replace',
+      itemId: selectedId,
+    };
+  }
+
+  return { mode: 'create' };
+}
+
+function getConstrainedImageAssetSize(naturalWidth, naturalHeight, minSide = 512) {
+  if (!Number.isFinite(naturalWidth) || !Number.isFinite(naturalHeight) || naturalWidth <= 0 || naturalHeight <= 0) {
+    return { width: minSide, height: minSide };
+  }
+
+  if (naturalWidth >= naturalHeight) {
+    return {
+      width: (naturalWidth / naturalHeight) * minSide,
+      height: minSide,
+    };
+  }
+
+  return {
+    width: minSide,
+    height: (naturalHeight / naturalWidth) * minSide,
+  };
+}
+
+export function getReplacedImageAssetItem(item, nextImageMeta) {
+  if (!isImageAssetItem(item) || !nextImageMeta || typeof nextImageMeta.src !== 'string' || nextImageMeta.src.length === 0) {
+    return item;
+  }
+
+  const { width, height } = getConstrainedImageAssetSize(
+    nextImageMeta.naturalWidth,
+    nextImageMeta.naturalHeight
+  );
+  const centerX = item.x + item.width / 2;
+  const centerY = item.y + item.height / 2;
+
+  return {
+    ...item,
+    src: nextImageMeta.src,
+    naturalWidth: nextImageMeta.naturalWidth,
+    naturalHeight: nextImageMeta.naturalHeight,
+    width,
+    height,
+    x: centerX - width / 2,
+    y: centerY - height / 2,
+  };
+}
+
 export function canItemAcceptIncomingConnection(item) {
   if (!item) {
     return false;
@@ -769,6 +877,176 @@ export function buildImageCardOutputsState(outputs, requestedActiveIndex = 0) {
   };
 }
 
+export function getCurrentImageCardOutput(item) {
+  if (!item || item.type !== 'image') {
+    return null;
+  }
+
+  if (Array.isArray(item.imageOutputs) && item.imageOutputs.length > 0) {
+    const outputState = buildImageCardOutputsState(item.imageOutputs, item.activeImageOutputIndex ?? 0);
+    if (typeof outputState.src === 'string' && outputState.src.length > 0) {
+      return {
+        src: outputState.src,
+        naturalWidth: outputState.naturalWidth,
+        naturalHeight: outputState.naturalHeight,
+      };
+    }
+  }
+
+  if (typeof item.src === 'string' && item.src.length > 0) {
+    return {
+      src: item.src,
+      naturalWidth: Number.isFinite(item.naturalWidth) ? item.naturalWidth : undefined,
+      naturalHeight: Number.isFinite(item.naturalHeight) ? item.naturalHeight : undefined,
+    };
+  }
+
+  return null;
+}
+
+function extractTimestampFromGeneratedId(value) {
+  if (typeof value !== 'string' || value.length === 0) {
+    return null;
+  }
+
+  const matches = value.match(/\d{10,}/g);
+  if (!matches || matches.length === 0) {
+    return null;
+  }
+
+  const timestamp = Number(matches[matches.length - 1]);
+  if (!Number.isFinite(timestamp) || timestamp <= 0) {
+    return null;
+  }
+
+  return timestamp;
+}
+
+function buildGeneratedImageHistorySortKey(timestamp, sequence = 0) {
+  const safeTimestamp = Number.isFinite(timestamp) && timestamp > 0 ? timestamp : 0;
+  const safeSequence = Number.isFinite(sequence) && sequence >= 0 ? sequence : 0;
+  return safeTimestamp * 1000 + safeSequence;
+}
+
+export function getGeneratedImageHistoryEntries({ sessions }) {
+  if (!Array.isArray(sessions) || sessions.length === 0) {
+    return [];
+  }
+
+  const entries = [];
+
+  sessions.forEach((session, sessionIndex) => {
+    const sessionId = typeof session?.id === 'string' ? session.id : `session-${sessionIndex}`;
+    const sessionUpdatedAt =
+      Number.isFinite(session?.updatedAt) && session.updatedAt > 0 ? session.updatedAt : 0;
+
+    const topics = Array.isArray(session?.topics) ? session.topics : [];
+    topics.forEach((topic, topicIndex) => {
+      const topicMessages = Array.isArray(topic?.messages) ? topic.messages : [];
+      const topicUpdatedAt =
+        Number.isFinite(topic?.updatedAt) && topic.updatedAt > 0 ? topic.updatedAt : sessionUpdatedAt;
+
+      topicMessages.forEach((message, messageIndex) => {
+        if (typeof message?.imageUrl !== 'string' || message.imageUrl.length === 0) {
+          return;
+        }
+
+        const messageTimestamp = extractTimestampFromGeneratedId(message.id) ?? topicUpdatedAt;
+        entries.push({
+          id: `chat:${sessionId}:${topic?.id || topicIndex}:${message?.id || messageIndex}`,
+          sessionId,
+          source: 'chat',
+          src: message.imageUrl,
+          naturalWidth: undefined,
+          naturalHeight: undefined,
+          sortKey: buildGeneratedImageHistorySortKey(messageTimestamp, messageIndex),
+        });
+      });
+    });
+
+    const items = Array.isArray(session?.items) ? session.items : [];
+    items.forEach((item, itemIndex) => {
+      if (!isImageCardItem(item) || !Array.isArray(item.imageOutputs) || item.imageOutputs.length === 0) {
+        return;
+      }
+
+      const itemTimestamp = extractTimestampFromGeneratedId(item.id) ?? sessionUpdatedAt;
+
+      item.imageOutputs.forEach((output, outputIndex) => {
+        if (
+          !output ||
+          typeof output.src !== 'string' ||
+          output.src.length === 0
+        ) {
+          return;
+        }
+
+        entries.push({
+          id: `image-card:${sessionId}:${item.id || itemIndex}:${outputIndex}`,
+          sessionId,
+          source: 'image-card',
+          src: output.src,
+          naturalWidth:
+            Number.isFinite(output.naturalWidth) && output.naturalWidth > 0 ? output.naturalWidth : undefined,
+          naturalHeight:
+            Number.isFinite(output.naturalHeight) && output.naturalHeight > 0 ? output.naturalHeight : undefined,
+          sortKey: buildGeneratedImageHistorySortKey(itemTimestamp, outputIndex),
+        });
+      });
+    });
+  });
+
+  return entries.sort((a, b) => {
+    if (b.sortKey !== a.sortKey) {
+      return b.sortKey - a.sortKey;
+    }
+
+    return String(b.id).localeCompare(String(a.id));
+  });
+}
+
+export function reorderIncomingImageConnections({
+  connections,
+  itemById,
+  targetItemId,
+  fromImageItemId,
+  toImageItemId,
+}) {
+  const normalizedConnections = Array.isArray(connections) ? connections : [];
+  if (!targetItemId || !fromImageItemId || !toImageItemId || fromImageItemId === toImageItemId) {
+    return normalizedConnections;
+  }
+
+  const imageConnectionIndexes = normalizedConnections.flatMap((connection, index) => {
+    if (connection?.toItemId !== targetItemId) return [];
+    const sourceItem = itemById?.[connection.fromItemId];
+    return sourceItem?.type === 'image' ? [index] : [];
+  });
+
+  if (imageConnectionIndexes.length < 2) {
+    return normalizedConnections;
+  }
+
+  const imageConnections = imageConnectionIndexes.map((index) => normalizedConnections[index]);
+  const fromIndex = imageConnections.findIndex((connection) => connection?.fromItemId === fromImageItemId);
+  const toIndex = imageConnections.findIndex((connection) => connection?.fromItemId === toImageItemId);
+
+  if (fromIndex === -1 || toIndex === -1 || fromIndex === toIndex) {
+    return normalizedConnections;
+  }
+
+  const reorderedImageConnections = [...imageConnections];
+  const [movedConnection] = reorderedImageConnections.splice(fromIndex, 1);
+  reorderedImageConnections.splice(toIndex, 0, movedConnection);
+
+  const nextConnections = [...normalizedConnections];
+  imageConnectionIndexes.forEach((index, reorderedIndex) => {
+    nextConnections[index] = reorderedImageConnections[reorderedIndex];
+  });
+
+  return nextConnections;
+}
+
 export function appendImageCardOutput({
   existingOutputs = [],
   existingActiveIndex = 0,
@@ -797,7 +1075,8 @@ export function getDirectImagePreviewsForTextCard({
     if (connection?.toItemId !== textCardId) return [];
 
     const sourceItem = itemById.get(connection.fromItemId);
-    if (!sourceItem || sourceItem.type !== 'image' || typeof sourceItem.src !== 'string' || sourceItem.src.length === 0) {
+    const currentOutput = getCurrentImageCardOutput(sourceItem);
+    if (!sourceItem || !currentOutput) {
       return [];
     }
 
@@ -810,7 +1089,7 @@ export function getDirectImagePreviewsForTextCard({
     return [
       {
         id: sourceItem.id,
-        src: sourceItem.src,
+        src: currentOutput.src,
         label: `image${seenImageIds.size}`,
         alt: `image${seenImageIds.size}`,
       },

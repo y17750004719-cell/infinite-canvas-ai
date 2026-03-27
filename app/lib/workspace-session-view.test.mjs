@@ -24,8 +24,10 @@ import {
   finalizeManualTextCardItem,
   getDefaultTextPanelModelOption,
   getDirectImagePreviewsForTextCard,
+  getCurrentImageCardOutput,
   getDirectTextInputsForTextCard,
   getDisplayableTextCardPanelDraft,
+  getGeneratedImageHistoryEntries,
   getTextCardPanelPlaceholder,
   getImageCardQualitySummary,
   getImageCardFrameSizeForAspectRatio,
@@ -44,6 +46,11 @@ import {
   normalizeImageCardAspectRatio,
   resolveFloatingPopoverOffset,
   resolveImageGenerationFallbackSizes,
+  extractImageFilesFromClipboardItems,
+  getReplacedImageAssetItem,
+  resolveCanvasImagePasteTarget,
+  reorderIncomingImageConnections,
+  shouldHandleCanvasImagePaste,
   shouldPreventScrollableRegionWheelDefault,
 } from './workspace-session-view.mjs';
 
@@ -177,6 +184,343 @@ test('getDirectImagePreviewsForTextCard ignores missing, duplicate, and non-imag
   });
 
   assert.deepEqual(result, [{ id: 'img-1', src: '/a.png', label: 'image1', alt: 'image1' }]);
+});
+
+test('getGeneratedImageHistoryEntries keeps only generated images and sorts newest items first', () => {
+  const result = getGeneratedImageHistoryEntries({
+    sessions: [
+      {
+        id: 'session-chat',
+        name: '聊天生成',
+        createdAt: 1700000000000,
+        updatedAt: 1700000000250,
+        items: [
+          {
+            id: 'image-asset-1',
+            type: 'image',
+            src: '/asset.png',
+            naturalWidth: 800,
+            naturalHeight: 600,
+          },
+        ],
+        connections: [],
+        messages: [],
+        topics: [
+          {
+            id: 'topic-1',
+            title: 'Topic 1',
+            createdAt: 1700000000000,
+            updatedAt: 1700000000250,
+            messages: [
+              {
+                id: 'msg-1700000000100-old',
+                role: 'assistant',
+                content: '',
+                imageUrl: '/chat-old.png',
+              },
+              {
+                id: 'msg-1700000000200-new',
+                role: 'assistant',
+                content: '',
+                imageUrl: '/chat-new.png',
+              },
+            ],
+          },
+        ],
+      },
+      {
+        id: 'session-card',
+        name: '画布生成',
+        createdAt: 1700000000000,
+        updatedAt: 1700000000300,
+        items: [
+          {
+            id: 'image-card-1700000000300',
+            type: 'image',
+            imageVariant: 'card',
+            imageOutputs: [
+              { src: '/card-first.png', naturalWidth: 1024, naturalHeight: 1024 },
+              { src: '/card-second.png', naturalWidth: 1024, naturalHeight: 1024 },
+            ],
+          },
+        ],
+        connections: [],
+        messages: [],
+        topics: [],
+      },
+    ],
+  });
+
+  assert.deepEqual(
+    result.map((entry) => ({ src: entry.src, source: entry.source, sessionId: entry.sessionId })),
+    [
+      { src: '/card-second.png', source: 'image-card', sessionId: 'session-card' },
+      { src: '/card-first.png', source: 'image-card', sessionId: 'session-card' },
+      { src: '/chat-new.png', source: 'chat', sessionId: 'session-chat' },
+      { src: '/chat-old.png', source: 'chat', sessionId: 'session-chat' },
+    ]
+  );
+});
+
+test('getGeneratedImageHistoryEntries falls back to topic order when chat image message ids do not contain timestamps', () => {
+  const result = getGeneratedImageHistoryEntries({
+    sessions: [
+      {
+        id: 'session-chat-fallback',
+        name: '聊天回退',
+        createdAt: 1700000000000,
+        updatedAt: 1700000000400,
+        items: [],
+        connections: [],
+        messages: [],
+        topics: [
+          {
+            id: 'topic-fallback',
+            title: 'Topic fallback',
+            createdAt: 1700000000000,
+            updatedAt: 1700000000400,
+            messages: [
+              {
+                id: 'msg-alpha',
+                role: 'assistant',
+                content: '',
+                imageUrl: '/fallback-old.png',
+              },
+              {
+                id: 'msg-beta',
+                role: 'assistant',
+                content: '',
+                imageUrl: '/fallback-new.png',
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  });
+
+  assert.deepEqual(
+    result.map((entry) => entry.src),
+    ['/fallback-new.png', '/fallback-old.png']
+  );
+});
+
+test('extractImageFilesFromClipboardItems keeps image files in clipboard order and ignores other entries', () => {
+  const firstImage = { name: 'first.png' };
+  const secondImage = { name: 'second.jpg' };
+
+  const result = extractImageFilesFromClipboardItems([
+    { type: 'text/plain', getAsFile: () => null },
+    { type: 'image/png', getAsFile: () => firstImage },
+    { type: 'image/jpeg', getAsFile: () => secondImage },
+    { type: 'application/json', getAsFile: () => ({ name: 'ignored.json' }) },
+  ]);
+
+  assert.deepEqual(result, [firstImage, secondImage]);
+});
+
+test('shouldHandleCanvasImagePaste returns false for textarea, input, and contenteditable targets', () => {
+  const buildTarget = ({ tagName, isContentEditable = false, closestResult = null }) => ({
+    tagName,
+    isContentEditable,
+    closest: () => closestResult,
+  });
+
+  assert.equal(shouldHandleCanvasImagePaste(buildTarget({ tagName: 'TEXTAREA' })), false);
+  assert.equal(shouldHandleCanvasImagePaste(buildTarget({ tagName: 'INPUT' })), false);
+  assert.equal(
+    shouldHandleCanvasImagePaste(buildTarget({ tagName: 'DIV', isContentEditable: true })),
+    false
+  );
+  assert.equal(
+    shouldHandleCanvasImagePaste(
+      buildTarget({ tagName: 'SPAN', closestResult: { tagName: 'DIV', isContentEditable: true } })
+    ),
+    false
+  );
+});
+
+test('shouldHandleCanvasImagePaste returns true for non-editable canvas targets and missing targets', () => {
+  const target = {
+    tagName: 'DIV',
+    isContentEditable: false,
+    closest: () => null,
+  };
+
+  assert.equal(shouldHandleCanvasImagePaste(target), true);
+  assert.equal(shouldHandleCanvasImagePaste(null), true);
+});
+
+test('resolveCanvasImagePasteTarget returns replace for a single selected image asset item', () => {
+  const result = resolveCanvasImagePasteTarget({
+    selectedId: 'image-1',
+    selectedIds: ['image-1'],
+    itemById: {
+      'image-1': {
+        id: 'image-1',
+        type: 'image',
+        src: '/old.png',
+      },
+    },
+  });
+
+  assert.deepEqual(result, {
+    mode: 'replace',
+    itemId: 'image-1',
+  });
+});
+
+test('resolveCanvasImagePasteTarget returns create for image cards, non-images, multi-select, and empty selection', () => {
+  assert.deepEqual(
+    resolveCanvasImagePasteTarget({
+      selectedId: 'image-card-1',
+      selectedIds: ['image-card-1'],
+      itemById: {
+        'image-card-1': {
+          id: 'image-card-1',
+          type: 'image',
+          imageVariant: 'card',
+        },
+      },
+    }),
+    { mode: 'create' }
+  );
+
+  assert.deepEqual(
+    resolveCanvasImagePasteTarget({
+      selectedId: 'text-1',
+      selectedIds: ['text-1'],
+      itemById: {
+        'text-1': {
+          id: 'text-1',
+          type: 'text',
+          textVariant: 'card',
+        },
+      },
+    }),
+    { mode: 'create' }
+  );
+
+  assert.deepEqual(
+    resolveCanvasImagePasteTarget({
+      selectedId: 'image-1',
+      selectedIds: ['image-1', 'image-2'],
+      itemById: {
+        'image-1': { id: 'image-1', type: 'image', src: '/old.png' },
+        'image-2': { id: 'image-2', type: 'image', src: '/other.png' },
+      },
+    }),
+    { mode: 'create' }
+  );
+
+  assert.deepEqual(
+    resolveCanvasImagePasteTarget({
+      selectedId: null,
+      selectedIds: [],
+      itemById: {},
+    }),
+    { mode: 'create' }
+  );
+});
+
+test('getReplacedImageAssetItem keeps the node id and center while resizing to the new image ratio', () => {
+  const result = getReplacedImageAssetItem(
+    {
+      id: 'image-1',
+      type: 'image',
+      x: 100,
+      y: 200,
+      width: 1024,
+      height: 512,
+      rotation: 0,
+      src: '/old.png',
+      naturalWidth: 2000,
+      naturalHeight: 1000,
+      visible: true,
+      locked: false,
+    },
+    {
+      src: '/new.png',
+      naturalWidth: 1000,
+      naturalHeight: 2000,
+    }
+  );
+
+  assert.equal(result.id, 'image-1');
+  assert.equal(result.src, '/new.png');
+  assert.equal(result.naturalWidth, 1000);
+  assert.equal(result.naturalHeight, 2000);
+  assert.equal(result.x + result.width / 2, 612);
+  assert.equal(result.y + result.height / 2, 456);
+  assert.equal(result.width, 512);
+  assert.equal(result.height, 1024);
+});
+
+test('reorderIncomingImageConnections reorders only image inputs for the targeted card while keeping other connections stable', () => {
+  const connections = [
+    { id: 'conn-text-before', fromItemId: 'text-1', toItemId: 'card-1' },
+    { id: 'conn-img-1', fromItemId: 'img-1', toItemId: 'card-1' },
+    { id: 'conn-other-target', fromItemId: 'img-3', toItemId: 'card-2' },
+    { id: 'conn-img-2', fromItemId: 'img-2', toItemId: 'card-1' },
+    { id: 'conn-text-after', fromItemId: 'text-2', toItemId: 'card-1' },
+  ];
+
+  const result = reorderIncomingImageConnections({
+    connections,
+    itemById: {
+      'img-1': { id: 'img-1', type: 'image', src: '/a.png' },
+      'img-2': { id: 'img-2', type: 'image', src: '/b.png' },
+      'img-3': { id: 'img-3', type: 'image', src: '/c.png' },
+      'text-1': { id: 'text-1', type: 'text', text: 'before' },
+      'text-2': { id: 'text-2', type: 'text', text: 'after' },
+    },
+    targetItemId: 'card-1',
+    fromImageItemId: 'img-2',
+    toImageItemId: 'img-1',
+  });
+
+  assert.deepEqual(result, [
+    { id: 'conn-text-before', fromItemId: 'text-1', toItemId: 'card-1' },
+    { id: 'conn-img-2', fromItemId: 'img-2', toItemId: 'card-1' },
+    { id: 'conn-other-target', fromItemId: 'img-3', toItemId: 'card-2' },
+    { id: 'conn-img-1', fromItemId: 'img-1', toItemId: 'card-1' },
+    { id: 'conn-text-after', fromItemId: 'text-2', toItemId: 'card-1' },
+  ]);
+});
+
+test('reorderIncomingImageConnections updates preview order and downstream reference image payload order', () => {
+  const connections = reorderIncomingImageConnections({
+    connections: [
+      { id: 'conn-1', fromItemId: 'img-1', toItemId: 'card-1' },
+      { id: 'conn-2', fromItemId: 'img-2', toItemId: 'card-1' },
+    ],
+    itemById: {
+      'img-1': { id: 'img-1', type: 'image', src: '/a.png' },
+      'img-2': { id: 'img-2', type: 'image', src: '/b.png' },
+    },
+    targetItemId: 'card-1',
+    fromImageItemId: 'img-2',
+    toImageItemId: 'img-1',
+  });
+
+  const previews = getDirectImagePreviewsForTextCard({
+    textCardId: 'card-1',
+    items: [
+      { id: 'img-1', type: 'image', src: '/a.png' },
+      { id: 'img-2', type: 'image', src: '/b.png' },
+      { id: 'card-1', type: 'image', imageVariant: 'card' },
+    ],
+    connections,
+  });
+
+  assert.deepEqual(previews, [
+    { id: 'img-2', src: '/b.png', label: 'image1', alt: 'image1' },
+    { id: 'img-1', src: '/a.png', label: 'image2', alt: 'image2' },
+  ]);
+  assert.deepEqual(buildReferenceImageRequestPayload(previews), {
+    referenceImages: ['/b.png', '/a.png'],
+    referenceLabels: ['image1', 'image2'],
+  });
 });
 
 test('getDirectTextInputsForTextCard returns direct text inputs in connection order', () => {
@@ -545,6 +889,31 @@ test('getDirectImagePreviewsForTextCard also returns direct image previews for i
   assert.deepEqual(result, [
     { id: 'img-2', src: '/b.png', label: 'image1', alt: 'image1' },
     { id: 'img-1', src: '/a.png', label: 'image2', alt: 'image2' },
+  ]);
+});
+
+test('getDirectImagePreviewsForTextCard uses the current active output from a multi-image card source', () => {
+  const result = getDirectImagePreviewsForTextCard({
+    textCardId: 'text-1',
+    items: [
+      {
+        id: 'image-card-1',
+        type: 'image',
+        imageVariant: 'card',
+        src: '/stale-preview.png',
+        activeImageOutputIndex: 1,
+        imageOutputs: [
+          { src: '/first-output.png', naturalWidth: 1024, naturalHeight: 1024 },
+          { src: '/second-output.png', naturalWidth: 1024, naturalHeight: 1792 },
+        ],
+      },
+      { id: 'text-1', type: 'text', textVariant: 'card' },
+    ],
+    connections: [{ id: 'conn-1', fromItemId: 'image-card-1', toItemId: 'text-1' }],
+  });
+
+  assert.deepEqual(result, [
+    { id: 'image-card-1', src: '/second-output.png', label: 'image1', alt: 'image1' },
   ]);
 });
 
@@ -958,6 +1327,22 @@ test('appendImageCardOutput activates the first completed output when the image 
     imageOutputs: [{ src: '/uploads/generated/a.png', naturalWidth: 1024, naturalHeight: 1024 }],
     activeImageOutputIndex: 0,
   });
+});
+
+test('getCurrentImageCardOutput resolves the active output from imageOutputs before falling back to item src', () => {
+  assert.deepEqual(
+    getCurrentImageCardOutput({
+      id: 'image-card-1',
+      type: 'image',
+      src: '/fallback.png',
+      activeImageOutputIndex: 1,
+      imageOutputs: [
+        { src: '/first-output.png', naturalWidth: 1024, naturalHeight: 1024 },
+        { src: '/second-output.png', naturalWidth: 1024, naturalHeight: 1792 },
+      ],
+    }),
+    { src: '/second-output.png', naturalWidth: 1024, naturalHeight: 1792 }
+  );
 });
 
 test('buildCanvasTextGenerationRequest only uses the current input, direct image previews, and selected model', () => {
