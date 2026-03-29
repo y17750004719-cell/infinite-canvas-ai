@@ -58,3 +58,17 @@ test('left rail generated image history panel uses a wider layout than the origi
   assert.equal(pageSource.includes('w-[384px]'), true);
   assert.equal(pageSource.includes('className="min-w-0 flex-1"'), true);
 });
+
+test('image nodes expose a shared toolbar target and render an above-node image toolbar overlay', () => {
+  assert.equal(pageSource.includes('const selectedImageToolbarTarget = React.useMemo('), true);
+  assert.equal(pageSource.includes('selectedImageToolbarTarget && ('), true);
+  assert.equal(pageSource.includes('data-image-node-toolbar="true"'), true);
+  assert.equal(pageSource.includes('抠图'), true);
+});
+
+test('image toolbar actions keep cutout enabled while leaving other actions disabled in the first version', () => {
+  assert.equal(pageSource.includes('const IMAGE_NODE_TOOLBAR_ACTIONS = ['), true);
+  assert.equal(pageSource.includes("id: 'cutout'"), true);
+  assert.equal(pageSource.includes('enabled: true'), true);
+  assert.equal(pageSource.includes('enabled: false'), true);
+});

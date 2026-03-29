@@ -1387,6 +1387,8 @@ const CanvasViewport = memo(function CanvasViewport({
   onPanelReferenceDragOver,
   onPanelReferenceDrop,
   onPanelReferenceDragEnd,
+  selectedImageToolbarTarget,
+  onImageToolbarAction,
 }: {
   canvasRef: React.RefObject<HTMLDivElement | null>;
   widthStyle: string;
@@ -1512,6 +1514,8 @@ const CanvasViewport = memo(function CanvasViewport({
     sourceItemId: string
   ) => void;
   onPanelReferenceDragEnd: () => void;
+  selectedImageToolbarTarget: { itemId: string; src: string; kind: 'asset' | 'card' } | null;
+  onImageToolbarAction: (actionId: (typeof IMAGE_NODE_TOOLBAR_ACTIONS)[number]['id']) => void;
 }) {
   const { from, to } = getPreviewRenderPoints();
   const selectedTextCardPanelTextareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -1532,6 +1536,35 @@ const CanvasViewport = memo(function CanvasViewport({
     width: canvasRect?.width ?? 0,
     height: canvasRect?.height ?? 0,
   };
+  const selectedImageToolbarItem = selectedImageToolbarTarget
+    ? itemById[selectedImageToolbarTarget.itemId] ?? null
+    : null;
+  const selectedImageToolbarBounds = selectedImageToolbarItem
+    ? getItemVisualBounds(selectedImageToolbarItem)
+    : null;
+  const selectedImageToolbarAnchor = selectedImageToolbarBounds
+    ? toCanvasScreenPoint({
+        x: selectedImageToolbarBounds.left + selectedImageToolbarBounds.width / 2,
+        y: selectedImageToolbarBounds.top,
+      })
+    : null;
+  const imageToolbarApproxWidth = 632;
+  const imageToolbarSidePadding = 20;
+  const selectedImageToolbarLeft = selectedImageToolbarAnchor
+    ? Math.min(
+        Math.max(
+          selectedImageToolbarAnchor.x,
+          imageToolbarSidePadding + imageToolbarApproxWidth / 2
+        ),
+        Math.max(
+          imageToolbarSidePadding + imageToolbarApproxWidth / 2,
+          canvasSize.width - imageToolbarSidePadding - imageToolbarApproxWidth / 2
+        )
+      )
+    : 0;
+  const selectedImageToolbarTop = selectedImageToolbarAnchor
+    ? Math.max(selectedImageToolbarAnchor.y, 84)
+    : 0;
   const connectionMenuWidth = 360;
   const connectionMenuHeight = 292;
   const connectionMenuPadding = 24;
@@ -1859,6 +1892,55 @@ const CanvasViewport = memo(function CanvasViewport({
             </div>
           </div>
         </div>
+      )}
+      {selectedImageToolbarTarget && (
+        <>
+          {selectedImageToolbarAnchor && (
+            <div className="pointer-events-none absolute inset-0 z-[114]">
+              <div
+                data-image-node-toolbar="true"
+                className="pointer-events-auto absolute flex items-center gap-1 rounded-full border border-white/[0.1] bg-[rgba(14,15,18,0.92)] px-2 py-1.5 shadow-[0_18px_42px_rgba(0,0,0,0.34),inset_0_1px_0_rgba(255,255,255,0.05)] backdrop-blur-xl"
+                style={{
+                  left: selectedImageToolbarLeft,
+                  top: selectedImageToolbarTop,
+                  transform: 'translate(-50%, calc(-100% - 12px))',
+                }}
+                onPointerDown={(e) => {
+                  e.stopPropagation();
+                }}
+              >
+                {IMAGE_NODE_TOOLBAR_ACTIONS.map((action) => {
+                  const Icon = action.icon;
+
+                  return (
+                    <button
+                      key={action.id}
+                      data-image-node-toolbar-action={action.id}
+                      type="button"
+                      disabled={!action.enabled}
+                      onPointerDown={(e) => {
+                        e.stopPropagation();
+                      }}
+                      onClick={() => {
+                        if (!action.enabled) return;
+                        onImageToolbarAction(action.id);
+                      }}
+                      className={`inline-flex h-8 items-center gap-1.5 rounded-full px-3 text-[12px] font-medium tracking-[-0.02em] transition-all ${
+                        action.enabled
+                          ? 'text-zinc-100 hover:bg-white/[0.08] hover:text-white'
+                          : 'cursor-default text-zinc-500/85'
+                      }`}
+                      title={action.enabled ? action.label : `${action.label} 即将支持`}
+                    >
+                      <Icon size={13} strokeWidth={2} className="shrink-0" />
+                      <span>{action.label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+        </>
       )}
       {selectedTextCardPanelItem && selectedTextCardPanelFrameBounds && selectedTextCardPanelCanvasRect && (
         <div className="pointer-events-none absolute inset-0 z-[115]">
@@ -2818,6 +2900,16 @@ const LEFT_RAIL_ITEMS = [
   { id: 'history', label: '历史', icon: Clock3 },
 ] as const;
 
+const IMAGE_NODE_TOOLBAR_ACTIONS = [
+  { id: 'redraw', label: '重绘', icon: Pencil, enabled: false },
+  { id: 'erase', label: '擦除', icon: X, enabled: false },
+  { id: 'enhance', label: '增强', icon: Sparkles, enabled: false },
+  { id: 'expand', label: '扩图', icon: Plus, enabled: false },
+  { id: 'cutout', label: '抠图', icon: ImageIcon, enabled: true },
+  { id: 'crop', label: '裁剪', icon: SlidersHorizontal, enabled: false },
+  { id: 'export', label: '导出', icon: Send, enabled: false },
+] as const;
+
 const ADD_NODE_MENU_OPTIONS = [
   {
     id: 'text',
@@ -2999,6 +3091,7 @@ export default function AIWorkspace() {
   const [showAddNodeMenu, setShowAddNodeMenu] = useState(false);
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [editingName, setEditingName] = useState('');
+  const [imageToolbarNotice, setImageToolbarNotice] = useState<string | null>(null);
   
   const [activeSkillJobId, setActiveSkillJobId] = useState<string | null>(null);
   const [activeSkillJobType, setActiveSkillJobType] = useState<'logo' | 'brand' | null>(null);
@@ -3033,6 +3126,7 @@ export default function AIWorkspace() {
   const streamMessageIdRef = useRef<string | null>(null);
   const pendingAssistantMessageIdRef = useRef<string | null>(null);
   const currentSessionIdRef = useRef<string | null>(null);
+  const imageToolbarNoticeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const assistantTextSelectionRef = useRef<AssistantTextSelectionSession>({
     startedInAssistant: false,
     isPointerDown: false,
@@ -3099,6 +3193,25 @@ export default function AIWorkspace() {
     const item = itemById[selectedId];
     return isImageAssetItem(item) ? item : null;
   }, [itemById, selectedId, selectedIds]);
+  const selectedImageToolbarTarget = React.useMemo(() => {
+    if (selectedImageAssetItem?.src) {
+      return {
+        itemId: selectedImageAssetItem.id,
+        src: selectedImageAssetItem.src,
+        kind: 'asset' as const,
+      };
+    }
+
+    if (selectedImageCardPanelItem?.src) {
+      return {
+        itemId: selectedImageCardPanelItem.id,
+        src: selectedImageCardPanelItem.src,
+        kind: 'card' as const,
+      };
+    }
+
+    return null;
+  }, [selectedImageAssetItem, selectedImageCardPanelItem]);
   const selectedTextCardPanelLinkedImagePreviews = React.useMemo(
     () =>
       getDirectImagePreviewsForTextCard({
@@ -3263,6 +3376,14 @@ export default function AIWorkspace() {
   useEffect(() => {
     selectedIdRef.current = selectedId;
   }, [selectedId]);
+
+  useEffect(() => {
+    return () => {
+      if (imageToolbarNoticeTimeoutRef.current) {
+        clearTimeout(imageToolbarNoticeTimeoutRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
@@ -7123,6 +7244,19 @@ export default function AIWorkspace() {
     }
   };
 
+  const handleImageToolbarAction = useCallback((actionId: (typeof IMAGE_NODE_TOOLBAR_ACTIONS)[number]['id']) => {
+    if (actionId !== 'cutout') return;
+
+    setImageToolbarNotice('抠图能力下一步接入');
+    if (imageToolbarNoticeTimeoutRef.current) {
+      clearTimeout(imageToolbarNoticeTimeoutRef.current);
+    }
+    imageToolbarNoticeTimeoutRef.current = setTimeout(() => {
+      setImageToolbarNotice(null);
+      imageToolbarNoticeTimeoutRef.current = null;
+    }, 2200);
+  }, []);
+
   const handleLeftRailItemClick = useCallback((itemId: (typeof LEFT_RAIL_ITEMS)[number]['id']) => {
     if (itemId === 'history') {
       setShowGeneratedImageHistoryPanel((prev) => !prev);
@@ -7975,7 +8109,17 @@ export default function AIWorkspace() {
         onPanelReferenceDragOver={handlePanelReferenceDragOver}
         onPanelReferenceDrop={handlePanelReferenceDrop}
         onPanelReferenceDragEnd={handlePanelReferenceDragEnd}
+        selectedImageToolbarTarget={selectedImageToolbarTarget}
+        onImageToolbarAction={handleImageToolbarAction}
       />
+
+      {imageToolbarNotice && (
+        <div className="pointer-events-none fixed inset-x-0 top-4 z-[220] flex justify-center px-4">
+          <div className="rounded-full border border-white/[0.1] bg-[rgba(14,15,18,0.92)] px-4 py-2 text-[12px] font-medium tracking-[-0.02em] text-zinc-100 shadow-[0_18px_42px_rgba(0,0,0,0.34)] backdrop-blur-xl">
+            {imageToolbarNotice}
+          </div>
+        </div>
+      )}
 
       {/* Zoom Controller - Outside Canvas */}
       <div className="absolute left-4 bottom-4 z-50 flex items-center gap-2 rounded-xl border border-white/10 bg-[rgba(16,18,22,0.88)] p-1.5 shadow-[0_18px_50px_rgba(0,0,0,0.35)] backdrop-blur-xl">
