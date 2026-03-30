@@ -27,6 +27,7 @@ test('createEmptySession creates a persisted-ready empty canvas', () => {
   assert.deepEqual(session.imageCardSizeById, {});
   assert.deepEqual(session.imageCardCountById, {});
   assert.deepEqual(session.imageCardAspectRatioById, {});
+  assert.deepEqual(session.generatedImageHistory, []);
   assert.equal(session.topics?.length, 1);
   assert.equal(session.viewport.scale, 1);
 });

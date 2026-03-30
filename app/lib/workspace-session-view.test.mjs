@@ -308,6 +308,172 @@ test('getGeneratedImageHistoryEntries falls back to topic order when chat image 
   );
 });
 
+test('getGeneratedImageHistoryEntries prefers the current session snapshot over the persisted session copy', () => {
+  const result = getGeneratedImageHistoryEntries({
+    sessions: [
+      {
+        id: 'session-live',
+        name: '实时会话',
+        createdAt: 1700000000000,
+        updatedAt: 1700000000100,
+        items: [
+          {
+            id: 'image-card-1700000000001',
+            type: 'image',
+            imageVariant: 'card',
+            imageOutputs: [{ src: '/persisted-card.png', naturalWidth: 1024, naturalHeight: 1024 }],
+          },
+        ],
+        connections: [],
+        messages: [],
+        topics: [
+          {
+            id: 'topic-persisted',
+            title: 'Persisted',
+            createdAt: 1700000000000,
+            updatedAt: 1700000000100,
+            messages: [
+              {
+                id: 'msg-persisted',
+                role: 'assistant',
+                content: '',
+                imageUrl: '/persisted-chat.png',
+              },
+            ],
+          },
+        ],
+      },
+      {
+        id: 'session-other',
+        name: '其它会话',
+        createdAt: 1700000000000,
+        updatedAt: 1700000000200,
+        items: [],
+        connections: [],
+        messages: [],
+        topics: [
+          {
+            id: 'topic-other',
+            title: 'Other',
+            createdAt: 1700000000000,
+            updatedAt: 1700000000200,
+            messages: [
+              {
+                id: 'msg-1700000000200-other',
+                role: 'assistant',
+                content: '',
+                imageUrl: '/other-chat.png',
+              },
+            ],
+          },
+        ],
+      },
+    ],
+    currentSessionSnapshot: {
+      id: 'session-live',
+      name: '实时会话',
+      createdAt: 1700000000000,
+      updatedAt: 1700000000300,
+      items: [
+        {
+          id: 'image-card-1700000000300',
+          type: 'image',
+          imageVariant: 'card',
+          imageOutputs: [{ src: '/live-card.png', naturalWidth: 1024, naturalHeight: 1024 }],
+        },
+      ],
+      connections: [],
+      messages: [],
+      topics: [
+        {
+          id: 'topic-live',
+          title: 'Live',
+          createdAt: 1700000000000,
+          updatedAt: 1700000000300,
+          messages: [
+            {
+              id: 'msg-1700000000300-live',
+              role: 'assistant',
+              content: '',
+              imageUrl: '/live-chat.png',
+            },
+          ],
+        },
+      ],
+    },
+  });
+
+  assert.deepEqual(
+    result.map((entry) => entry.src),
+    ['/live-card.png', '/live-chat.png', '/other-chat.png']
+  );
+});
+
+test('getGeneratedImageHistoryEntries prefers append-only session history and merges archive entries without duplicate src values', () => {
+  const result = getGeneratedImageHistoryEntries({
+    sessions: [
+      {
+        id: 'session-history',
+        name: '独立历史',
+        createdAt: 1700000000000,
+        updatedAt: 1700000000100,
+        generatedImageHistory: [
+          {
+            id: 'history-1',
+            src: '/uploads/generated/run-1.png',
+            createdAt: 1700000000400,
+            source: 'image-card',
+            sourceItemId: 'image-card-1',
+          },
+          {
+            id: 'history-2',
+            src: '/uploads/generated/run-2.png',
+            createdAt: 1700000000500,
+            source: 'image-card',
+            sourceItemId: 'image-card-1',
+          },
+        ],
+        items: [
+          {
+            id: 'image-card-1',
+            type: 'image',
+            imageVariant: 'card',
+            imageOutputs: [
+              { src: '/uploads/generated/current-only.png', naturalWidth: 1024, naturalHeight: 1024 },
+            ],
+          },
+        ],
+        connections: [],
+        messages: [],
+        topics: [],
+      },
+    ],
+    archiveEntries: [
+      {
+        id: 'archive-1',
+        src: '/uploads/generated/run-2.png',
+        createdAt: 1700000000600,
+        source: 'archive',
+      },
+      {
+        id: 'archive-2',
+        src: '/uploads/generated/archive-only.png',
+        createdAt: 1700000000550,
+        source: 'archive',
+      },
+    ],
+  });
+
+  assert.deepEqual(
+    result.map((entry) => ({ src: entry.src, source: entry.source })),
+    [
+      { src: '/uploads/generated/archive-only.png', source: 'archive' },
+      { src: '/uploads/generated/run-2.png', source: 'image-card' },
+      { src: '/uploads/generated/run-1.png', source: 'image-card' },
+    ]
+  );
+});
+
 test('getSelectedImageToolbarSource returns the selected image asset output first and falls back to image card output', () => {
   assert.deepEqual(
     getSelectedImageToolbarSource({

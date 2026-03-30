@@ -31,6 +31,51 @@ test('buildPersistedSession stores connections in the saved session', () => {
   assert.deepEqual(result.connections, [{ id: 'conn-1', fromItemId: 'a', toItemId: 'b' }]);
 });
 
+test('buildPersistedSession preserves normalized generated image history entries', () => {
+  const session = {
+    id: 'session-1',
+    name: 'Canvas',
+    createdAt: 1,
+    updatedAt: 1,
+    items: [],
+    messages: [],
+    viewport: { x: 0, y: 0, scale: 1 },
+  };
+
+  const result = buildPersistedSession(session, {
+    generatedImageHistory: [
+      {
+        id: 'history-1',
+        src: '/uploads/generated/a.png',
+        createdAt: 10,
+        source: 'image-card',
+        sourceItemId: 'image-card-1',
+      },
+      {
+        id: 'history-2',
+        src: '',
+        createdAt: 11,
+        source: 'chat',
+      },
+    ],
+  });
+
+  assert.deepEqual(result.generatedImageHistory, [
+    {
+      id: 'history-1',
+      src: '/uploads/generated/a.png',
+      createdAt: 10,
+      source: 'image-card',
+      sessionId: undefined,
+      naturalWidth: undefined,
+      naturalHeight: undefined,
+      sourceItemId: 'image-card-1',
+      topicId: undefined,
+      messageId: undefined,
+    },
+  ]);
+});
+
 test('buildPersistedSession keeps valid text card panel drafts for existing text card items', () => {
   const session = {
     id: 'session-1',
@@ -162,6 +207,7 @@ test('normalizeProjectSession falls back missing text card panel drafts to an em
   assert.deepEqual(result.imageCardSizeById, {});
   assert.deepEqual(result.imageCardCountById, {});
   assert.deepEqual(result.imageCardAspectRatioById, {});
+  assert.deepEqual(result.generatedImageHistory, []);
 });
 
 test('normalizeProjectSession removes orphan, invalid, and blank text card panel drafts', () => {
@@ -234,6 +280,42 @@ test('normalizeProjectSession removes orphan and invalid image card state while 
   assert.deepEqual(result.imageCardAspectRatioById, {
     'image-card-1': '1:1',
   });
+});
+
+test('normalizeProjectSession keeps valid generated image history entries and removes invalid ones', () => {
+  const result = normalizeProjectSession({
+    id: 'session-1',
+    items: [],
+    generatedImageHistory: [
+      {
+        id: 'history-1',
+        src: '/uploads/generated/a.png',
+        createdAt: 10,
+        source: 'chat',
+      },
+      {
+        id: 'history-2',
+        src: '   ',
+        createdAt: 11,
+        source: 'archive',
+      },
+    ],
+  });
+
+  assert.deepEqual(result.generatedImageHistory, [
+    {
+      id: 'history-1',
+      src: '/uploads/generated/a.png',
+      createdAt: 10,
+      source: 'chat',
+      sessionId: undefined,
+      naturalWidth: undefined,
+      naturalHeight: undefined,
+      sourceItemId: undefined,
+      topicId: undefined,
+      messageId: undefined,
+    },
+  ]);
 });
 
 test('shouldFlushScheduledSessionSave rejects stale save epochs', () => {

@@ -1,3 +1,5 @@
+import { normalizeGeneratedImageHistory } from './generated-image-history.mjs';
+
 const isRecord = (value) => typeof value === 'object' && value !== null;
 
 const normalizeConnections = (connections, items) => {
@@ -137,6 +139,7 @@ export function normalizeProjectSession(session) {
     imageCardSizeById: normalizeImageCardSizeById(session?.imageCardSizeById, normalizedItems),
     imageCardCountById: normalizeImageCardCountById(session?.imageCardCountById, normalizedItems),
     imageCardAspectRatioById: normalizeImageCardAspectRatioById(session?.imageCardAspectRatioById, normalizedItems),
+    generatedImageHistory: normalizeGeneratedImageHistory(session?.generatedImageHistory),
   };
 }
 
@@ -155,6 +158,7 @@ export function buildPersistedSession(session, patch) {
     imageCardSizeById: normalizeImageCardSizeById(nextSession.imageCardSizeById, nextSession.items),
     imageCardCountById: normalizeImageCardCountById(nextSession.imageCardCountById, nextSession.items),
     imageCardAspectRatioById: normalizeImageCardAspectRatioById(nextSession.imageCardAspectRatioById, nextSession.items),
+    generatedImageHistory: normalizeGeneratedImageHistory(nextSession.generatedImageHistory),
   };
 }
 

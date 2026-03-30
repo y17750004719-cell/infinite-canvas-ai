@@ -54,6 +54,18 @@ export interface ChatTopic {
   updatedAt: number;
 }
 
+export interface GeneratedImageHistoryEntry {
+  id: string;
+  src: string;
+  naturalWidth?: number;
+  naturalHeight?: number;
+  createdAt: number;
+  source: 'chat' | 'image-card' | 'archive';
+  sourceItemId?: string;
+  topicId?: string;
+  messageId?: string;
+}
+
 export interface ProjectSession {
   id: string;
   name: string;
@@ -74,6 +86,7 @@ export interface ProjectSession {
   messages: ChatMessage[]; // 保持兼容性
   topics?: ChatTopic[];    // 新增：对话项目列表
   activeTopicId?: string; // 新增：当前对话 ID
+  generatedImageHistory?: GeneratedImageHistoryEntry[];
   viewport: { x: number; y: number; scale: number };
 }
 

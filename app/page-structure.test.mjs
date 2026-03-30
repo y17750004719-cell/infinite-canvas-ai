@@ -57,6 +57,21 @@ test('left rail generated image history panel uses a wider layout than the origi
   assert.equal(pageSource.includes('className="min-w-0 flex-1"'), true);
 });
 
+test('generated image history merges persisted sessions with live session history and archive backfill entries', () => {
+  assert.equal(pageSource.includes('const currentSessionHistorySnapshot = React.useMemo('), true);
+  assert.equal(pageSource.includes('buildCurrentSessionSnapshot(currentSession)'), true);
+  assert.equal(pageSource.includes('const [generatedImageHistoryBySession, setGeneratedImageHistoryBySession] = useState<Record<string, GeneratedImageHistoryEntry[]>>({});'), true);
+  assert.equal(pageSource.includes('const [archiveGeneratedImageHistoryEntries, setArchiveGeneratedImageHistoryEntries] = useState<GeneratedImageHistoryEntry[]>([]);'), true);
+  assert.equal(pageSource.includes('const sessionsWithGeneratedImageHistory = React.useMemo('), true);
+  assert.equal(pageSource.includes("fetch('/api/generated-images/history'"), true);
+  assert.equal(
+    pageSource.includes('() => getGeneratedImageHistoryEntries({'),
+    true
+  );
+  assert.equal(pageSource.includes('sessions: sessionsWithGeneratedImageHistory,'), true);
+  assert.equal(pageSource.includes('archiveEntries: archiveGeneratedImageHistoryEntries,'), true);
+});
+
 test('image nodes expose a shared toolbar target and render an above-node image toolbar overlay', () => {
   assert.equal(pageSource.includes('const selectedImageToolbarTarget = React.useMemo<'), true);
   assert.equal(pageSource.includes('getSelectedImageToolbarSource({'), true);

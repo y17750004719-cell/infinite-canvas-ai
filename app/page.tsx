@@ -9,8 +9,9 @@ import {
   Share2, History, Settings, Paperclip,
   Send, Sparkles, X, ChevronDown, Trash2, Edit3, ArrowLeft, Plus, SlidersHorizontal, Copy, Check, Video, Pencil, Package2, Workflow, Clock3
 } from 'lucide-react';
-import { ProjectSession } from './lib/db';
+import { GeneratedImageHistoryEntry, ProjectSession } from './lib/db';
 import { ASPECT_RATIOS } from './lib/api-client';
+import { appendGeneratedImageHistoryEntries } from './lib/generated-image-history.mjs';
 import {
   buildPersistedSession,
   normalizeTextCardPanelDrafts,
@@ -456,6 +457,41 @@ const createImageCanvasItem = ({
 };
 
 const IMAGE_CARD_DEFAULT_FRAME_WIDTH = IMAGE_CARD_DIMENSIONS.width - TEXT_CARD_FRAME_INSET_X * 2;
+const GENERATED_HISTORY_SOURCE_LABELS: Record<GeneratedImageHistoryEntry['source'], string> = {
+  chat: '聊天生成',
+  'image-card': 'Image 生成',
+  archive: '本地生成',
+};
+
+const createGeneratedImageHistoryEntry = ({
+  src,
+  naturalWidth,
+  naturalHeight,
+  createdAt = Date.now(),
+  source,
+  sourceItemId,
+  topicId,
+  messageId,
+}: {
+  src: string;
+  naturalWidth?: number;
+  naturalHeight?: number;
+  createdAt?: number;
+  source: GeneratedImageHistoryEntry['source'];
+  sourceItemId?: string;
+  topicId?: string;
+  messageId?: string;
+}): GeneratedImageHistoryEntry => ({
+  id: `generated-history-${createdAt}-${Math.random().toString(36).slice(2, 8)}`,
+  src,
+  naturalWidth,
+  naturalHeight,
+  createdAt,
+  source,
+  sourceItemId,
+  topicId,
+  messageId,
+});
 
 const getImageCardFrameWidthFromItem = (item: Pick<CanvasItem, 'width'> | null | undefined) => {
   const frameWidth = (item?.width ?? 0) - TEXT_CARD_FRAME_INSET_X * 2;
@@ -3061,6 +3097,8 @@ export default function AIWorkspace() {
   const [showProjectMenu, setShowProjectMenu] = useState(false);
   const [showHistoryPanel, setShowHistoryPanel] = useState(false);
   const [showGeneratedImageHistoryPanel, setShowGeneratedImageHistoryPanel] = useState(false);
+  const [generatedImageHistoryBySession, setGeneratedImageHistoryBySession] = useState<Record<string, GeneratedImageHistoryEntry[]>>({});
+  const [archiveGeneratedImageHistoryEntries, setArchiveGeneratedImageHistoryEntries] = useState<GeneratedImageHistoryEntry[]>([]);
   const [showAddNodeMenu, setShowAddNodeMenu] = useState(false);
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [editingName, setEditingName] = useState('');
@@ -3099,6 +3137,7 @@ export default function AIWorkspace() {
   const streamMessageIdRef = useRef<string | null>(null);
   const pendingAssistantMessageIdRef = useRef<string | null>(null);
   const currentSessionIdRef = useRef<string | null>(null);
+  const persistedGeneratedImageHistoryBySessionRef = useRef<Record<string, GeneratedImageHistoryEntry[]>>({});
   const imageToolbarNoticeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const assistantTextSelectionRef = useRef<AssistantTextSelectionSession>({
     startedInAssistant: false,
@@ -5710,6 +5749,25 @@ export default function AIWorkspace() {
     canvasTextGenerateAbortControllersRef.current.get(itemId)?.abort();
   }, []);
 
+  const appendGeneratedImageHistoryForSession = useCallback((
+    sessionId: string | null | undefined,
+    entries: GeneratedImageHistoryEntry[]
+  ) => {
+    const normalizedSessionId = typeof sessionId === 'string' ? sessionId.trim() : '';
+    if (!normalizedSessionId) {
+      return;
+    }
+
+    setGeneratedImageHistoryBySession((prev) => {
+      const baseEntries = prev[normalizedSessionId] ?? persistedGeneratedImageHistoryBySessionRef.current[normalizedSessionId] ?? [];
+      const nextSessionEntries = appendGeneratedImageHistoryEntries(baseEntries, entries);
+      return {
+        ...prev,
+        [normalizedSessionId]: nextSessionEntries,
+      };
+    });
+  }, []);
+
   const handleCanvasImageGenerate = useCallback(
     async ({
       itemId,
@@ -5831,6 +5889,19 @@ export default function AIWorkspace() {
             return;
           }
 
+          appendGeneratedImageHistoryForSession(
+            generationSessionId,
+            outputMetas.map((outputMeta) =>
+              createGeneratedImageHistoryEntry({
+                src: outputMeta.src,
+                naturalWidth: outputMeta.naturalWidth,
+                naturalHeight: outputMeta.naturalHeight,
+                source: 'image-card',
+                sourceItemId: itemId,
+              })
+            )
+          );
+
           setItems((prev) =>
             prev.map((item) => {
               if (item.id !== itemId) {
@@ -5873,6 +5944,19 @@ export default function AIWorkspace() {
               ) {
                 return { completed: 0 };
               }
+
+              appendGeneratedImageHistoryForSession(
+                generationSessionId,
+                outputMetas.map((outputMeta) =>
+                  createGeneratedImageHistoryEntry({
+                    src: outputMeta.src,
+                    naturalWidth: outputMeta.naturalWidth,
+                    naturalHeight: outputMeta.naturalHeight,
+                    source: 'image-card',
+                    sourceItemId: itemId,
+                  })
+                )
+              );
 
               for (const outputMeta of outputMetas) {
                 setItems((prev) =>
@@ -5996,7 +6080,7 @@ export default function AIWorkspace() {
         });
       }
     },
-    [activeCanvasImageGenerations]
+    [activeCanvasImageGenerations, appendGeneratedImageHistoryForSession]
   );
 
   const handleCancelCanvasImageGenerate = useCallback((itemId?: string | null) => {
@@ -6184,6 +6268,7 @@ export default function AIWorkspace() {
     const currentSkill = options?.skill ?? activeSkill;
     const currentViewport = { ...viewport };
     const currentImageCount = imageCount;
+    const generationSessionId = currentSessionIdRef.current;
     const uploadedLogoRefs = extractUploadedLogoReferences();
     const existingBrandLogoUrl = [...chatMessages]
       .reverse()
@@ -6501,6 +6586,7 @@ export default function AIWorkspace() {
           if (!logoUrl) {
             throw new Error('未返回可用 logo 图片');
           }
+          const brandLogoMessageId = `msg-${Date.now()}-brand-logo`;
 
           setImageCount((prev) => prev + 1);
 
@@ -6513,7 +6599,7 @@ export default function AIWorkspace() {
                 content: `已生成基础 logo（${industry} - ${brandName}）`,
               },
               {
-                id: `msg-${Date.now()}-brand-logo`,
+                id: brandLogoMessageId,
                 role: 'assistant',
                 content: '',
                 imageUrl: logoUrl,
@@ -6542,6 +6628,18 @@ export default function AIWorkspace() {
               x: spawnPosition.x,
               y: spawnPosition.y,
             });
+            appendGeneratedImageHistoryForSession(
+              generationSessionId,
+              [
+                createGeneratedImageHistoryEntry({
+                  src: logoUrl,
+                  naturalWidth: img.width,
+                  naturalHeight: img.height,
+                  source: 'chat',
+                  messageId: brandLogoMessageId,
+                }),
+              ]
+            );
             setItems(prev => [...prev, newItem]);
           };
           img.src = logoUrl;
@@ -6792,6 +6890,7 @@ export default function AIWorkspace() {
         } else if (data.data && data.data.length > 0) {
           const imageUrl = data.localUrl || data.data[0].url;
           const newImageCount = currentImageCount + 1;
+          const assistantImageMessageId = pendingAssistantMessageIdRef.current || assistantPlaceholderId;
           setImageCount(newImageCount);
           
           updatePendingAssistantMessage((msg) => ({
@@ -6822,6 +6921,18 @@ export default function AIWorkspace() {
               x: spawnPosition.x,
               y: spawnPosition.y,
             });
+            appendGeneratedImageHistoryForSession(
+              generationSessionId,
+              [
+                createGeneratedImageHistoryEntry({
+                  src: imageUrl,
+                  naturalWidth: img.width,
+                  naturalHeight: img.height,
+                  source: 'chat',
+                  messageId: assistantImageMessageId,
+                }),
+              ]
+            );
             setItems(prev => [...prev, newItem]);
             
             setTimeout(() => {
@@ -7021,9 +7132,14 @@ export default function AIWorkspace() {
       messages: chatMessages,
       topics,
       activeTopicId: activeId,
+      generatedImageHistory:
+        generatedImageHistoryBySession[session.id] ??
+        persistedGeneratedImageHistoryBySessionRef.current[session.id] ??
+        session.generatedImageHistory ??
+        [],
       viewport,
     });
-  }, [activeSkill, chatMessages, connections, imageCardAspectRatioById, imageCardCountById, imageCardModelById, imageCardPanelDrafts, imageCardSizeById, items, textCardPanelDrafts, viewport]);
+  }, [activeSkill, chatMessages, connections, generatedImageHistoryBySession, imageCardAspectRatioById, imageCardCountById, imageCardModelById, imageCardPanelDrafts, imageCardSizeById, items, textCardPanelDrafts, viewport]);
 
   const resolveCurrentSessionPresentationState = useCallback((session: ProjectSession) => {
     return resolveSessionPresentationState({
@@ -7073,8 +7189,9 @@ export default function AIWorkspace() {
       viewport,
       imageCount,
       activeSkill,
+      generatedImageHistoryBySession,
     }),
-    [activeSkill, chatMessages, connections, imageCardAspectRatioById, imageCardCountById, imageCardModelById, imageCardPanelDrafts, imageCardSizeById, imageCount, items, textCardPanelDrafts, viewport]
+    [activeSkill, chatMessages, connections, generatedImageHistoryBySession, imageCardAspectRatioById, imageCardCountById, imageCardModelById, imageCardPanelDrafts, imageCardSizeById, imageCount, items, textCardPanelDrafts, viewport]
   );
 
   const {
@@ -7099,11 +7216,77 @@ export default function AIWorkspace() {
     sessionSaveSignal,
   });
 
+  useEffect(() => {
+    persistedGeneratedImageHistoryBySessionRef.current = sessions.reduce<Record<string, GeneratedImageHistoryEntry[]>>((result, session) => {
+      if (Array.isArray(session.generatedImageHistory) && session.generatedImageHistory.length > 0) {
+        result[session.id] = session.generatedImageHistory;
+      }
+      return result;
+    }, {});
+  }, [sessions]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadArchiveGeneratedImageHistory = async () => {
+      try {
+        const response = await fetch('/api/generated-images/history', {
+          cache: 'no-store',
+        });
+        if (!response.ok) {
+          return;
+        }
+
+        const data = await response.json().catch(() => null);
+        if (cancelled) {
+          return;
+        }
+
+        setArchiveGeneratedImageHistoryEntries(Array.isArray(data?.entries) ? data.entries : []);
+      } catch (error) {
+        if (!cancelled) {
+          console.error('Failed to load generated image archive history:', error);
+        }
+      }
+    };
+
+    void loadArchiveGeneratedImageHistory();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   // 项目管理函数
   const getCurrentSession = () => sessions.find(s => s.id === currentSessionId);
+  const sessionsWithGeneratedImageHistory = React.useMemo(() => {
+    return sessions.map((session) => {
+      const liveEntries = generatedImageHistoryBySession[session.id];
+      if (!liveEntries) {
+        return session;
+      }
+
+      return {
+        ...session,
+        generatedImageHistory: liveEntries,
+      };
+    });
+  }, [generatedImageHistoryBySession, sessions]);
+  const currentSessionHistorySnapshot = React.useMemo(() => {
+    const currentSession = sessionsWithGeneratedImageHistory.find((session) => session.id === currentSessionId);
+    if (!currentSession) {
+      return null;
+    }
+
+    return buildCurrentSessionSnapshot(currentSession);
+  }, [buildCurrentSessionSnapshot, currentSessionId, sessionsWithGeneratedImageHistory]);
   const generatedImageHistoryEntries = React.useMemo(
-    () => getGeneratedImageHistoryEntries({ sessions }),
-    [sessions]
+    () => getGeneratedImageHistoryEntries({
+      sessions: sessionsWithGeneratedImageHistory,
+      currentSessionSnapshot: currentSessionHistorySnapshot,
+      archiveEntries: archiveGeneratedImageHistoryEntries,
+    }),
+    [archiveGeneratedImageHistoryEntries, currentSessionHistorySnapshot, sessionsWithGeneratedImageHistory]
   );
   
   const currentProjectName = getCurrentSession()?.name || '新画布';
@@ -7711,6 +7894,17 @@ export default function AIWorkspace() {
               x: spawnPosition.x,
               y: spawnPosition.y,
             });
+            appendGeneratedImageHistoryForSession(
+              currentSessionIdRef.current,
+              [
+                createGeneratedImageHistoryEntry({
+                  src: item.localUrl,
+                  naturalWidth: img.width,
+                  naturalHeight: img.height,
+                  source: 'chat',
+                }),
+              ]
+            );
             setItems(prev => [...prev, newItem]);
           };
           img.src = item.localUrl;
@@ -7910,7 +8104,7 @@ export default function AIWorkspace() {
                           </div>
                           <div className="flex items-center justify-between gap-2 px-3 py-2.5">
                             <span className="truncate text-[11px] font-medium text-zinc-200">
-                              {entry.source === 'chat' ? '聊天生成' : 'Image 生成'}
+                              {GENERATED_HISTORY_SOURCE_LABELS[entry.source as GeneratedImageHistoryEntry['source']] || '本地生成'}
                             </span>
                             <span className="shrink-0 text-[10px] uppercase tracking-[0.08em] text-zinc-500">
                               Add

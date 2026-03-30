@@ -29,6 +29,7 @@ export function createEmptySession({
     imageCardSizeById: {},
     imageCardCountById: {},
     imageCardAspectRatioById: {},
+    generatedImageHistory: [],
     messages: [],
     topics: [topic],
     activeTopicId: topic.id,

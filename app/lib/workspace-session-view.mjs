@@ -1,3 +1,5 @@
+import { mergeGeneratedImageHistoryEntries, normalizeGeneratedImageHistory } from './generated-image-history.mjs';
+
 const DEFAULT_VIEWPORT = { x: 0, y: 0, scale: 1 };
 export const CANVAS_TEXT_GENERATION_CONCURRENCY_LIMIT = 5;
 
@@ -1008,17 +1010,39 @@ function buildGeneratedImageHistorySortKey(timestamp, sequence = 0) {
   return safeTimestamp * 1000 + safeSequence;
 }
 
-export function getGeneratedImageHistoryEntries({ sessions }) {
-  if (!Array.isArray(sessions) || sessions.length === 0) {
-    return [];
+export function getGeneratedImageHistorySourceSessions({ sessions, currentSessionSnapshot }) {
+  const normalizedSessions = Array.isArray(sessions) ? sessions : [];
+  const currentSnapshotId = typeof currentSessionSnapshot?.id === 'string' ? currentSessionSnapshot.id : '';
+
+  if (!currentSnapshotId) {
+    return normalizedSessions;
   }
 
-  const entries = [];
+  const existingIndex = normalizedSessions.findIndex((session) => session?.id === currentSnapshotId);
+  if (existingIndex === -1) {
+    return [currentSessionSnapshot, ...normalizedSessions];
+  }
 
-  sessions.forEach((session, sessionIndex) => {
+  return normalizedSessions.map((session, index) => (index === existingIndex ? currentSessionSnapshot : session));
+}
+
+export function getGeneratedImageHistoryEntries({ sessions, currentSessionSnapshot, archiveEntries }) {
+  const sourceSessions = getGeneratedImageHistorySourceSessions({ sessions, currentSessionSnapshot });
+  const sessionEntries = [];
+  const fallbackEntries = [];
+
+  (Array.isArray(sourceSessions) ? sourceSessions : []).forEach((session, sessionIndex) => {
     const sessionId = typeof session?.id === 'string' ? session.id : `session-${sessionIndex}`;
     const sessionUpdatedAt =
       Number.isFinite(session?.updatedAt) && session.updatedAt > 0 ? session.updatedAt : 0;
+    const normalizedSessionHistory = normalizeGeneratedImageHistory(session?.generatedImageHistory);
+    if (normalizedSessionHistory.length > 0) {
+      sessionEntries.push(...normalizedSessionHistory.map((entry) => ({
+        ...entry,
+        sessionId,
+      })));
+      return;
+    }
 
     const topics = Array.isArray(session?.topics) ? session.topics : [];
     topics.forEach((topic, topicIndex) => {
@@ -1032,14 +1056,14 @@ export function getGeneratedImageHistoryEntries({ sessions }) {
         }
 
         const messageTimestamp = extractTimestampFromGeneratedId(message.id) ?? topicUpdatedAt;
-        entries.push({
+        fallbackEntries.push({
           id: `chat:${sessionId}:${topic?.id || topicIndex}:${message?.id || messageIndex}`,
           sessionId,
           source: 'chat',
           src: message.imageUrl,
+          createdAt: buildGeneratedImageHistorySortKey(messageTimestamp, messageIndex),
           naturalWidth: undefined,
           naturalHeight: undefined,
-          sortKey: buildGeneratedImageHistorySortKey(messageTimestamp, messageIndex),
         });
       });
     });
@@ -1061,27 +1085,25 @@ export function getGeneratedImageHistoryEntries({ sessions }) {
           return;
         }
 
-        entries.push({
+        fallbackEntries.push({
           id: `image-card:${sessionId}:${item.id || itemIndex}:${outputIndex}`,
           sessionId,
           source: 'image-card',
           src: output.src,
+          createdAt: itemTimestamp * 1000 + outputIndex,
           naturalWidth:
             Number.isFinite(output.naturalWidth) && output.naturalWidth > 0 ? output.naturalWidth : undefined,
           naturalHeight:
             Number.isFinite(output.naturalHeight) && output.naturalHeight > 0 ? output.naturalHeight : undefined,
-          sortKey: buildGeneratedImageHistorySortKey(itemTimestamp, outputIndex),
         });
       });
     });
   });
 
-  return entries.sort((a, b) => {
-    if (b.sortKey !== a.sortKey) {
-      return b.sortKey - a.sortKey;
-    }
-
-    return String(b.id).localeCompare(String(a.id));
+  return mergeGeneratedImageHistoryEntries({
+    sessionEntries,
+    fallbackEntries,
+    archiveEntries,
   });
 }
 
