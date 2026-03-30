@@ -28,6 +28,8 @@ import {
   getDirectTextInputsForTextCard,
   getDisplayableTextCardPanelDraft,
   getGeneratedImageHistoryEntries,
+  getImageToolResultSpawnPosition,
+  getSelectedImageToolbarSource,
   getTextCardPanelPlaceholder,
   getImageCardQualitySummary,
   getImageCardFrameSizeForAspectRatio,
@@ -35,6 +37,7 @@ import {
   getImageCardItemSizeForNaturalImage,
   isImageAssetItem,
   isImageCardItem,
+  moveCanvasItemsToFront,
   removeCanvasTextGenerationEntry,
   isEventInsideTextCardPanel,
   shouldSubmitTextCardPanelEnter,
@@ -305,6 +308,98 @@ test('getGeneratedImageHistoryEntries falls back to topic order when chat image 
   );
 });
 
+test('getSelectedImageToolbarSource returns the selected image asset output first and falls back to image card output', () => {
+  assert.deepEqual(
+    getSelectedImageToolbarSource({
+      selectedId: 'asset-1',
+      selectedIds: ['asset-1'],
+      itemById: {
+        'asset-1': {
+          id: 'asset-1',
+          type: 'image',
+          src: '/asset.png',
+        },
+      },
+    }),
+    {
+      itemId: 'asset-1',
+      src: '/asset.png',
+      kind: 'asset',
+    }
+  );
+
+  assert.deepEqual(
+    getSelectedImageToolbarSource({
+      selectedId: 'card-1',
+      selectedIds: ['card-1'],
+      itemById: {
+        'card-1': {
+          id: 'card-1',
+          type: 'image',
+          imageVariant: 'card',
+          src: '/card-current.png',
+        },
+      },
+    }),
+    {
+      itemId: 'card-1',
+      src: '/card-current.png',
+      kind: 'card',
+    }
+  );
+});
+
+test('getSelectedImageToolbarSource returns null for multi-select and items without a current image source', () => {
+  assert.equal(
+    getSelectedImageToolbarSource({
+      selectedId: 'asset-1',
+      selectedIds: ['asset-1', 'asset-2'],
+      itemById: {
+        'asset-1': { id: 'asset-1', type: 'image', src: '/asset.png' },
+      },
+    }),
+    null
+  );
+
+  assert.equal(
+    getSelectedImageToolbarSource({
+      selectedId: 'card-1',
+      selectedIds: ['card-1'],
+      itemById: {
+        'card-1': {
+          id: 'card-1',
+          type: 'image',
+          imageVariant: 'card',
+        },
+      },
+    }),
+    null
+  );
+});
+
+test('getImageToolResultSpawnPosition places the new image node to the right of the source node with a small offset', () => {
+  assert.deepEqual(
+    getImageToolResultSpawnPosition({
+      sourceItem: {
+        id: 'source-1',
+        type: 'image',
+        x: 120,
+        y: 240,
+        width: 360,
+        height: 240,
+      },
+      nextSize: {
+        width: 256,
+        height: 384,
+      },
+    }),
+    {
+      x: 528,
+      y: 192,
+    }
+  );
+});
+
 test('extractImageFilesFromClipboardItems keeps image files in clipboard order and ignores other entries', () => {
   const firstImage = { name: 'first.png' };
   const secondImage = { name: 'second.jpg' };
@@ -421,6 +516,49 @@ test('resolveCanvasImagePasteTarget returns create for image cards, non-images, 
     }),
     { mode: 'create' }
   );
+});
+
+test('moveCanvasItemsToFront moves a single selected item to the end of the canvas item order', () => {
+  const items = [
+    { id: 'a', type: 'shape' },
+    { id: 'b', type: 'text', textVariant: 'card' },
+    { id: 'c', type: 'image', src: '/c.png' },
+  ];
+
+  const result = moveCanvasItemsToFront(items, ['b']);
+
+  assert.deepEqual(
+    result.map((item) => item.id),
+    ['a', 'c', 'b']
+  );
+});
+
+test('moveCanvasItemsToFront moves multiple selected items together while preserving their relative order', () => {
+  const items = [
+    { id: 'a', type: 'shape' },
+    { id: 'b', type: 'text', textVariant: 'card' },
+    { id: 'c', type: 'image', src: '/c.png' },
+    { id: 'd', type: 'image', imageVariant: 'card' },
+  ];
+
+  const result = moveCanvasItemsToFront(items, ['b', 'd']);
+
+  assert.deepEqual(
+    result.map((item) => item.id),
+    ['a', 'c', 'b', 'd']
+  );
+});
+
+test('moveCanvasItemsToFront ignores empty, duplicate, and invalid selected ids without disturbing other item order', () => {
+  const items = [
+    { id: 'a', type: 'shape' },
+    { id: 'b', type: 'text', textVariant: 'card' },
+    { id: 'c', type: 'image', src: '/c.png' },
+  ];
+
+  assert.deepEqual(moveCanvasItemsToFront(items, []).map((item) => item.id), ['a', 'b', 'c']);
+  assert.deepEqual(moveCanvasItemsToFront(items, ['missing']).map((item) => item.id), ['a', 'b', 'c']);
+  assert.deepEqual(moveCanvasItemsToFront(items, ['b', 'b', 'missing']).map((item) => item.id), ['a', 'c', 'b']);
 });
 
 test('getReplacedImageAssetItem keeps the node id and center while resizing to the new image ratio', () => {

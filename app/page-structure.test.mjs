@@ -9,9 +9,7 @@ const pageSource = fs.readFileSync(path.join(__dirname, 'page.tsx'), 'utf8');
 
 test('image card floating menus are not rendered inside the pending connection menu block', () => {
   const pendingMenuStart = pageSource.indexOf('{pendingConnectionMenu && (');
-  const pendingMenuEnd = pageSource.indexOf(
-    '{selectedTextCardPanelItem && selectedTextCardPanelFrameBounds && selectedTextCardPanelCanvasRect && ('
-  );
+  const pendingMenuEnd = pageSource.indexOf('{portaledSelectedTextCardPanel}');
 
   assert.notEqual(pendingMenuStart, -1);
   assert.notEqual(pendingMenuEnd, -1);
@@ -60,8 +58,9 @@ test('left rail generated image history panel uses a wider layout than the origi
 });
 
 test('image nodes expose a shared toolbar target and render an above-node image toolbar overlay', () => {
-  assert.equal(pageSource.includes('const selectedImageToolbarTarget = React.useMemo('), true);
-  assert.equal(pageSource.includes('selectedImageToolbarTarget && ('), true);
+  assert.equal(pageSource.includes('const selectedImageToolbarTarget = React.useMemo<'), true);
+  assert.equal(pageSource.includes('getSelectedImageToolbarSource({'), true);
+  assert.equal(pageSource.includes("typeof document !== 'undefined' &&"), true);
   assert.equal(pageSource.includes('data-image-node-toolbar="true"'), true);
   assert.equal(pageSource.includes('抠图'), true);
 });
@@ -71,4 +70,74 @@ test('image toolbar actions keep cutout enabled while leaving other actions disa
   assert.equal(pageSource.includes("id: 'cutout'"), true);
   assert.equal(pageSource.includes('enabled: true'), true);
   assert.equal(pageSource.includes('enabled: false'), true);
+});
+
+test('image toolbar cutout uses the dedicated remove-background route instead of the placeholder notice', () => {
+  assert.equal(pageSource.includes("/api/image-tools/remove-background"), true);
+  assert.equal(pageSource.includes('抠图能力下一步接入'), false);
+});
+
+test('image toolbar positioning no longer clamps against canvas width and uses a fixed floating overlay', () => {
+  assert.equal(pageSource.includes('imageToolbarApproxWidth'), false);
+  assert.equal(pageSource.includes('canvasSize.width - imageToolbarSidePadding'), false);
+  assert.equal(pageSource.includes('className="pointer-events-none fixed inset-0 z-[114]"'), true);
+});
+
+test('image toolbar keeps its natural width and does not clamp back into the viewport shell', () => {
+  assert.equal(pageSource.includes('max-w-[calc(100vw-40px)]'), false);
+  assert.equal(pageSource.includes('clampFloatingToolbarToViewport({'), false);
+  assert.equal(pageSource.includes('Math.max(selectedImageToolbarAnchor.y, 84)'), false);
+  assert.equal(pageSource.includes('<span className="whitespace-nowrap">{action.label}</span>'), true);
+});
+
+test('image toolbar and selected card panels render through a portal so they are not clipped by the canvas container', () => {
+  assert.equal(pageSource.includes("import { createPortal } from 'react-dom';"), true);
+  assert.equal(pageSource.includes('createPortal('), true);
+  assert.equal(pageSource.includes('document.body'), true);
+  assert.equal(pageSource.includes('className="pointer-events-none fixed inset-0 z-[115]"'), true);
+});
+
+test('image card floating panel positioning no longer clamps against canvasSize bounds', () => {
+  assert.equal(pageSource.includes('canvasSize.width - selectedImageCardPanelDisplayedWidth - selectedTextCardPanelPadding'), false);
+  assert.equal(pageSource.includes('canvasSize.height - selectedImageCardPanelDisplayedHeight - selectedTextCardPanelPadding'), false);
+  assert.equal(pageSource.includes('selectedImageCardPanelViewportLeft = (canvasRect?.left ?? 0) + selectedImageCardPanelLeft;'), false);
+  assert.equal(pageSource.includes('selectedImageCardPanelViewportTop = (canvasRect?.top ?? 0) + selectedImageCardPanelTop;'), false);
+  assert.equal(pageSource.includes('clampFloatingPanelToViewport({'), false);
+});
+
+test('text card floating panel renders through a portal instead of the legacy in-canvas branch', () => {
+  assert.equal(pageSource.includes('const selectedTextCardPanelViewportOrigin ='), true);
+  assert.equal(pageSource.includes('const portaledSelectedTextCardPanel ='), true);
+  assert.equal(pageSource.includes('{portaledSelectedTextCardPanel}'), true);
+  assert.equal(pageSource.includes('{selectedTextCardPanelItem && selectedTextCardPanelFrameBounds && selectedTextCardPanelCanvasRect && ('), false);
+  assert.equal(pageSource.includes('left: selectedTextCardPanelLeft,'), false);
+  assert.equal(pageSource.includes('top: selectedTextCardPanelTop,'), false);
+  assert.equal(pageSource.includes('canvasSize.width - selectedTextCardPanelDisplayedWidth - selectedTextCardPanelPadding'), false);
+  assert.equal(pageSource.includes('canvasSize.height - selectedTextCardPanelDisplayedHeight - selectedTextCardPanelPadding'), false);
+});
+
+test('canvas viewport no longer keeps a legacy in-canvas image card floating panel branch', () => {
+  assert.equal(pageSource.includes('{false && selectedImageCardPanelItem && selectedImageCardPanelFrameBounds && selectedImageCardPanelCanvasRect && ('), false);
+  assert.equal(pageSource.includes('left: selectedImageCardPanelLeft + selectedImageCardQualityPopoverOffset.left * viewport.scale,'), false);
+  assert.equal(pageSource.includes('left: selectedImageCardPanelLeft + selectedImageCardCountPopoverOffset.left * viewport.scale,'), false);
+});
+
+test('node selection flows move selected canvas items to the front of the persisted item order', () => {
+  assert.equal(pageSource.includes('moveCanvasItemsToFront('), true);
+  assert.equal(pageSource.includes('setItems((prev) => moveCanvasItemsToFront(prev, itemIds));'), true);
+  assert.equal(pageSource.includes('setItems((prev) => moveCanvasItemsToFront(prev, [itemId]));'), true);
+  assert.equal(pageSource.includes('setItems((prev) => moveCanvasItemsToFront(prev, next));'), true);
+  assert.equal(pageSource.includes('setItems((prev) => moveCanvasItemsToFront(prev, hitIds));'), true);
+});
+
+test('right chat panel renders through a page-level portal above canvas overlays', () => {
+  assert.equal(pageSource.includes('const CANVAS_OVERLAY_Z = '), true);
+  assert.equal(pageSource.includes('const CHAT_PANEL_Z = '), true);
+  assert.equal(pageSource.includes('const GLOBAL_NOTICE_Z = '), true);
+  assert.equal(pageSource.includes('createPortal('), true);
+  assert.equal(pageSource.includes('document.body'), true);
+  assert.equal(pageSource.includes('style={{ zIndex: CHAT_PANEL_Z }}'), true);
+  assert.equal(pageSource.includes("className=\"fixed right-4 top-4 isolate"), true);
+  assert.equal(pageSource.includes("className=\"fixed inset-y-4 left-4 right-4 isolate"), true);
+  assert.equal(pageSource.includes('style={{ zIndex: GLOBAL_NOTICE_Z }}'), true);
 });

@@ -191,6 +191,86 @@ export function isImageAssetItem(item) {
   return !!item && item.type === 'image' && !isImageCardItem(item) && typeof item.src === 'string' && item.src.length > 0;
 }
 
+export function moveCanvasItemsToFront(items, selectedIds) {
+  if (!Array.isArray(items) || items.length === 0) {
+    return Array.isArray(items) ? items : [];
+  }
+
+  const normalizedSelectedIds = Array.isArray(selectedIds)
+    ? selectedIds.filter((id) => typeof id === 'string' && id.length > 0)
+    : [];
+  if (normalizedSelectedIds.length === 0) {
+    return items;
+  }
+
+  const selectedIdSet = new Set(normalizedSelectedIds);
+  const remainingItems = [];
+  const selectedItems = [];
+
+  for (const item of items) {
+    if (selectedIdSet.has(item?.id)) {
+      selectedItems.push(item);
+    } else {
+      remainingItems.push(item);
+    }
+  }
+
+  if (selectedItems.length === 0) {
+    return items;
+  }
+
+  return [...remainingItems, ...selectedItems];
+}
+
+export function getSelectedImageToolbarSource({
+  selectedId,
+  selectedIds,
+  itemById,
+}) {
+  if (!selectedId || !Array.isArray(selectedIds) || selectedIds.length !== 1) {
+    return null;
+  }
+
+  const item = itemById?.[selectedId];
+  if (isImageAssetItem(item)) {
+    return {
+      itemId: item.id,
+      src: item.src,
+      kind: 'asset',
+    };
+  }
+
+  const currentOutput = getCurrentImageCardOutput(item);
+  if (isImageCardItem(item) && currentOutput?.src) {
+    return {
+      itemId: item.id,
+      src: currentOutput.src,
+      kind: 'card',
+    };
+  }
+
+  return null;
+}
+
+export function getImageToolResultSpawnPosition({
+  sourceItem,
+  nextSize,
+  gap = 48,
+  verticalOffset = 24,
+}) {
+  const safeSourceX = Number.isFinite(sourceItem?.x) ? sourceItem.x : 0;
+  const safeSourceY = Number.isFinite(sourceItem?.y) ? sourceItem.y : 0;
+  const safeSourceWidth = Number.isFinite(sourceItem?.width) ? sourceItem.width : 0;
+  const safeSourceHeight = Number.isFinite(sourceItem?.height) ? sourceItem.height : 0;
+  const safeNextWidth = Number.isFinite(nextSize?.width) ? nextSize.width : 0;
+  const safeNextHeight = Number.isFinite(nextSize?.height) ? nextSize.height : 0;
+
+  return {
+    x: safeSourceX + safeSourceWidth + gap,
+    y: safeSourceY + (safeSourceHeight - safeNextHeight) / 2 + verticalOffset,
+  };
+}
+
 export function extractImageFilesFromClipboardItems(items) {
   return Array.from(items || [])
     .filter((item) => item && typeof item.type === 'string' && item.type.startsWith('image/'))

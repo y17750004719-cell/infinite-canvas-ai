@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useState, useRef, useEffect, useLayoutEffect, useCallback, memo } from 'react';
+import { createPortal } from 'react-dom';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { 
@@ -38,17 +39,20 @@ import {
   getDefaultTextPanelModelOption,
   getDisplayableTextCardPanelDraft,
   getGeneratedImageHistoryEntries,
+  getImageToolResultSpawnPosition,
   getDirectImagePreviewsForTextCard,
   getDirectTextInputsForTextCard,
   getImageCardFrameSizeForAspectRatio,
   getImageCardItemSizeForFrameSize,
   getImageCardItemSizeForNaturalImage,
   getImageCardQualitySummary,
+  getSelectedImageToolbarSource,
   isEventInsideTextCardPanel,
   extractImageFilesFromClipboardItems,
   getReplacedImageAssetItem,
   isImageAssetItem,
   isImageCardItem,
+  moveCanvasItemsToFront,
   reorderIncomingImageConnections,
   resolveCanvasImagePasteTarget,
   shouldHandleCanvasImagePaste,
@@ -68,6 +72,9 @@ import { GalleryView, SessionActionErrorBanner } from './components/workspace/Ga
 import { useWorkspaceSessionController } from './hooks/useWorkspaceSessionController';
 
 const DEBUG_CANVAS_CONNECTIONS = false;
+const CANVAS_OVERLAY_Z = 120;
+const CHAT_PANEL_Z = 180;
+const GLOBAL_NOTICE_Z = 220;
 
 const extractPlainText = (value: React.ReactNode): string =>
   React.Children.toArray(value)
@@ -341,6 +348,77 @@ const getConstrainedImageDisplaySize = (
   return {
     width: minSide,
     height: (naturalHeight / naturalWidth) * minSide,
+  };
+};
+
+const FLOATING_TOOLBAR_VIEWPORT_PADDING = 20;
+
+const clampFloatingPanelToViewport = ({
+  left,
+  top,
+  width,
+  height,
+  viewportWidth,
+  viewportHeight,
+  padding = FLOATING_TOOLBAR_VIEWPORT_PADDING,
+}: {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+  viewportWidth: number;
+  viewportHeight: number;
+  padding?: number;
+}) => {
+  if (!Number.isFinite(left) || !Number.isFinite(top)) {
+    return { left: 0, top: 0 };
+  }
+
+  if (
+    !Number.isFinite(width) ||
+    width <= 0 ||
+    !Number.isFinite(height) ||
+    height <= 0 ||
+    !Number.isFinite(viewportWidth) ||
+    viewportWidth <= 0 ||
+    !Number.isFinite(viewportHeight) ||
+    viewportHeight <= 0
+  ) {
+    return { left, top };
+  }
+
+  const minLeft = padding;
+  const maxLeft = Math.max(minLeft, viewportWidth - width - padding);
+  const minTop = padding;
+  const maxTop = Math.max(minTop, viewportHeight - height - padding);
+
+  return {
+    left: Math.min(Math.max(left, minLeft), maxLeft),
+    top: Math.min(Math.max(top, minTop), maxTop),
+  };
+};
+
+const resolveImageToolbarViewportAnchor = ({
+  itemBounds,
+  toCanvasScreenPoint,
+  canvasRect,
+}: {
+  itemBounds: { left: number; top: number; width: number; height: number } | null;
+  toCanvasScreenPoint: (point: { x: number; y: number }) => { x: number; y: number };
+  canvasRect: DOMRect | null | undefined;
+}) => {
+  if (!itemBounds || !canvasRect) {
+    return null;
+  }
+
+  const canvasScreenPoint = toCanvasScreenPoint({
+    x: itemBounds.left + itemBounds.width / 2,
+    y: itemBounds.top,
+  });
+
+  return {
+    x: canvasRect.left + canvasScreenPoint.x,
+    y: canvasRect.top + canvasScreenPoint.y,
   };
 };
 
@@ -1387,8 +1465,6 @@ const CanvasViewport = memo(function CanvasViewport({
   onPanelReferenceDragOver,
   onPanelReferenceDrop,
   onPanelReferenceDragEnd,
-  selectedImageToolbarTarget,
-  onImageToolbarAction,
 }: {
   canvasRef: React.RefObject<HTMLDivElement | null>;
   widthStyle: string;
@@ -1514,8 +1590,6 @@ const CanvasViewport = memo(function CanvasViewport({
     sourceItemId: string
   ) => void;
   onPanelReferenceDragEnd: () => void;
-  selectedImageToolbarTarget: { itemId: string; src: string; kind: 'asset' | 'card' } | null;
-  onImageToolbarAction: (actionId: (typeof IMAGE_NODE_TOOLBAR_ACTIONS)[number]['id']) => void;
 }) {
   const { from, to } = getPreviewRenderPoints();
   const selectedTextCardPanelTextareaRef = useRef<HTMLTextAreaElement | null>(null);
@@ -1536,35 +1610,6 @@ const CanvasViewport = memo(function CanvasViewport({
     width: canvasRect?.width ?? 0,
     height: canvasRect?.height ?? 0,
   };
-  const selectedImageToolbarItem = selectedImageToolbarTarget
-    ? itemById[selectedImageToolbarTarget.itemId] ?? null
-    : null;
-  const selectedImageToolbarBounds = selectedImageToolbarItem
-    ? getItemVisualBounds(selectedImageToolbarItem)
-    : null;
-  const selectedImageToolbarAnchor = selectedImageToolbarBounds
-    ? toCanvasScreenPoint({
-        x: selectedImageToolbarBounds.left + selectedImageToolbarBounds.width / 2,
-        y: selectedImageToolbarBounds.top,
-      })
-    : null;
-  const imageToolbarApproxWidth = 632;
-  const imageToolbarSidePadding = 20;
-  const selectedImageToolbarLeft = selectedImageToolbarAnchor
-    ? Math.min(
-        Math.max(
-          selectedImageToolbarAnchor.x,
-          imageToolbarSidePadding + imageToolbarApproxWidth / 2
-        ),
-        Math.max(
-          imageToolbarSidePadding + imageToolbarApproxWidth / 2,
-          canvasSize.width - imageToolbarSidePadding - imageToolbarApproxWidth / 2
-        )
-      )
-    : 0;
-  const selectedImageToolbarTop = selectedImageToolbarAnchor
-    ? Math.max(selectedImageToolbarAnchor.y, 84)
-    : 0;
   const connectionMenuWidth = 360;
   const connectionMenuHeight = 292;
   const connectionMenuPadding = 24;
@@ -1743,73 +1788,639 @@ const CanvasViewport = memo(function CanvasViewport({
           height: selectedImageCardPanelCanvasHeight,
         }
       : null;
-  const selectedTextCardPanelPadding = 24;
-  const selectedTextCardPanelDisplayedWidth = selectedTextCardPanelCanvasRect
-    ? selectedTextCardPanelCanvasRect.width * viewport.scale
-    : 0;
-  const selectedTextCardPanelDisplayedHeight = selectedTextCardPanelCanvasRect
-    ? selectedTextCardPanelCanvasRect.height * viewport.scale
-    : 0;
   const selectedTextCardPanelScreenPoint = selectedTextCardPanelCanvasRect
     ? toCanvasScreenPoint({
         x: selectedTextCardPanelCanvasRect.left,
         y: selectedTextCardPanelCanvasRect.top,
       })
     : null;
-  const selectedTextCardPanelLeft = selectedTextCardPanelScreenPoint
-    ? Math.min(
-        Math.max(
-          selectedTextCardPanelScreenPoint.x,
-          selectedTextCardPanelPadding
-        ),
-        Math.max(
-          selectedTextCardPanelPadding,
-          canvasSize.width - selectedTextCardPanelDisplayedWidth - selectedTextCardPanelPadding
-        )
-      )
-    : 0;
-  const selectedTextCardPanelTop = selectedTextCardPanelScreenPoint
-    ? Math.min(
-        Math.max(selectedTextCardPanelScreenPoint.y, selectedTextCardPanelPadding),
-        Math.max(
-          selectedTextCardPanelPadding,
-          canvasSize.height - selectedTextCardPanelDisplayedHeight - selectedTextCardPanelPadding
-        )
-      )
-    : 0;
-  const selectedImageCardPanelDisplayedWidth = selectedImageCardPanelCanvasRect
-    ? selectedImageCardPanelCanvasRect.width * viewport.scale
-    : 0;
-  const selectedImageCardPanelDisplayedHeight = selectedImageCardPanelCanvasRect
-    ? selectedImageCardPanelCanvasRect.height * viewport.scale
-    : 0;
+  const selectedTextCardPanelViewportOrigin = selectedTextCardPanelScreenPoint && canvasRect
+    ? {
+        left: canvasRect.left + selectedTextCardPanelScreenPoint.x,
+        top: canvasRect.top + selectedTextCardPanelScreenPoint.y,
+      }
+    : null;
   const selectedImageCardPanelScreenPoint = selectedImageCardPanelCanvasRect
     ? toCanvasScreenPoint({
         x: selectedImageCardPanelCanvasRect.left,
         y: selectedImageCardPanelCanvasRect.top,
       })
     : null;
-  const selectedImageCardPanelLeft = selectedImageCardPanelScreenPoint
-    ? Math.min(
-        Math.max(
-          selectedImageCardPanelScreenPoint.x,
-          selectedTextCardPanelPadding
-        ),
-        Math.max(
-          selectedTextCardPanelPadding,
-          canvasSize.width - selectedImageCardPanelDisplayedWidth - selectedTextCardPanelPadding
+  const selectedImageCardPanelViewportOrigin = selectedImageCardPanelScreenPoint && canvasRect
+    ? {
+        left: canvasRect.left + selectedImageCardPanelScreenPoint.x,
+        top: canvasRect.top + selectedImageCardPanelScreenPoint.y,
+      }
+    : null;
+  const portaledSelectedImageCardPanel =
+    typeof document !== 'undefined' &&
+    selectedImageCardPanelItem &&
+    selectedImageCardPanelFrameBounds &&
+    selectedImageCardPanelCanvasRect &&
+    selectedImageCardPanelViewportOrigin
+      ? createPortal(
+          <>
+            <div className="pointer-events-none fixed inset-0 z-[115]">
+              <div
+              data-text-card-panel="true"
+              ref={selectedImageCardPanelRootRef}
+              className="pointer-events-auto fixed overflow-hidden rounded-[26px] border border-white/[0.11] bg-[rgba(28,28,31,0.98)] shadow-[0_34px_90px_rgba(0,0,0,0.46),inset_0_1px_0_rgba(255,255,255,0.025)] backdrop-blur-xl"
+              style={{
+                left: selectedImageCardPanelViewportOrigin.left,
+                top: selectedImageCardPanelViewportOrigin.top,
+                width: selectedImageCardPanelCanvasRect.width,
+                transform: `scale(${viewport.scale})`,
+                transformOrigin: 'top left',
+              }}
+              onPointerDown={(e) => {
+                e.stopPropagation();
+              }}
+            >
+              <div className="px-5 py-3">
+                {selectedImageCardPanelLinkedImagePreviews.length > 0 && (
+                  <div className="mb-3 rounded-[18px] border border-white/[0.08] bg-[rgba(255,255,255,0.025)] p-2.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.025)]">
+                    <div
+                      className="panel-scrollbar flex gap-2 overflow-x-auto pb-1"
+                      onWheel={stopCanvasWheelFromScrollableRegion}
+                    >
+                      {selectedImageCardPanelLinkedImagePreviews.map((preview) => (
+                        <div
+                          key={preview.id}
+                          draggable
+                          onDragStart={(e) => {
+                            onPanelReferenceDragStart(e, selectedImageCardPanelItem.id, preview.id);
+                          }}
+                          onDragOver={(e) => {
+                            onPanelReferenceDragOver(e, selectedImageCardPanelItem.id, preview.id);
+                          }}
+                          onDrop={(e) => {
+                            onPanelReferenceDrop(e, selectedImageCardPanelItem.id, preview.id);
+                          }}
+                          onDragEnd={onPanelReferenceDragEnd}
+                          className={`relative h-20 w-20 shrink-0 overflow-hidden rounded-[14px] border bg-black/25 transition-all ${
+                            draggingPanelReference?.targetItemId === selectedImageCardPanelItem.id &&
+                            draggingPanelReference.sourceItemId === preview.id
+                              ? 'border-white/[0.08] opacity-50'
+                              : dragOverPanelReference?.targetItemId === selectedImageCardPanelItem.id &&
+                                  dragOverPanelReference.sourceItemId === preview.id
+                                ? 'border-white/30 ring-1 ring-zinc-100'
+                                : 'border-white/[0.08]'
+                          } cursor-move`}
+                        >
+                          <img
+                            src={preview.src}
+                            alt={preview.alt || preview.label}
+                            className="h-full w-full object-cover"
+                            draggable={false}
+                          />
+                          <span className="pointer-events-none absolute left-1.5 top-1.5 rounded-full bg-black/70 px-2 py-0.5 text-[10px] font-medium tracking-[0.01em] text-zinc-100">
+                            {preview.label}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                <div
+                  data-text-card-panel-input-shell="true"
+                  className="rounded-[20px] border border-white/[0.09] bg-[rgba(7,8,10,0.34)] px-4 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] transition-colors duration-150 hover:border-white/[0.14] focus-within:border-white/[0.18] focus-within:bg-[rgba(9,10,13,0.42)]"
+                  onPointerDown={(e) => {
+                    e.stopPropagation();
+                    if (!shouldFocusTextCardPanelInputOnPointerDown(e.target as HTMLElement | null)) {
+                      return;
+                    }
+
+                    e.preventDefault();
+                    focusSelectedImageCardPanelInput();
+                  }}
+                >
+                  <textarea
+                    data-text-card-panel-input="true"
+                    ref={selectedImageCardPanelTextareaRef}
+                    value={selectedImageCardPanelDisplayInput}
+                    onChange={(e) => {
+                      onSelectedImageCardPanelInputChange(e.target.value);
+                    }}
+                    onKeyDown={(e) => {
+                      if (
+                        shouldSubmitTextCardPanelEnter({
+                          key: e.key,
+                          shiftKey: e.shiftKey,
+                          altKey: e.altKey,
+                          isComposing: e.nativeEvent.isComposing,
+                        })
+                      ) {
+                        e.preventDefault();
+                        if (isSelectedImageCardGenerating) {
+                          onSelectedImageCardPanelCancel();
+                        } else {
+                          onSelectedImageCardPanelSubmit();
+                        }
+                      }
+                    }}
+                    onPointerDown={(e) => {
+                      e.stopPropagation();
+                    }}
+                    onWheel={stopCanvasWheelFromScrollableRegion}
+                    autoFocus={false}
+                    readOnly={false}
+                    disabled={false}
+                    spellCheck={false}
+                    className="panel-scrollbar w-full resize-none bg-transparent text-[14px] leading-6 text-zinc-100 caret-zinc-100 outline-none placeholder:text-zinc-500 [user-select:text] [-webkit-user-select:text] cursor-text"
+                    placeholder={IMAGE_CARD_PANEL_PROMPT_PLACEHOLDER}
+                    rows={TEXT_CARD_PANEL_INPUT_MIN_ROWS}
+                    style={{
+                      height: `${selectedImageCardPanelInputMetrics.height}px`,
+                      overflowY: selectedImageCardPanelInputMetrics.isOverflowing ? 'auto' : 'hidden',
+                    }}
+                  />
+                </div>
+                {selectedImageCardPanelError && (
+                  <div className="mt-2 px-0.5 text-[12px] leading-5 text-rose-400">
+                    {selectedImageCardPanelError}
+                  </div>
+                )}
+              </div>
+              <div
+                data-text-card-panel-control="true"
+                className="flex items-center justify-between border-t border-white/[0.08] bg-[rgba(255,255,255,0.02)] px-5 py-3"
+              >
+                <div className="flex min-w-0 items-center gap-5">
+                  <div className="relative" ref={imageCardModelMenuRef}>
+                    {showImageCardModelMenu && (
+                      <div
+                        data-text-card-panel-control="true"
+                        className="absolute bottom-full left-0 mb-2 min-w-[248px] overflow-hidden rounded-[18px] border border-white/[0.1] bg-[rgba(24,24,27,0.985)] p-1.5 shadow-[0_24px_64px_rgba(0,0,0,0.42)] backdrop-blur-xl"
+                        onPointerDown={(e) => {
+                          e.stopPropagation();
+                        }}
+                      >
+                        {imageCardModelOptions.map((option) => {
+                          const isSelected = option.id === selectedImageCardModel.id;
+                          return (
+                            <button
+                              key={option.id}
+                              type="button"
+                              onClick={() => {
+                                onSelectImageCardModel(option.id);
+                              }}
+                              className={`flex w-full items-center justify-between rounded-[14px] px-3 py-2.5 text-left transition-colors ${
+                                isSelected ? 'bg-white/[0.08] text-zinc-50' : 'text-zinc-300 hover:bg-white/[0.05]'
+                              }`}
+                            >
+                              <div className="min-w-0">
+                                <div className="truncate text-[13px] font-semibold tracking-[-0.02em]">{option.label}</div>
+                                <div className="truncate text-[11px] text-zinc-500">{option.id}</div>
+                              </div>
+                              {isSelected && <Check size={15} className="ml-3 shrink-0 text-zinc-100" />}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+                    <button
+                      data-text-card-panel-control="true"
+                      type="button"
+                      onPointerDown={(e) => {
+                        e.stopPropagation();
+                      }}
+                      onClick={() => {
+                        onToggleImageCardModelMenu();
+                      }}
+                      className="inline-flex max-w-[220px] items-center gap-2 text-[13px] font-semibold tracking-[-0.02em] text-zinc-100"
+                      aria-haspopup="menu"
+                      aria-expanded={showImageCardModelMenu}
+                    >
+                      <Sparkles size={15} className="shrink-0 text-zinc-100" />
+                      <span className="truncate">{selectedImageCardModel.label}</span>
+                      <ChevronDown size={14} className={`shrink-0 text-zinc-500 transition-transform ${showImageCardModelMenu ? 'rotate-180' : ''}`} />
+                    </button>
+                  </div>
+                  <div className="relative flex items-center gap-5" ref={imageCardQualityMenuRef}>
+                    <button
+                      data-text-card-panel-control="true"
+                      type="button"
+                      onPointerDown={(e) => {
+                        e.stopPropagation();
+                      }}
+                      onClick={() => {
+                        onToggleImageCardQualityMenu();
+                      }}
+                      className="inline-flex items-center gap-2 text-[13px] font-semibold tracking-[-0.02em] text-zinc-100"
+                      aria-haspopup="menu"
+                      aria-expanded={showImageCardQualityMenu}
+                    >
+                      <span>
+                        {getImageCardQualitySummary({
+                          aspectRatio: selectedImageCardPanelAspectRatio,
+                          size: selectedImageCardPanelSize,
+                        })}
+                      </span>
+                      <ChevronDown size={14} className={`text-zinc-500 transition-transform ${showImageCardQualityMenu ? 'rotate-180' : ''}`} />
+                    </button>
+                    <div className="relative" ref={imageCardCountMenuRef}>
+                      <button
+                        data-text-card-panel-control="true"
+                        type="button"
+                        onPointerDown={(e) => {
+                          e.stopPropagation();
+                        }}
+                        onClick={() => {
+                          onToggleImageCardCountMenu();
+                        }}
+                        className="inline-flex items-center gap-2 text-[13px] font-semibold tracking-[-0.02em] text-zinc-100"
+                        aria-haspopup="menu"
+                        aria-expanded={showImageCardCountMenu}
+                      >
+                        <span>{IMAGE_CARD_COUNT_OPTIONS.find((item) => item.id === selectedImageCardPanelCount)?.label || `X${selectedImageCardPanelCount}`}</span>
+                        <ChevronDown size={14} className={`text-zinc-500 transition-transform ${showImageCardCountMenu ? 'rotate-180' : ''}`} />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2.5">
+                  <button
+                    data-text-card-panel-control="true"
+                    type="button"
+                    onPointerDown={(e) => {
+                      e.stopPropagation();
+                    }}
+                    onClick={() => {
+                      if (isSelectedImageCardGenerating) {
+                        onSelectedImageCardPanelCancel();
+                      } else {
+                        onSelectedImageCardPanelSubmit();
+                      }
+                    }}
+                    disabled={!isSelectedImageCardGenerating && !selectedImageCardPanelCanSubmit}
+                    className="inline-flex h-11 w-11 items-center justify-center rounded-full border border-black/5 bg-[#f5f7fb] text-black shadow-[0_10px_24px_rgba(0,0,0,0.22),inset_0_1px_0_rgba(255,255,255,0.7)] transition-colors hover:bg-white disabled:cursor-not-allowed disabled:opacity-50"
+                    aria-label={isSelectedImageCardGenerating ? '终止生成' : '开始生图'}
+                    title={isSelectedImageCardGenerating ? '终止生成' : '开始生图'}
+                  >
+                    {isSelectedImageCardGenerating ? (
+                      <svg className="animate-spin" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <circle cx="12" cy="12" r="9" opacity="0.25" />
+                        <path d="M21 12a9 9 0 0 1-9 9" />
+                      </svg>
+                    ) : (
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M12 18V6" />
+                        <path d="m7 11 5-5 5 5" />
+                      </svg>
+                    )}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+            {showImageCardQualityMenu && selectedImageCardQualityPopoverOffset && (
+              <div
+                ref={imageCardQualityPopoverRef}
+                data-text-card-panel-control="true"
+                className="pointer-events-auto fixed z-[116] overflow-hidden rounded-[22px] border border-white/[0.1] bg-[rgba(24,24,27,0.985)] p-3 shadow-[0_24px_64px_rgba(0,0,0,0.42)] backdrop-blur-xl"
+                style={{
+                  left: selectedImageCardPanelViewportOrigin.left + selectedImageCardQualityPopoverOffset.left * viewport.scale,
+                  top: selectedImageCardPanelViewportOrigin.top + selectedImageCardQualityPopoverOffset.top * viewport.scale,
+                  width: 292,
+                  transform: `scale(${viewport.scale})`,
+                  transformOrigin: 'top left',
+                }}
+                onPointerDown={(e) => {
+                  e.stopPropagation();
+                }}
+              >
+                <div className="rounded-[18px] border border-white/[0.06] bg-[rgba(255,255,255,0.025)] p-3">
+                  <div className="mb-2.5 flex items-center justify-between">
+                    <span className="text-[11px] font-medium tracking-[0.04em] text-zinc-500">比例</span>
+                    <span className="text-[11px] font-medium text-zinc-400">
+                      {getImageCardAspectRatioShortLabel(selectedImageCardPanelAspectRatio)}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-4 gap-1.5">
+                    {ASPECT_RATIOS.filter((option) => option.id !== 'auto').map((option) => {
+                      const isSelected = option.id === selectedImageCardPanelAspectRatio;
+                      const previewSize = getImageCardAspectRatioPreviewSize(option.id);
+                      return (
+                        <button
+                          key={option.id}
+                          type="button"
+                          onClick={() => {
+                            onSelectImageCardAspectRatio(option.id);
+                          }}
+                          className={`flex min-h-[58px] flex-col items-center justify-center gap-1.5 rounded-[14px] border px-1.5 py-2 text-center transition-colors ${
+                            isSelected
+                              ? 'border-white/[0.14] bg-white/[0.09] text-zinc-50 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]'
+                              : 'border-white/[0.06] bg-[rgba(255,255,255,0.02)] text-zinc-300 hover:border-white/[0.12] hover:bg-white/[0.05]'
+                          }`}
+                        >
+                          <span className="flex h-7 w-7 items-center justify-center rounded-[10px] border border-white/[0.08] bg-[rgba(7,8,10,0.28)]">
+                            <span
+                              className={`rounded-[6px] border ${
+                                isSelected ? 'border-zinc-100/80 bg-zinc-100/10' : 'border-zinc-400/60 bg-white/[0.03]'
+                              }`}
+                              style={{
+                                width: `${previewSize.width}px`,
+                                height: `${previewSize.height}px`,
+                              }}
+                            />
+                          </span>
+                          <span className="text-[11px] font-semibold tracking-[-0.02em]">
+                            {option.id}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                  <div className="mt-3.5 border-t border-white/[0.06] pt-3.5">
+                    <div className="mb-2.5 flex items-center justify-between">
+                      <span className="text-[11px] font-medium tracking-[0.04em] text-zinc-500">清晰度</span>
+                      <span className="text-[11px] font-medium text-zinc-400">
+                        {IMAGE_CARD_SIZE_OPTIONS.find((item) => item.id === selectedImageCardPanelSize)?.label || selectedImageCardPanelSize}
+                      </span>
+                    </div>
+                    <div className="inline-flex w-full items-center rounded-[14px] border border-white/[0.06] bg-[rgba(255,255,255,0.03)] p-1">
+                      {IMAGE_CARD_SIZE_OPTIONS.map((option) => {
+                        const isSelected = option.id === selectedImageCardPanelSize;
+                        return (
+                          <button
+                            key={option.id}
+                            type="button"
+                            onClick={() => {
+                              onSelectImageCardSize(option.id);
+                            }}
+                            className={`flex-1 rounded-[11px] px-2.5 py-1.5 text-[12px] font-semibold tracking-[-0.02em] transition-colors ${
+                              isSelected
+                                ? 'bg-[#f5f7fb] text-black shadow-[0_8px_20px_rgba(0,0,0,0.18)]'
+                                : 'text-zinc-300 hover:bg-white/[0.05]'
+                            }`}
+                          >
+                            {option.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+            {showImageCardCountMenu && selectedImageCardCountPopoverOffset && (
+              <div
+                ref={imageCardCountPopoverRef}
+                data-text-card-panel-control="true"
+                className="pointer-events-auto fixed z-[116] min-w-[124px] overflow-hidden rounded-[18px] border border-white/[0.1] bg-[rgba(24,24,27,0.985)] p-1.5 shadow-[0_24px_64px_rgba(0,0,0,0.42)] backdrop-blur-xl"
+                style={{
+                  left: selectedImageCardPanelViewportOrigin.left + selectedImageCardCountPopoverOffset.left * viewport.scale,
+                  top: selectedImageCardPanelViewportOrigin.top + selectedImageCardCountPopoverOffset.top * viewport.scale - 8,
+                  transform: `translateY(-100%) scale(${viewport.scale})`,
+                  transformOrigin: 'top left',
+                }}
+                onPointerDown={(e) => {
+                  e.stopPropagation();
+                }}
+              >
+                {IMAGE_CARD_COUNT_OPTIONS.map((option) => {
+                  const isSelected = option.id === selectedImageCardPanelCount;
+                  return (
+                    <button
+                      key={option.id}
+                      type="button"
+                      onClick={() => {
+                        onSelectImageCardCount(option.id);
+                      }}
+                      className={`flex w-full items-center justify-between rounded-[14px] px-3 py-2.5 text-left transition-colors ${
+                        isSelected ? 'bg-white/[0.08] text-zinc-50' : 'text-zinc-300 hover:bg-white/[0.05]'
+                      }`}
+                    >
+                      <span className="text-[13px] font-semibold tracking-[-0.02em]">{option.label}</span>
+                      {isSelected && <Check size={15} className="ml-3 shrink-0 text-zinc-100" />}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </>,
+          document.body
         )
-      )
-    : 0;
-  const selectedImageCardPanelTop = selectedImageCardPanelScreenPoint
-    ? Math.min(
-        Math.max(selectedImageCardPanelScreenPoint.y, selectedTextCardPanelPadding),
-        Math.max(
-          selectedTextCardPanelPadding,
-          canvasSize.height - selectedImageCardPanelDisplayedHeight - selectedTextCardPanelPadding
+      : null;
+  const portaledSelectedTextCardPanel =
+    typeof document !== 'undefined' &&
+    selectedTextCardPanelItem &&
+    selectedTextCardPanelFrameBounds &&
+    selectedTextCardPanelCanvasRect &&
+    selectedTextCardPanelViewportOrigin
+      ? createPortal(
+          <div className="pointer-events-none fixed inset-0 z-[115]">
+            <div
+              data-text-card-panel="true"
+              className="pointer-events-auto fixed overflow-hidden rounded-[26px] border border-white/[0.11] bg-[rgba(28,28,31,0.98)] shadow-[0_34px_90px_rgba(0,0,0,0.46),inset_0_1px_0_rgba(255,255,255,0.025)] backdrop-blur-xl"
+              style={{
+                left: selectedTextCardPanelViewportOrigin.left,
+                top: selectedTextCardPanelViewportOrigin.top,
+                width: selectedTextCardPanelCanvasRect.width,
+                transform: `scale(${viewport.scale})`,
+                transformOrigin: 'top left',
+              }}
+              onPointerDown={(e) => {
+                e.stopPropagation();
+              }}
+            >
+              <div className="px-5 py-3">
+                {linkedImagePreviews.length > 0 && (
+                  <div className="mb-3 rounded-[18px] border border-white/[0.08] bg-[rgba(255,255,255,0.025)] p-2.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.025)]">
+                    <div
+                      className="panel-scrollbar flex gap-2 overflow-x-auto pb-1"
+                      onWheel={stopCanvasWheelFromScrollableRegion}
+                    >
+                      {linkedImagePreviews.map((preview) => (
+                        <div
+                          key={preview.id}
+                          draggable
+                          onDragStart={(e) => {
+                            onPanelReferenceDragStart(e, selectedTextCardPanelItem.id, preview.id);
+                          }}
+                          onDragOver={(e) => {
+                            onPanelReferenceDragOver(e, selectedTextCardPanelItem.id, preview.id);
+                          }}
+                          onDrop={(e) => {
+                            onPanelReferenceDrop(e, selectedTextCardPanelItem.id, preview.id);
+                          }}
+                          onDragEnd={onPanelReferenceDragEnd}
+                          className={`relative h-20 w-20 shrink-0 overflow-hidden rounded-[14px] border bg-black/25 transition-all ${
+                            draggingPanelReference?.targetItemId === selectedTextCardPanelItem.id &&
+                            draggingPanelReference.sourceItemId === preview.id
+                              ? 'border-white/[0.08] opacity-50'
+                              : dragOverPanelReference?.targetItemId === selectedTextCardPanelItem.id &&
+                                  dragOverPanelReference.sourceItemId === preview.id
+                                ? 'border-white/30 ring-1 ring-zinc-100'
+                                : 'border-white/[0.08]'
+                          } cursor-move`}
+                        >
+                          <img
+                            src={preview.src}
+                            alt={preview.alt || preview.label}
+                            className="h-full w-full object-cover"
+                            draggable={false}
+                          />
+                          <span className="pointer-events-none absolute left-1.5 top-1.5 rounded-full bg-black/70 px-2 py-0.5 text-[10px] font-medium tracking-[0.01em] text-zinc-100">
+                            {preview.label}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                <div
+                  data-text-card-panel-input-shell="true"
+                  className="rounded-[20px] border border-white/[0.09] bg-[rgba(7,8,10,0.34)] px-4 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] transition-colors duration-150 hover:border-white/[0.14] focus-within:border-white/[0.18] focus-within:bg-[rgba(9,10,13,0.42)]"
+                  onPointerDown={(e) => {
+                    e.stopPropagation();
+                    if (!shouldFocusTextCardPanelInputOnPointerDown(e.target as HTMLElement | null)) {
+                      return;
+                    }
+
+                    e.preventDefault();
+                    focusSelectedTextCardPanelInput();
+                  }}
+                >
+                  <textarea
+                    data-text-card-panel-input="true"
+                    ref={selectedTextCardPanelTextareaRef}
+                    value={selectedTextCardPanelDisplayInput}
+                    onChange={(e) => {
+                      onSelectedTextCardPanelInputChange(e.target.value);
+                    }}
+                    onKeyDown={(e) => {
+                      if (
+                        shouldSubmitTextCardPanelEnter({
+                          key: e.key,
+                          shiftKey: e.shiftKey,
+                          altKey: e.altKey,
+                          isComposing: e.nativeEvent.isComposing,
+                        })
+                      ) {
+                        e.preventDefault();
+                        if (isSelectedTextCardGenerating) {
+                          onSelectedTextCardPanelCancel();
+                        } else {
+                          onSelectedTextCardPanelSubmit();
+                        }
+                      }
+                    }}
+                    onPointerDown={(e) => {
+                      e.stopPropagation();
+                    }}
+                    onWheel={stopCanvasWheelFromScrollableRegion}
+                    autoFocus={false}
+                    readOnly={false}
+                    disabled={false}
+                    spellCheck={false}
+                    className="panel-scrollbar w-full resize-none bg-transparent text-[14px] leading-6 text-zinc-100 caret-zinc-100 outline-none placeholder:text-zinc-500 [user-select:text] [-webkit-user-select:text] cursor-text"
+                    placeholder={selectedTextCardPanelPlaceholder}
+                    rows={TEXT_CARD_PANEL_INPUT_MIN_ROWS}
+                    style={{
+                      height: `${selectedTextCardPanelInputMetrics.height}px`,
+                      overflowY: selectedTextCardPanelInputMetrics.isOverflowing ? 'auto' : 'hidden',
+                    }}
+                  />
+                </div>
+                {selectedTextCardPanelError && (
+                  <div className="mt-2 px-0.5 text-[12px] leading-5 text-rose-400">
+                    {selectedTextCardPanelError}
+                  </div>
+                )}
+              </div>
+              <div
+                data-text-card-panel-control="true"
+                className="flex items-center justify-between border-t border-white/[0.08] bg-[rgba(255,255,255,0.02)] px-5 py-3"
+              >
+                <div className="relative" ref={textPanelModelMenuRef}>
+                  {showTextPanelModelMenu && (
+                    <div
+                      data-text-card-panel-control="true"
+                      className="absolute bottom-full left-0 mb-2 min-w-[248px] overflow-hidden rounded-[18px] border border-white/[0.1] bg-[rgba(24,24,27,0.985)] p-1.5 shadow-[0_24px_64px_rgba(0,0,0,0.42)] backdrop-blur-xl"
+                      onPointerDown={(e) => {
+                        e.stopPropagation();
+                      }}
+                    >
+                      {textPanelModelOptions.map((option) => {
+                        const isSelected = option.id === selectedTextPanelModel.id;
+                        return (
+                          <button
+                            key={option.id}
+                            type="button"
+                            onClick={() => {
+                              onSelectTextPanelModel(option.id);
+                            }}
+                            className={`flex w-full items-center justify-between rounded-[14px] px-3 py-2.5 text-left transition-colors ${
+                              isSelected ? 'bg-white/[0.08] text-zinc-50' : 'text-zinc-300 hover:bg-white/[0.05]'
+                            }`}
+                          >
+                            <div className="min-w-0">
+                              <div className="truncate text-[13px] font-semibold tracking-[-0.02em]">{option.label}</div>
+                              <div className="truncate text-[11px] text-zinc-500">{option.id}</div>
+                            </div>
+                            {isSelected && <Check size={15} className="ml-3 shrink-0 text-zinc-100" />}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  )}
+                  <button
+                    data-text-card-panel-control="true"
+                    type="button"
+                    onPointerDown={(e) => {
+                      e.stopPropagation();
+                    }}
+                    onClick={() => {
+                      onToggleTextPanelModelMenu();
+                    }}
+                    className="inline-flex items-center gap-2 text-[13px] font-semibold tracking-[-0.02em] text-zinc-100"
+                    aria-haspopup="menu"
+                    aria-expanded={showTextPanelModelMenu}
+                  >
+                    <Sparkles size={15} className="text-zinc-100" />
+                    <span>{selectedTextPanelModel.label}</span>
+                    <ChevronDown size={14} className={`text-zinc-500 transition-transform ${showTextPanelModelMenu ? 'rotate-180' : ''}`} />
+                  </button>
+                </div>
+                <div className="flex items-center gap-2.5">
+                  <button
+                    data-text-card-panel-control="true"
+                    type="button"
+                    onPointerDown={(e) => {
+                      e.stopPropagation();
+                    }}
+                    onClick={() => {
+                      if (isSelectedTextCardGenerating) {
+                        onSelectedTextCardPanelCancel();
+                      } else {
+                        onSelectedTextCardPanelSubmit();
+                      }
+                    }}
+                    disabled={!isSelectedTextCardGenerating && !selectedTextCardPanelCanSubmit}
+                    className="inline-flex h-11 w-11 items-center justify-center rounded-full border border-black/5 bg-[#f5f7fb] text-black shadow-[0_10px_24px_rgba(0,0,0,0.22),inset_0_1px_0_rgba(255,255,255,0.7)] transition-colors hover:bg-white disabled:cursor-not-allowed disabled:opacity-50"
+                    aria-label={isSelectedTextCardGenerating ? '终止生成' : '开始生成'}
+                    title={isSelectedTextCardGenerating ? '终止生成' : '开始生成'}
+                  >
+                    {isSelectedTextCardGenerating ? (
+                      <svg className="animate-spin" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                        <circle cx="12" cy="12" r="9" opacity="0.25" />
+                        <path d="M21 12a9 9 0 0 1-9 9" />
+                      </svg>
+                    ) : (
+                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                        <path d="M12 18V6" />
+                        <path d="m7 11 5-5 5 5" />
+                      </svg>
+                    )}
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>,
+          document.body
         )
-      )
-    : 0;
+      : null;
 
   return (
     <div
@@ -1893,646 +2504,8 @@ const CanvasViewport = memo(function CanvasViewport({
           </div>
         </div>
       )}
-      {selectedImageToolbarTarget && (
-        <>
-          {selectedImageToolbarAnchor && (
-            <div className="pointer-events-none absolute inset-0 z-[114]">
-              <div
-                data-image-node-toolbar="true"
-                className="pointer-events-auto absolute flex items-center gap-1 rounded-full border border-white/[0.1] bg-[rgba(14,15,18,0.92)] px-2 py-1.5 shadow-[0_18px_42px_rgba(0,0,0,0.34),inset_0_1px_0_rgba(255,255,255,0.05)] backdrop-blur-xl"
-                style={{
-                  left: selectedImageToolbarLeft,
-                  top: selectedImageToolbarTop,
-                  transform: 'translate(-50%, calc(-100% - 12px))',
-                }}
-                onPointerDown={(e) => {
-                  e.stopPropagation();
-                }}
-              >
-                {IMAGE_NODE_TOOLBAR_ACTIONS.map((action) => {
-                  const Icon = action.icon;
-
-                  return (
-                    <button
-                      key={action.id}
-                      data-image-node-toolbar-action={action.id}
-                      type="button"
-                      disabled={!action.enabled}
-                      onPointerDown={(e) => {
-                        e.stopPropagation();
-                      }}
-                      onClick={() => {
-                        if (!action.enabled) return;
-                        onImageToolbarAction(action.id);
-                      }}
-                      className={`inline-flex h-8 items-center gap-1.5 rounded-full px-3 text-[12px] font-medium tracking-[-0.02em] transition-all ${
-                        action.enabled
-                          ? 'text-zinc-100 hover:bg-white/[0.08] hover:text-white'
-                          : 'cursor-default text-zinc-500/85'
-                      }`}
-                      title={action.enabled ? action.label : `${action.label} 即将支持`}
-                    >
-                      <Icon size={13} strokeWidth={2} className="shrink-0" />
-                      <span>{action.label}</span>
-                    </button>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-        </>
-      )}
-      {selectedTextCardPanelItem && selectedTextCardPanelFrameBounds && selectedTextCardPanelCanvasRect && (
-        <div className="pointer-events-none absolute inset-0 z-[115]">
-          <div
-            data-text-card-panel="true"
-            className="pointer-events-auto absolute overflow-hidden rounded-[26px] border border-white/[0.11] bg-[rgba(28,28,31,0.98)] shadow-[0_34px_90px_rgba(0,0,0,0.46),inset_0_1px_0_rgba(255,255,255,0.025)] backdrop-blur-xl"
-            style={{
-              left: selectedTextCardPanelLeft,
-              top: selectedTextCardPanelTop,
-              width: selectedTextCardPanelCanvasRect.width,
-              transform: `scale(${viewport.scale})`,
-              transformOrigin: 'top left',
-            }}
-            onPointerDown={(e) => {
-              e.stopPropagation();
-            }}
-          >
-            <div className="px-5 py-3">
-              {linkedImagePreviews.length > 0 && (
-                <div className="mb-3 rounded-[18px] border border-white/[0.08] bg-[rgba(255,255,255,0.025)] p-2.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.025)]">
-                  <div
-                    className="panel-scrollbar flex gap-2 overflow-x-auto pb-1"
-                    onWheel={stopCanvasWheelFromScrollableRegion}
-                  >
-                    {linkedImagePreviews.map((preview) => (
-                      <div
-                        key={preview.id}
-                        draggable
-                        onDragStart={(e) => {
-                          onPanelReferenceDragStart(e, selectedTextCardPanelItem.id, preview.id);
-                        }}
-                        onDragOver={(e) => {
-                          onPanelReferenceDragOver(e, selectedTextCardPanelItem.id, preview.id);
-                        }}
-                        onDrop={(e) => {
-                          onPanelReferenceDrop(e, selectedTextCardPanelItem.id, preview.id);
-                        }}
-                        onDragEnd={onPanelReferenceDragEnd}
-                        className={`relative h-20 w-20 shrink-0 overflow-hidden rounded-[14px] border bg-black/25 transition-all ${
-                          draggingPanelReference?.targetItemId === selectedTextCardPanelItem.id &&
-                          draggingPanelReference.sourceItemId === preview.id
-                            ? 'border-white/[0.08] opacity-50'
-                            : dragOverPanelReference?.targetItemId === selectedTextCardPanelItem.id &&
-                                dragOverPanelReference.sourceItemId === preview.id
-                              ? 'border-white/30 ring-1 ring-zinc-100'
-                              : 'border-white/[0.08]'
-                        } cursor-move`}
-                      >
-                        <img
-                          src={preview.src}
-                          alt={preview.alt || preview.label}
-                          className="h-full w-full object-cover"
-                          draggable={false}
-                        />
-                        <span className="pointer-events-none absolute left-1.5 top-1.5 rounded-full bg-black/70 px-2 py-0.5 text-[10px] font-medium tracking-[0.01em] text-zinc-100">
-                          {preview.label}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-              <div
-                data-text-card-panel-input-shell="true"
-                className="rounded-[20px] border border-white/[0.09] bg-[rgba(7,8,10,0.34)] px-4 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] transition-colors duration-150 hover:border-white/[0.14] focus-within:border-white/[0.18] focus-within:bg-[rgba(9,10,13,0.42)]"
-                onPointerDown={(e) => {
-                  e.stopPropagation();
-                  if (!shouldFocusTextCardPanelInputOnPointerDown(e.target as HTMLElement | null)) {
-                    return;
-                  }
-
-                  e.preventDefault();
-                  focusSelectedTextCardPanelInput();
-                }}
-              >
-                <textarea
-                  data-text-card-panel-input="true"
-                  ref={selectedTextCardPanelTextareaRef}
-                  value={selectedTextCardPanelDisplayInput}
-                  onChange={(e) => {
-                    onSelectedTextCardPanelInputChange(e.target.value);
-                  }}
-                  onKeyDown={(e) => {
-                    if (
-                      shouldSubmitTextCardPanelEnter({
-                        key: e.key,
-                        shiftKey: e.shiftKey,
-                        altKey: e.altKey,
-                        isComposing: e.nativeEvent.isComposing,
-                      })
-                    ) {
-                      e.preventDefault();
-                      if (isSelectedTextCardGenerating) {
-                        onSelectedTextCardPanelCancel();
-                      } else {
-                        onSelectedTextCardPanelSubmit();
-                      }
-                    }
-                  }}
-                  onPointerDown={(e) => {
-                    e.stopPropagation();
-                  }}
-                  onWheel={stopCanvasWheelFromScrollableRegion}
-                  autoFocus={false}
-                  readOnly={false}
-                  disabled={false}
-                  spellCheck={false}
-                  className="panel-scrollbar w-full resize-none bg-transparent text-[14px] leading-6 text-zinc-100 caret-zinc-100 outline-none placeholder:text-zinc-500 [user-select:text] [-webkit-user-select:text] cursor-text"
-                  placeholder={selectedTextCardPanelPlaceholder}
-                  rows={TEXT_CARD_PANEL_INPUT_MIN_ROWS}
-                  style={{
-                    height: `${selectedTextCardPanelInputMetrics.height}px`,
-                    overflowY: selectedTextCardPanelInputMetrics.isOverflowing ? 'auto' : 'hidden',
-                  }}
-                />
-              </div>
-              {selectedTextCardPanelError && (
-                <div className="mt-2 px-0.5 text-[12px] leading-5 text-rose-400">
-                  {selectedTextCardPanelError}
-                </div>
-              )}
-            </div>
-            <div
-              data-text-card-panel-control="true"
-              className="flex items-center justify-between border-t border-white/[0.08] bg-[rgba(255,255,255,0.02)] px-5 py-3"
-            >
-              <div className="relative" ref={textPanelModelMenuRef}>
-                {showTextPanelModelMenu && (
-                  <div
-                    data-text-card-panel-control="true"
-                    className="absolute bottom-full left-0 mb-2 min-w-[248px] overflow-hidden rounded-[18px] border border-white/[0.1] bg-[rgba(24,24,27,0.985)] p-1.5 shadow-[0_24px_64px_rgba(0,0,0,0.42)] backdrop-blur-xl"
-                    onPointerDown={(e) => {
-                      e.stopPropagation();
-                    }}
-                  >
-                    {textPanelModelOptions.map((option) => {
-                      const isSelected = option.id === selectedTextPanelModel.id;
-                      return (
-                        <button
-                          key={option.id}
-                          type="button"
-                          onClick={() => {
-                            onSelectTextPanelModel(option.id);
-                          }}
-                          className={`flex w-full items-center justify-between rounded-[14px] px-3 py-2.5 text-left transition-colors ${
-                            isSelected ? 'bg-white/[0.08] text-zinc-50' : 'text-zinc-300 hover:bg-white/[0.05]'
-                          }`}
-                        >
-                          <div className="min-w-0">
-                            <div className="truncate text-[13px] font-semibold tracking-[-0.02em]">{option.label}</div>
-                            <div className="truncate text-[11px] text-zinc-500">{option.id}</div>
-                          </div>
-                          {isSelected && <Check size={15} className="ml-3 shrink-0 text-zinc-100" />}
-                        </button>
-                      );
-                    })}
-                  </div>
-                )}
-                <button
-                  data-text-card-panel-control="true"
-                  type="button"
-                  onPointerDown={(e) => {
-                    e.stopPropagation();
-                  }}
-                  onClick={() => {
-                    onToggleTextPanelModelMenu();
-                  }}
-                  className="inline-flex items-center gap-2 text-[13px] font-semibold tracking-[-0.02em] text-zinc-100"
-                  aria-haspopup="menu"
-                  aria-expanded={showTextPanelModelMenu}
-                >
-                  <Sparkles size={15} className="text-zinc-100" />
-                  <span>{selectedTextPanelModel.label}</span>
-                  <ChevronDown size={14} className={`text-zinc-500 transition-transform ${showTextPanelModelMenu ? 'rotate-180' : ''}`} />
-                </button>
-              </div>
-              <div className="flex items-center gap-2.5">
-                <button
-                  data-text-card-panel-control="true"
-                  type="button"
-                  onPointerDown={(e) => {
-                    e.stopPropagation();
-                  }}
-                  onClick={() => {
-                    if (isSelectedTextCardGenerating) {
-                      onSelectedTextCardPanelCancel();
-                    } else {
-                      onSelectedTextCardPanelSubmit();
-                    }
-                  }}
-                  disabled={!isSelectedTextCardGenerating && !selectedTextCardPanelCanSubmit}
-                  className="inline-flex h-11 w-11 items-center justify-center rounded-full border border-black/5 bg-[#f5f7fb] text-black shadow-[0_10px_24px_rgba(0,0,0,0.22),inset_0_1px_0_rgba(255,255,255,0.7)] transition-colors hover:bg-white disabled:cursor-not-allowed disabled:opacity-50"
-                  aria-label={isSelectedTextCardGenerating ? '终止生成' : '开始生成'}
-                  title={isSelectedTextCardGenerating ? '终止生成' : '开始生成'}
-                >
-                  {isSelectedTextCardGenerating ? (
-                    <svg className="animate-spin" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                      <circle cx="12" cy="12" r="9" opacity="0.25" />
-                      <path d="M21 12a9 9 0 0 1-9 9" />
-                    </svg>
-                  ) : (
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M12 18V6" />
-                      <path d="m7 11 5-5 5 5" />
-                    </svg>
-                  )}
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      )}
-      {selectedImageCardPanelItem && selectedImageCardPanelFrameBounds && selectedImageCardPanelCanvasRect && (
-        <div className="pointer-events-none absolute inset-0 z-[115]">
-          <div
-            data-text-card-panel="true"
-            ref={selectedImageCardPanelRootRef}
-            className="pointer-events-auto absolute overflow-hidden rounded-[26px] border border-white/[0.11] bg-[rgba(28,28,31,0.98)] shadow-[0_34px_90px_rgba(0,0,0,0.46),inset_0_1px_0_rgba(255,255,255,0.025)] backdrop-blur-xl"
-            style={{
-              left: selectedImageCardPanelLeft,
-              top: selectedImageCardPanelTop,
-              width: selectedImageCardPanelCanvasRect.width,
-              transform: `scale(${viewport.scale})`,
-              transformOrigin: 'top left',
-            }}
-            onPointerDown={(e) => {
-              e.stopPropagation();
-            }}
-          >
-            <div className="px-5 py-3">
-              {selectedImageCardPanelLinkedImagePreviews.length > 0 && (
-                <div className="mb-3 rounded-[18px] border border-white/[0.08] bg-[rgba(255,255,255,0.025)] p-2.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.025)]">
-                  <div
-                    className="panel-scrollbar flex gap-2 overflow-x-auto pb-1"
-                    onWheel={stopCanvasWheelFromScrollableRegion}
-                  >
-                    {selectedImageCardPanelLinkedImagePreviews.map((preview) => (
-                      <div
-                        key={preview.id}
-                        draggable
-                        onDragStart={(e) => {
-                          onPanelReferenceDragStart(e, selectedImageCardPanelItem.id, preview.id);
-                        }}
-                        onDragOver={(e) => {
-                          onPanelReferenceDragOver(e, selectedImageCardPanelItem.id, preview.id);
-                        }}
-                        onDrop={(e) => {
-                          onPanelReferenceDrop(e, selectedImageCardPanelItem.id, preview.id);
-                        }}
-                        onDragEnd={onPanelReferenceDragEnd}
-                        className={`relative h-20 w-20 shrink-0 overflow-hidden rounded-[14px] border bg-black/25 transition-all ${
-                          draggingPanelReference?.targetItemId === selectedImageCardPanelItem.id &&
-                          draggingPanelReference.sourceItemId === preview.id
-                            ? 'border-white/[0.08] opacity-50'
-                            : dragOverPanelReference?.targetItemId === selectedImageCardPanelItem.id &&
-                                dragOverPanelReference.sourceItemId === preview.id
-                              ? 'border-white/30 ring-1 ring-zinc-100'
-                              : 'border-white/[0.08]'
-                        } cursor-move`}
-                      >
-                        <img
-                          src={preview.src}
-                          alt={preview.alt || preview.label}
-                          className="h-full w-full object-cover"
-                          draggable={false}
-                        />
-                        <span className="pointer-events-none absolute left-1.5 top-1.5 rounded-full bg-black/70 px-2 py-0.5 text-[10px] font-medium tracking-[0.01em] text-zinc-100">
-                          {preview.label}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-              <div
-                data-text-card-panel-input-shell="true"
-                className="rounded-[20px] border border-white/[0.09] bg-[rgba(7,8,10,0.34)] px-4 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] transition-colors duration-150 hover:border-white/[0.14] focus-within:border-white/[0.18] focus-within:bg-[rgba(9,10,13,0.42)]"
-                onPointerDown={(e) => {
-                  e.stopPropagation();
-                  if (!shouldFocusTextCardPanelInputOnPointerDown(e.target as HTMLElement | null)) {
-                    return;
-                  }
-
-                  e.preventDefault();
-                  focusSelectedImageCardPanelInput();
-                }}
-              >
-                <textarea
-                  data-text-card-panel-input="true"
-                  ref={selectedImageCardPanelTextareaRef}
-                  value={selectedImageCardPanelDisplayInput}
-                  onChange={(e) => {
-                    onSelectedImageCardPanelInputChange(e.target.value);
-                  }}
-                  onKeyDown={(e) => {
-                    if (
-                      shouldSubmitTextCardPanelEnter({
-                        key: e.key,
-                        shiftKey: e.shiftKey,
-                        altKey: e.altKey,
-                        isComposing: e.nativeEvent.isComposing,
-                      })
-                    ) {
-                      e.preventDefault();
-                      if (isSelectedImageCardGenerating) {
-                        onSelectedImageCardPanelCancel();
-                      } else {
-                        onSelectedImageCardPanelSubmit();
-                      }
-                    }
-                  }}
-                  onPointerDown={(e) => {
-                    e.stopPropagation();
-                  }}
-                  onWheel={stopCanvasWheelFromScrollableRegion}
-                  autoFocus={false}
-                  readOnly={false}
-                  disabled={false}
-                  spellCheck={false}
-                  className="panel-scrollbar w-full resize-none bg-transparent text-[14px] leading-6 text-zinc-100 caret-zinc-100 outline-none placeholder:text-zinc-500 [user-select:text] [-webkit-user-select:text] cursor-text"
-                  placeholder={IMAGE_CARD_PANEL_PROMPT_PLACEHOLDER}
-                  rows={TEXT_CARD_PANEL_INPUT_MIN_ROWS}
-                  style={{
-                    height: `${selectedImageCardPanelInputMetrics.height}px`,
-                    overflowY: selectedImageCardPanelInputMetrics.isOverflowing ? 'auto' : 'hidden',
-                  }}
-                />
-              </div>
-              {selectedImageCardPanelError && (
-                <div className="mt-2 px-0.5 text-[12px] leading-5 text-rose-400">
-                  {selectedImageCardPanelError}
-                </div>
-              )}
-            </div>
-            <div
-              data-text-card-panel-control="true"
-              className="flex items-center justify-between border-t border-white/[0.08] bg-[rgba(255,255,255,0.02)] px-5 py-3"
-            >
-              <div className="flex min-w-0 items-center gap-5">
-                <div className="relative" ref={imageCardModelMenuRef}>
-                  {showImageCardModelMenu && (
-                    <div
-                      data-text-card-panel-control="true"
-                      className="absolute bottom-full left-0 mb-2 min-w-[248px] overflow-hidden rounded-[18px] border border-white/[0.1] bg-[rgba(24,24,27,0.985)] p-1.5 shadow-[0_24px_64px_rgba(0,0,0,0.42)] backdrop-blur-xl"
-                      onPointerDown={(e) => {
-                        e.stopPropagation();
-                      }}
-                    >
-                      {imageCardModelOptions.map((option) => {
-                        const isSelected = option.id === selectedImageCardModel.id;
-                        return (
-                          <button
-                            key={option.id}
-                            type="button"
-                            onClick={() => {
-                              onSelectImageCardModel(option.id);
-                            }}
-                            className={`flex w-full items-center justify-between rounded-[14px] px-3 py-2.5 text-left transition-colors ${
-                              isSelected ? 'bg-white/[0.08] text-zinc-50' : 'text-zinc-300 hover:bg-white/[0.05]'
-                            }`}
-                          >
-                            <div className="min-w-0">
-                              <div className="truncate text-[13px] font-semibold tracking-[-0.02em]">{option.label}</div>
-                              <div className="truncate text-[11px] text-zinc-500">{option.id}</div>
-                            </div>
-                            {isSelected && <Check size={15} className="ml-3 shrink-0 text-zinc-100" />}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  )}
-                  <button
-                    data-text-card-panel-control="true"
-                    type="button"
-                    onPointerDown={(e) => {
-                      e.stopPropagation();
-                    }}
-                    onClick={() => {
-                      onToggleImageCardModelMenu();
-                    }}
-                    className="inline-flex max-w-[220px] items-center gap-2 text-[13px] font-semibold tracking-[-0.02em] text-zinc-100"
-                    aria-haspopup="menu"
-                    aria-expanded={showImageCardModelMenu}
-                  >
-                    <Sparkles size={15} className="shrink-0 text-zinc-100" />
-                    <span className="truncate">{selectedImageCardModel.label}</span>
-                    <ChevronDown size={14} className={`shrink-0 text-zinc-500 transition-transform ${showImageCardModelMenu ? 'rotate-180' : ''}`} />
-                  </button>
-                </div>
-                <div className="relative flex items-center gap-5" ref={imageCardQualityMenuRef}>
-                  <button
-                    data-text-card-panel-control="true"
-                    type="button"
-                    onPointerDown={(e) => {
-                      e.stopPropagation();
-                    }}
-                    onClick={() => {
-                      onToggleImageCardQualityMenu();
-                    }}
-                    className="inline-flex items-center gap-2 text-[13px] font-semibold tracking-[-0.02em] text-zinc-100"
-                    aria-haspopup="menu"
-                    aria-expanded={showImageCardQualityMenu}
-                  >
-                    <span>
-                      {getImageCardQualitySummary({
-                        aspectRatio: selectedImageCardPanelAspectRatio,
-                        size: selectedImageCardPanelSize,
-                      })}
-                    </span>
-                    <ChevronDown size={14} className={`text-zinc-500 transition-transform ${showImageCardQualityMenu ? 'rotate-180' : ''}`} />
-                  </button>
-                  <div className="relative" ref={imageCardCountMenuRef}>
-                  <button
-                    data-text-card-panel-control="true"
-                    type="button"
-                    onPointerDown={(e) => {
-                      e.stopPropagation();
-                    }}
-                    onClick={() => {
-                      onToggleImageCardCountMenu();
-                    }}
-                    className="inline-flex items-center gap-2 text-[13px] font-semibold tracking-[-0.02em] text-zinc-100"
-                    aria-haspopup="menu"
-                    aria-expanded={showImageCardCountMenu}
-                  >
-                    <span>{IMAGE_CARD_COUNT_OPTIONS.find((item) => item.id === selectedImageCardPanelCount)?.label || `X${selectedImageCardPanelCount}`}</span>
-                    <ChevronDown size={14} className={`text-zinc-500 transition-transform ${showImageCardCountMenu ? 'rotate-180' : ''}`} />
-                  </button>
-                  </div>
-                </div>
-              </div>
-              <div className="flex items-center gap-2.5">
-                <button
-                  data-text-card-panel-control="true"
-                  type="button"
-                  onPointerDown={(e) => {
-                    e.stopPropagation();
-                  }}
-                  onClick={() => {
-                    if (isSelectedImageCardGenerating) {
-                      onSelectedImageCardPanelCancel();
-                    } else {
-                      onSelectedImageCardPanelSubmit();
-                    }
-                  }}
-                  disabled={!isSelectedImageCardGenerating && !selectedImageCardPanelCanSubmit}
-                  className="inline-flex h-11 w-11 items-center justify-center rounded-full border border-black/5 bg-[#f5f7fb] text-black shadow-[0_10px_24px_rgba(0,0,0,0.22),inset_0_1px_0_rgba(255,255,255,0.7)] transition-colors hover:bg-white disabled:cursor-not-allowed disabled:opacity-50"
-                  aria-label={isSelectedImageCardGenerating ? '终止生成' : '开始生图'}
-                  title={isSelectedImageCardGenerating ? '终止生成' : '开始生图'}
-                >
-                  {isSelectedImageCardGenerating ? (
-                    <svg className="animate-spin" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                      <circle cx="12" cy="12" r="9" opacity="0.25" />
-                      <path d="M21 12a9 9 0 0 1-9 9" />
-                    </svg>
-                  ) : (
-                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M12 18V6" />
-                      <path d="m7 11 5-5 5 5" />
-                    </svg>
-                  )}
-                </button>
-              </div>
-            </div>
-          </div>
-          {showImageCardQualityMenu && selectedImageCardQualityPopoverOffset && (
-            <div
-              ref={imageCardQualityPopoverRef}
-              data-text-card-panel-control="true"
-              className="pointer-events-auto absolute overflow-hidden rounded-[22px] border border-white/[0.1] bg-[rgba(24,24,27,0.985)] p-3 shadow-[0_24px_64px_rgba(0,0,0,0.42)] backdrop-blur-xl"
-              style={{
-                left: selectedImageCardPanelLeft + selectedImageCardQualityPopoverOffset.left * viewport.scale,
-                top: selectedImageCardPanelTop + selectedImageCardQualityPopoverOffset.top * viewport.scale,
-                width: 292,
-                transform: `scale(${viewport.scale})`,
-                transformOrigin: 'top left',
-              }}
-              onPointerDown={(e) => {
-                e.stopPropagation();
-              }}
-            >
-              <div className="rounded-[18px] border border-white/[0.06] bg-[rgba(255,255,255,0.025)] p-3">
-                <div className="mb-2.5 flex items-center justify-between">
-                  <span className="text-[11px] font-medium tracking-[0.04em] text-zinc-500">比例</span>
-                  <span className="text-[11px] font-medium text-zinc-400">
-                    {getImageCardAspectRatioShortLabel(selectedImageCardPanelAspectRatio)}
-                  </span>
-                </div>
-                <div className="grid grid-cols-4 gap-1.5">
-                  {ASPECT_RATIOS.filter((option) => option.id !== 'auto').map((option) => {
-                    const isSelected = option.id === selectedImageCardPanelAspectRatio;
-                    const previewSize = getImageCardAspectRatioPreviewSize(option.id);
-                    return (
-                      <button
-                        key={option.id}
-                        type="button"
-                        onClick={() => {
-                          onSelectImageCardAspectRatio(option.id);
-                        }}
-                        className={`flex min-h-[58px] flex-col items-center justify-center gap-1.5 rounded-[14px] border px-1.5 py-2 text-center transition-colors ${
-                          isSelected
-                            ? 'border-white/[0.14] bg-white/[0.09] text-zinc-50 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]'
-                            : 'border-white/[0.06] bg-[rgba(255,255,255,0.02)] text-zinc-300 hover:border-white/[0.12] hover:bg-white/[0.05]'
-                        }`}
-                      >
-                        <span className="flex h-7 w-7 items-center justify-center rounded-[10px] border border-white/[0.08] bg-[rgba(7,8,10,0.28)]">
-                          <span
-                            className={`rounded-[6px] border ${
-                              isSelected ? 'border-zinc-100/80 bg-zinc-100/10' : 'border-zinc-400/60 bg-white/[0.03]'
-                            }`}
-                            style={{
-                              width: `${previewSize.width}px`,
-                              height: `${previewSize.height}px`,
-                            }}
-                          />
-                        </span>
-                        <span className="text-[11px] font-semibold tracking-[-0.02em]">
-                          {option.id}
-                        </span>
-                      </button>
-                    );
-                  })}
-                </div>
-                <div className="mt-3.5 border-t border-white/[0.06] pt-3.5">
-                  <div className="mb-2.5 flex items-center justify-between">
-                    <span className="text-[11px] font-medium tracking-[0.04em] text-zinc-500">清晰度</span>
-                    <span className="text-[11px] font-medium text-zinc-400">
-                      {IMAGE_CARD_SIZE_OPTIONS.find((item) => item.id === selectedImageCardPanelSize)?.label || selectedImageCardPanelSize}
-                    </span>
-                  </div>
-                  <div className="inline-flex w-full items-center rounded-[14px] border border-white/[0.06] bg-[rgba(255,255,255,0.03)] p-1">
-                    {IMAGE_CARD_SIZE_OPTIONS.map((option) => {
-                      const isSelected = option.id === selectedImageCardPanelSize;
-                      return (
-                        <button
-                          key={option.id}
-                          type="button"
-                          onClick={() => {
-                            onSelectImageCardSize(option.id);
-                          }}
-                          className={`flex-1 rounded-[11px] px-2.5 py-1.5 text-[12px] font-semibold tracking-[-0.02em] transition-colors ${
-                            isSelected
-                              ? 'bg-[#f5f7fb] text-black shadow-[0_8px_20px_rgba(0,0,0,0.18)]'
-                              : 'text-zinc-300 hover:bg-white/[0.05]'
-                          }`}
-                        >
-                          {option.label}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
-          {showImageCardCountMenu && selectedImageCardCountPopoverOffset && (
-            <div
-              ref={imageCardCountPopoverRef}
-              data-text-card-panel-control="true"
-              className="pointer-events-auto absolute min-w-[124px] overflow-hidden rounded-[18px] border border-white/[0.1] bg-[rgba(24,24,27,0.985)] p-1.5 shadow-[0_24px_64px_rgba(0,0,0,0.42)] backdrop-blur-xl"
-              style={{
-                left: selectedImageCardPanelLeft + selectedImageCardCountPopoverOffset.left * viewport.scale,
-                top: selectedImageCardPanelTop + selectedImageCardCountPopoverOffset.top * viewport.scale - 8,
-                transform: `translateY(-100%) scale(${viewport.scale})`,
-                transformOrigin: 'top left',
-              }}
-              onPointerDown={(e) => {
-                e.stopPropagation();
-              }}
-            >
-              {IMAGE_CARD_COUNT_OPTIONS.map((option) => {
-                const isSelected = option.id === selectedImageCardPanelCount;
-                return (
-                  <button
-                    key={option.id}
-                    type="button"
-                    onClick={() => {
-                      onSelectImageCardCount(option.id);
-                    }}
-                    className={`flex w-full items-center justify-between rounded-[14px] px-3 py-2.5 text-left transition-colors ${
-                      isSelected ? 'bg-white/[0.08] text-zinc-50' : 'text-zinc-300 hover:bg-white/[0.05]'
-                    }`}
-                  >
-                    <span className="text-[13px] font-semibold tracking-[-0.02em]">{option.label}</span>
-                    {isSelected && <Check size={15} className="ml-3 shrink-0 text-zinc-100" />}
-                  </button>
-                );
-              })}
-            </div>
-          )}
-        </div>
-      )}
+      {portaledSelectedTextCardPanel}
+      {portaledSelectedImageCardPanel}
       <CanvasNodesLayer
         items={items}
         connections={connections}
@@ -3193,25 +3166,15 @@ export default function AIWorkspace() {
     const item = itemById[selectedId];
     return isImageAssetItem(item) ? item : null;
   }, [itemById, selectedId, selectedIds]);
-  const selectedImageToolbarTarget = React.useMemo(() => {
-    if (selectedImageAssetItem?.src) {
-      return {
-        itemId: selectedImageAssetItem.id,
-        src: selectedImageAssetItem.src,
-        kind: 'asset' as const,
-      };
-    }
-
-    if (selectedImageCardPanelItem?.src) {
-      return {
-        itemId: selectedImageCardPanelItem.id,
-        src: selectedImageCardPanelItem.src,
-        kind: 'card' as const,
-      };
-    }
-
-    return null;
-  }, [selectedImageAssetItem, selectedImageCardPanelItem]);
+  const selectedImageToolbarTarget = React.useMemo<{ itemId: string; src: string; kind: 'asset' | 'card' } | null>(
+    () =>
+      getSelectedImageToolbarSource({
+        selectedId,
+        selectedIds,
+        itemById,
+      }) as { itemId: string; src: string; kind: 'asset' | 'card' } | null,
+    [itemById, selectedId, selectedIds]
+  );
   const selectedTextCardPanelLinkedImagePreviews = React.useMemo(
     () =>
       getDirectImagePreviewsForTextCard({
@@ -3890,6 +3853,66 @@ export default function AIWorkspace() {
     [getSpawnPosition]
   );
 
+  const addBackgroundRemovedImageToCanvas = useCallback(
+    async ({
+      src,
+      naturalWidth,
+      naturalHeight,
+      sourceItemId,
+    }: {
+      src: string;
+      naturalWidth?: number;
+      naturalHeight?: number;
+      sourceItemId: string;
+    }) => {
+      const resolvedMeta =
+        Number.isFinite(naturalWidth) &&
+        naturalWidth > 0 &&
+        Number.isFinite(naturalHeight) &&
+        naturalHeight > 0
+          ? {
+              naturalWidth,
+              naturalHeight,
+            }
+          : await new Promise<{ naturalWidth: number; naturalHeight: number }>((resolve, reject) => {
+              const img = new Image();
+              img.onload = () => {
+                resolve({
+                  naturalWidth: img.width,
+                  naturalHeight: img.height,
+                });
+              };
+              img.onerror = () => reject(new Error('图片加载失败'));
+              img.src = src;
+            });
+
+      setItems((prev) => {
+        const displaySize = getConstrainedImageDisplaySize(
+          resolvedMeta.naturalWidth,
+          resolvedMeta.naturalHeight
+        );
+        const sourceItem = prev.find((item) => item.id === sourceItemId) ?? null;
+        const spawnPosition = sourceItem
+          ? getImageToolResultSpawnPosition({
+              sourceItem,
+              nextSize: displaySize,
+            })
+          : getSpawnPosition(displaySize);
+        const newItem = createImageCanvasItem({
+          id: `cutout-image-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+          src,
+          naturalWidth: resolvedMeta.naturalWidth,
+          naturalHeight: resolvedMeta.naturalHeight,
+          x: spawnPosition.x,
+          y: spawnPosition.y,
+        });
+
+        return [...prev, newItem];
+      });
+    },
+    [getSpawnPosition]
+  );
+
   const replaceImageAssetItemFromFile = useCallback(
     async (itemId: string, file: File) => {
       const base64Data = await readAsDataURL(file);
@@ -4423,6 +4446,21 @@ export default function AIWorkspace() {
     x: point.x * viewport.scale + viewport.x,
     y: point.y * viewport.scale + viewport.y,
   });
+
+  const selectedImageToolbarItem = selectedImageToolbarTarget
+    ? itemById[selectedImageToolbarTarget.itemId] ?? null
+    : null;
+  const selectedImageToolbarBounds = selectedImageToolbarItem
+    ? getItemVisualBounds(selectedImageToolbarItem)
+    : null;
+  const selectedImageToolbarAnchor = resolveImageToolbarViewportAnchor({
+    itemBounds: selectedImageToolbarBounds,
+    toCanvasScreenPoint,
+    canvasRect: canvasRef.current?.getBoundingClientRect(),
+  });
+  const selectedImageToolbarTop = selectedImageToolbarAnchor
+    ? selectedImageToolbarAnchor.y
+    : null;
 
   const buildConnectionPath = (from: { x: number; y: number }, to: { x: number; y: number }) => {
     const dx = Math.max(64, Math.abs(to.x - from.x) * 0.42);
@@ -5120,6 +5158,7 @@ export default function AIWorkspace() {
       draggingItemIdsRef.current = itemIds;
       setSelectedId(primaryId);
       setSelectedIds(itemIds);
+      setItems((prev) => moveCanvasItemsToFront(prev, itemIds));
       dragStart.current = { x: clientX, y: clientY };
       dragItemStartPositionsRef.current = Object.fromEntries(
         itemsRef.current
@@ -5291,6 +5330,7 @@ export default function AIWorkspace() {
         setSelectedIds((prev) => {
           const next = hitIds.reduce((ids, id) => toggleSelectionId(ids, id), prev);
           setSelectedId(getPrimarySelectedId(next));
+          setItems((prev) => moveCanvasItemsToFront(prev, next));
           return next;
         });
         setSelectedConnectionIds((prev) =>
@@ -5300,6 +5340,7 @@ export default function AIWorkspace() {
         setSelectedIds(hitIds);
         setSelectedId(getPrimarySelectedId(hitIds));
         setSelectedConnectionIds(hitConnectionIds);
+        setItems((prev) => moveCanvasItemsToFront(prev, hitIds));
       }
     }
 
@@ -5440,6 +5481,7 @@ export default function AIWorkspace() {
       setSelectedIds((prev) => {
         const next = toggleSelectionId(prev, itemId);
         setSelectedId(getPrimarySelectedId(next));
+        setItems((prev) => moveCanvasItemsToFront(prev, next));
         return next;
       });
       return;
@@ -5448,6 +5490,7 @@ export default function AIWorkspace() {
     setSelectedConnectionIds([]);
     setSelectedId(itemId);
     setSelectedIds([itemId]);
+    setItems((prev) => moveCanvasItemsToFront(prev, [itemId]));
   }, []);
 
   const handleItemPointerDown = useCallback(
@@ -5476,6 +5519,7 @@ export default function AIWorkspace() {
       e.stopPropagation();
       setSelectedId(item.id);
       setSelectedIds([item.id]);
+      setItems((prev) => moveCanvasItemsToFront(prev, [item.id]));
       setIsCornerResizing(true);
       cornerResizeStart.current = {
         mouseX: e.clientX,
@@ -7244,18 +7288,63 @@ export default function AIWorkspace() {
     }
   };
 
-  const handleImageToolbarAction = useCallback((actionId: (typeof IMAGE_NODE_TOOLBAR_ACTIONS)[number]['id']) => {
-    if (actionId !== 'cutout') return;
-
-    setImageToolbarNotice('抠图能力下一步接入');
+  const showImageToolbarNoticeWithTimeout = useCallback((message: string, autoHideMs?: number) => {
+    setImageToolbarNotice(message);
     if (imageToolbarNoticeTimeoutRef.current) {
       clearTimeout(imageToolbarNoticeTimeoutRef.current);
-    }
-    imageToolbarNoticeTimeoutRef.current = setTimeout(() => {
-      setImageToolbarNotice(null);
       imageToolbarNoticeTimeoutRef.current = null;
-    }, 2200);
+    }
+
+    if (Number.isFinite(autoHideMs) && autoHideMs && autoHideMs > 0) {
+      imageToolbarNoticeTimeoutRef.current = setTimeout(() => {
+        setImageToolbarNotice(null);
+        imageToolbarNoticeTimeoutRef.current = null;
+      }, autoHideMs);
+    }
   }, []);
+
+  const handleImageToolbarAction = useCallback(async (actionId: (typeof IMAGE_NODE_TOOLBAR_ACTIONS)[number]['id']) => {
+    if (actionId !== 'cutout' || !selectedImageToolbarTarget?.src) return;
+
+    showImageToolbarNoticeWithTimeout('抠图中…');
+
+    try {
+      const response = await fetch('/api/image-tools/remove-background', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          imageUrl: selectedImageToolbarTarget.src,
+          sourceItemId: selectedImageToolbarTarget.itemId,
+        }),
+      });
+
+      const data = await response.json().catch(() => null);
+      if (!response.ok || !data || typeof data.url !== 'string' || data.url.length === 0) {
+        throw new Error(
+          (data && typeof data.error === 'string' && data.error) ||
+            `抠图失败: ${response.status}`
+        );
+      }
+
+      await addBackgroundRemovedImageToCanvas({
+        src: data.url,
+        naturalWidth:
+          Number.isFinite(data.naturalWidth) && data.naturalWidth > 0 ? data.naturalWidth : undefined,
+        naturalHeight:
+          Number.isFinite(data.naturalHeight) && data.naturalHeight > 0 ? data.naturalHeight : undefined,
+        sourceItemId: selectedImageToolbarTarget.itemId,
+      });
+
+      showImageToolbarNoticeWithTimeout('抠图完成', 2200);
+    } catch (error) {
+      showImageToolbarNoticeWithTimeout(
+        error instanceof Error && error.message ? error.message : '抠图失败',
+        2800
+      );
+    }
+  }, [addBackgroundRemovedImageToCanvas, selectedImageToolbarTarget, showImageToolbarNoticeWithTimeout]);
 
   const handleLeftRailItemClick = useCallback((itemId: (typeof LEFT_RAIL_ITEMS)[number]['id']) => {
     if (itemId === 'history') {
@@ -8109,12 +8198,64 @@ export default function AIWorkspace() {
         onPanelReferenceDragOver={handlePanelReferenceDragOver}
         onPanelReferenceDrop={handlePanelReferenceDrop}
         onPanelReferenceDragEnd={handlePanelReferenceDragEnd}
-        selectedImageToolbarTarget={selectedImageToolbarTarget}
-        onImageToolbarAction={handleImageToolbarAction}
       />
 
+      {typeof document !== 'undefined' &&
+        selectedImageToolbarTarget &&
+        selectedImageToolbarAnchor &&
+        selectedImageToolbarTop !== null &&
+        createPortal(
+          <div className="pointer-events-none fixed inset-0 z-[114]">
+            <div
+              data-image-node-toolbar="true"
+              className="pointer-events-auto fixed flex items-center gap-1 rounded-full border border-white/[0.1] bg-[rgba(14,15,18,0.92)] px-2 py-1.5 shadow-[0_24px_56px_rgba(0,0,0,0.42),inset_0_1px_0_rgba(255,255,255,0.05)] backdrop-blur-xl"
+              style={{
+                left: selectedImageToolbarAnchor.x,
+                top: selectedImageToolbarTop,
+                transform: 'translate(-50%, calc(-100% - 12px))',
+              }}
+              onPointerDown={(e) => {
+                e.stopPropagation();
+              }}
+            >
+              {IMAGE_NODE_TOOLBAR_ACTIONS.map((action) => {
+                const Icon = action.icon;
+
+                return (
+                  <button
+                    key={action.id}
+                    data-image-node-toolbar-action={action.id}
+                    type="button"
+                    disabled={!action.enabled}
+                    onPointerDown={(e) => {
+                      e.stopPropagation();
+                    }}
+                    onClick={() => {
+                      if (!action.enabled) return;
+                      handleImageToolbarAction(action.id);
+                    }}
+                    className={`inline-flex h-8 items-center gap-1.5 rounded-full px-3 text-[12px] font-medium tracking-[-0.02em] transition-all ${
+                      action.enabled
+                        ? 'text-zinc-100 hover:bg-white/[0.08] hover:text-white'
+                        : 'cursor-default text-zinc-500/85'
+                    }`}
+                    title={action.enabled ? action.label : `${action.label} 即将支持`}
+                  >
+                    <Icon size={13} strokeWidth={2} className="shrink-0" />
+                    <span className="whitespace-nowrap">{action.label}</span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>,
+          document.body
+        )}
+
       {imageToolbarNotice && (
-        <div className="pointer-events-none fixed inset-x-0 top-4 z-[220] flex justify-center px-4">
+        <div
+          className="pointer-events-none fixed inset-x-0 top-4 flex justify-center px-4"
+          style={{ zIndex: GLOBAL_NOTICE_Z }}
+        >
           <div className="rounded-full border border-white/[0.1] bg-[rgba(14,15,18,0.92)] px-4 py-2 text-[12px] font-medium tracking-[-0.02em] text-zinc-100 shadow-[0_18px_42px_rgba(0,0,0,0.34)] backdrop-blur-xl">
             {imageToolbarNotice}
           </div>
@@ -8146,20 +8287,28 @@ export default function AIWorkspace() {
       </div>
 
       {/* Right Chat Panel */}
-      {sidebarCollapsed ? (
-        <div className="absolute right-4 top-4 z-[140] isolate flex h-9 w-9 items-center justify-center rounded-xl border border-white/10 bg-[rgba(16,18,22,0.92)] shadow-[0_18px_40px_rgba(0,0,0,0.32)] transition-all duration-300">
-          <button 
-            className="p-1 text-zinc-200 transition-colors hover:text-white"
-            onClick={() => setSidebarCollapsed(false)}
-            title="展开对话"
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <polyline points="15 18 9 12 15 6" />
-            </svg>
-          </button>
-        </div>
-      ) : (
-        <div className="absolute inset-y-4 left-4 right-4 z-[140] isolate flex w-auto flex-col overflow-hidden rounded-[28px] border border-white/10 bg-[rgba(12,14,18,0.9)] shadow-[0_28px_80px_rgba(0,0,0,0.42)] backdrop-blur-xl transition-all duration-300 sm:left-auto sm:w-[480px]">
+      {typeof document !== 'undefined' &&
+        createPortal(
+          sidebarCollapsed ? (
+            <div
+              className="fixed right-4 top-4 isolate flex h-9 w-9 items-center justify-center rounded-xl border border-white/10 bg-[rgba(16,18,22,0.92)] shadow-[0_18px_40px_rgba(0,0,0,0.32)] transition-all duration-300"
+              style={{ zIndex: CHAT_PANEL_Z }}
+            >
+              <button 
+                className="p-1 text-zinc-200 transition-colors hover:text-white"
+                onClick={() => setSidebarCollapsed(false)}
+                title="展开对话"
+              >
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <polyline points="15 18 9 12 15 6" />
+                </svg>
+              </button>
+            </div>
+          ) : (
+            <div
+              className="fixed inset-y-4 left-4 right-4 isolate flex w-auto flex-col overflow-hidden rounded-[28px] border border-white/10 bg-[rgba(12,14,18,0.9)] shadow-[0_28px_80px_rgba(0,0,0,0.42)] backdrop-blur-xl transition-all duration-300 sm:left-auto sm:w-[480px]"
+              style={{ zIndex: CHAT_PANEL_Z }}
+            >
           {/* Header */}
           <div className="flex flex-shrink-0 items-center justify-between border-b border-[#252b34] px-6 py-4">
             <div className="flex items-center gap-3">
@@ -8661,8 +8810,10 @@ export default function AIWorkspace() {
               </div>
             </div>
           </div>
-        </div>
-      )}
+            </div>
+          ),
+          document.body
+        )}
       <style jsx global>{`
         .panel-scrollbar {
           scrollbar-width: thin;
