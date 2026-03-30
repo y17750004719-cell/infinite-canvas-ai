@@ -64,6 +64,48 @@ function getErrorDiagnostics(error: unknown) {
 }
 
 async function saveImageToLocal(imageUrl: string): Promise<{ filename: string; localUrl: string }> {
+  if (imageUrl.startsWith("data:image/")) {
+    const match = imageUrl.match(/^data:(image\/[a-z0-9.+-]+);base64,(.+)$/i);
+    if (!match) {
+      throw new Error("Invalid generated image data URL");
+    }
+
+    const mimeType = match[1].toLowerCase();
+    const base64 = match[2];
+    const buffer = Buffer.from(base64, "base64");
+    if (buffer.length === 0) {
+      throw new Error("Generated image payload is empty");
+    }
+    if (buffer.length > MAX_SAVED_IMAGE_BYTES) {
+      throw new Error("Generated image is too large to store");
+    }
+
+    const extension = mimeType.includes("jpeg")
+      ? "jpg"
+      : mimeType.includes("webp")
+        ? "webp"
+        : mimeType.includes("gif")
+          ? "gif"
+          : "png";
+    const filename = createStoredImageName(extension);
+    const filepath = path.join(GENERATED_UPLOADS_DIR, filename);
+
+    await mkdir(GENERATED_UPLOADS_DIR, { recursive: true });
+    await writeFile(filepath, buffer);
+
+    debugLog("Stored generated image locally", {
+      status: 200,
+      sizeBytes: buffer.length,
+      fileName: filename,
+      source: "data-url",
+    });
+
+    return {
+      filename,
+      localUrl: `/uploads/generated/${filename}`,
+    };
+  }
+
   const parsedUrl = new URL(imageUrl);
   if (!["http:", "https:"].includes(parsedUrl.protocol)) {
     throw new Error("Unsupported image URL protocol");
@@ -525,6 +567,9 @@ export async function POST(request: NextRequest) {
 
     if (resolved.intent === "image" && hasReferenceImages) {
       const resolvedImageModel = resolveImageCardModel(model, IMAGE_MODEL);
+      const imageSize = resolveImageSize(size, resolvedImageModel);
+      const requestedAspectRatio = normalizeAspectRatio(aspect_ratio);
+      const resolvedAspectRatio = requestedAspectRatio || aspectRatioFromSize(imageSize);
       const normalizedEditImages = reference_images
         .map((img) => normalizeChatReferenceImage(img))
         .filter((img): img is string => !!img);
@@ -541,19 +586,21 @@ export async function POST(request: NextRequest) {
         ? reference_labels
         : normalizedEditImages.map((_, index) => `image${index + 1}`);
 
-      debugLog("Routing request to image edit flow", {
+      debugLog("Routing request to image generation flow with references", {
         reqId,
-        editMode: "image_edit",
-        requestedAspectRatio: normalizeAspectRatio(aspect_ratio) || null,
+        generationMode: "image_generate_with_references",
+        requestedAspectRatio: requestedAspectRatio || null,
         referenceCount: normalizedEditImages.length,
         model: resolvedImageModel,
+        imageSize,
       });
-      debugLog("Dispatching image edit supplier task", {
+      debugLog("Dispatching image supplier task with references", {
         reqId,
         n: n || 1,
         referenceCount: normalizedEditImages.length,
         resolvedImageModel,
-        resolvedAspectRatio: normalizeAspectRatio(aspect_ratio) || null,
+        resolvedAspectRatio: resolvedAspectRatio,
+        imageSize,
       });
 
       let imageResult;
@@ -562,14 +609,15 @@ export async function POST(request: NextRequest) {
           model: resolvedImageModel,
           prompt: resolved.prompt,
           images: normalizedEditImages,
-          aspect_ratio: normalizeAspectRatio(aspect_ratio) || undefined,
+          size: imageSize,
+          aspect_ratio: resolvedAspectRatio,
           n: n || 1,
           executionMode: resolvedExecutionMode,
           signal: request.signal,
         });
       } catch (error) {
         const message = error instanceof Error ? error.message : "Unknown edits error";
-        debugLog("Image edit supplier task failed", {
+        debugLog("Image supplier task with references failed", {
           reqId,
           ...getErrorDiagnostics(error),
         });
@@ -579,9 +627,9 @@ export async function POST(request: NextRequest) {
           normalizedMessage.includes("size") ||
           normalizedMessage.includes("ratio unsupported")
         ) {
-          throw new ImageGenerationError("Image task failed: edits ratio unsupported (endpoint=edits)", error instanceof ImageGenerationError ? error.statusCode : 502);
+          throw new ImageGenerationError("Image task failed: ratio unsupported", error instanceof ImageGenerationError ? error.statusCode : 502);
         }
-        throw new ImageGenerationError(`Image task failed: ${message} (endpoint=edits)`, error instanceof ImageGenerationError ? error.statusCode : 502);
+        throw new ImageGenerationError(`Image task failed: ${message}`, error instanceof ImageGenerationError ? error.statusCode : 502);
       }
 
       if (!imageResult.data || imageResult.data.length === 0) {
@@ -589,7 +637,7 @@ export async function POST(request: NextRequest) {
         return NextResponse.json({ status: "error", error: "Edits failed: no image data returned" }, { status: 500 });
       }
 
-      debugLog("Image edit supplier returned outputs", {
+      debugLog("Image supplier returned outputs for reference-based generation", {
         reqId,
         dataCount: imageResult.data.length,
         urlPresencePreview: imageResult.data.slice(0, 2).map((entry) => typeof entry?.url === "string" && entry.url.length > 0),
@@ -597,7 +645,7 @@ export async function POST(request: NextRequest) {
 
       const savedImages = await saveImagesToLocal(imageResult.data.map((entry) => entry.url));
       const primarySavedImage = savedImages[0];
-      debugLog("Saved image edit outputs locally", {
+      debugLog("Saved reference-based generation outputs locally", {
         reqId,
         savedCount: savedImages.length,
         savedFiles: savedImages.map((image) => image.filename),
@@ -634,7 +682,9 @@ export async function POST(request: NextRequest) {
       });
       let actualSize = imageSize;
       let imageResult;
-      const fallbackSizes = resolveImageGenerationFallbackSizes(imageSize);
+      const fallbackSizes = resolvedImageModel === IMAGE_MODEL
+        ? [imageSize]
+        : resolveImageGenerationFallbackSizes(imageSize);
       debugLog("Dispatching image generate supplier task", {
         reqId,
         n: n || 1,

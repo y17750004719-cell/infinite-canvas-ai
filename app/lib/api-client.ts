@@ -9,6 +9,10 @@ const API_KEY =
 const LOG_LEVEL = (process.env.LOG_LEVEL || "basic").toLowerCase();
 const LOG_ENABLED = LOG_LEVEL !== "off";
 const LOG_DEBUG = LOG_LEVEL === "debug";
+const SUPPORTED_GEMINI_OFFICIAL_IMAGE_MODELS = new Set([
+  "gemini-3.1-flash-image-preview",
+  "gemini-3-pro-image-preview",
+]);
 
 function nowIso(): string {
   return new Date().toISOString();
@@ -226,6 +230,38 @@ function normalizeAspectRatio(input?: string): string {
   return SUPPLIER_ALLOWED_ASPECT_RATIOS.has(raw) ? raw : "";
 }
 
+function getGeminiOfficialApiBaseUrl(): string {
+  const trimmed = API_URL.replace(/\/+$/, "");
+  if (trimmed.endsWith("/v1")) {
+    return trimmed.slice(0, -3);
+  }
+  return trimmed;
+}
+
+function isGeminiOfficialImageModel(model?: string): boolean {
+  return typeof model === "string" && SUPPORTED_GEMINI_OFFICIAL_IMAGE_MODELS.has(model.trim());
+}
+
+function resolveGeminiOfficialImageSize(size?: string): "1K" | "2K" | "4K" {
+  const raw = typeof size === "string" ? size.trim() : "";
+  const match = raw.match(/^(\d+)x(\d+)$/i);
+  if (!match) {
+    return "1K";
+  }
+
+  const width = Number(match[1]);
+  const height = Number(match[2]);
+  const longestEdge = Math.max(width, height);
+
+  if (longestEdge >= 3500) {
+    return "4K";
+  }
+  if (longestEdge >= 1800) {
+    return "2K";
+  }
+  return "1K";
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -428,6 +464,197 @@ async function referenceToBlob(input: string, signal?: AbortSignal): Promise<{ b
       ...getErrorDiagnostics(error),
     });
     throw error;
+  }
+}
+
+async function blobToBase64(blob: Blob): Promise<string> {
+  const arrayBuffer = await blob.arrayBuffer();
+  return Buffer.from(arrayBuffer).toString("base64");
+}
+
+async function referenceToInlineData(
+  input: string,
+  signal?: AbortSignal
+): Promise<{ inlineData: { mimeType: string; data: string } }> {
+  const { blob, mimeType } = await referenceToBlob(input, signal);
+  return {
+    inlineData: {
+      mimeType,
+      data: await blobToBase64(blob),
+    },
+  };
+}
+
+function extractGeminiOfficialImageOutputs(payload: unknown): Array<{ url: string; revised_prompt?: string }> {
+  const outputs: Array<{ url: string; revised_prompt?: string }> = [];
+
+  const visit = (value: unknown, depth = 0) => {
+    if (depth > 8 || value == null) return;
+
+    if (Array.isArray(value)) {
+      value.forEach((entry) => visit(entry, depth + 1));
+      return;
+    }
+
+    if (typeof value !== "object") {
+      return;
+    }
+
+    const record = value as Record<string, unknown>;
+    const inlineData =
+      record.inlineData && typeof record.inlineData === "object"
+        ? (record.inlineData as Record<string, unknown>)
+        : null;
+
+    if (inlineData) {
+      const mimeType = typeof inlineData.mimeType === "string" ? inlineData.mimeType : "image/png";
+      const data = typeof inlineData.data === "string" ? inlineData.data : "";
+      if (mimeType.startsWith("image/") && data) {
+        outputs.push({
+          url: `data:${mimeType};base64,${data}`,
+        });
+      }
+    }
+
+    Object.values(record).forEach((entry) => visit(entry, depth + 1));
+  };
+
+  visit(payload);
+  return outputs;
+}
+
+async function generateGeminiOfficialImage(request: UnifiedImageRequest): Promise<GenerationResponse> {
+  if (!API_KEY) {
+    throw new ImageGenerationError("Please set COMFLY_API_KEY or GPT_BEST_API_KEY in .env.local");
+  }
+
+  const model = typeof request.model === "string" ? request.model.trim() : "";
+  if (!isGeminiOfficialImageModel(model)) {
+    throw new ImageGenerationError(`Gemini official image request failed: model "${request.model}" is not supported`, 400);
+  }
+
+  const endpoint = `${getGeminiOfficialApiBaseUrl()}/v1beta/models/${model}:generateContent`;
+  const aspectRatio = normalizeAspectRatio(request.aspect_ratio) || toAspectRatio(request.size);
+  const imageSize = resolveGeminiOfficialImageSize(request.size);
+  const prompt = typeof request.prompt === "string" ? request.prompt : "";
+  const referenceImages = Array.isArray(request.images) ? request.images.filter(Boolean) : [];
+  const contentParts: Array<
+    | { inlineData: { mimeType: string; data: string } }
+    | { text: string }
+  > = await Promise.all(referenceImages.map((image) => referenceToInlineData(image, request.signal)));
+  contentParts.push({ text: prompt });
+
+  const requestBody = {
+    contents: [
+      {
+        role: "user",
+        parts: contentParts,
+      },
+    ],
+    generationConfig: {
+      responseModalities: ["IMAGE"],
+      imageConfig: {
+        aspectRatio,
+        imageSize,
+      },
+    },
+  };
+
+  basicLog("[SUPPLIER][PREP]", {
+    endpointBase: getGeminiOfficialApiBaseUrl(),
+    endpoint: `/v1beta/models/${model}:generateContent`,
+    model: request.model,
+    imageSize,
+    aspectRatio,
+    n: request.n || 1,
+    referenceCount: referenceImages.length,
+    executionMode: request.executionMode === "async" ? "async" : "sync",
+    apiKeyMasked: maskToken(API_KEY),
+  });
+  debugLog("[SUPPLIER][PREP_PROMPT]", {
+    promptPreview: prompt.slice(0, 200),
+  });
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 120000);
+  const onAbort = () => controller.abort();
+  request.signal?.addEventListener("abort", onAbort);
+
+  try {
+    const requestStartedAt = Date.now();
+    basicLog("[SUPPLIER][REQ]", {
+      method: "POST",
+      endpoint,
+    });
+
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${API_KEY}`,
+      },
+      body: JSON.stringify(requestBody),
+      signal: controller.signal,
+    });
+
+    basicLog("[SUPPLIER][RES]", {
+      method: "POST",
+      endpoint,
+      status: response.status,
+      statusText: response.statusText,
+      durationMs: Date.now() - requestStartedAt,
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new ImageGenerationError(`Gemini official image request failed: ${errorText || response.statusText}`, response.status);
+    }
+
+    const payload = await response.json();
+    const outputs = extractGeminiOfficialImageOutputs(payload);
+
+    basicLog("[SUPPLIER][PARSE]", {
+      endpoint: `/v1beta/models/${request.model}:generateContent`,
+      executionMode: request.executionMode === "async" ? "async" : "sync",
+      imageCount: outputs.length,
+      imageSize,
+      aspectRatio,
+    });
+
+    if (outputs.length === 0) {
+      throw new ImageGenerationError("Gemini official image request failed: no image data returned", 502);
+    }
+
+    return {
+      created: Math.floor(Date.now() / 1000),
+      data: outputs,
+    };
+  } catch (error) {
+    basicLog("[SUPPLIER][ERR]", {
+      endpoint: `/v1beta/models/${request.model}:generateContent`,
+      model: request.model,
+      imageSize,
+      aspectRatio,
+      referenceCount: referenceImages.length,
+      ...getErrorDiagnostics(error),
+    });
+
+    if (error instanceof Error && error.name === "AbortError") {
+      if (request.signal?.aborted) {
+        throw new ImageGenerationError("Request cancelled by user", 499);
+      }
+      throw new ImageGenerationError("Gemini official image request timed out", 504);
+    }
+    if (error instanceof ImageGenerationError) {
+      throw error;
+    }
+    throw new ImageGenerationError(
+      error instanceof Error ? `Gemini official image request failed: ${error.message}` : "Gemini official image request failed",
+      502
+    );
+  } finally {
+    clearTimeout(timeoutId);
+    request.signal?.removeEventListener("abort", onAbort);
   }
 }
 
@@ -634,6 +861,13 @@ export async function editImage(request: EditRequest): Promise<GenerationRespons
 
 export async function runImageTask(request: UnifiedImageRequest): Promise<GenerationResponse> {
   const images = Array.isArray(request.images) ? request.images.filter(Boolean) : [];
+  if (isGeminiOfficialImageModel(request.model)) {
+    return generateGeminiOfficialImage({
+      ...request,
+      model: request.model,
+      images,
+    });
+  }
   if (images.length > 0) {
     return editImage({
       model: request.model,
@@ -1230,6 +1464,7 @@ export async function* chatStream(
 
 export const AVAILABLE_MODELS = [
   { id: "gemini-2.0-flash-exp", name: "Gemini 2.0 Flash", provider: "Google" },
+  { id: "gemini-3-pro-image-preview", name: "Gemini 3 Pro (Image)", provider: "Google" },
   { id: "gemini-3.1-flash-image-preview", name: "Gemini 3.1 Flash (Image)", provider: "Google" },
   { id: "gemini-3.1-flash", name: "Gemini 3.1 Flash", provider: "Google" },
   { id: "gemini-3.5-flash", name: "Gemini 3.5 Flash", provider: "Google" },
