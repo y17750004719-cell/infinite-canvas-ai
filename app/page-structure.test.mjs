@@ -72,6 +72,12 @@ test('generated image history merges persisted sessions with live session histor
   assert.equal(pageSource.includes('archiveEntries: archiveGeneratedImageHistoryEntries,'), true);
 });
 
+test('realtime generated image history entries normalize createdAt with the shared sort key helper', () => {
+  assert.equal(pageSource.includes('buildGeneratedImageHistorySortKey,'), true);
+  assert.equal(pageSource.includes('const normalizedCreatedAt = buildGeneratedImageHistorySortKey(timestamp, sequence);'), true);
+  assert.equal(pageSource.includes('createdAt: normalizedCreatedAt,'), true);
+});
+
 test('image generation materializes the current image-card outputs into history before clearing the card outputs', () => {
   assert.equal(pageSource.includes('buildGeneratedHistoryEntriesFromImageCard({'), true);
   assert.equal(pageSource.includes('appendMissingGeneratedHistoryEntries('), true);

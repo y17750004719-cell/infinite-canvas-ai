@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
+import { buildGeneratedImageHistorySortKey } from './generated-image-history.mjs';
 import * as workspaceSessionView from './workspace-session-view.mjs';
 import { createEmptySession } from './session-crud.mjs';
 import {
@@ -455,6 +456,55 @@ test('getGeneratedImageHistoryEntries prefers chat image file timestamps when me
     [
       '/uploads/generated/img-1700000000500-newest.png',
       '/uploads/generated/img-1700000000100-oldest.png',
+    ]
+  );
+});
+
+test('getGeneratedImageHistoryEntries keeps newer explicit session history entries above older chat fallback items', () => {
+  const result = getGeneratedImageHistoryEntries({
+    sessions: [
+      {
+        id: 'session-same-scale',
+        name: '同量级排序',
+        createdAt: 1700000000000,
+        updatedAt: 1700000000400,
+        generatedImageHistory: [
+          {
+            id: 'history-image-new',
+            src: '/uploads/generated/img-1700000000500-image.png',
+            createdAt: buildGeneratedImageHistorySortKey(1700000000500),
+            source: 'image-card',
+            sourceItemId: 'image-card-1',
+          },
+        ],
+        items: [],
+        connections: [],
+        messages: [],
+        topics: [
+          {
+            id: 'topic-old-chat',
+            title: 'Old chat',
+            createdAt: 1700000000000,
+            updatedAt: 1700000000200,
+            messages: [
+              {
+                id: 'msg-1700000000200-chat',
+                role: 'assistant',
+                content: '',
+                imageUrl: '/uploads/generated/img-1700000000200-chat.png',
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  });
+
+  assert.deepEqual(
+    result.map((entry) => ({ src: entry.src, source: entry.source })),
+    [
+      { src: '/uploads/generated/img-1700000000500-image.png', source: 'image-card' },
+      { src: '/uploads/generated/img-1700000000200-chat.png', source: 'chat' },
     ]
   );
 });

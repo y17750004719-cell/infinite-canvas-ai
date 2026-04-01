@@ -14,6 +14,7 @@ import { ASPECT_RATIOS } from './lib/aspect-ratios';
 import {
   appendGeneratedImageHistoryEntries,
   appendMissingGeneratedHistoryEntries,
+  buildGeneratedImageHistorySortKey,
   buildGeneratedHistoryEntriesFromImageCard,
 } from './lib/generated-image-history.mjs';
 import {
@@ -479,7 +480,8 @@ const createGeneratedImageHistoryEntry = ({
   src,
   naturalWidth,
   naturalHeight,
-  createdAt = Date.now(),
+  timestamp = Date.now(),
+  sequence = 0,
   source,
   sourceItemId,
   topicId,
@@ -488,22 +490,27 @@ const createGeneratedImageHistoryEntry = ({
   src: string;
   naturalWidth?: number;
   naturalHeight?: number;
-  createdAt?: number;
+  timestamp?: number;
+  sequence?: number;
   source: GeneratedImageHistoryEntry['source'];
   sourceItemId?: string;
   topicId?: string;
   messageId?: string;
-}): GeneratedImageHistoryEntry => ({
-  id: `generated-history-${createdAt}-${Math.random().toString(36).slice(2, 8)}`,
-  src,
-  naturalWidth,
-  naturalHeight,
-  createdAt,
-  source,
-  sourceItemId,
-  topicId,
-  messageId,
-});
+}): GeneratedImageHistoryEntry => {
+  const normalizedCreatedAt = buildGeneratedImageHistorySortKey(timestamp, sequence);
+
+  return {
+    id: `generated-history-${normalizedCreatedAt}-${Math.random().toString(36).slice(2, 8)}`,
+    src,
+    naturalWidth,
+    naturalHeight,
+    createdAt: normalizedCreatedAt,
+    source,
+    sourceItemId,
+    topicId,
+    messageId,
+  };
+};
 
 const resizeCanvasItemFromCenter = (
   item: CanvasItem,
@@ -5968,13 +5975,16 @@ export default function AIWorkspace() {
               }
 
               if (validOutputs.length > 0) {
+                const historyTimestamp = Date.now();
                 appendGeneratedImageHistoryForSession(
                   generationSessionId,
-                  validOutputs.map((outputMeta) =>
+                  validOutputs.map((outputMeta, index) =>
                     createGeneratedImageHistoryEntry({
                       src: outputMeta.src,
                       naturalWidth: outputMeta.naturalWidth,
                       naturalHeight: outputMeta.naturalHeight,
+                      timestamp: historyTimestamp,
+                      sequence: index,
                       source: 'image-card',
                       sourceItemId: itemId,
                     })
@@ -7939,7 +7949,8 @@ export default function AIWorkspace() {
           (item: { key?: string; component?: string; status: string; localUrl?: string }) => item.status === 'completed' && item.localUrl
         );
 
-        completedItems.forEach((item: { key?: string; component?: string; localUrl: string }) => {
+        const historyTimestamp = Date.now();
+        completedItems.forEach((item: { key?: string; component?: string; localUrl: string }, index: number) => {
           const itemKey = item.key || item.component || 'logo-item';
           if (processedSkillJobUrlsRef.current.has(item.localUrl)) return;
           processedSkillJobUrlsRef.current.add(item.localUrl);
@@ -7973,6 +7984,8 @@ export default function AIWorkspace() {
                   src: item.localUrl,
                   naturalWidth: img.width,
                   naturalHeight: img.height,
+                  timestamp: historyTimestamp,
+                  sequence: index,
                   source: 'chat',
                 }),
               ]

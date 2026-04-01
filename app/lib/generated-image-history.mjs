@@ -54,6 +54,12 @@ export function extractGeneratedImageTimestampFromFilename(filename) {
   return Number.isFinite(timestamp) && timestamp > 0 ? timestamp : null;
 }
 
+export function buildGeneratedImageHistorySortKey(timestamp, sequence = 0) {
+  const safeTimestamp = Number.isFinite(timestamp) && timestamp > 0 ? timestamp : 0;
+  const safeSequence = Number.isFinite(sequence) && sequence >= 0 ? sequence : 0;
+  return safeTimestamp * 1000 + safeSequence;
+}
+
 export function normalizeGeneratedImageHistory(entries) {
   if (!Array.isArray(entries) || entries.length === 0) {
     return [];
@@ -122,7 +128,7 @@ export function buildGeneratedHistoryEntriesFromImageCard({
   return outputEntries.map((output, index) => ({
     id: `generated-history:${normalizedSourceItemId}:${index}:${output.src}`,
     src: output.src,
-    createdAt: safeCreatedAt + index,
+    createdAt: buildGeneratedImageHistorySortKey(safeCreatedAt, index),
     source: 'image-card',
     sourceItemId: normalizedSourceItemId,
     naturalWidth: output.naturalWidth,

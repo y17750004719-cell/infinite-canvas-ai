@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   appendMissingGeneratedHistoryEntries,
   appendGeneratedImageHistoryEntries,
+  buildGeneratedImageHistorySortKey,
   buildGeneratedHistoryEntriesFromImageCard,
   extractGeneratedImageTimestampFromFilename,
   mergeGeneratedImageHistoryEntries,
@@ -14,6 +15,12 @@ test('extractGeneratedImageTimestampFromFilename reads timestamps from generated
   assert.equal(extractGeneratedImageTimestampFromFilename('img-1774856292455-avxj5v.jpg'), 1774856292455);
   assert.equal(extractGeneratedImageTimestampFromFilename('logo-1773047333648-yp62bt.png'), 1773047333648);
   assert.equal(extractGeneratedImageTimestampFromFilename('plain.png'), null);
+});
+
+test('buildGeneratedImageHistorySortKey scales timestamps into the shared ordering range', () => {
+  assert.equal(buildGeneratedImageHistorySortKey(1700000000500), 1700000000500000);
+  assert.equal(buildGeneratedImageHistorySortKey(1700000000500, 3), 1700000000500003);
+  assert.equal(buildGeneratedImageHistorySortKey(0, 2), 2);
 });
 
 test('normalizeGeneratedImageHistory keeps only valid generated image entries', () => {
@@ -137,7 +144,7 @@ test('buildGeneratedHistoryEntriesFromImageCard returns current image-card outpu
         sourceItemId: 'image-card-1',
         naturalWidth: 1024,
         naturalHeight: 1024,
-        createdAt: 42,
+        createdAt: buildGeneratedImageHistorySortKey(42, 0),
       },
       {
         src: '/uploads/generated/b.png',
@@ -145,7 +152,7 @@ test('buildGeneratedHistoryEntriesFromImageCard returns current image-card outpu
         sourceItemId: 'image-card-1',
         naturalWidth: 2048,
         naturalHeight: 1024,
-        createdAt: 43,
+        createdAt: buildGeneratedImageHistorySortKey(42, 1),
       },
     ]
   );
