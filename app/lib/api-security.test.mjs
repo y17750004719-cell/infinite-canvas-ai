@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
+import * as apiSecurity from './api-security.mjs';
 import {
   createStoredImageName,
   parseImageDataUrl,
@@ -76,4 +77,28 @@ test('resolvePublicAssetPath rejects traversal attempts that escape the public d
 
   const resolved = resolvePublicAssetPath('/%2e%2e/secrets.txt', { publicDir });
   assert.equal(resolved, null);
+});
+
+test('resolvePublicAssetDataUrl only reads image files that stay inside the public directory', () => {
+  assert.equal(typeof apiSecurity.resolvePublicAssetDataUrl, 'function');
+
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'zo-public-'));
+  const publicDir = path.join(tempRoot, 'public');
+  const assetPath = path.join(publicDir, 'uploads', 'sample.png');
+  fs.mkdirSync(path.dirname(assetPath), { recursive: true });
+  fs.writeFileSync(assetPath, PNG_BYTES);
+
+  const resolved = apiSecurity.resolvePublicAssetDataUrl('/uploads/sample.png?cache=1', {
+    publicDir,
+    allowedExtensions: ['.png', '.jpg', '.jpeg', '.webp', '.gif'],
+  });
+
+  assert.equal(resolved, `data:image/png;base64,${PNG_BYTES.toString('base64')}`);
+  assert.equal(
+    apiSecurity.resolvePublicAssetDataUrl('/%2e%2e/secrets.png', {
+      publicDir,
+      allowedExtensions: ['.png', '.jpg', '.jpeg', '.webp', '.gif'],
+    }),
+    null
+  );
 });

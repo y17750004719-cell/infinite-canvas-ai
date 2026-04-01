@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import path from 'node:path';
 
+import * as backgroundRemoval from './background-removal.mjs';
 import {
   extractBackgroundRemovalFileResult,
   resolveBackgroundRemovalSource,
@@ -91,4 +92,27 @@ test('extractBackgroundRemovalFileResult accepts gradio file outputs from string
 
 test('extractBackgroundRemovalFileResult throws when gradio does not return a usable file reference', () => {
   assert.throws(() => extractBackgroundRemovalFileResult({ data: [null] }), /No background removal file returned/);
+});
+
+test('createRetryableAsyncSingleton retries after an initial rejection and caches the later success', async () => {
+  assert.equal(typeof backgroundRemoval.createRetryableAsyncSingleton, 'function');
+
+  let attempts = 0;
+  const getValue = backgroundRemoval.createRetryableAsyncSingleton(async () => {
+    attempts += 1;
+    if (attempts === 1) {
+      throw new Error('temporary outage');
+    }
+
+    return { client: 'ready' };
+  });
+
+  await assert.rejects(() => getValue(), /temporary outage/);
+
+  const value = await getValue();
+  const cachedValue = await getValue();
+
+  assert.deepEqual(value, { client: 'ready' });
+  assert.equal(cachedValue, value);
+  assert.equal(attempts, 2);
 });

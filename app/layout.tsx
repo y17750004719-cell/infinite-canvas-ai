@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import ClientErrorReporter from './components/ClientErrorReporter';
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -14,6 +15,7 @@ export default function RootLayout({
   return (
     <html lang="zh-CN">
       <body className="antialiased">
+        <ClientErrorReporter />
         {children}
       </body>
     </html>

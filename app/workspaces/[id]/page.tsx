@@ -2,13 +2,14 @@
 
 import React, { useState, useEffect } from 'react';
 import { useRouter, useParams } from 'next/navigation';
-import { ArrowLeft, Edit3, Trash2, Sparkles, Image, Type, Square, FolderOpen, ArrowRight } from 'lucide-react';
+import { ArrowLeft, Edit3, Trash2, Sparkles, Image as ImageIcon, Type, Square, FolderOpen, ArrowRight } from 'lucide-react';
 import {
   ProjectSession,
   CanvasItem,
   removeSession,
   loadSessions,
 } from '../../lib/db';
+import { getSessionConversationCount } from '../../lib/workspace-session-view.mjs';
 
 export default function WorkspaceDetailPage() {
   const router = useRouter();
@@ -52,7 +53,7 @@ export default function WorkspaceDetailPage() {
 
   const getItemIcon = (type: CanvasItem['type']) => {
     switch (type) {
-      case 'image': return <Image size={14} />;
+      case 'image': return <ImageIcon size={14} />;
       case 'text': return <Type size={14} />;
       case 'frame': return <Square size={14} />;
       default: return <FolderOpen size={14} />;
@@ -191,7 +192,7 @@ export default function WorkspaceDetailPage() {
         <div className="workspace-content-shell flex flex-wrap items-center gap-3 pb-3 text-sm text-gray-400 sm:gap-6">
           <span>创建于: {formatDate(session.createdAt)}</span>
           <span>更新于: {formatDate(session.updatedAt)}</span>
-          <span>{session.messages.length} 条对话</span>
+          <span>{getSessionConversationCount(session)} 条对话</span>
         </div>
       </div>
 

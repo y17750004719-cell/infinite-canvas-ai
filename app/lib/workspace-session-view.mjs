@@ -15,6 +15,10 @@ export const IMAGE_CARD_MODEL_OPTIONS = [
     id: 'gemini-3.1-flash-image-preview',
     label: 'Gemini 3.1 Flash Image',
   },
+  {
+    id: 'nano-banana-2',
+    label: 'Nano Banana 2',
+  },
 ];
 
 export function getDefaultTextPanelModelOption() {
@@ -23,6 +27,18 @@ export function getDefaultTextPanelModelOption() {
 
 export function getDefaultImageCardModelOption() {
   return IMAGE_CARD_MODEL_OPTIONS[0];
+}
+
+export function getSessionConversationCount(session) {
+  const topics = Array.isArray(session?.topics) ? session.topics : [];
+  if (topics.length > 0) {
+    return topics.reduce(
+      (total, topic) => total + (Array.isArray(topic?.messages) ? topic.messages.length : 0),
+      0
+    );
+  }
+
+  return Array.isArray(session?.messages) ? session.messages.length : 0;
 }
 
 export function resolveTextPanelChatModel(requestedModel, fallbackModel = getDefaultTextPanelModelOption()?.id) {
@@ -75,6 +91,13 @@ function parseAspectRatioParts(value) {
     heightRatio,
   };
 }
+
+const RESOLUTION_TIER_MIN_EDGE = {
+  '1K': 1024,
+  '2K': 2048,
+  '4K': 4096,
+};
+const IMAGE_CARD_ASPECT_RATIO_TOLERANCE = 0.03;
 
 export function getImageCardFrameSizeForAspectRatio(aspectRatio, frameWidth = 348) {
   const safeFrameWidth = Number.isFinite(frameWidth) && frameWidth > 0 ? frameWidth : 348;
@@ -145,6 +168,108 @@ export function getImageCardQualitySummary({ aspectRatio, size }) {
   }
 
   return `${normalizedAspectRatio} · ${sizeLabel}`;
+}
+
+export function resolveRequestedResolutionTier(size) {
+  const normalizedSize = typeof size === 'string' ? size.trim() : '';
+  const match = normalizedSize.match(/^(\d+)x(\d+)$/i);
+  if (!match) {
+    return '1K';
+  }
+
+  const width = Number(match[1]);
+  const height = Number(match[2]);
+  const longestEdge = Math.max(width, height);
+
+  if (longestEdge >= RESOLUTION_TIER_MIN_EDGE['4K']) {
+    return '4K';
+  }
+  if (longestEdge >= RESOLUTION_TIER_MIN_EDGE['2K']) {
+    return '2K';
+  }
+  return '1K';
+}
+
+function doesOutputMatchRequestedAspectRatio(aspectRatio, naturalWidth, naturalHeight) {
+  const safeNaturalWidth = Number.isFinite(naturalWidth) ? naturalWidth : 0;
+  const safeNaturalHeight = Number.isFinite(naturalHeight) ? naturalHeight : 0;
+  if (safeNaturalWidth <= 0 || safeNaturalHeight <= 0) {
+    return false;
+  }
+
+  const normalizedAspectRatio = normalizeImageCardAspectRatio(aspectRatio);
+  if (normalizedAspectRatio === '1:1') {
+    return true;
+  }
+
+  const parts = parseAspectRatioParts(normalizedAspectRatio);
+  if (!parts) {
+    return true;
+  }
+
+  const requestedRatio = parts.widthRatio / parts.heightRatio;
+  const actualRatio = safeNaturalWidth / safeNaturalHeight;
+  return Math.abs(actualRatio - requestedRatio) / requestedRatio <= IMAGE_CARD_ASPECT_RATIO_TOLERANCE;
+}
+
+export function isOutputResolutionSufficient({
+  requestedSize,
+  aspectRatio,
+  naturalWidth,
+  naturalHeight,
+}) {
+  const safeNaturalWidth = Number.isFinite(naturalWidth) ? naturalWidth : 0;
+  const safeNaturalHeight = Number.isFinite(naturalHeight) ? naturalHeight : 0;
+  if (safeNaturalWidth <= 0 || safeNaturalHeight <= 0) {
+    return false;
+  }
+
+  const resolutionTier = resolveRequestedResolutionTier(requestedSize);
+  const minimumEdge = RESOLUTION_TIER_MIN_EDGE[resolutionTier] || RESOLUTION_TIER_MIN_EDGE['1K'];
+  const normalizedAspectRatio = normalizeImageCardAspectRatio(aspectRatio);
+
+  if (normalizedAspectRatio === '1:1') {
+    return safeNaturalWidth >= minimumEdge && safeNaturalHeight >= minimumEdge;
+  }
+
+  return (
+    Math.max(safeNaturalWidth, safeNaturalHeight) >= minimumEdge &&
+    doesOutputMatchRequestedAspectRatio(normalizedAspectRatio, safeNaturalWidth, safeNaturalHeight)
+  );
+}
+
+export function getResolutionFailureReason({
+  requestedSize,
+  aspectRatio,
+  naturalWidth,
+  naturalHeight,
+}) {
+  const resolutionTier = resolveRequestedResolutionTier(requestedSize);
+  const minimumEdge = RESOLUTION_TIER_MIN_EDGE[resolutionTier] || RESOLUTION_TIER_MIN_EDGE['1K'];
+  const safeNaturalWidth = Number.isFinite(naturalWidth) ? naturalWidth : 0;
+  const safeNaturalHeight = Number.isFinite(naturalHeight) ? naturalHeight : 0;
+  const normalizedAspectRatio = normalizeImageCardAspectRatio(aspectRatio);
+
+  if (safeNaturalWidth <= 0 || safeNaturalHeight <= 0) {
+    return `返回图未达到 ${resolutionTier} 分辨率要求`;
+  }
+
+  if (normalizedAspectRatio === '1:1') {
+    if (safeNaturalWidth < minimumEdge || safeNaturalHeight < minimumEdge) {
+      return `返回图未达到 ${resolutionTier} 分辨率要求`;
+    }
+    return null;
+  }
+
+  if (Math.max(safeNaturalWidth, safeNaturalHeight) < minimumEdge) {
+    return `返回图未达到 ${resolutionTier} 分辨率要求`;
+  }
+
+  if (!doesOutputMatchRequestedAspectRatio(normalizedAspectRatio, safeNaturalWidth, safeNaturalHeight)) {
+    return `返回图宽高比与请求的 ${normalizedAspectRatio} 不匹配`;
+  }
+
+  return null;
 }
 
 export function resolveImageGenerationFallbackSizes(requestedSize) {
@@ -811,7 +936,11 @@ export function canSubmitImageCardPanel({
   });
   const references = buildReferenceImageRequestPayload(linkedImagePreviews);
 
-  return submitInput.length > 0 || references.referenceImages.length > 0;
+  if (references.referenceImages.length > 0) {
+    return submitInput.length > 0;
+  }
+
+  return submitInput.length > 0;
 }
 
 export function buildCanvasTextGenerationRequest({
@@ -847,7 +976,7 @@ export function buildCanvasImageGenerationRequest({
   size,
   count,
   aspectRatio = 'auto',
-  executionMode = 'sync',
+  executionMode = 'async',
 }) {
   const trimmedInput = typeof input === 'string' ? input.trim() : '';
   const references = buildReferenceImageRequestPayload(linkedImagePreviews);
@@ -1041,7 +1170,6 @@ export function getGeneratedImageHistoryEntries({ sessions, currentSessionSnapsh
         ...entry,
         sessionId,
       })));
-      return;
     }
 
     const topics = Array.isArray(session?.topics) ? session.topics : [];

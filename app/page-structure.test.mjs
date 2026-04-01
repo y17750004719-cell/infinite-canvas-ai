@@ -72,6 +72,12 @@ test('generated image history merges persisted sessions with live session histor
   assert.equal(pageSource.includes('archiveEntries: archiveGeneratedImageHistoryEntries,'), true);
 });
 
+test('image generation materializes the current image-card outputs into history before clearing the card outputs', () => {
+  assert.equal(pageSource.includes('buildGeneratedHistoryEntriesFromImageCard({'), true);
+  assert.equal(pageSource.includes('appendMissingGeneratedHistoryEntries('), true);
+  assert.equal(pageSource.includes('const existingImageCardHistoryEntries = buildGeneratedHistoryEntriesFromImageCard({'), true);
+});
+
 test('image nodes expose a shared toolbar target and render an above-node image toolbar overlay', () => {
   assert.equal(pageSource.includes('const selectedImageToolbarTarget = React.useMemo<'), true);
   assert.equal(pageSource.includes('getSelectedImageToolbarSource({'), true);
@@ -135,6 +141,47 @@ test('canvas viewport no longer keeps a legacy in-canvas image card floating pan
   assert.equal(pageSource.includes('{false && selectedImageCardPanelItem && selectedImageCardPanelFrameBounds && selectedImageCardPanelCanvasRect && ('), false);
   assert.equal(pageSource.includes('left: selectedImageCardPanelLeft + selectedImageCardQualityPopoverOffset.left * viewport.scale,'), false);
   assert.equal(pageSource.includes('left: selectedImageCardPanelLeft + selectedImageCardCountPopoverOffset.left * viewport.scale,'), false);
+});
+
+test('image card generation always uses async task requests instead of keeping a single-image sync branch', () => {
+  assert.equal(pageSource.includes('if (count <= 1) {'), false);
+  assert.equal(pageSource.includes('buildCanvasImageGenerationRequest({'), false);
+  assert.equal(pageSource.includes('const asyncRequests = buildAsyncImageTaskRequests({'), true);
+  assert.equal(pageSource.includes('Promise.allSettled('), true);
+});
+
+test('image card generation validates actual output resolution before appending image outputs', () => {
+  const generateStart = pageSource.indexOf('const handleCanvasImageGenerate = useCallback(');
+  const generateEnd = pageSource.indexOf('const handleCancelCanvasImageGenerate = useCallback(', generateStart);
+
+  assert.notEqual(generateStart, -1);
+  assert.notEqual(generateEnd, -1);
+  assert.ok(generateEnd > generateStart);
+
+  const generateBlock = pageSource.slice(generateStart, generateEnd);
+
+  assert.equal(generateBlock.includes('isOutputResolutionSufficient({'), true);
+  assert.equal(generateBlock.includes('getResolutionFailureReason({'), true);
+  assert.equal(generateBlock.includes('appendImageCardOutput({'), true);
+  assert.ok(
+    generateBlock.indexOf('isOutputResolutionSufficient({') < generateBlock.indexOf('appendImageCardOutput({')
+  );
+});
+
+test('image card generation surfaces partial success when undersized results are discarded', () => {
+  assert.equal(
+    pageSource.includes('未达标结果已丢弃'),
+    true
+  );
+  assert.equal(
+    pageSource.includes('请求 ${asyncRequests.length} 张，成功 ${completedCount} 张，未达标结果已丢弃'),
+    true
+  );
+});
+
+test('image card panel shows a validation hint when references exist without any text prompt', () => {
+  assert.equal(pageSource.includes('参考图生成需要输入文字描述'), true);
+  assert.equal(pageSource.includes('selectedImageCardPanelValidationError'), true);
 });
 
 test('node selection flows move selected canvas items to the front of the persisted item order', () => {

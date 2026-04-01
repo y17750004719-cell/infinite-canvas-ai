@@ -1,0 +1,17 @@
+export const ASPECT_RATIOS = [
+  { id: "auto", name: "默认（模型自动匹配）" },
+  { id: "1:1", name: "2K (1:1 Square)" },
+  { id: "9:16", name: "9:16 (Portrait)" },
+  { id: "16:9", name: "16:9 (Landscape)" },
+  { id: "2:3", name: "2:3 (Portrait)" },
+  { id: "3:2", name: "3:2 (Landscape)" },
+  { id: "4:3", name: "4:3 (Classic Landscape)" },
+  { id: "3:4", name: "3:4 (Classic Portrait)" },
+  { id: "4:5", name: "4:5 (Portrait)" },
+  { id: "5:4", name: "5:4 (Landscape)" },
+  { id: "21:9", name: "21:9 (Ultra-wide)" },
+  { id: "1:4", name: "1:4 (Tall Banner)" },
+  { id: "4:1", name: "4:1 (Wide Banner)" },
+  { id: "1:8", name: "1:8 (Vertical Strip)" },
+  { id: "8:1", name: "8:1 (Horizontal Strip)" },
+];

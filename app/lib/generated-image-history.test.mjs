@@ -2,7 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  appendMissingGeneratedHistoryEntries,
   appendGeneratedImageHistoryEntries,
+  buildGeneratedHistoryEntriesFromImageCard,
   extractGeneratedImageTimestampFromFilename,
   mergeGeneratedImageHistoryEntries,
   normalizeGeneratedImageHistory,
@@ -80,6 +82,71 @@ test('appendGeneratedImageHistoryEntries preserves existing entries and skips du
     [
       { id: 'history-1', src: '/uploads/generated/a.png' },
       { id: 'history-2', src: '/uploads/generated/b.png' },
+    ]
+  );
+});
+
+test('appendMissingGeneratedHistoryEntries skips duplicates by src even when ids differ', () => {
+  const result = appendMissingGeneratedHistoryEntries(
+    [
+      { id: 'history-1', src: '/uploads/generated/a.png', createdAt: 10, source: 'image-card' },
+    ],
+    [
+      { id: 'history-2', src: '/uploads/generated/a.png', createdAt: 20, source: 'image-card' },
+      { id: 'history-3', src: '/uploads/generated/b.png', createdAt: 30, source: 'image-card' },
+    ]
+  );
+
+  assert.deepEqual(
+    result.map((entry) => ({ id: entry.id, src: entry.src })),
+    [
+      { id: 'history-1', src: '/uploads/generated/a.png' },
+      { id: 'history-3', src: '/uploads/generated/b.png' },
+    ]
+  );
+});
+
+test('buildGeneratedHistoryEntriesFromImageCard returns current image-card outputs as generated history entries', () => {
+  const result = buildGeneratedHistoryEntriesFromImageCard({
+    item: {
+      id: 'image-card-1',
+      type: 'image',
+      imageVariant: 'card',
+      imageOutputs: [
+        { src: '/uploads/generated/a.png', naturalWidth: 1024, naturalHeight: 1024 },
+        { src: '/uploads/generated/b.png', naturalWidth: 2048, naturalHeight: 1024 },
+      ],
+    },
+    sourceItemId: 'image-card-1',
+    createdAt: 42,
+  });
+
+  assert.deepEqual(
+    result.map((entry) => ({
+      src: entry.src,
+      source: entry.source,
+      sourceItemId: entry.sourceItemId,
+      naturalWidth: entry.naturalWidth,
+      naturalHeight: entry.naturalHeight,
+      createdAt: entry.createdAt,
+    })),
+    [
+      {
+        src: '/uploads/generated/a.png',
+        source: 'image-card',
+        sourceItemId: 'image-card-1',
+        naturalWidth: 1024,
+        naturalHeight: 1024,
+        createdAt: 42,
+      },
+      {
+        src: '/uploads/generated/b.png',
+        source: 'image-card',
+        sourceItemId: 'image-card-1',
+        naturalWidth: 2048,
+        naturalHeight: 1024,
+        createdAt: 43,
+      },
     ]
   );
 });

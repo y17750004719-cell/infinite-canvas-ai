@@ -1,3 +1,5 @@
+import { createLogger } from "./logger";
+
 const API_URL =
   process.env.COMFLY_API_URL ||
   process.env.GPT_BEST_BASE_URL ||
@@ -10,13 +12,26 @@ const LOG_LEVEL = (process.env.LOG_LEVEL || "basic").toLowerCase();
 const LOG_ENABLED = LOG_LEVEL !== "off";
 const LOG_DEBUG = LOG_LEVEL === "debug";
 const SUPPORTED_GEMINI_OFFICIAL_IMAGE_MODELS = new Set([
+  "gemini-3-pro-image-preview",
+  "gemini-3.1-flash-image-preview",
+]);
+const EXACT_IMAGE_SIZE_REQUEST_SIZES = new Set([
+  "1024x1024",
+  "2048x2048",
+  "4096x4096",
+]);
+const SUPPLIER_REFERENCE_IMAGE_GENERATIONS_MODELS = new Set([
+  "gemini-3.1-flash-image-preview",
+]);
+const SUPPLIER_IMAGE_EDITS_MODELS = new Set([
+  "nano-banana-2",
+]);
+const SUPPLIER_ASPECT_RATIO_IMAGE_MODELS = new Set([
   "gemini-3.1-flash-image-preview",
   "gemini-3-pro-image-preview",
+  "nano-banana-2",
 ]);
-
-function nowIso(): string {
-  return new Date().toISOString();
-}
+const apiClientLogger = createLogger("lib.api-client");
 
 function maskToken(token: string): string {
   if (!token) return "<empty>";
@@ -24,27 +39,42 @@ function maskToken(token: string): string {
   return `${token.slice(0, 4)}...${token.slice(-4)}`;
 }
 
-function debugLog(...args: unknown[]) {
+function toLogDetails(payload?: unknown): Record<string, unknown> | undefined {
+  if (payload === undefined) return undefined;
+  if (payload && typeof payload === "object" && !Array.isArray(payload)) {
+    return payload as Record<string, unknown>;
+  }
+  return { value: payload };
+}
+
+function debugLog(message: string, payload?: unknown) {
   if (LOG_DEBUG) {
-    console.log(`[${nowIso()}]`, ...args);
+    void apiClientLogger.info("debug", message, toLogDetails(payload));
   }
 }
 
-function basicLog(...args: unknown[]) {
+function basicLog(message: string, payload?: unknown) {
   if (LOG_ENABLED) {
-    console.log(`[${nowIso()}]`, ...args);
+    void apiClientLogger.info("info", message, toLogDetails(payload));
   }
 }
 
-function debugWarn(...args: unknown[]) {
+function debugWarn(message: string, payload?: unknown) {
   if (LOG_DEBUG) {
-    console.warn(`[${nowIso()}]`, ...args);
+    void apiClientLogger.warn("warn", message, toLogDetails(payload));
   }
 }
 
-function debugError(...args: unknown[]) {
+function debugError(message: string, payload?: unknown) {
   if (LOG_ENABLED) {
-    console.error(`[${nowIso()}]`, ...args);
+    const details = toLogDetails(payload);
+    const nextDetails =
+      details && "error" in details
+        ? details
+        : details
+          ? { ...details }
+          : undefined;
+    void apiClientLogger.error("error", message, nextDetails);
   }
 }
 
@@ -238,8 +268,46 @@ function getGeminiOfficialApiBaseUrl(): string {
   return trimmed;
 }
 
+function normalizeImageModelKey(model?: string): string {
+  return typeof model === "string" ? model.trim() : "";
+}
+
 function isGeminiOfficialImageModel(model?: string): boolean {
-  return typeof model === "string" && SUPPORTED_GEMINI_OFFICIAL_IMAGE_MODELS.has(model.trim());
+  const normalizedModel = normalizeImageModelKey(model);
+  return normalizedModel.length > 0 && SUPPORTED_GEMINI_OFFICIAL_IMAGE_MODELS.has(normalizedModel);
+}
+
+export function shouldUseExactImageSizeApi(model?: string, size?: string): boolean {
+  const normalizedModel = normalizeImageModelKey(model);
+  const normalizedSize = typeof size === "string" ? size.trim() : "";
+  return (
+    normalizedModel.length > 0 &&
+    normalizedSize.length > 0 &&
+    SUPPORTED_GEMINI_OFFICIAL_IMAGE_MODELS.has(normalizedModel) &&
+    EXACT_IMAGE_SIZE_REQUEST_SIZES.has(normalizedSize)
+  );
+}
+
+function usesSupplierAspectRatioImageModel(model?: string): boolean {
+  const normalizedModel = normalizeImageModelKey(model);
+  return normalizedModel.length > 0 && SUPPLIER_ASPECT_RATIO_IMAGE_MODELS.has(normalizedModel);
+}
+
+export function shouldUseImageEditsApi(model?: string, referenceImageCount = 0): boolean {
+  if (referenceImageCount <= 0) {
+    return false;
+  }
+
+  const normalizedModel = normalizeImageModelKey(model);
+  if (!normalizedModel) {
+    return false;
+  }
+
+  if (SUPPLIER_REFERENCE_IMAGE_GENERATIONS_MODELS.has(normalizedModel)) {
+    return false;
+  }
+
+  return SUPPLIER_IMAGE_EDITS_MODELS.has(normalizedModel);
 }
 
 function resolveGeminiOfficialImageSize(size?: string): "1K" | "2K" | "4K" {
@@ -253,10 +321,10 @@ function resolveGeminiOfficialImageSize(size?: string): "1K" | "2K" | "4K" {
   const height = Number(match[2]);
   const longestEdge = Math.max(width, height);
 
-  if (longestEdge >= 3500) {
+  if (longestEdge >= 4096) {
     return "4K";
   }
-  if (longestEdge >= 1800) {
+  if (longestEdge >= 2048) {
     return "2K";
   }
   return "1K";
@@ -292,6 +360,8 @@ function parsePositiveInt(input: string | undefined, fallback: number): number {
   const value = Number.parseInt(input, 10);
   return Number.isFinite(value) && value > 0 ? value : fallback;
 }
+
+const asyncImageSubmitTimeoutMs = parsePositiveInt(process.env.COMFLY_ASYNC_IMAGE_SUBMIT_TIMEOUT_MS, 600000);
 
 function extractTaskStatus(payload: AsyncImageTaskResultResponse): string {
   const rootStatus = typeof payload.status === "string" ? payload.status : "";
@@ -382,6 +452,51 @@ function toImageEntries(input: unknown, depth = 0): Array<{ url: string; revised
 
 function extractTaskData(payload: AsyncImageTaskResultResponse): Array<{ url: string; revised_prompt?: string }> {
   return toImageEntries(payload);
+}
+
+function extractAsyncTaskFailureMessage(payload: AsyncImageTaskResultResponse): string | undefined {
+  const nestedDataRecord =
+    payload.data && !Array.isArray(payload.data) && typeof payload.data === "object"
+      ? (payload.data as Record<string, unknown>)
+      : null;
+  const nestedResultRecord =
+    payload.result && typeof payload.result === "object"
+      ? (payload.result as Record<string, unknown>)
+      : null;
+  const nestedOutputRecord =
+    payload.output && typeof payload.output === "object"
+      ? (payload.output as Record<string, unknown>)
+      : null;
+  const nestedDataFailReason =
+    typeof nestedDataRecord?.fail_reason === "string"
+      ? nestedDataRecord.fail_reason
+      : undefined;
+  const nestedResultFailReason =
+    typeof nestedResultRecord?.fail_reason === "string"
+      ? nestedResultRecord.fail_reason
+      : undefined;
+  const nestedOutputFailReason =
+    typeof nestedOutputRecord?.fail_reason === "string"
+      ? nestedOutputRecord.fail_reason
+      : undefined;
+
+  return (
+    (typeof payload.error === "object" && payload.error && "message" in payload.error
+      ? (payload.error as { message?: string }).message
+      : typeof payload.error === "string"
+        ? payload.error
+        : undefined) ||
+    (typeof payload.last_error === "object" && payload.last_error && "message" in payload.last_error
+      ? (payload.last_error as { message?: string }).message
+      : typeof payload.last_error === "string"
+        ? payload.last_error
+        : undefined) ||
+    nestedDataFailReason ||
+    nestedResultFailReason ||
+    nestedOutputFailReason ||
+    payload.message ||
+    undefined
+  );
 }
 
 function getArrayLength(value: unknown): number {
@@ -678,7 +793,11 @@ export async function editImage(request: EditRequest): Promise<GenerationRespons
     formData.append("aspect_ratio", request.aspect_ratio.trim());
   }
   if (typeof request.size === "string" && request.size.trim()) {
-    formData.append("size", request.size.trim());
+    if (request.model === "nano-banana-2") {
+      formData.append("image_size", request.size.trim());
+    } else {
+      formData.append("size", request.size.trim());
+    }
   }
 
   const imageEntries = await Promise.all(
@@ -717,6 +836,7 @@ export async function editImage(request: EditRequest): Promise<GenerationRespons
     sentAspectRatio: request.aspect_ratio || null,
     sentSize: request.size || null,
     executionMode,
+    submitTimeoutMs: executionMode === "async" ? asyncImageSubmitTimeoutMs : 120000,
     apiKeyMasked: maskToken(API_KEY),
   });
   debugLog("[SUPPLIER][PREP_PROMPT]", {
@@ -724,7 +844,8 @@ export async function editImage(request: EditRequest): Promise<GenerationRespons
   });
 
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 120000);
+  const submitTimeoutMs = executionMode === "async" ? asyncImageSubmitTimeoutMs : 120000;
+  const timeoutId = setTimeout(() => controller.abort(), submitTimeoutMs);
   const onAbort = () => controller.abort();
   request.signal?.addEventListener("abort", onAbort);
 
@@ -827,6 +948,7 @@ export async function editImage(request: EditRequest): Promise<GenerationRespons
     basicLog("[SUPPLIER][ERR]", {
       endpoint: "/images/edits",
       executionMode,
+      submitTimeoutMs,
       model: request.model,
       n: request.n || 1,
       formFieldImageCount: request.images.length,
@@ -836,6 +958,7 @@ export async function editImage(request: EditRequest): Promise<GenerationRespons
     debugError("[SUPPLIER][ERR]", {
       endpoint: "/images/edits",
       executionMode,
+      submitTimeoutMs,
       model: request.model,
       n: request.n || 1,
       formFieldImageCount: request.images.length,
@@ -861,14 +984,14 @@ export async function editImage(request: EditRequest): Promise<GenerationRespons
 
 export async function runImageTask(request: UnifiedImageRequest): Promise<GenerationResponse> {
   const images = Array.isArray(request.images) ? request.images.filter(Boolean) : [];
-  if (isGeminiOfficialImageModel(request.model)) {
+  if (shouldUseExactImageSizeApi(request.model, request.size)) {
     return generateGeminiOfficialImage({
       ...request,
-      model: request.model,
       images,
     });
   }
-  if (images.length > 0) {
+
+  if (shouldUseImageEditsApi(request.model, images.length)) {
     return editImage({
       model: request.model,
       prompt: request.prompt,
@@ -886,6 +1009,7 @@ export async function runImageTask(request: UnifiedImageRequest): Promise<Genera
     model: request.model,
     prompt: request.prompt,
     n: request.n,
+    reference_images: images.length > 0 ? images : undefined,
     size: request.size,
     aspect_ratio: request.aspect_ratio,
     quality: request.quality,
@@ -994,19 +1118,7 @@ async function pollAsyncImageTask(taskId: string, signal?: AbortSignal): Promise
     }
 
     if (failureStatuses.has(status)) {
-      const failureMessage =
-        (typeof taskResult.error === "object" && taskResult.error && "message" in taskResult.error
-          ? (taskResult.error as { message?: string }).message
-          : typeof taskResult.error === "string"
-            ? taskResult.error
-            : undefined) ||
-        (typeof taskResult.last_error === "object" && taskResult.last_error && "message" in taskResult.last_error
-          ? (taskResult.last_error as { message?: string }).message
-          : typeof taskResult.last_error === "string"
-            ? taskResult.last_error
-            : undefined) ||
-        taskResult.message ||
-        "Async image generation failed";
+      const failureMessage = extractAsyncTaskFailureMessage(taskResult) || "Async image generation failed";
 
       debugError("Supplier async task failed:", {
         taskId,
@@ -1036,7 +1148,7 @@ export async function generateImage(
   const requestedSize = request.size || "2048x2048";
   const requestedAspectRatio = normalizeAspectRatio(request.aspect_ratio);
   const aspectRatio = requestedAspectRatio || toAspectRatio(requestedSize);
-  const isGeminiImageModel = /gemini/i.test(request.model) && /image/i.test(request.model);
+  const usesAspectRatioParam = usesSupplierAspectRatioImageModel(request.model);
 
   const requestBody: Record<string, unknown> = {
     model: request.model,
@@ -1045,24 +1157,30 @@ export async function generateImage(
     quality: request.quality || "standard",
     response_format: request.response_format || "url",
   };
-  if (isGeminiImageModel) {
+  if (usesAspectRatioParam) {
     requestBody.aspect_ratio = aspectRatio;
   } else {
     requestBody.size = requestedSize;
   }
 
-  // 添加参考图（如果有）
+  // 供应商统一生图协议使用 image 字段承载参考图列表
   if (request.reference_images && request.reference_images.length > 0) {
-    requestBody.reference_images = request.reference_images;
+    requestBody.image = request.reference_images;
   }
+
+  const executionMode = request.executionMode === "async" ? "async" : "sync";
+  const endpoint = executionMode === "async"
+    ? `${API_URL}/images/generations?async=true`
+    : `${API_URL}/images/generations`;
 
   basicLog("[SUPPLIER][PREP]", {
     endpointBase: API_URL,
     model: request.model,
     size: requestedSize,
-    aspectRatio: isGeminiImageModel ? aspectRatio : null,
+    aspectRatio: usesAspectRatioParam ? aspectRatio : null,
     n: requestBody.n,
     executionMode: request.executionMode || "sync",
+    submitTimeoutMs: executionMode === "async" ? asyncImageSubmitTimeoutMs : 120000,
     referenceCount: Array.isArray(request.reference_images) ? request.reference_images.length : 0,
     apiKeyMasked: maskToken(API_KEY),
   });
@@ -1070,15 +1188,11 @@ export async function generateImage(
     promptPreview: request.prompt.slice(0, 200),
   });
 
-  const executionMode = request.executionMode === "async" ? "async" : "sync";
-  const endpoint = executionMode === "async"
-    ? `${API_URL}/images/generations?async=true`
-    : `${API_URL}/images/generations`;
-
   const maxAttempts = 3;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 120000);
+    const submitTimeoutMs = executionMode === "async" ? asyncImageSubmitTimeoutMs : 120000;
+    const timeoutId = setTimeout(() => controller.abort(), submitTimeoutMs);
     const onAbort = () => controller.abort();
     request.signal?.addEventListener("abort", onAbort);
 
@@ -1466,6 +1580,7 @@ export const AVAILABLE_MODELS = [
   { id: "gemini-2.0-flash-exp", name: "Gemini 2.0 Flash", provider: "Google" },
   { id: "gemini-3-pro-image-preview", name: "Gemini 3 Pro (Image)", provider: "Google" },
   { id: "gemini-3.1-flash-image-preview", name: "Gemini 3.1 Flash (Image)", provider: "Google" },
+  { id: "nano-banana-2", name: "Nano Banana 2", provider: "Google" },
   { id: "gemini-3.1-flash", name: "Gemini 3.1 Flash", provider: "Google" },
   { id: "gemini-3.5-flash", name: "Gemini 3.5 Flash", provider: "Google" },
   { id: "gemini-3.5-flash-preview-05-20", name: "Gemini 3.5 Flash (Preview)", provider: "Google" },

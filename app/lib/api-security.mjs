@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import path from 'node:path';
 
 const ALLOWED_IMAGE_TYPES = new Map([
@@ -5,6 +6,13 @@ const ALLOWED_IMAGE_TYPES = new Map([
   ['image/jpeg', 'jpg'],
   ['image/webp', 'webp'],
   ['image/gif', 'gif'],
+]);
+const EXTENSION_TO_MIME_TYPE = new Map([
+  ['.png', 'image/png'],
+  ['.jpg', 'image/jpeg'],
+  ['.jpeg', 'image/jpeg'],
+  ['.webp', 'image/webp'],
+  ['.gif', 'image/gif'],
 ]);
 
 function isPng(buffer) {
@@ -127,4 +135,29 @@ export function resolvePublicAssetPath(inputPath, { publicDir, allowedExtensions
   }
 
   return resolvedPath;
+}
+
+export function resolvePublicAssetDataUrl(inputPath, options = {}) {
+  const resolvedPath = resolvePublicAssetPath(inputPath, options);
+  if (!resolvedPath || !fs.existsSync(resolvedPath)) {
+    return null;
+  }
+
+  const fileStat = fs.statSync(resolvedPath);
+  if (!fileStat.isFile()) {
+    return null;
+  }
+
+  const extension = path.extname(resolvedPath).toLowerCase();
+  const mimeType = EXTENSION_TO_MIME_TYPE.get(extension);
+  if (!mimeType) {
+    return null;
+  }
+
+  const buffer = fs.readFileSync(resolvedPath);
+  if (!buffer.length) {
+    return null;
+  }
+
+  return `data:${mimeType};base64,${buffer.toString('base64')}`;
 }

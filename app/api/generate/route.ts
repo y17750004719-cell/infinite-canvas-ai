@@ -1,10 +1,11 @@
 import { NextRequest, NextResponse } from "next/server";
-import { chat, chatStream, ImageGenerationError, runImageTask } from "../../lib/api-client";
+import { chat, chatStream, ImageGenerationError, runImageTask, shouldUseExactImageSizeApi, shouldUseImageEditsApi } from "../../lib/api-client";
 import fs from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createStoredImageName, resolvePublicAssetPath } from "../../lib/api-security.mjs";
 import { resolveImageCardModel, resolveImageGenerationFallbackSizes, resolveTextPanelChatModel } from "../../lib/workspace-session-view.mjs";
+import { createLogger, createRequestId, serializeError } from "../../lib/logger";
 
 const DEBUG_API_LOGS = process.env.LOG_ALL_REQUESTS !== "0";
 const PUBLIC_DIR = path.join(process.cwd(), "public");
@@ -12,20 +13,25 @@ const GENERATED_UPLOADS_DIR = path.join(PUBLIC_DIR, "uploads", "generated");
 const MAX_REFERENCE_IMAGE_BYTES = 12 * 1024 * 1024;
 const MAX_SAVED_IMAGE_BYTES = 20 * 1024 * 1024;
 const ALLOWED_PUBLIC_IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".webp", ".gif"];
+const generateLogger = createLogger("api.generate", { route: "/api/generate" });
 
-function nowIso(): string {
-  return new Date().toISOString();
+function toLogDetails(payload?: unknown): Record<string, unknown> | undefined {
+  if (payload === undefined) return undefined;
+  if (payload && typeof payload === "object" && !Array.isArray(payload)) {
+    return payload as Record<string, unknown>;
+  }
+  return { value: payload };
 }
 
-function debugLog(...args: unknown[]) {
+function debugLog(message: string, payload?: unknown) {
   if (DEBUG_API_LOGS) {
-    console.log(`[${nowIso()}]`, ...args);
+    void generateLogger.info("debug", message, toLogDetails(payload));
   }
 }
 
-function debugWarn(...args: unknown[]) {
+function debugWarn(message: string, payload?: unknown) {
   if (DEBUG_API_LOGS) {
-    console.warn(`[${nowIso()}]`, ...args);
+    void generateLogger.warn("warn", message, toLogDetails(payload));
   }
 }
 
@@ -161,7 +167,10 @@ async function saveImageToLocal(imageUrl: string): Promise<{ filename: string; l
       localUrl: `/uploads/generated/${filename}`,
     };
   } catch (error) {
-    console.error("Error saving generated image:", error instanceof Error ? error.message : String(error));
+    void generateLogger.error("save_image.error", "Error saving generated image", {
+      error: serializeError(error),
+      sourceKind: imageUrl.startsWith("data:image/") ? "data-url" : "remote-url",
+    });
     throw error;
   }
 }
@@ -329,7 +338,10 @@ function loadSkillContent(skillId: string): string | null {
     }
     return null;
   } catch (error) {
-    console.error("Error loading skill:", error);
+    void generateLogger.error("skill.load_error", "Error loading skill content", {
+      skillId,
+      error: serializeError(error),
+    });
     return null;
   }
 }
@@ -419,23 +431,42 @@ function attachImagesToLatestUserMessage(
 }
 
 export async function POST(request: NextRequest) {
-  const reqId = `gen-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+  const reqId = createRequestId("gen");
   const startedAt = Date.now();
+  const requestLogger = createLogger("api.generate", {
+    route: "/api/generate",
+    requestId: reqId,
+  });
 
-  const logResponse = (status: number, extra?: Record<string, unknown>) => {
-    debugLog("[API][RES]", {
-      reqId,
-      route: "/api/generate",
+  const logResponse = async (status: number, extra?: Record<string, unknown>) => {
+    if (!DEBUG_API_LOGS) {
+      return;
+    }
+
+    const level = status >= 500 ? "error" : status >= 400 ? "warn" : "info";
+    const payload = {
       status,
       durationMs: Date.now() - startedAt,
       ...(extra || {}),
-    });
+    };
+
+    if (level === "error") {
+      await requestLogger.error("request.response", "Generate API response completed with server error", payload);
+      return;
+    }
+
+    if (level === "warn") {
+      await requestLogger.warn("request.response", "Generate API response completed with client error", payload);
+      return;
+    }
+
+    await requestLogger.info("request.response", "Generate API response completed", payload);
   };
 
   try {
     const body = await request.json().catch(() => null);
     if (!body || typeof body !== "object") {
-      logResponse(400, { reason: "invalid_json" });
+      await logResponse(400, { reason: "invalid_json" });
       return NextResponse.json({ status: "error", error: "Invalid JSON body" }, { status: 400 });
     }
 
@@ -453,20 +484,20 @@ export async function POST(request: NextRequest) {
       stream?: boolean;
     };
 
-    debugLog("[API][REQ]", {
-      reqId,
-      route: "/api/generate",
-      method: request.method,
-      messageCount: Array.isArray(incomingMessages) ? incomingMessages.length : 0,
-      hasReferenceImages: Array.isArray(reference_images) && reference_images.length > 0,
-      skill: typeof skill === "string" ? skill : null,
-      intent: intent || "auto",
-      model: typeof model === "string" ? model : null,
-      executionMode: executionMode === "async" ? "async" : "sync",
-    });
+    if (DEBUG_API_LOGS) {
+      await requestLogger.info("request.start", "Generate API request started", {
+        method: request.method,
+        messageCount: Array.isArray(incomingMessages) ? incomingMessages.length : 0,
+        hasReferenceImages: Array.isArray(reference_images) && reference_images.length > 0,
+        skill: typeof skill === "string" ? skill : null,
+        intent: intent || "auto",
+        model: typeof model === "string" ? model : null,
+        executionMode: executionMode === "async" ? "async" : "sync",
+      });
+    }
 
     if (!incomingMessages || !Array.isArray(incomingMessages)) {
-      logResponse(400, { reason: "messages_required" });
+      await logResponse(400, { reason: "messages_required" });
       return NextResponse.json({ status: 'error', error: "Messages are required" }, { status: 400 });
     }
 
@@ -570,37 +601,46 @@ export async function POST(request: NextRequest) {
       const imageSize = resolveImageSize(size, resolvedImageModel);
       const requestedAspectRatio = normalizeAspectRatio(aspect_ratio);
       const resolvedAspectRatio = requestedAspectRatio || aspectRatioFromSize(imageSize);
-      const normalizedEditImages = reference_images
+      const normalizedReferenceImages = reference_images
         .map((img) => normalizeChatReferenceImage(img))
         .filter((img): img is string => !!img);
+      const usesImageEditsApi = shouldUseImageEditsApi(resolvedImageModel, normalizedReferenceImages.length);
+      const referenceResponseMode = usesImageEditsApi ? "image_edit" : "image_generate";
+      const referenceResultMode = usesImageEditsApi ? "image_edit" : "generate";
 
-      if (normalizedEditImages.length === 0) {
-        logResponse(400, { mode: "image_edit", reason: "no_valid_reference_images" });
+      if (normalizedReferenceImages.length === 0) {
+        await logResponse(400, { mode: referenceResponseMode, reason: "no_valid_reference_images" });
         return NextResponse.json(
-          { status: "error", error: "Edits failed: no valid reference images after normalization" },
+          {
+            status: "error",
+            error: usesImageEditsApi
+              ? "Edits failed: no valid reference images after normalization"
+              : "Image generation failed: no valid reference images after normalization",
+          },
           { status: 400 }
         );
       }
 
-      const referenceLabels = Array.isArray(reference_labels) && reference_labels.length === normalizedEditImages.length
+      const referenceLabels = Array.isArray(reference_labels) && reference_labels.length === normalizedReferenceImages.length
         ? reference_labels
-        : normalizedEditImages.map((_, index) => `image${index + 1}`);
+        : normalizedReferenceImages.map((_, index) => `image${index + 1}`);
 
       debugLog("Routing request to image generation flow with references", {
         reqId,
-        generationMode: "image_generate_with_references",
+        generationMode: usesImageEditsApi ? "image_edit" : "image_generate_with_references",
         requestedAspectRatio: requestedAspectRatio || null,
-        referenceCount: normalizedEditImages.length,
+        referenceCount: normalizedReferenceImages.length,
         model: resolvedImageModel,
         imageSize,
       });
       debugLog("Dispatching image supplier task with references", {
         reqId,
         n: n || 1,
-        referenceCount: normalizedEditImages.length,
+        referenceCount: normalizedReferenceImages.length,
         resolvedImageModel,
         resolvedAspectRatio: resolvedAspectRatio,
         imageSize,
+        supplierEndpointMode: referenceResponseMode,
       });
 
       let imageResult;
@@ -608,7 +648,7 @@ export async function POST(request: NextRequest) {
         imageResult = await runImageTask({
           model: resolvedImageModel,
           prompt: resolved.prompt,
-          images: normalizedEditImages,
+          images: normalizedReferenceImages,
           size: imageSize,
           aspect_ratio: resolvedAspectRatio,
           n: n || 1,
@@ -633,8 +673,14 @@ export async function POST(request: NextRequest) {
       }
 
       if (!imageResult.data || imageResult.data.length === 0) {
-        logResponse(500, { mode: "image_edit", reason: "no_image_data" });
-        return NextResponse.json({ status: "error", error: "Edits failed: no image data returned" }, { status: 500 });
+        await logResponse(500, { mode: referenceResponseMode, reason: "no_image_data" });
+        return NextResponse.json(
+          {
+            status: "error",
+            error: usesImageEditsApi ? "Edits failed: no image data returned" : "No image data returned",
+          },
+          { status: 500 }
+        );
       }
 
       debugLog("Image supplier returned outputs for reference-based generation", {
@@ -651,14 +697,14 @@ export async function POST(request: NextRequest) {
         savedFiles: savedImages.map((image) => image.filename),
       });
 
-      logResponse(200, { mode: "image_edit", skill: skill || null });
+      await logResponse(200, { mode: referenceResponseMode, skill: skill || null });
       return NextResponse.json({
         status: "completed",
         result: {
           type: "image",
           ...imageResult,
           model: resolvedImageModel,
-          mode: "image_edit",
+          mode: referenceResultMode,
           analyzedPrompt: resolved.prompt,
           referenceLabels,
           savedFile: primarySavedImage?.filename,
@@ -682,9 +728,8 @@ export async function POST(request: NextRequest) {
       });
       let actualSize = imageSize;
       let imageResult;
-      const fallbackSizes = resolvedImageModel === IMAGE_MODEL
-        ? [imageSize]
-        : resolveImageGenerationFallbackSizes(imageSize);
+      const shouldUseExactSizeApi = shouldUseExactImageSizeApi(resolvedImageModel, imageSize);
+      const fallbackSizes = shouldUseExactSizeApi ? [imageSize] : resolveImageGenerationFallbackSizes(imageSize);
       debugLog("Dispatching image generate supplier task", {
         reqId,
         n: n || 1,
@@ -692,6 +737,7 @@ export async function POST(request: NextRequest) {
         requestedSize,
         resolvedAspectRatio,
         fallbackSizes,
+        shouldUseExactSizeApi,
       });
       let lastError: unknown = null;
 
@@ -735,8 +781,10 @@ export async function POST(request: NextRequest) {
       }
 
       if (!imageResult.data || imageResult.data.length === 0) {
-        console.error("No image data in generation result");
-        logResponse(500, { mode: "image_generate", reason: "no_image_data" });
+        await requestLogger.error("image.empty_result", "No image data in generation result", {
+          mode: "image_generate",
+        });
+        await logResponse(500, { mode: "image_generate", reason: "no_image_data" });
         return NextResponse.json({ status: "error", error: "No image data returned" }, { status: 500 });
       }
 
@@ -754,7 +802,7 @@ export async function POST(request: NextRequest) {
         savedFiles: savedImages.map((image) => image.filename),
       });
 
-      logResponse(200, { mode: "image_generate", skill: skill || null });
+      await logResponse(200, { mode: "image_generate", skill: skill || null });
       return NextResponse.json({
         status: "completed",
         result: {
@@ -796,7 +844,7 @@ export async function POST(request: NextRequest) {
         },
       });
 
-      logResponse(200, { mode: "chat", stream: true, skill: skill || null });
+      await logResponse(200, { mode: "chat", stream: true, skill: skill || null });
 
       return new NextResponse(stream, {
         headers: {
@@ -817,7 +865,7 @@ export async function POST(request: NextRequest) {
     const finalContent = chatResult.choices[0]?.message?.content || "";
     const reasoningContent = chatResult.choices[0]?.message?.reasoning_content || "";
 
-    logResponse(200, { mode: "chat", stream: false, skill: skill || null });
+    await logResponse(200, { mode: "chat", stream: false, skill: skill || null });
     return NextResponse.json({
       status: 'completed',
       result: {
@@ -836,14 +884,13 @@ export async function POST(request: NextRequest) {
       ? error.statusCode
       : 500;
 
-    console.error("Generate API error", {
-      reqId,
+    await requestLogger.error("request.error", "Generate API error", {
       statusCode,
-      message: errorMessage,
+      error: serializeError(error),
       ...getErrorDiagnostics(error),
     });
 
-    logResponse(statusCode, {
+    await logResponse(statusCode, {
       mode: "error",
       error: errorMessage,
     });

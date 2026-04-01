@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
+import * as workspaceSessionView from './workspace-session-view.mjs';
 import { createEmptySession } from './session-crud.mjs';
 import {
   CANVAS_TEXT_GENERATION_CONCURRENCY_LIMIT,
@@ -35,11 +36,14 @@ import {
   getImageCardFrameSizeForAspectRatio,
   getImageCardItemSizeForFrameSize,
   getImageCardItemSizeForNaturalImage,
+  getResolutionFailureReason,
   isImageAssetItem,
   isImageCardItem,
+  isOutputResolutionSufficient,
   moveCanvasItemsToFront,
   removeCanvasTextGenerationEntry,
   isEventInsideTextCardPanel,
+  resolveRequestedResolutionTier,
   shouldSubmitTextCardPanelEnter,
   shouldFocusTextCardPanelInputOnPointerDown,
   getTextCardVisualState,
@@ -56,6 +60,51 @@ import {
   shouldHandleCanvasImagePaste,
   shouldPreventScrollableRegionWheelDefault,
 } from './workspace-session-view.mjs';
+
+test('getSessionConversationCount sums topic messages before falling back to legacy messages', () => {
+  assert.equal(typeof workspaceSessionView.getSessionConversationCount, 'function');
+
+  const session = {
+    ...createEmptySession({ existingCount: 0, now: 100 }),
+    messages: [{ id: 'legacy-1', role: 'assistant', content: 'legacy' }],
+    topics: [
+      {
+        id: 'topic-1',
+        title: 'Topic 1',
+        messages: [
+          { id: 'msg-1', role: 'assistant', content: 'one' },
+          { id: 'msg-2', role: 'user', content: 'two' },
+        ],
+        createdAt: 100,
+        updatedAt: 100,
+      },
+      {
+        id: 'topic-2',
+        title: 'Topic 2',
+        messages: [{ id: 'msg-3', role: 'assistant', content: 'three' }],
+        createdAt: 101,
+        updatedAt: 101,
+      },
+    ],
+  };
+
+  assert.equal(workspaceSessionView.getSessionConversationCount(session), 3);
+});
+
+test('getSessionConversationCount falls back to legacy messages when topics are absent', () => {
+  assert.equal(typeof workspaceSessionView.getSessionConversationCount, 'function');
+
+  const session = {
+    ...createEmptySession({ existingCount: 0, now: 100 }),
+    topics: [],
+    messages: [
+      { id: 'msg-1', role: 'assistant', content: 'one' },
+      { id: 'msg-2', role: 'user', content: 'two' },
+    ],
+  };
+
+  assert.equal(workspaceSessionView.getSessionConversationCount(session), 2);
+});
 
 test('resolveSessionPresentationState creates a topic for legacy sessions that only have messages', () => {
   const legacyMessages = [
@@ -467,10 +516,51 @@ test('getGeneratedImageHistoryEntries prefers append-only session history and me
   assert.deepEqual(
     result.map((entry) => ({ src: entry.src, source: entry.source })),
     [
+      { src: '/uploads/generated/current-only.png', source: 'image-card' },
       { src: '/uploads/generated/archive-only.png', source: 'archive' },
       { src: '/uploads/generated/run-2.png', source: 'image-card' },
       { src: '/uploads/generated/run-1.png', source: 'image-card' },
     ]
+  );
+});
+
+test('getGeneratedImageHistoryEntries keeps current image-card outputs visible even when the session already has generated history', () => {
+  const result = getGeneratedImageHistoryEntries({
+    sessions: [
+      {
+        id: 'session-current-card',
+        name: '当前卡片',
+        createdAt: 1700000000000,
+        updatedAt: 1700000000200,
+        generatedImageHistory: [
+          {
+            id: 'history-1',
+            src: '/uploads/generated/older-run.png',
+            createdAt: 1700000000100,
+            source: 'image-card',
+            sourceItemId: 'image-card-1',
+          },
+        ],
+        items: [
+          {
+            id: 'image-card-1',
+            type: 'image',
+            imageVariant: 'card',
+            imageOutputs: [
+              { src: '/uploads/generated/current-run.png', naturalWidth: 1024, naturalHeight: 1024 },
+            ],
+          },
+        ],
+        connections: [],
+        messages: [],
+        topics: [],
+      },
+    ],
+  });
+
+  assert.deepEqual(
+    result.map((entry) => entry.src),
+    ['/uploads/generated/current-run.png', '/uploads/generated/older-run.png']
   );
 });
 
@@ -1231,14 +1321,14 @@ test('canSubmitImageCardPanel returns true when prompt exists', () => {
   assert.equal(result, true);
 });
 
-test('canSubmitImageCardPanel returns true when only linked reference images exist', () => {
+test('canSubmitImageCardPanel returns false when only linked reference images exist without any text prompt', () => {
   const result = canSubmitImageCardPanel({
     draft: '   ',
     linkedImagePreviews: [{ id: 'img-1', src: '/a.png', label: 'image1' }],
     linkedTexts: [],
   });
 
-  assert.equal(result, true);
+  assert.equal(result, false);
 });
 
 test('buildCanvasImagePanelSubmitInput appends linked text blocks after the draft with double newlines', () => {
@@ -1267,6 +1357,16 @@ test('canSubmitImageCardPanel returns true when only linked text exists', () => 
     draft: '   ',
     linkedImagePreviews: [],
     linkedTexts: [{ id: 'text-1', text: '上游文案' }],
+  });
+
+  assert.equal(result, true);
+});
+
+test('canSubmitImageCardPanel returns true when reference images exist and linked text provides the prompt', () => {
+  const result = canSubmitImageCardPanel({
+    draft: '   ',
+    linkedImagePreviews: [{ id: 'img-1', src: '/a.png', label: 'image1' }],
+    linkedTexts: [{ id: 'text-1', text: '请基于参考图生成新版海报' }],
   });
 
   assert.equal(result, true);
@@ -1304,6 +1404,7 @@ test('buildCanvasImageGenerationRequest only uses current prompt, direct image p
     aspect_ratio: '16:9',
     reference_images: ['/b.png', '/a.png'],
     reference_labels: ['image1', 'image2'],
+    executionMode: 'async',
   });
 });
 
@@ -1324,6 +1425,7 @@ test('buildCanvasImageGenerationRequest preserves 4K size requests for image car
     size: '4096x4096',
     n: 1,
     aspect_ratio: '1:1',
+    executionMode: 'async',
   });
 });
 
@@ -1349,10 +1451,11 @@ test('buildCanvasImageGenerationRequest preserves requested multi-image counts f
     aspect_ratio: '3:4',
     reference_images: ['/b.png', '/a.png'],
     reference_labels: ['image1', 'image2'],
+    executionMode: 'async',
   });
 });
 
-test('buildCanvasImageGenerationRequest includes async execution mode when requested', () => {
+test('buildCanvasImageGenerationRequest defaults to async execution mode for image cards', () => {
   const result = buildCanvasImageGenerationRequest({
     input: '生成一张科技海报',
     linkedImagePreviews: [],
@@ -1360,7 +1463,6 @@ test('buildCanvasImageGenerationRequest includes async execution mode when reque
     size: '2048x2048',
     count: 1,
     aspectRatio: '1:1',
-    executionMode: 'async',
   });
 
   assert.deepEqual(result, {
@@ -1400,6 +1502,29 @@ test('buildAsyncImageTaskRequests expands multi-image generation into async sing
     executionMode: 'async',
   });
   assert.deepEqual(result[1], result[0]);
+});
+
+test('buildAsyncImageTaskRequests expands 4K multi-image generation into four exact-size single-image requests', () => {
+  const result = buildAsyncImageTaskRequests({
+    input: '生成 4K 主视觉',
+    linkedImagePreviews: [],
+    modelId: 'gemini-3.1-flash-image-preview',
+    size: '4096x4096',
+    count: 4,
+    aspectRatio: '1:1',
+  });
+
+  assert.equal(result.length, 4);
+  assert.deepEqual(result[0], {
+    messages: [{ role: 'user', content: '生成 4K 主视觉' }],
+    intent: 'image',
+    model: 'gemini-3.1-flash-image-preview',
+    size: '4096x4096',
+    n: 1,
+    aspect_ratio: '1:1',
+    executionMode: 'async',
+  });
+  assert.deepEqual(result[3], result[0]);
 });
 
 test('createCanvasCardItemAtCanvasPoint creates a text card centered on the spawn point', () => {
@@ -1483,6 +1608,75 @@ test('resolveImageGenerationFallbackSizes returns the 4K to 2K to 1K fallback ch
   assert.deepEqual(result, ['4096x4096', '2048x2048', '1024x1024']);
 });
 
+test('resolveRequestedResolutionTier maps image card sizes onto 1K 2K and 4K tiers', () => {
+  assert.equal(resolveRequestedResolutionTier('1024x1024'), '1K');
+  assert.equal(resolveRequestedResolutionTier('2048x2048'), '2K');
+  assert.equal(resolveRequestedResolutionTier('4096x4096'), '4K');
+});
+
+test('isOutputResolutionSufficient requires both sides to meet the target for square outputs', () => {
+  assert.equal(
+    isOutputResolutionSufficient({
+      requestedSize: '2048x2048',
+      aspectRatio: '1:1',
+      naturalWidth: 2048,
+      naturalHeight: 2048,
+    }),
+    true
+  );
+  assert.equal(
+    isOutputResolutionSufficient({
+      requestedSize: '2048x2048',
+      aspectRatio: '1:1',
+      naturalWidth: 2048,
+      naturalHeight: 1536,
+    }),
+    false
+  );
+});
+
+test('isOutputResolutionSufficient validates longest edge and requested ratio for non-square outputs', () => {
+  assert.equal(
+    isOutputResolutionSufficient({
+      requestedSize: '2048x2048',
+      aspectRatio: '16:9',
+      naturalWidth: 2048,
+      naturalHeight: 1152,
+    }),
+    true
+  );
+  assert.equal(
+    isOutputResolutionSufficient({
+      requestedSize: '2048x2048',
+      aspectRatio: '16:9',
+      naturalWidth: 2048,
+      naturalHeight: 2048,
+    }),
+    false
+  );
+});
+
+test('getResolutionFailureReason explains whether an output missed the target size or ratio', () => {
+  assert.equal(
+    getResolutionFailureReason({
+      requestedSize: '4096x4096',
+      aspectRatio: '1:1',
+      naturalWidth: 2048,
+      naturalHeight: 2048,
+    }),
+    '返回图未达到 4K 分辨率要求'
+  );
+  assert.equal(
+    getResolutionFailureReason({
+      requestedSize: '2048x2048',
+      aspectRatio: '16:9',
+      naturalWidth: 2048,
+      naturalHeight: 2048,
+    }),
+    '返回图宽高比与请求的 16:9 不匹配'
+  );
+});
+
 test('buildCanvasImageGenerationRequest falls back to the default image model for unsupported overrides', () => {
   const result = buildCanvasImageGenerationRequest({
     input: '生成一张海报',
@@ -1499,6 +1693,7 @@ test('buildCanvasImageGenerationRequest falls back to the default image model fo
     model: 'gemini-3.1-flash-image-preview',
     size: '1024x1024',
     n: 2,
+    executionMode: 'async',
   });
 });
 
@@ -1511,10 +1706,29 @@ test('getDefaultImageCardModelOption returns Gemini 3.1 Flash Image as the defau
   });
 });
 
+test('IMAGE_CARD_MODEL_OPTIONS includes nano-banana-2 as a non-default image-card model option', () => {
+  assert.deepEqual(workspaceSessionView.IMAGE_CARD_MODEL_OPTIONS, [
+    {
+      id: 'gemini-3.1-flash-image-preview',
+      label: 'Gemini 3.1 Flash Image',
+    },
+    {
+      id: 'nano-banana-2',
+      label: 'Nano Banana 2',
+    },
+  ]);
+});
+
 test('resolveImageCardModel accepts the supported image model', () => {
   const result = resolveImageCardModel('gemini-3.1-flash-image-preview');
 
   assert.equal(result, 'gemini-3.1-flash-image-preview');
+});
+
+test('resolveImageCardModel accepts nano-banana-2 as a supported image model', () => {
+  const result = resolveImageCardModel('nano-banana-2');
+
+  assert.equal(result, 'nano-banana-2');
 });
 
 test('normalizeImageCardAspectRatio maps auto and empty values to 1:1', () => {

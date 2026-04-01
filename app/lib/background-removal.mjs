@@ -2,6 +2,23 @@ import { resolvePublicAssetPath } from './api-security.mjs';
 
 const ALLOWED_PUBLIC_IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.webp', '.gif'];
 
+export function createRetryableAsyncSingleton(loadValue) {
+  let pendingValue = null;
+
+  return async function getValue() {
+    if (!pendingValue) {
+      pendingValue = Promise.resolve()
+        .then(() => loadValue())
+        .catch((error) => {
+          pendingValue = null;
+          throw error;
+        });
+    }
+
+    return pendingValue;
+  };
+}
+
 function normalizeOrigin(value) {
   if (typeof value !== 'string' || value.length === 0) {
     return '';

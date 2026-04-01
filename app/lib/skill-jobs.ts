@@ -1,20 +1,31 @@
 import fs from "fs";
 import path from "path";
 import { runImageTask } from "./api-client";
+import { resolvePublicAssetDataUrl } from "./api-security.mjs";
+import { createLogger, serializeError } from "./logger";
 
 const LOG_LEVEL = (process.env.LOG_LEVEL || "basic").toLowerCase();
 const LOG_ENABLED = LOG_LEVEL !== "off";
 const LOG_DEBUG = LOG_LEVEL === "debug";
+const skillJobsLogger = createLogger("lib.skill-jobs");
 
-function logBasic(...args: unknown[]) {
+function toLogDetails(payload?: unknown): Record<string, unknown> | undefined {
+  if (payload === undefined) return undefined;
+  if (payload && typeof payload === "object" && !Array.isArray(payload)) {
+    return payload as Record<string, unknown>;
+  }
+  return { value: payload };
+}
+
+function logBasic(message: string, payload?: unknown) {
   if (LOG_ENABLED) {
-    console.log(`[${new Date().toISOString()}]`, ...args);
+    void skillJobsLogger.info("info", message, toLogDetails(payload));
   }
 }
 
-function logDebug(...args: unknown[]) {
+function logDebug(message: string, payload?: unknown) {
   if (LOG_DEBUG) {
-    console.log(`[${new Date().toISOString()}]`, ...args);
+    void skillJobsLogger.info("debug", message, toLogDetails(payload));
   }
 }
 
@@ -128,37 +139,11 @@ interface BrandJobMetadata {
   concurrency: number;
 }
 
-function inferImageMimeFromPath(filePath: string): string {
-  const lower = filePath.toLowerCase();
-  if (lower.endsWith(".jpg") || lower.endsWith(".jpeg")) return "image/jpeg";
-  if (lower.endsWith(".webp")) return "image/webp";
-  if (lower.endsWith(".gif")) return "image/gif";
-  return "image/png";
-}
-
 function getReferenceType(input: string): "data" | "http" | "local" | "unknown" {
   if (input.startsWith("data:image/")) return "data";
   if (input.startsWith("http://") || input.startsWith("https://")) return "http";
   if (input.startsWith("/")) return "local";
   return "unknown";
-}
-
-function normalizeLocalReferencePath(input: string): string | null {
-  if (!input.startsWith("/")) return null;
-  const withoutQuery = input.split("?")[0] || input;
-  const normalized = withoutQuery.replace(/\\/g, "/").replace(/^\/+/, "");
-  return path.join(process.cwd(), "public", normalized);
-}
-
-function toDataUrlFromLocalFile(localPath: string): string | null {
-  try {
-    if (!fs.existsSync(localPath)) return null;
-    const fileBuffer = fs.readFileSync(localPath);
-    const mime = inferImageMimeFromPath(localPath);
-    return `data:${mime};base64,${fileBuffer.toString("base64")}`;
-  } catch {
-    return null;
-  }
 }
 
 async function normalizeReferenceImages(inputs?: string[]): Promise<string[]> {
@@ -180,10 +165,10 @@ async function normalizeReferenceImages(inputs?: string[]): Promise<string[]> {
       continue;
     }
 
-    const localPath = normalizeLocalReferencePath(input);
-    if (!localPath) continue;
-
-    const dataUrl = toDataUrlFromLocalFile(localPath);
+    const dataUrl = resolvePublicAssetDataUrl(input, {
+      publicDir: path.join(process.cwd(), "public"),
+      allowedExtensions: [".png", ".jpg", ".jpeg", ".webp", ".gif"],
+    });
     if (dataUrl) {
       normalized.push(dataUrl);
     }
@@ -280,13 +265,18 @@ function loadLogoSkillConfig(): { components: LogoSkillComponentConfig[]; concur
       : [];
 
     if (components.length === 0) {
-      console.warn("logo config.json has no valid components, fallback to defaults");
+      void skillJobsLogger.warn("config.logo.invalid", "logo config.json has no valid components, fallback to defaults", {
+        configPath,
+      });
       return { components: fallback.components, concurrency };
     }
 
     return { components, concurrency };
   } catch (error) {
-    console.error("Failed to parse logo config.json, fallback to defaults", error);
+    void skillJobsLogger.error("config.logo.parse_error", "Failed to parse logo config.json, fallback to defaults", {
+      configPath,
+      error: serializeError(error),
+    });
     return fallback;
   }
 }
@@ -333,7 +323,10 @@ function loadBrandSkillConfig(): { nineGridSize: string; materialTypes: string[]
       materialTypes: materialTypes.length > 0 ? materialTypes : fallback.materialTypes,
     };
   } catch (error) {
-    console.error("Failed to parse brand config.json, fallback to defaults", error);
+    void skillJobsLogger.error("config.brand.parse_error", "Failed to parse brand config.json, fallback to defaults", {
+      configPath,
+      error: serializeError(error),
+    });
     return fallback;
   }
 }
@@ -707,7 +700,7 @@ async function processJob(jobId: string): Promise<void> {
           item.status = "cancelled";
           item.error = "Cancelled by user";
         } else {
-          console.error("Skill job item generation error:", {
+          void skillJobsLogger.error("job.item.error", "Skill job item generation error", {
             jobId,
             skillType: job.skillType,
             itemKey: item.key,
@@ -717,7 +710,7 @@ async function processJob(jobId: string): Promise<void> {
             referenceTypes: rawReferenceImages.map((ref) => getReferenceType(ref)),
             normalizedReferenceCount: normalizedReferenceImages.length,
             promptPreview: resolvedPrompt.slice(0, 120),
-            error: error instanceof Error ? error.message : String(error),
+            error: serializeError(error),
           });
           item.status = "failed";
           item.error = error instanceof Error ? error.message : "Generation failed";
@@ -762,7 +755,11 @@ export function createSkillJob(skillType: string, payload: Record<string, unknow
   const job = skillType === "brand" ? buildBrandJob(payload) : buildLogoJob(payload);
   skillJobs.set(job.id, job);
   processJob(job.id).catch((error) => {
-    console.error("Skill job processing error:", error);
+    void skillJobsLogger.error("job.process.error", "Skill job processing error", {
+      jobId: job.id,
+      skillType: job.skillType,
+      error: serializeError(error),
+    });
   });
   return job;
 }

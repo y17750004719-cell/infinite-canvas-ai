@@ -5,10 +5,12 @@ import path from 'node:path';
 import { Client, handle_file } from '@gradio/client';
 import { createStoredImageName } from '../../../lib/api-security.mjs';
 import {
+  createRetryableAsyncSingleton,
   extractBackgroundRemovalFileResult,
   getImageDimensionsFromBuffer,
   resolveBackgroundRemovalSource,
 } from '../../../lib/background-removal.mjs';
+import { createLogger, createRequestId, serializeError } from '../../../lib/logger';
 
 export const runtime = 'nodejs';
 
@@ -16,28 +18,16 @@ const LOG_ALL_REQUESTS = process.env.LOG_ALL_REQUESTS !== '0';
 const GENERATED_UPLOADS_DIR = path.join(process.cwd(), 'public', 'uploads', 'generated');
 const MAX_RESULT_BYTES = 20 * 1024 * 1024;
 
-let backgroundRemovalClientPromise: Promise<any> | null = null;
-
-function log(...args: unknown[]) {
-  if (LOG_ALL_REQUESTS) {
-    console.log(`[${new Date().toISOString()}]`, ...args);
-  }
-}
-
 function getErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : String(error);
 }
 
-async function getBackgroundRemovalClient() {
-  if (!backgroundRemovalClientPromise) {
-    backgroundRemovalClientPromise = Client.connect(
-      'not-lain/background-removal',
-      process.env.HF_TOKEN ? ({ hf_token: process.env.HF_TOKEN } as any) : undefined
-    );
-  }
-
-  return backgroundRemovalClientPromise;
-}
+const getBackgroundRemovalClient = createRetryableAsyncSingleton(() =>
+  Client.connect(
+    'not-lain/background-removal',
+    process.env.HF_TOKEN ? ({ hf_token: process.env.HF_TOKEN } as any) : undefined
+  )
+);
 
 function inferExtension(fileReference: string, contentType = '') {
   const normalizedType = contentType.toLowerCase();
@@ -109,17 +99,25 @@ async function readBackgroundRemovalResult(fileReference: string) {
 
 export async function POST(request: NextRequest) {
   const startedAt = Date.now();
-  const reqId = `bg-remove-${startedAt}-${Math.random().toString(36).slice(2, 7)}`;
+  const reqId = createRequestId('bg-remove');
+  const logger = createLogger('api.image-tools.remove-background', {
+    route: '/api/image-tools/remove-background',
+    requestId: reqId,
+  });
 
   try {
-    log('[API][REQ]', {
-      reqId,
-      route: '/api/image-tools/remove-background',
-      method: 'POST',
-    });
+    if (LOG_ALL_REQUESTS) {
+      await logger.info('request.start', 'Background removal request started', {
+        method: 'POST',
+      });
+    }
 
     const body = await request.json().catch(() => null);
     if (!body || typeof body !== 'object') {
+      await logger.warn('request.invalid_json', 'Background removal request received invalid JSON body', {
+        method: 'POST',
+        status: 400,
+      });
       return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });
     }
 
@@ -130,12 +128,13 @@ export async function POST(request: NextRequest) {
       requestOrigin: request.nextUrl.origin,
     });
 
-    log('Dispatching background removal task', {
-      reqId,
-      sourceItemId,
-      sourceKind: source.kind,
-      sourceValuePreview: source.kind === 'local' ? path.basename(source.value) : source.value,
-    });
+    if (LOG_ALL_REQUESTS) {
+      await logger.info('supplier.dispatch', 'Dispatching background removal task', {
+        sourceItemId,
+        sourceKind: source.kind,
+        sourceValuePreview: source.kind === 'local' ? path.basename(source.value) : source.value,
+      });
+    }
 
     const client = await getBackgroundRemovalClient();
     const prediction = await client.predict('/png', {
@@ -143,10 +142,11 @@ export async function POST(request: NextRequest) {
     });
     const fileReference = extractBackgroundRemovalFileResult(prediction);
 
-    log('Background removal supplier returned file reference', {
-      reqId,
-      fileReferencePreview: typeof fileReference === 'string' ? fileReference.slice(0, 160) : null,
-    });
+    if (LOG_ALL_REQUESTS) {
+      await logger.info('supplier.response', 'Background removal supplier returned file reference', {
+        fileReferencePreview: typeof fileReference === 'string' ? fileReference.slice(0, 160) : null,
+      });
+    }
 
     const resultFile = await readBackgroundRemovalResult(fileReference);
     await mkdir(GENERATED_UPLOADS_DIR, { recursive: true });
@@ -163,15 +163,15 @@ export async function POST(request: NextRequest) {
       naturalHeight: dimensions?.naturalHeight,
     };
 
-    log('[API][RES]', {
-      reqId,
-      route: '/api/image-tools/remove-background',
-      status: 200,
-      sourceItemId,
-      sizeBytes: resultFile.buffer.length,
-      fileName: filename,
-      durationMs: Date.now() - startedAt,
-    });
+    if (LOG_ALL_REQUESTS) {
+      await logger.info('request.success', 'Background removal request completed', {
+        status: 200,
+        sourceItemId,
+        sizeBytes: resultFile.buffer.length,
+        fileName: filename,
+        durationMs: Date.now() - startedAt,
+      });
+    }
 
     return NextResponse.json(responseBody);
   } catch (error) {
@@ -182,13 +182,18 @@ export async function POST(request: NextRequest) {
         ? 400
         : 502;
 
-    log('[API][RES]', {
-      reqId,
-      route: '/api/image-tools/remove-background',
-      status,
-      error: message,
-      durationMs: Date.now() - startedAt,
-    });
+    if (status === 400) {
+      await logger.warn('request.invalid_input', `Background removal request rejected: ${message}`, {
+        status,
+        durationMs: Date.now() - startedAt,
+      });
+    } else {
+      await logger.error('request.error', 'Background removal request failed', {
+        status,
+        error: serializeError(error),
+        durationMs: Date.now() - startedAt,
+      });
+    }
 
     return NextResponse.json({ error: message }, { status });
   }

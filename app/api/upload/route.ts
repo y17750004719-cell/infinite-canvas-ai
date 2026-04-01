@@ -2,24 +2,25 @@ import { NextRequest, NextResponse } from 'next/server';
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { createStoredImageName, parseImageDataUrl } from '../../lib/api-security.mjs';
+import { createLogger, createRequestId, serializeError } from '../../lib/logger';
 
 const LOG_ALL_REQUESTS = process.env.LOG_ALL_REQUESTS !== '0';
 const MAX_UPLOAD_BYTES = 12 * 1024 * 1024;
 
-const log = (...args: unknown[]) => {
-  if (LOG_ALL_REQUESTS) {
-    console.log(`[${new Date().toISOString()}]`, ...args);
-  }
-};
-
 export async function POST(request: NextRequest) {
   const startedAt = Date.now();
+  const requestId = createRequestId('upload');
+  const logger = createLogger('api.upload', {
+    route: '/api/upload',
+    requestId,
+  });
   try {
-    log('[API][REQ]', { route: '/api/upload', method: 'POST' });
+    if (LOG_ALL_REQUESTS) {
+      await logger.info('request.start', 'Upload request started', { method: 'POST' });
+    }
     const body = await request.json().catch(() => null);
     if (!body || typeof body !== 'object') {
-      log('[API][RES]', {
-        route: '/api/upload',
+      await logger.warn('request.invalid_json', 'Upload request received invalid JSON body', {
         method: 'POST',
         status: 400,
         reason: 'invalid_json',
@@ -43,14 +44,15 @@ export async function POST(request: NextRequest) {
 
     const url = `/uploads/${newFileName}`;
 
-    log('[API][RES]', {
-      route: '/api/upload',
-      method: 'POST',
-      status: 200,
-      fileName: newFileName,
-      sizeBytes: parsedImage.buffer.length,
-      durationMs: Date.now() - startedAt,
-    });
+    if (LOG_ALL_REQUESTS) {
+      await logger.info('request.success', 'Upload request stored image locally', {
+        method: 'POST',
+        status: 200,
+        fileName: newFileName,
+        sizeBytes: parsedImage.buffer.length,
+        durationMs: Date.now() - startedAt,
+      });
+    }
 
     return NextResponse.json({
       success: true,
@@ -68,8 +70,7 @@ export async function POST(request: NextRequest) {
       message === 'Image payload does not match the declared image type';
 
     if (isInputError) {
-      log('[API][RES]', {
-        route: '/api/upload',
+      await logger.warn('request.invalid_input', `Upload request rejected: ${message}`, {
         method: 'POST',
         status: 400,
         reason: message,
@@ -78,12 +79,10 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: message }, { status: 400 });
     }
 
-    console.error('Upload error:', message);
-    log('[API][RES]', {
-      route: '/api/upload',
+    await logger.error('request.error', 'Upload request failed', {
       method: 'POST',
       status: 500,
-      error: message,
+      error: serializeError(error),
       durationMs: Date.now() - startedAt,
     });
     return NextResponse.json(
