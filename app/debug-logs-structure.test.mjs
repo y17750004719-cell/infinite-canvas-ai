@@ -24,12 +24,14 @@ test('client debug logs route only accepts local development access and validate
   assert.equal(clientRouteSource.includes('return new NextResponse(null, { status: 204 });'), true);
 });
 
-test('debug logs page reads local log entries and exposes filters while guarding non-dev access', () => {
+test('debug logs page reads the current startup log file and points old logs to the local directory', () => {
   assert.equal(debugLogsPageSource.includes('isLocalLogAccessAllowed()'), true);
+  assert.equal(debugLogsPageSource.includes('getCurrentStartupSession()'), true);
   assert.equal(debugLogsPageSource.includes('await readLogEntries({'), true);
-  assert.equal(debugLogsPageSource.includes('const date ='), true);
   assert.equal(debugLogsPageSource.includes('const level ='), true);
   assert.equal(debugLogsPageSource.includes('const source ='), true);
   assert.equal(debugLogsPageSource.includes('const q ='), true);
+  assert.equal(debugLogsPageSource.includes('startupId: startupSession.startupId'), true);
+  assert.equal(debugLogsPageSource.includes('旧启动日志请到'), true);
   assert.equal(debugLogsPageSource.includes('日志查看仅在本地开发环境开放'), true);
 });

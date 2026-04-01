@@ -150,3 +150,49 @@ test('api-client extracts nested supplier fail_reason for async image task failu
     true
   );
 });
+
+test('api-client builds reusable supplier request diagnostics with host retry and elapsed fields', () => {
+  assert.equal(
+    apiClientSource.includes('function getEndpointHost(endpoint: string): string | null {'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('function buildSupplierRequestDiagnostics({'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('host: getEndpointHost(endpoint)'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('retryCount: Math.max(0, attempt - 1)'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('retriesRemaining: Math.max(0, maxAttempts - attempt)'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('elapsedMs: Math.max(0, Date.now() - requestStartedAt)'),
+    true
+  );
+});
+
+test('api-client logs supplier transport diagnostics for Gemini image and chat fetch failures', () => {
+  assert.equal(
+    apiClientSource.includes('mode: "gemini_official_image"'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('mode: "chat"'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('mode: "chat_stream"'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('...buildSupplierRequestDiagnostics({'),
+    true
+  );
+});

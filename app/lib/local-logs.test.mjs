@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import os from 'node:os';
 import path from 'node:path';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 
 async function loadLocalLogsModule() {
   return import(`./local-logs.ts?cacheBust=${Date.now()}-${Math.random()}`);
@@ -17,13 +17,14 @@ async function withTempLogsDir(run) {
   }
 }
 
-test('appendLogEntry writes structured entries and readLogEntries filters newest-first results', async () => {
-  const { appendLogEntry, readLogEntries } = await loadLocalLogsModule();
+test('appendLogEntry writes entries into the current startup file and readLogEntries filters newest-first results', async () => {
+  const { appendLogEntry, getCurrentStartupSession, readLogEntries } = await loadLocalLogsModule();
 
   await withTempLogsDir(async (logsDir) => {
+    const startupSession = getCurrentStartupSession();
     await appendLogEntry(
       {
-        timestamp: '2026-04-01T08:00:00.000Z',
+        timestamp: `${startupSession.date}T08:00:00.000Z`,
         level: 'info',
         source: 'server',
         scope: 'api.upload',
@@ -37,7 +38,7 @@ test('appendLogEntry writes structured entries and readLogEntries filters newest
 
     await appendLogEntry(
       {
-        timestamp: '2026-04-01T09:00:00.000Z',
+        timestamp: `${startupSession.date}T09:00:00.000Z`,
         level: 'error',
         source: 'client',
         scope: 'client.error',
@@ -52,7 +53,6 @@ test('appendLogEntry writes structured entries and readLogEntries filters newest
 
     const entries = await readLogEntries(
       {
-        date: '2026-04-01',
         level: 'error',
         source: 'client',
         q: 'crash',
@@ -65,16 +65,26 @@ test('appendLogEntry writes structured entries and readLogEntries filters newest
     assert.equal(entries[0].message, 'client crash happened');
     assert.equal(entries[0].requestId, 'req-client');
     assert.equal(entries[0].pageUrl, 'http://localhost:3000/?workspace=abc');
+    assert.equal(entries[0].startupId, startupSession.startupId);
+
+    const raw = await readFile(
+      path.join(logsDir, startupSession.date, `${startupSession.startupId}.app.log`),
+      'utf8'
+    );
+    const stored = JSON.parse(raw.trim().split('\n')[0]);
+
+    assert.equal(stored.startupId, startupSession.startupId);
   });
 });
 
 test('appendLogEntry redacts sensitive values and truncates oversized text', async () => {
-  const { appendLogEntry } = await loadLocalLogsModule();
+  const { appendLogEntry, getCurrentStartupSession } = await loadLocalLogsModule();
 
   await withTempLogsDir(async (logsDir) => {
+    const startupSession = getCurrentStartupSession();
     await appendLogEntry(
       {
-        timestamp: '2026-04-01T10:00:00.000Z',
+        timestamp: `${startupSession.date}T10:00:00.000Z`,
         level: 'error',
         source: 'server',
         scope: 'api.generate',
@@ -93,7 +103,10 @@ test('appendLogEntry redacts sensitive values and truncates oversized text', asy
       { logsDir }
     );
 
-    const raw = await readFile(path.join(logsDir, '2026-04-01.app.log'), 'utf8');
+    const raw = await readFile(
+      path.join(logsDir, startupSession.date, `${startupSession.startupId}.app.log`),
+      'utf8'
+    );
     const stored = JSON.parse(raw.trim());
 
     assert.equal(stored.details.authorization, '[REDACTED]');
@@ -106,13 +119,115 @@ test('appendLogEntry redacts sensitive values and truncates oversized text', asy
   });
 });
 
-test('readLogEntries skips invalid JSON lines and keeps valid entries', async () => {
+test('a fresh module instance gets a new startup file while the current reader stays scoped to its own startup', async () => {
+  const moduleA = await loadLocalLogsModule();
+  const moduleB = await loadLocalLogsModule();
+
+  await withTempLogsDir(async (logsDir) => {
+    const startupA = moduleA.getCurrentStartupSession();
+    const startupB = moduleB.getCurrentStartupSession();
+
+    assert.notEqual(startupA.startupId, startupB.startupId);
+
+    await moduleA.appendLogEntry(
+      {
+        timestamp: `${startupA.date}T08:00:00.000Z`,
+        level: 'info',
+        source: 'server',
+        scope: 'api.startup',
+        event: 'server.boot',
+        message: 'startup a',
+        details: null,
+      },
+      { logsDir }
+    );
+
+    await moduleB.appendLogEntry(
+      {
+        timestamp: `${startupB.date}T08:05:00.000Z`,
+        level: 'info',
+        source: 'server',
+        scope: 'api.startup',
+        event: 'server.boot',
+        message: 'startup b',
+        details: null,
+      },
+      { logsDir }
+    );
+
+    const currentEntries = await moduleB.readLogEntries({ limit: 10 }, { logsDir });
+    assert.equal(currentEntries.length, 1);
+    assert.equal(currentEntries[0].message, 'startup b');
+    assert.equal(currentEntries[0].startupId, startupB.startupId);
+
+    const previousEntries = await moduleB.readLogEntries(
+      {
+        date: startupA.date,
+        startupId: startupA.startupId,
+        limit: 10,
+      },
+      { logsDir }
+    );
+    assert.equal(previousEntries.length, 1);
+    assert.equal(previousEntries[0].message, 'startup a');
+    assert.equal(previousEntries[0].startupId, startupA.startupId);
+
+    const files = await readdir(path.join(logsDir, startupA.date));
+    assert.equal(files.includes(`${startupA.startupId}.app.log`), true);
+    assert.equal(files.includes(`${startupB.startupId}.app.log`), true);
+  });
+});
+
+test('readLogEntries skips invalid JSON lines and keeps valid entries from the current startup file', async () => {
+  const { getCurrentStartupSession, readLogEntries } = await loadLocalLogsModule();
+
+  await withTempLogsDir(async (logsDir) => {
+    const startupSession = getCurrentStartupSession();
+    const logFilePath = path.join(logsDir, startupSession.date, `${startupSession.startupId}.app.log`);
+    await mkdir(path.dirname(logFilePath), { recursive: true });
+    await writeFile(
+      logFilePath,
+      [
+        '{"timestamp":"2026-04-01T08:00:00.000Z","level":"error"',
+        'not-json-at-all',
+        JSON.stringify({
+          timestamp: `${startupSession.date}T11:00:00.000Z`,
+          level: 'warn',
+          source: 'server',
+          scope: 'api.upload',
+          event: 'request.warn',
+          message: 'usable line',
+          details: null,
+          startupId: startupSession.startupId,
+        }),
+      ].join('\n'),
+      'utf8'
+    );
+
+    const entries = await readLogEntries(
+      {
+        limit: 20,
+      },
+      { logsDir }
+    );
+
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0].message, 'usable line');
+    assert.equal(entries[0].level, 'warn');
+    assert.equal(entries[0].startupId, startupSession.startupId);
+  });
+});
+
+test('readLogEntries skips invalid JSON lines and keeps valid entries when targeting an explicit startup file', async () => {
   const { readLogEntries } = await loadLocalLogsModule();
 
   await withTempLogsDir(async (logsDir) => {
-    const logFilePath = path.join(logsDir, '2026-04-01.app.log');
+    const startupDate = '2026-04-01';
+    const startupId = '09-30-12-legacy123';
+    const startupDir = path.join(logsDir, startupDate);
+    await mkdir(startupDir, { recursive: true });
     await writeFile(
-      logFilePath,
+      path.join(startupDir, `${startupId}.app.log`),
       [
         '{"timestamp":"2026-04-01T08:00:00.000Z","level":"error"',
         'not-json-at-all',
@@ -124,6 +239,7 @@ test('readLogEntries skips invalid JSON lines and keeps valid entries', async ()
           event: 'request.warn',
           message: 'usable line',
           details: null,
+          startupId,
         }),
       ].join('\n'),
       'utf8'
@@ -131,7 +247,8 @@ test('readLogEntries skips invalid JSON lines and keeps valid entries', async ()
 
     const entries = await readLogEntries(
       {
-        date: '2026-04-01',
+        date: startupDate,
+        startupId,
         limit: 20,
       },
       { logsDir }
@@ -140,5 +257,6 @@ test('readLogEntries skips invalid JSON lines and keeps valid entries', async ()
     assert.equal(entries.length, 1);
     assert.equal(entries[0].message, 'usable line');
     assert.equal(entries[0].level, 'warn');
+    assert.equal(entries[0].startupId, startupId);
   });
 });

@@ -147,7 +147,8 @@ test('image card generation always uses async task requests instead of keeping a
   assert.equal(pageSource.includes('if (count <= 1) {'), false);
   assert.equal(pageSource.includes('buildCanvasImageGenerationRequest({'), false);
   assert.equal(pageSource.includes('const asyncRequests = buildAsyncImageTaskRequests({'), true);
-  assert.equal(pageSource.includes('Promise.allSettled('), true);
+  assert.equal(pageSource.includes('const taskExecutionMode = resolveCanvasImageTaskExecutionMode({'), true);
+  assert.equal(pageSource.includes('settleCanvasImageGenerationRequests({'), true);
 });
 
 test('image card generation validates actual output resolution before appending image outputs', () => {
@@ -168,13 +169,13 @@ test('image card generation validates actual output resolution before appending 
   );
 });
 
-test('image card generation surfaces partial success when undersized results are discarded', () => {
+test('image card generation uses the shared failure message helper for partial success states', () => {
   assert.equal(
-    pageSource.includes('未达标结果已丢弃'),
+    pageSource.includes('buildCanvasImageGenerationFailureMessage('),
     true
   );
   assert.equal(
-    pageSource.includes('请求 ${asyncRequests.length} 张，成功 ${completedCount} 张，未达标结果已丢弃'),
+    pageSource.includes('[itemId]: failureMessage,'),
     true
   );
 });

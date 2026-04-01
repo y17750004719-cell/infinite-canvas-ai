@@ -112,6 +112,39 @@ function getErrorDiagnostics(error: unknown) {
   };
 }
 
+function getEndpointHost(endpoint: string): string | null {
+  try {
+    return new URL(endpoint).host;
+  } catch {
+    return null;
+  }
+}
+
+function buildSupplierRequestDiagnostics({
+  endpoint,
+  requestStartedAt,
+  timeoutMs = null,
+  attempt = 1,
+  maxAttempts = 1,
+}: {
+  endpoint: string;
+  requestStartedAt: number;
+  timeoutMs?: number | null;
+  attempt?: number;
+  maxAttempts?: number;
+}) {
+  return {
+    endpoint,
+    host: getEndpointHost(endpoint),
+    attempt,
+    maxAttempts,
+    retryCount: Math.max(0, attempt - 1),
+    retriesRemaining: Math.max(0, maxAttempts - attempt),
+    elapsedMs: Math.max(0, Date.now() - requestStartedAt),
+    timeoutMs,
+  };
+}
+
 export interface GenerationRequest {
   model: string;
   prompt: string;
@@ -691,15 +724,22 @@ async function generateGeminiOfficialImage(request: UnifiedImageRequest): Promis
   });
 
   const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), 120000);
+  const timeoutMs = 120000;
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
   const onAbort = () => controller.abort();
   request.signal?.addEventListener("abort", onAbort);
+  const attempt = 1;
+  const maxAttempts = 1;
+  let requestStartedAt = Date.now();
 
   try {
-    const requestStartedAt = Date.now();
+    requestStartedAt = Date.now();
     basicLog("[SUPPLIER][REQ]", {
       method: "POST",
       endpoint,
+      host: getEndpointHost(endpoint),
+      attempt,
+      maxAttempts,
     });
 
     const response = await fetch(endpoint, {
@@ -747,10 +787,34 @@ async function generateGeminiOfficialImage(request: UnifiedImageRequest): Promis
   } catch (error) {
     basicLog("[SUPPLIER][ERR]", {
       endpoint: `/v1beta/models/${request.model}:generateContent`,
+      mode: "gemini_official_image",
       model: request.model,
       imageSize,
       aspectRatio,
       referenceCount: referenceImages.length,
+      ...buildSupplierRequestDiagnostics({
+        endpoint,
+        requestStartedAt,
+        timeoutMs,
+        attempt,
+        maxAttempts,
+      }),
+      ...getErrorDiagnostics(error),
+    });
+    debugError("[SUPPLIER][ERR]", {
+      endpoint: `/v1beta/models/${request.model}:generateContent`,
+      mode: "gemini_official_image",
+      model: request.model,
+      imageSize,
+      aspectRatio,
+      referenceCount: referenceImages.length,
+      ...buildSupplierRequestDiagnostics({
+        endpoint,
+        requestStartedAt,
+        timeoutMs,
+        attempt,
+        maxAttempts,
+      }),
       ...getErrorDiagnostics(error),
     });
 
@@ -848,12 +912,14 @@ export async function editImage(request: EditRequest): Promise<GenerationRespons
   const timeoutId = setTimeout(() => controller.abort(), submitTimeoutMs);
   const onAbort = () => controller.abort();
   request.signal?.addEventListener("abort", onAbort);
+  let requestStartedAt = Date.now();
 
   try {
-    const requestStartedAt = Date.now();
+    requestStartedAt = Date.now();
     basicLog("[SUPPLIER][REQ]", {
       method: "POST",
       endpoint,
+      host: getEndpointHost(endpoint),
     });
 
     const response = await fetch(endpoint, {
@@ -946,23 +1012,31 @@ export async function editImage(request: EditRequest): Promise<GenerationRespons
     return result;
   } catch (error) {
     basicLog("[SUPPLIER][ERR]", {
-      endpoint: "/images/edits",
+      mode: "image_edit",
       executionMode,
-      submitTimeoutMs,
       model: request.model,
       n: request.n || 1,
       formFieldImageCount: request.images.length,
       hasMask: Boolean(request.mask),
+      ...buildSupplierRequestDiagnostics({
+        endpoint,
+        requestStartedAt,
+        timeoutMs: submitTimeoutMs,
+      }),
       ...getErrorDiagnostics(error),
     });
     debugError("[SUPPLIER][ERR]", {
-      endpoint: "/images/edits",
+      mode: "image_edit",
       executionMode,
-      submitTimeoutMs,
       model: request.model,
       n: request.n || 1,
       formFieldImageCount: request.images.length,
       hasMask: Boolean(request.mask),
+      ...buildSupplierRequestDiagnostics({
+        endpoint,
+        requestStartedAt,
+        timeoutMs: submitTimeoutMs,
+      }),
       ...getErrorDiagnostics(error),
     });
 
@@ -1195,12 +1269,14 @@ export async function generateImage(
     const timeoutId = setTimeout(() => controller.abort(), submitTimeoutMs);
     const onAbort = () => controller.abort();
     request.signal?.addEventListener("abort", onAbort);
+    let requestStartedAt = Date.now();
 
     try {
-      const requestStartedAt = Date.now();
+      requestStartedAt = Date.now();
       basicLog("[SUPPLIER][REQ]", {
         method: "POST",
         endpoint,
+        host: getEndpointHost(endpoint),
         attempt,
         maxAttempts,
       });
@@ -1320,6 +1396,41 @@ export async function generateImage(
         typeof (error as { cause?: { code?: string } }).cause?.code === "string" &&
         (error as { cause?: { code?: string } }).cause?.code === "UND_ERR_SOCKET";
 
+      basicLog("[SUPPLIER][ERR]", {
+        mode: "image_generate",
+        executionMode,
+        model: request.model,
+        size: request.size || null,
+        n: request.n || 1,
+        referenceCount: Array.isArray(request.reference_images) ? request.reference_images.length : 0,
+        willRetry: isSocketClosed && attempt < maxAttempts,
+        ...buildSupplierRequestDiagnostics({
+          endpoint,
+          requestStartedAt,
+          timeoutMs: submitTimeoutMs,
+          attempt,
+          maxAttempts,
+        }),
+        ...getErrorDiagnostics(error),
+      });
+      debugError("[SUPPLIER][ERR]", {
+        mode: "image_generate",
+        executionMode,
+        model: request.model,
+        size: request.size || null,
+        n: request.n || 1,
+        referenceCount: Array.isArray(request.reference_images) ? request.reference_images.length : 0,
+        willRetry: isSocketClosed && attempt < maxAttempts,
+        ...buildSupplierRequestDiagnostics({
+          endpoint,
+          requestStartedAt,
+          timeoutMs: submitTimeoutMs,
+          attempt,
+          maxAttempts,
+        }),
+        ...getErrorDiagnostics(error),
+      });
+
       if (isSocketClosed && attempt < maxAttempts) {
         const delayMs = 1000 * Math.pow(2, attempt - 1);
         debugWarn(`Socket closed, retrying in ${delayMs}ms (attempt ${attempt}/${maxAttempts})`);
@@ -1419,42 +1530,78 @@ export async function chat(
     );
   }
 
-  const chatStartedAt = Date.now();
-  basicLog("[SUPPLIER][REQ]", {
-    method: "POST",
-    endpoint: `${API_URL}/chat/completions`,
-    mode: "chat",
-    model: request.model,
-    messageCount: request.messages.length,
-  });
+  const endpoint = `${API_URL}/chat/completions`;
+  const attempt = 1;
+  const maxAttempts = 1;
+  let requestStartedAt = Date.now();
 
-  const response = await fetch(`${API_URL}/chat/completions`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${API_KEY}`,
-    },
-    body: JSON.stringify({ model: request.model, messages: request.messages }),
-    signal: request.signal,
-  });
+  try {
+    requestStartedAt = Date.now();
+    basicLog("[SUPPLIER][REQ]", {
+      method: "POST",
+      endpoint,
+      host: getEndpointHost(endpoint),
+      mode: "chat",
+      model: request.model,
+      messageCount: request.messages.length,
+      attempt,
+      maxAttempts,
+    });
 
-  if (!response.ok) {
-    const error = await response.json().catch(() => ({}));
-    throw new ImageGenerationError(
-      error.error?.message || `API request failed with status ${response.status}`,
-      response.status
-    );
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${API_KEY}`,
+      },
+      body: JSON.stringify({ model: request.model, messages: request.messages }),
+      signal: request.signal,
+    });
+
+    if (!response.ok) {
+      const error = await response.json().catch(() => ({}));
+      throw new ImageGenerationError(
+        error.error?.message || `API request failed with status ${response.status}`,
+        response.status
+      );
+    }
+
+    basicLog("[SUPPLIER][RES]", {
+      method: "POST",
+      endpoint,
+      mode: "chat",
+      status: response.status,
+      durationMs: Date.now() - requestStartedAt,
+    });
+
+    return response.json();
+  } catch (error) {
+    basicLog("[SUPPLIER][ERR]", {
+      mode: "chat",
+      model: request.model,
+      messageCount: request.messages.length,
+      ...buildSupplierRequestDiagnostics({
+        endpoint,
+        requestStartedAt,
+        attempt,
+        maxAttempts,
+      }),
+      ...getErrorDiagnostics(error),
+    });
+    debugError("[SUPPLIER][ERR]", {
+      mode: "chat",
+      model: request.model,
+      messageCount: request.messages.length,
+      ...buildSupplierRequestDiagnostics({
+        endpoint,
+        requestStartedAt,
+        attempt,
+        maxAttempts,
+      }),
+      ...getErrorDiagnostics(error),
+    });
+    throw error;
   }
-
-  basicLog("[SUPPLIER][RES]", {
-    method: "POST",
-    endpoint: `${API_URL}/chat/completions`,
-    mode: "chat",
-    status: response.status,
-    durationMs: Date.now() - chatStartedAt,
-  });
-
-  return response.json();
 }
 
 export async function* chatStream(
@@ -1466,54 +1613,91 @@ export async function* chatStream(
     );
   }
 
-  const streamStartedAt = Date.now();
-  basicLog("[SUPPLIER][REQ]", {
-    method: "POST",
-    endpoint: `${API_URL}/chat/completions`,
-    mode: "chat_stream",
-    model: request.model,
-    messageCount: request.messages.length,
-  });
+  const endpoint = `${API_URL}/chat/completions`;
+  const attempt = 1;
+  const maxAttempts = 1;
+  let requestStartedAt = Date.now();
+  let response;
 
-  const response = await fetch(`${API_URL}/chat/completions`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${API_KEY}`,
-    },
-    body: JSON.stringify({
+  try {
+    requestStartedAt = Date.now();
+    basicLog("[SUPPLIER][REQ]", {
+      method: "POST",
+      endpoint,
+      host: getEndpointHost(endpoint),
+      mode: "chat_stream",
       model: request.model,
-      messages: request.messages,
-      stream: true,
-    }),
-    signal: request.signal,
-  });
-
-  if (!response.ok) {
-    const errorText = await response.text();
-    debugError("Supplier chat stream error:", {
-      status: response.status,
-      model: request.model,
-      raw: errorText,
+      messageCount: request.messages.length,
+      attempt,
+      maxAttempts,
     });
-    const error = parseErrorPayload(errorText);
-    throw new ImageGenerationError(
-      (error.error as { message?: string } | undefined)?.message ||
-        `API request failed with status ${response.status}: ${errorText}`,
-      response.status
-    );
-  }
 
-  basicLog("[SUPPLIER][RES]", {
-    method: "POST",
-    endpoint: `${API_URL}/chat/completions`,
-    mode: "chat_stream",
-    status: response.status,
-    durationMs: Date.now() - streamStartedAt,
-  });
+    response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: request.model,
+        messages: request.messages,
+        stream: true,
+      }),
+      signal: request.signal,
+    });
 
-  if (!response.body) {
-    throw new ImageGenerationError("Chat stream body is empty", 502);
+    if (!response.ok) {
+      const errorText = await response.text();
+      debugError("Supplier chat stream error:", {
+        status: response.status,
+        model: request.model,
+        raw: errorText,
+      });
+      const error = parseErrorPayload(errorText);
+      throw new ImageGenerationError(
+        (error.error as { message?: string } | undefined)?.message ||
+          `API request failed with status ${response.status}: ${errorText}`,
+        response.status
+      );
+    }
+
+    basicLog("[SUPPLIER][RES]", {
+      method: "POST",
+      endpoint,
+      mode: "chat_stream",
+      status: response.status,
+      durationMs: Date.now() - requestStartedAt,
+    });
+
+    if (!response.body) {
+      throw new ImageGenerationError("Chat stream body is empty", 502);
+    }
+  } catch (error) {
+    basicLog("[SUPPLIER][ERR]", {
+      mode: "chat_stream",
+      model: request.model,
+      messageCount: request.messages.length,
+      ...buildSupplierRequestDiagnostics({
+        endpoint,
+        requestStartedAt,
+        attempt,
+        maxAttempts,
+      }),
+      ...getErrorDiagnostics(error),
+    });
+    debugError("[SUPPLIER][ERR]", {
+      mode: "chat_stream",
+      model: request.model,
+      messageCount: request.messages.length,
+      ...buildSupplierRequestDiagnostics({
+        endpoint,
+        requestStartedAt,
+        attempt,
+        maxAttempts,
+      }),
+      ...getErrorDiagnostics(error),
+    });
+    throw error;
   }
 
   yield { type: "start", model: request.model };

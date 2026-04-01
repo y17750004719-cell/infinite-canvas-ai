@@ -21,6 +21,15 @@ export const IMAGE_CARD_MODEL_OPTIONS = [
   },
 ];
 
+const SERIAL_EXACT_SIZE_IMAGE_MODELS = new Set([
+  'gemini-3.1-flash-image-preview',
+]);
+const SERIAL_EXACT_SIZE_REQUEST_SIZES = new Set([
+  '1024x1024',
+  '2048x2048',
+  '4096x4096',
+]);
+
 export function getDefaultTextPanelModelOption() {
   return TEXT_PANEL_MODEL_OPTIONS[0];
 }
@@ -1039,6 +1048,79 @@ export function buildAsyncImageTaskRequests({
       executionMode: 'async',
     })
   );
+}
+
+export function resolveCanvasImageTaskExecutionMode({
+  modelId,
+  size,
+  count,
+}) {
+  const normalizedModelId = typeof modelId === 'string' ? modelId.trim() : '';
+  const normalizedSize = typeof size === 'string' ? size.trim() : '';
+  const safeCount = Number.isFinite(count) && count > 0 ? Math.floor(count) : 0;
+
+  if (
+    safeCount > 1 &&
+    SERIAL_EXACT_SIZE_IMAGE_MODELS.has(normalizedModelId) &&
+    SERIAL_EXACT_SIZE_REQUEST_SIZES.has(normalizedSize)
+  ) {
+    return 'serial';
+  }
+
+  return 'parallel';
+}
+
+export async function settleCanvasImageGenerationRequests({
+  requests,
+  executionMode = 'parallel',
+  runTask,
+}) {
+  const safeRequests = Array.isArray(requests) ? requests : [];
+  if (executionMode !== 'serial') {
+    return Promise.allSettled(safeRequests.map((request) => runTask(request)));
+  }
+
+  const results = [];
+  for (const request of safeRequests) {
+    try {
+      const value = await runTask(request);
+      results.push({ status: 'fulfilled', value });
+    } catch (error) {
+      results.push({ status: 'rejected', reason: error });
+      if (error instanceof Error && error.name === 'AbortError') {
+        break;
+      }
+    }
+  }
+  return results;
+}
+
+export function buildCanvasImageGenerationFailureMessage({
+  requestedCount,
+  completedCount,
+  validationFailureCount = 0,
+  requestFailureCount = 0,
+}) {
+  const safeRequestedCount = Number.isFinite(requestedCount) && requestedCount > 0 ? Math.floor(requestedCount) : 0;
+  const safeCompletedCount = Number.isFinite(completedCount) && completedCount >= 0 ? Math.floor(completedCount) : 0;
+  const safeValidationFailureCount =
+    Number.isFinite(validationFailureCount) && validationFailureCount > 0 ? Math.floor(validationFailureCount) : 0;
+  const safeRequestFailureCount =
+    Number.isFinite(requestFailureCount) && requestFailureCount > 0 ? Math.floor(requestFailureCount) : 0;
+
+  if (safeValidationFailureCount <= 0 && safeRequestFailureCount <= 0) {
+    return null;
+  }
+
+  if (safeValidationFailureCount > 0 && safeRequestFailureCount > 0) {
+    return `请求 ${safeRequestedCount} 张，成功 ${safeCompletedCount} 张；${safeValidationFailureCount} 张未达标已丢弃，请手动补生成剩余 ${safeRequestFailureCount} 张`;
+  }
+
+  if (safeRequestFailureCount > 0) {
+    return `请求 ${safeRequestedCount} 张，成功 ${safeCompletedCount} 张；请手动补生成剩余 ${safeRequestFailureCount} 张`;
+  }
+
+  return `请求 ${safeRequestedCount} 张，成功 ${safeCompletedCount} 张，未达标结果已丢弃`;
 }
 
 export function buildImageCardOutputsState(outputs, requestedActiveIndex = 0) {

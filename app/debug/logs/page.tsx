@@ -1,4 +1,4 @@
-import { isLocalLogAccessAllowed, readLogEntries, type LocalLogEntry } from "../../lib/local-logs";
+import { getCurrentStartupSession, isLocalLogAccessAllowed, readLogEntries, type LocalLogEntry } from "../../lib/local-logs";
 
 type SearchParams = Record<string, string | string[] | undefined>;
 
@@ -40,13 +40,14 @@ export default async function DebugLogsPage({
     );
   }
 
-  const date = firstValue(searchParams?.date) || new Date().toISOString().slice(0, 10);
+  const startupSession = getCurrentStartupSession();
   const level = firstValue(searchParams?.level);
   const source = firstValue(searchParams?.source);
   const q = firstValue(searchParams?.q);
+  const currentLogFile = `logs/${startupSession.date}/${startupSession.startupId}.app.log`;
 
   const entries = await readLogEntries({
-    date,
+    startupId: startupSession.startupId,
     level: level || undefined,
     source: source || undefined,
     q: q || undefined,
@@ -61,17 +62,26 @@ export default async function DebugLogsPage({
             <p className="text-xs uppercase tracking-[0.35em] text-cyan-300/80">Local Debug Logs</p>
             <h1 className="mt-3 text-3xl font-semibold">项目本地错误日志</h1>
             <p className="mt-2 max-w-2xl text-sm text-white/65">
-              查看服务端和浏览器端写入本地文件的结构化日志，方便定位接口异常、未捕获错误和 Promise 拒绝。
+              当前页面只展示本次服务启动写入的日志，避免和上一次启动的错误混在一起。
             </p>
           </div>
 
-          <form className="grid gap-3 px-6 py-5 md:grid-cols-[180px_160px_160px_1fr_auto]">
-            <input
-              type="date"
-              name="date"
-              defaultValue={date}
-              className="rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-sm text-white outline-none transition focus:border-cyan-400"
-            />
+          <div className="grid gap-3 border-b border-white/10 px-6 py-5 md:grid-cols-3">
+            <div className="rounded-2xl border border-white/10 bg-black/20 px-4 py-3">
+              <p className="text-[11px] uppercase tracking-[0.25em] text-cyan-300/80">Current Startup</p>
+              <p className="mt-2 break-all text-sm text-white">{startupSession.startupId}</p>
+            </div>
+            <div className="rounded-2xl border border-white/10 bg-black/20 px-4 py-3">
+              <p className="text-[11px] uppercase tracking-[0.25em] text-cyan-300/80">Started At</p>
+              <p className="mt-2 text-sm text-white">{formatTimestamp(startupSession.startedAt)}</p>
+            </div>
+            <div className="rounded-2xl border border-white/10 bg-black/20 px-4 py-3">
+              <p className="text-[11px] uppercase tracking-[0.25em] text-cyan-300/80">Current File</p>
+              <p className="mt-2 break-all text-sm text-white">{currentLogFile}</p>
+            </div>
+          </div>
+
+          <form className="grid gap-3 px-6 py-5 md:grid-cols-[160px_160px_1fr_auto]">
             <select
               name="level"
               defaultValue={level}
@@ -113,7 +123,9 @@ export default async function DebugLogsPage({
               <h2 className="text-lg font-medium">结果</h2>
               <p className="mt-1 text-sm text-white/55">{entries.length} 条日志</p>
             </div>
-            <p className="text-xs text-white/45">日志文件按天保存在项目根目录 `logs/`</p>
+            <p className="max-w-xl text-right text-xs text-white/45">
+              旧启动日志请到项目根目录的 `logs/{startupSession.date}/` 手动查看；当前页只展示本次启动对应的文件。
+            </p>
           </div>
 
           <div className="mt-6 space-y-4">
@@ -140,6 +152,7 @@ export default async function DebugLogsPage({
                       </p>
                     </div>
                     <div className="space-y-1 text-right text-xs text-white/45">
+                      {entry.startupId ? <p>startupId: {entry.startupId}</p> : null}
                       {entry.route ? <p>route: {entry.route}</p> : null}
                       {entry.pageUrl ? <p className="max-w-[320px] break-all">page: {entry.pageUrl}</p> : null}
                       {entry.requestId ? <p>requestId: {entry.requestId}</p> : null}

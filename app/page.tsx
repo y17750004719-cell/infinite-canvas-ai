@@ -24,6 +24,7 @@ import {
 import {
   appendImageCardOutput,
   buildAsyncImageTaskRequests,
+  buildCanvasImageGenerationFailureMessage,
   buildImageCardOutputsState,
   buildCanvasImagePanelSubmitInput,
   buildCanvasTextPanelSubmitInput,
@@ -68,9 +69,11 @@ import {
   getTextCardVisualState,
   normalizeImageCardAspectRatio,
   removeCanvasTextGenerationEntry,
+  resolveCanvasImageTaskExecutionMode,
   resolveFloatingPopoverOffset,
   resolveImageCardModel,
   resolveSessionPresentationState,
+  settleCanvasImageGenerationRequests,
   shouldPreventScrollableRegionWheelDefault,
   syncAutoResizedTextareaLayout,
 } from './lib/workspace-session-view.mjs';
@@ -5949,83 +5952,114 @@ export default function AIWorkspace() {
           count,
           aspectRatio,
         });
+        const taskExecutionMode = resolveCanvasImageTaskExecutionMode({
+          modelId: resolveImageCardModel(modelId),
+          size,
+          count,
+        });
 
-        const taskResults = await Promise.allSettled(
-          asyncRequests.map(async (requestBody) => {
-            const { validOutputs, failedOutputCount, failureReason } = await requestImageGeneration(requestBody, controller.signal);
+        const taskResults = await settleCanvasImageGenerationRequests({
+          requests: asyncRequests,
+          executionMode: taskExecutionMode,
+          runTask: async (requestBody) => {
+            try {
+              const { validOutputs, failedOutputCount, failureReason } = await requestImageGeneration(requestBody, controller.signal);
 
-            if (
-              currentSessionIdRef.current !== generationSessionId ||
-              !itemsRef.current.some((item) => item.id === itemId)
-            ) {
-              return { completed: 0, failed: 0, failureReason: null };
-            }
+              if (
+                currentSessionIdRef.current !== generationSessionId ||
+                !itemsRef.current.some((item) => item.id === itemId)
+              ) {
+                return { completed: 0, failed: 0, failureReason: null };
+              }
 
-            if (validOutputs.length > 0) {
-              appendGeneratedImageHistoryForSession(
-                generationSessionId,
-                validOutputs.map((outputMeta) =>
-                  createGeneratedImageHistoryEntry({
-                    src: outputMeta.src,
-                    naturalWidth: outputMeta.naturalWidth,
-                    naturalHeight: outputMeta.naturalHeight,
-                    source: 'image-card',
-                    sourceItemId: itemId,
+              if (validOutputs.length > 0) {
+                appendGeneratedImageHistoryForSession(
+                  generationSessionId,
+                  validOutputs.map((outputMeta) =>
+                    createGeneratedImageHistoryEntry({
+                      src: outputMeta.src,
+                      naturalWidth: outputMeta.naturalWidth,
+                      naturalHeight: outputMeta.naturalHeight,
+                      source: 'image-card',
+                      sourceItemId: itemId,
+                    })
+                  )
+                );
+              }
+
+              for (const outputMeta of validOutputs) {
+                setItems((prev) =>
+                  prev.map((item) => {
+                    if (item.id !== itemId) {
+                      return item;
+                    }
+
+                    const nextOutputState = appendImageCardOutput({
+                      existingOutputs: item.imageOutputs,
+                      existingActiveIndex: item.activeImageOutputIndex ?? 0,
+                      nextOutput: outputMeta,
+                    });
+
+                    return {
+                      ...resizeImageCardItemToNaturalImage(
+                        {
+                          ...item,
+                          imageVariant: 'card',
+                          ...nextOutputState,
+                        },
+                        nextOutputState.naturalWidth ?? item.naturalWidth ?? IMAGE_CARD_DEFAULT_FRAME_WIDTH,
+                        nextOutputState.naturalHeight ?? item.naturalHeight ?? IMAGE_CARD_DEFAULT_FRAME_WIDTH
+                      ),
+                      imageVariant: 'card',
+                      ...nextOutputState,
+                    };
                   })
-                )
-              );
-            }
+                );
+              }
 
-            for (const outputMeta of validOutputs) {
-              setItems((prev) =>
-                prev.map((item) => {
-                  if (item.id !== itemId) {
-                    return item;
-                  }
+              setActiveCanvasImageGenerations((prev) => {
+                const entry = prev[itemId];
+                if (!entry) return prev;
+                return {
+                  ...prev,
+                  [itemId]: {
+                    ...entry,
+                    completed: Math.min(entry.total, entry.completed + validOutputs.length),
+                    failed: Math.min(entry.total, entry.failed + failedOutputCount),
+                  },
+                };
+              });
 
-                  const nextOutputState = appendImageCardOutput({
-                    existingOutputs: item.imageOutputs,
-                    existingActiveIndex: item.activeImageOutputIndex ?? 0,
-                    nextOutput: outputMeta,
-                  });
-
-                  return {
-                    ...resizeImageCardItemToNaturalImage(
-                      {
-                        ...item,
-                        imageVariant: 'card',
-                        ...nextOutputState,
-                      },
-                      nextOutputState.naturalWidth ?? item.naturalWidth ?? IMAGE_CARD_DEFAULT_FRAME_WIDTH,
-                      nextOutputState.naturalHeight ?? item.naturalHeight ?? IMAGE_CARD_DEFAULT_FRAME_WIDTH
-                    ),
-                    imageVariant: 'card',
-                    ...nextOutputState,
-                  };
-                })
-              );
-            }
-
-            setActiveCanvasImageGenerations((prev) => {
-              const entry = prev[itemId];
-              if (!entry) return prev;
               return {
-                ...prev,
-                [itemId]: {
-                  ...entry,
-                  completed: Math.min(entry.total, entry.completed + validOutputs.length),
-                  failed: Math.min(entry.total, entry.failed + failedOutputCount),
-                },
+                completed: validOutputs.length,
+                failed: failedOutputCount,
+                failureReason,
               };
-            });
+            } catch (error) {
+              if (
+                controller.signal.aborted ||
+                currentSessionIdRef.current !== generationSessionId ||
+                !itemsRef.current.some((item) => item.id === itemId)
+              ) {
+                throw error;
+              }
 
-            return {
-              completed: validOutputs.length,
-              failed: failedOutputCount,
-              failureReason,
-            };
-          })
-        );
+              setActiveCanvasImageGenerations((prev) => {
+                const entry = prev[itemId];
+                if (!entry) return prev;
+                return {
+                  ...prev,
+                  [itemId]: {
+                    ...entry,
+                    failed: Math.min(entry.total, entry.failed + 1),
+                  },
+                };
+              });
+
+              throw error;
+            }
+          },
+        });
 
         if (
           currentSessionIdRef.current !== generationSessionId ||
@@ -6035,6 +6069,7 @@ export default function AIWorkspace() {
         }
 
         const failures = taskResults.filter((result) => result.status === 'rejected');
+        const requestFailureCount = failures.length;
         const completedCount = taskResults.reduce((total, result) => {
           if (result.status !== 'fulfilled') return total;
           return total + (result.value?.completed ?? 0);
@@ -6047,7 +6082,7 @@ export default function AIWorkspace() {
           (result): result is PromiseFulfilledResult<{ completed: number; failed: number; failureReason: string | null }> =>
             result.status === 'fulfilled' && typeof result.value?.failureReason === 'string' && result.value.failureReason.length > 0
         )?.value.failureReason;
-        const failedCount = failures.length + validationFailureCount;
+        const failedCount = requestFailureCount + validationFailureCount;
 
         if (controller.signal.aborted) {
           throw new DOMException('Aborted', 'AbortError');
@@ -6074,12 +6109,17 @@ export default function AIWorkspace() {
             throw firstReason instanceof Error ? firstReason : new Error('未收到有效图片响应，请重试');
           }
 
+          const failureMessage =
+            buildCanvasImageGenerationFailureMessage({
+              requestedCount: asyncRequests.length,
+              completedCount,
+              validationFailureCount,
+              requestFailureCount,
+            }) || `请求 ${asyncRequests.length} 张，成功 ${completedCount} 张；请手动补生成剩余 ${failedCount} 张`;
+
           setCanvasImageGenerationErrorById((prev) => ({
             ...prev,
-            [itemId]:
-              validationFailureCount > 0
-                ? `请求 ${asyncRequests.length} 张，成功 ${completedCount} 张，未达标结果已丢弃`
-                : `请求 ${asyncRequests.length} 张，成功 ${completedCount} 张`,
+            [itemId]: failureMessage,
           }));
         }
       } catch (error) {

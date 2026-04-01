@@ -13,6 +13,7 @@ import {
   syncAutoResizedTextareaLayout,
   appendImageCardOutput,
   buildAsyncImageTaskRequests,
+  buildCanvasImageGenerationFailureMessage,
   buildCanvasImageGenerationRequest,
   buildCanvasImagePanelSubmitInput,
   buildImageCardOutputsState,
@@ -51,12 +52,14 @@ import {
   resolveSessionPresentationState,
   resolveImageCardModel,
   normalizeImageCardAspectRatio,
+  resolveCanvasImageTaskExecutionMode,
   resolveFloatingPopoverOffset,
   resolveImageGenerationFallbackSizes,
   extractImageFilesFromClipboardItems,
   getReplacedImageAssetItem,
   resolveCanvasImagePasteTarget,
   reorderIncomingImageConnections,
+  settleCanvasImageGenerationRequests,
   shouldHandleCanvasImagePaste,
   shouldPreventScrollableRegionWheelDefault,
 } from './workspace-session-view.mjs';
@@ -1525,6 +1528,110 @@ test('buildAsyncImageTaskRequests expands 4K multi-image generation into four ex
     executionMode: 'async',
   });
   assert.deepEqual(result[3], result[0]);
+});
+
+test('resolveCanvasImageTaskExecutionMode uses serial mode for exact-size Gemini multi-image requests', () => {
+  const result = resolveCanvasImageTaskExecutionMode({
+    modelId: 'gemini-3.1-flash-image-preview',
+    size: '2048x2048',
+    count: 2,
+  });
+
+  assert.equal(result, 'serial');
+});
+
+test('resolveCanvasImageTaskExecutionMode keeps non-exact-size or single-image requests in parallel mode', () => {
+  assert.equal(
+    resolveCanvasImageTaskExecutionMode({
+      modelId: 'gemini-3.1-flash-image-preview',
+      size: '1024x1792',
+      count: 2,
+    }),
+    'parallel'
+  );
+
+  assert.equal(
+    resolveCanvasImageTaskExecutionMode({
+      modelId: 'gemini-3.1-flash-image-preview',
+      size: '2048x2048',
+      count: 1,
+    }),
+    'parallel'
+  );
+
+  assert.equal(
+    resolveCanvasImageTaskExecutionMode({
+      modelId: 'nano-banana-2',
+      size: '2048x2048',
+      count: 2,
+    }),
+    'parallel'
+  );
+});
+
+test('settleCanvasImageGenerationRequests runs serial tasks one at a time and preserves later successes after failures', async () => {
+  let releaseFirstTask;
+  const firstTaskGate = new Promise((resolve) => {
+    releaseFirstTask = resolve;
+  });
+  const startedRequests = [];
+
+  const resultPromise = settleCanvasImageGenerationRequests({
+    requests: ['first', 'second'],
+    executionMode: 'serial',
+    runTask: async (requestId) => {
+      startedRequests.push(requestId);
+      if (requestId === 'first') {
+        await firstTaskGate;
+        throw new Error('socket closed');
+      }
+      return `${requestId}-ok`;
+    },
+  });
+
+  await Promise.resolve();
+  assert.deepEqual(startedRequests, ['first']);
+
+  releaseFirstTask();
+  const results = await resultPromise;
+
+  assert.deepEqual(startedRequests, ['first', 'second']);
+  assert.equal(results[0].status, 'rejected');
+  assert.match(results[0].reason.message, /socket closed/);
+  assert.deepEqual(results[1], { status: 'fulfilled', value: 'second-ok' });
+});
+
+test('buildCanvasImageGenerationFailureMessage asks for manual backfill when request failures leave missing outputs', () => {
+  const result = buildCanvasImageGenerationFailureMessage({
+    requestedCount: 2,
+    completedCount: 1,
+    validationFailureCount: 0,
+    requestFailureCount: 1,
+  });
+
+  assert.equal(result, '请求 2 张，成功 1 张；请手动补生成剩余 1 张');
+});
+
+test('buildCanvasImageGenerationFailureMessage keeps validation-specific wording when outputs are discarded', () => {
+  const result = buildCanvasImageGenerationFailureMessage({
+    requestedCount: 2,
+    completedCount: 1,
+    validationFailureCount: 1,
+    requestFailureCount: 0,
+  });
+
+  assert.equal(result, '请求 2 张，成功 1 张，未达标结果已丢弃');
+});
+
+test('buildCanvasImageGenerationFailureMessage explains both discarded and missing outputs when both happen', () => {
+  const result = buildCanvasImageGenerationFailureMessage({
+    requestedCount: 3,
+    completedCount: 1,
+    validationFailureCount: 1,
+    requestFailureCount: 1,
+  });
+
+  assert.equal(result, '请求 3 张，成功 1 张；1 张未达标已丢弃，请手动补生成剩余 1 张');
 });
 
 test('createCanvasCardItemAtCanvasPoint creates a text card centered on the spawn point', () => {

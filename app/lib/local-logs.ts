@@ -4,6 +4,12 @@ import path from "node:path";
 export type LocalLogLevel = "info" | "warn" | "error";
 export type LocalLogSource = "server" | "client";
 
+export interface StartupSession {
+  startupId: string;
+  startedAt: string;
+  date: string;
+}
+
 export interface LocalLogEntry {
   timestamp: string;
   level: LocalLogLevel;
@@ -12,6 +18,7 @@ export interface LocalLogEntry {
   message: string;
   event: string;
   details: Record<string, unknown> | null;
+  startupId?: string;
   route?: string;
   pageUrl?: string;
   requestId?: string;
@@ -19,6 +26,7 @@ export interface LocalLogEntry {
 
 export interface ReadLogEntriesFilters {
   date?: string;
+  startupId?: string;
   level?: LocalLogLevel | string;
   source?: LocalLogSource | string;
   q?: string;
@@ -36,16 +44,30 @@ const MAX_OBJECT_KEYS = 40;
 const MAX_DEPTH = 5;
 const REDACTED_VALUE = "[REDACTED]";
 const REDACTED_IMAGE_VALUE = "[BASE64_IMAGE_REDACTED]";
+const CURRENT_STARTUP_SESSION = createStartupSession();
 
 function resolveLogsDir(options?: LocalLogsRuntimeOptions): string {
   return options?.logsDir || path.join(process.cwd(), "logs");
+}
+
+function createStartupSession(now = new Date()): StartupSession {
+  const startedAt = now.toISOString();
+  return {
+    startupId: `${startedAt.slice(11, 19).replace(/:/g, "-")}-${Math.random().toString(36).slice(2, 8)}`,
+    startedAt,
+    date: startedAt.slice(0, 10),
+  };
+}
+
+export function getCurrentStartupSession(): StartupSession {
+  return CURRENT_STARTUP_SESSION;
 }
 
 function normalizeDate(date?: string): string {
   if (typeof date === "string" && /^\d{4}-\d{2}-\d{2}$/.test(date.trim())) {
     return date.trim();
   }
-  return new Date().toISOString().slice(0, 10);
+  return CURRENT_STARTUP_SESSION.date;
 }
 
 function isSensitiveKey(key?: string): boolean {
@@ -172,7 +194,7 @@ function normalizeString(value?: string): string | undefined {
   return truncateString(trimmed);
 }
 
-function normalizeEntry(entry: LocalLogEntry): LocalLogEntry {
+function normalizeEntry(entry: LocalLogEntry, startupIdFallback?: string): LocalLogEntry {
   return {
     timestamp: normalizeString(entry.timestamp) || new Date().toISOString(),
     level: entry.level,
@@ -181,19 +203,37 @@ function normalizeEntry(entry: LocalLogEntry): LocalLogEntry {
     message: normalizeString(entry.message) || "Log entry",
     event: normalizeString(entry.event) || "unknown",
     details: normalizeDetails(entry.details),
+    startupId: normalizeString(entry.startupId) || startupIdFallback,
     route: normalizeString(entry.route),
     pageUrl: normalizeString(entry.pageUrl),
     requestId: normalizeString(entry.requestId),
   };
 }
 
-function getLogFilePath(timestamp: string, options?: LocalLogsRuntimeOptions): string {
-  const normalizedTimestamp = normalizeString(timestamp) || new Date().toISOString();
-  const datePart = normalizedTimestamp.slice(0, 10);
-  return path.join(resolveLogsDir(options), `${datePart}.app.log`);
+function getLogFilePath(session: StartupSession, options?: LocalLogsRuntimeOptions): string {
+  return path.join(resolveLogsDir(options), session.date, `${session.startupId}.app.log`);
+}
+
+function resolveReadSession(filters: ReadLogEntriesFilters): StartupSession {
+  const startupId = normalizeString(filters.startupId) || CURRENT_STARTUP_SESSION.startupId;
+  const date = normalizeDate(filters.date);
+
+  if (startupId === CURRENT_STARTUP_SESSION.startupId && date === CURRENT_STARTUP_SESSION.date) {
+    return CURRENT_STARTUP_SESSION;
+  }
+
+  return {
+    startupId,
+    startedAt: `${date}T00:00:00.000Z`,
+    date,
+  };
 }
 
 function matchesFilters(entry: LocalLogEntry, filters: ReadLogEntriesFilters): boolean {
+  if (filters.startupId && entry.startupId !== filters.startupId) {
+    return false;
+  }
+
   if (filters.level && entry.level !== filters.level) {
     return false;
   }
@@ -219,6 +259,7 @@ function emitDevelopmentConsoleLog(entry: LocalLogEntry) {
 
   const method = entry.level === "error" ? console.error : entry.level === "warn" ? console.warn : console.log;
   method(`[local-log][${entry.level}] ${entry.scope} ${entry.message}`, {
+    startupId: entry.startupId,
     event: entry.event,
     route: entry.route,
     pageUrl: entry.pageUrl,
@@ -235,11 +276,12 @@ export async function appendLogEntry(
   entry: LocalLogEntry,
   options?: LocalLogsRuntimeOptions
 ): Promise<LocalLogEntry> {
-  const normalized = normalizeEntry(entry);
-  const logsDir = resolveLogsDir(options);
+  const startupSession = CURRENT_STARTUP_SESSION;
+  const normalized = normalizeEntry(entry, startupSession.startupId);
+  const logFilePath = getLogFilePath(startupSession, options);
 
-  await mkdir(logsDir, { recursive: true });
-  await appendFile(getLogFilePath(normalized.timestamp, options), `${JSON.stringify(normalized)}\n`, "utf8");
+  await mkdir(path.dirname(logFilePath), { recursive: true });
+  await appendFile(logFilePath, `${JSON.stringify(normalized)}\n`, "utf8");
 
   emitDevelopmentConsoleLog(normalized);
   return normalized;
@@ -249,8 +291,8 @@ export async function readLogEntries(
   filters: ReadLogEntriesFilters = {},
   options?: LocalLogsRuntimeOptions
 ): Promise<LocalLogEntry[]> {
-  const targetDate = normalizeDate(filters.date);
-  const logFilePath = path.join(resolveLogsDir(options), `${targetDate}.app.log`);
+  const targetSession = resolveReadSession(filters);
+  const logFilePath = getLogFilePath(targetSession, options);
 
   let raw = "";
   try {
@@ -268,7 +310,7 @@ export async function readLogEntries(
   for (const line of lines) {
     try {
       const parsed = JSON.parse(line) as LocalLogEntry;
-      const normalized = normalizeEntry(parsed);
+      const normalized = normalizeEntry(parsed, targetSession.startupId);
       if (matchesFilters(normalized, filters)) {
         entries.push(normalized);
       }
