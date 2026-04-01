@@ -159,6 +159,83 @@ test('text card floating panel renders through a portal instead of the legacy in
   assert.equal(pageSource.includes('canvasSize.height - selectedTextCardPanelDisplayedHeight - selectedTextCardPanelPadding'), false);
 });
 
+test('text card shell keeps padding inside idle and waiting states instead of the shared frame wrapper', () => {
+  const textCardBranchStart = pageSource.indexOf("{item.type === 'text' && item.textVariant === 'card' && (");
+  const textCardBranchEnd = pageSource.indexOf('{isItemSelected &&', textCardBranchStart);
+
+  assert.notEqual(textCardBranchStart, -1);
+  assert.notEqual(textCardBranchEnd, -1);
+  assert.ok(textCardBranchEnd > textCardBranchStart);
+
+  const textCardBranch = pageSource.slice(textCardBranchStart, textCardBranchEnd);
+
+  assert.equal(textCardBranch.includes('className="absolute rounded-[22px] bg-[#1f1f22] px-9 py-12"'), false);
+  assert.equal(textCardBranch.includes('className="w-full max-w-[560px] px-8 py-10 text-left"'), true);
+  assert.equal(textCardBranch.includes('className="flex h-full w-full items-center justify-center px-8 text-center"'), true);
+});
+
+test('text card content and manual states use edge-to-edge full-frame layouts without inner padding', () => {
+  const textCardBranchStart = pageSource.indexOf("{item.type === 'text' && item.textVariant === 'card' && (");
+  const textCardBranchEnd = pageSource.indexOf('{isItemSelected &&', textCardBranchStart);
+
+  assert.notEqual(textCardBranchStart, -1);
+  assert.notEqual(textCardBranchEnd, -1);
+  assert.ok(textCardBranchEnd > textCardBranchStart);
+
+  const textCardBranch = pageSource.slice(textCardBranchStart, textCardBranchEnd);
+  const fullFrameScrollMatches = textCardBranch.match(/className="panel-scrollbar h-full min-w-0 w-full overflow-y-auto"/g) ?? [];
+
+  assert.equal(textCardBranch.includes('className="panel-scrollbar h-full w-full overflow-y-auto px-2 py-1"'), false);
+  assert.equal(fullFrameScrollMatches.length, 2);
+  assert.equal(textCardBranch.includes('className={`panel-scrollbar h-full w-full resize-none bg-transparent px-2 py-1'), false);
+  assert.equal(
+    textCardBranch.includes(
+      'className={`panel-scrollbar h-full min-w-0 w-full resize-none bg-transparent ${TEXT_CARD_BODY_TEXT_CLASSNAME} outline-none placeholder:text-zinc-500`}'
+    ),
+    true
+  );
+  assert.equal(textCardBranch.includes('className="min-h-full break-words"'), false);
+  assert.equal(textCardBranch.includes('className="min-h-full w-full min-w-0 break-words"'), true);
+  assert.equal(
+    textCardBranch.includes('className={`min-h-full whitespace-pre-wrap break-words ${TEXT_CARD_BODY_TEXT_CLASSNAME}`}'),
+    false
+  );
+  assert.equal(
+    textCardBranch.includes('className={`min-h-full w-full min-w-0 whitespace-pre-wrap break-words ${TEXT_CARD_BODY_TEXT_CLASSNAME}`}'),
+    true
+  );
+});
+
+test('text card markdown root explicitly fills the current frame width without a max-width cap', () => {
+  assert.equal(
+    pageSource.includes(
+      'className="workspace-text-card-markdown w-full min-w-0 max-w-none break-words text-[15px] leading-7 tracking-[-0.02em] text-zinc-200"'
+    ),
+    true
+  );
+  assert.equal(
+    pageSource.includes('className="workspace-text-card-markdown text-[15px] leading-7 tracking-[-0.02em] text-zinc-200"'),
+    false
+  );
+});
+
+test('text card markdown code blocks soft-wrap to the current frame width while tables keep horizontal scrolling', () => {
+  const markdownStart = pageSource.indexOf('const TextCardMarkdown = memo(function TextCardMarkdown({');
+  const markdownEnd = pageSource.indexOf('function ConnectionPortIcon({', markdownStart);
+
+  assert.notEqual(markdownStart, -1);
+  assert.notEqual(markdownEnd, -1);
+  assert.ok(markdownEnd > markdownStart);
+
+  const markdownBlock = pageSource.slice(markdownStart, markdownEnd);
+
+  assert.equal(markdownBlock.includes('overflow-x-auto rounded-[14px] border border-white/[0.08] bg-black/20 px-3 py-2 text-[13px] leading-6 text-zinc-200 first:mt-0'), false);
+  assert.equal(markdownBlock.includes('whitespace-pre-wrap'), true);
+  assert.equal(markdownBlock.includes('[overflow-wrap:anywhere]'), true);
+  assert.equal(markdownBlock.includes('block w-full min-w-0'), true);
+  assert.equal(markdownBlock.includes('className="mt-4 overflow-x-auto first:mt-0"'), true);
+});
+
 test('canvas viewport no longer keeps a legacy in-canvas image card floating panel branch', () => {
   assert.equal(pageSource.includes('{false && selectedImageCardPanelItem && selectedImageCardPanelFrameBounds && selectedImageCardPanelCanvasRect && ('), false);
   assert.equal(pageSource.includes('left: selectedImageCardPanelLeft + selectedImageCardQualityPopoverOffset.left * viewport.scale,'), false);

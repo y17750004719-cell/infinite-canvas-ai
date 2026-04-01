@@ -1244,7 +1244,7 @@ const CanvasNodesLayer = memo(function CanvasNodesLayer({
                   <span>Text</span>
                 </div>
                 <div
-                  className="absolute rounded-[22px] bg-[#1f1f22] px-9 py-12"
+                  className="absolute overflow-hidden rounded-[22px] bg-[#1f1f22]"
                   style={{
                     left: `${TEXT_CARD_FRAME_INSET_X}px`,
                     top: `${TEXT_CARD_FRAME_TOP}px`,
@@ -1254,7 +1254,7 @@ const CanvasNodesLayer = memo(function CanvasNodesLayer({
                 >
                   <div className="flex h-full w-full items-center justify-center">
                     {textCardVisualState === 'idle' && (
-                      <div className="w-full max-w-[560px] text-left">
+                      <div className="w-full max-w-[560px] px-8 py-10 text-left">
                         <div className="flex flex-col gap-4">
                           <div className="px-2 text-sm text-zinc-500">尝试：</div>
                           <div className="flex w-full flex-col items-start gap-2">
@@ -1296,10 +1296,10 @@ const CanvasNodesLayer = memo(function CanvasNodesLayer({
                     )}
                     {textCardVisualState === 'content' && (
                       <div
-                        className="panel-scrollbar h-full w-full overflow-y-auto px-2 py-1"
+                        className="panel-scrollbar h-full min-w-0 w-full overflow-y-auto"
                         onWheel={stopCanvasWheelFromScrollableRegion}
                       >
-                        <div className="min-h-full break-words">
+                        <div className="min-h-full w-full min-w-0 break-words">
                           <TextCardMarkdown content={item.text || ''} />
                         </div>
                       </div>
@@ -1318,16 +1318,16 @@ const CanvasNodesLayer = memo(function CanvasNodesLayer({
                           e.stopPropagation();
                         }}
                         onWheel={stopCanvasWheelFromScrollableRegion}
-                        className={`panel-scrollbar h-full w-full resize-none bg-transparent px-2 py-1 ${TEXT_CARD_BODY_TEXT_CLASSNAME} outline-none placeholder:text-zinc-500`}
+                        className={`panel-scrollbar h-full min-w-0 w-full resize-none bg-transparent ${TEXT_CARD_BODY_TEXT_CLASSNAME} outline-none placeholder:text-zinc-500`}
                         placeholder="请输入文本内容..."
                       />
                     )}
                     {textCardVisualState === 'manual-content' && (
                       <div
-                        className="panel-scrollbar h-full w-full overflow-y-auto px-2 py-1"
+                        className="panel-scrollbar h-full min-w-0 w-full overflow-y-auto"
                         onWheel={stopCanvasWheelFromScrollableRegion}
                       >
-                        <div className={`min-h-full whitespace-pre-wrap break-words ${TEXT_CARD_BODY_TEXT_CLASSNAME}`}>
+                        <div className={`min-h-full w-full min-w-0 whitespace-pre-wrap break-words ${TEXT_CARD_BODY_TEXT_CLASSNAME}`}>
                           {item.text || ''}
                         </div>
                       </div>
@@ -2788,18 +2788,18 @@ const TextCardMarkdown = memo(function TextCardMarkdown({
   content: string;
 }) {
   return (
-    <div className="workspace-text-card-markdown text-[15px] leading-7 tracking-[-0.02em] text-zinc-200">
+    <div className="workspace-text-card-markdown w-full min-w-0 max-w-none break-words text-[15px] leading-7 tracking-[-0.02em] text-zinc-200">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
         components={{
           h1: ({ children }) => <h1 className="mb-3 text-[1.2rem] font-semibold leading-[1.25] text-zinc-50 first:mt-0">{children}</h1>,
           h2: ({ children }) => <h2 className="mb-3 mt-5 text-[1.08rem] font-semibold leading-[1.3] text-zinc-100 first:mt-0">{children}</h2>,
           h3: ({ children }) => <h3 className="mb-2 mt-4 text-[1rem] font-semibold leading-[1.35] text-zinc-100 first:mt-0">{children}</h3>,
-          p: ({ children }) => <p className="mt-4 first:mt-0">{children}</p>,
+          p: ({ children }) => <p className="mt-4 break-words first:mt-0">{children}</p>,
           ul: ({ children }) => <ul className="mt-4 list-disc space-y-1.5 pl-5 first:mt-0">{children}</ul>,
           ol: ({ children }) => <ol className="mt-4 list-decimal space-y-1.5 pl-5 first:mt-0">{children}</ol>,
-          li: ({ children }) => <li className="pl-1 marker:text-zinc-500">{children}</li>,
-          blockquote: ({ children }) => <blockquote className="mt-4 border-l border-white/10 pl-4 text-zinc-300 first:mt-0">{children}</blockquote>,
+          li: ({ children }) => <li className="break-words pl-1 marker:text-zinc-500">{children}</li>,
+          blockquote: ({ children }) => <blockquote className="mt-4 break-words border-l border-white/10 pl-4 text-zinc-300 first:mt-0">{children}</blockquote>,
           strong: ({ children }) => <strong className="font-semibold text-zinc-50">{children}</strong>,
           em: ({ children }) => <em className="italic text-zinc-100">{children}</em>,
           code(props) {
@@ -2822,7 +2822,9 @@ const TextCardMarkdown = memo(function TextCardMarkdown({
             return (
               <code
                 {...rest}
-                className={className}
+                className={['block w-full min-w-0 whitespace-pre-wrap break-words [overflow-wrap:anywhere]', className]
+                  .filter(Boolean)
+                  .join(' ')}
               >
                 {children}
               </code>
@@ -2830,7 +2832,7 @@ const TextCardMarkdown = memo(function TextCardMarkdown({
           },
           pre: ({ children }) => (
             <pre
-              className="panel-scrollbar mt-4 overflow-x-auto rounded-[14px] border border-white/[0.08] bg-black/20 px-3 py-2 text-[13px] leading-6 text-zinc-200 first:mt-0"
+              className="panel-scrollbar mt-4 whitespace-pre-wrap break-words [overflow-wrap:anywhere] rounded-[14px] border border-white/[0.08] bg-black/20 px-3 py-2 text-[13px] leading-6 text-zinc-200 first:mt-0"
               onWheel={stopCanvasWheelFromScrollableRegion}
             >
               {children}
