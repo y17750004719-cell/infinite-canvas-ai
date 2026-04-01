@@ -1,4 +1,8 @@
-import { mergeGeneratedImageHistoryEntries, normalizeGeneratedImageHistory } from './generated-image-history.mjs';
+import {
+  extractGeneratedImageTimestampFromFilename,
+  mergeGeneratedImageHistoryEntries,
+  normalizeGeneratedImageHistory,
+} from './generated-image-history.mjs';
 
 const DEFAULT_VIEWPORT = { x: 0, y: 0, scale: 1 };
 export const CANVAS_TEXT_GENERATION_CONCURRENCY_LIMIT = 5;
@@ -1225,6 +1229,16 @@ function extractTimestampFromGeneratedId(value) {
   return timestamp;
 }
 
+function extractTimestampFromGeneratedAsset(value) {
+  if (typeof value !== 'string' || value.length === 0) {
+    return null;
+  }
+
+  const normalizedValue = value.split(/[?#]/, 1)[0];
+  const filename = normalizedValue.split('/').pop() || normalizedValue;
+  return extractGeneratedImageTimestampFromFilename(filename);
+}
+
 function buildGeneratedImageHistorySortKey(timestamp, sequence = 0) {
   const safeTimestamp = Number.isFinite(timestamp) && timestamp > 0 ? timestamp : 0;
   const safeSequence = Number.isFinite(sequence) && sequence >= 0 ? sequence : 0;
@@ -1275,7 +1289,10 @@ export function getGeneratedImageHistoryEntries({ sessions, currentSessionSnapsh
           return;
         }
 
-        const messageTimestamp = extractTimestampFromGeneratedId(message.id) ?? topicUpdatedAt;
+        const messageTimestamp =
+          extractTimestampFromGeneratedId(message.id) ??
+          extractTimestampFromGeneratedAsset(message.imageUrl) ??
+          topicUpdatedAt;
         fallbackEntries.push({
           id: `chat:${sessionId}:${topic?.id || topicIndex}:${message?.id || messageIndex}`,
           sessionId,
@@ -1305,12 +1322,16 @@ export function getGeneratedImageHistoryEntries({ sessions, currentSessionSnapsh
           return;
         }
 
+        const outputTimestamp =
+          extractTimestampFromGeneratedAsset(output.src) ??
+          itemTimestamp;
+
         fallbackEntries.push({
           id: `image-card:${sessionId}:${item.id || itemIndex}:${outputIndex}`,
           sessionId,
           source: 'image-card',
           src: output.src,
-          createdAt: itemTimestamp * 1000 + outputIndex,
+          createdAt: buildGeneratedImageHistorySortKey(outputTimestamp, outputIndex),
           naturalWidth:
             Number.isFinite(output.naturalWidth) && output.naturalWidth > 0 ? output.naturalWidth : undefined,
           naturalHeight:

@@ -360,6 +360,105 @@ test('getGeneratedImageHistoryEntries falls back to topic order when chat image 
   );
 });
 
+test('getGeneratedImageHistoryEntries prefers image-card output file timestamps over older card ids', () => {
+  const result = getGeneratedImageHistoryEntries({
+    sessions: [
+      {
+        id: 'session-mixed-order',
+        name: '混合排序',
+        createdAt: 1700000000000,
+        updatedAt: 1700000000300,
+        items: [
+          {
+            id: 'image-card-1700000000100',
+            type: 'image',
+            imageVariant: 'card',
+            imageOutputs: [
+              {
+                src: '/uploads/generated/img-1700000000500-fresh.png',
+                naturalWidth: 1024,
+                naturalHeight: 1024,
+              },
+            ],
+          },
+        ],
+        connections: [],
+        messages: [],
+        topics: [
+          {
+            id: 'topic-mixed',
+            title: 'Mixed',
+            createdAt: 1700000000000,
+            updatedAt: 1700000000200,
+            messages: [
+              {
+                id: 'msg-1700000000200-chat',
+                role: 'assistant',
+                content: '',
+                imageUrl: '/uploads/generated/img-1700000000200-chat.png',
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  });
+
+  assert.deepEqual(
+    result.map((entry) => ({ src: entry.src, source: entry.source })),
+    [
+      { src: '/uploads/generated/img-1700000000500-fresh.png', source: 'image-card' },
+      { src: '/uploads/generated/img-1700000000200-chat.png', source: 'chat' },
+    ]
+  );
+});
+
+test('getGeneratedImageHistoryEntries prefers chat image file timestamps when message ids do not contain timestamps', () => {
+  const result = getGeneratedImageHistoryEntries({
+    sessions: [
+      {
+        id: 'session-chat-file-order',
+        name: '聊天文件名排序',
+        createdAt: 1700000000000,
+        updatedAt: 1700000000400,
+        items: [],
+        connections: [],
+        messages: [],
+        topics: [
+          {
+            id: 'topic-file-order',
+            title: 'File order',
+            createdAt: 1700000000000,
+            updatedAt: 1700000000400,
+            messages: [
+              {
+                id: 'msg-alpha',
+                role: 'assistant',
+                content: '',
+                imageUrl: '/uploads/generated/img-1700000000500-newest.png',
+              },
+              {
+                id: 'msg-beta',
+                role: 'assistant',
+                content: '',
+                imageUrl: '/uploads/generated/img-1700000000100-oldest.png',
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  });
+
+  assert.deepEqual(
+    result.map((entry) => entry.src),
+    [
+      '/uploads/generated/img-1700000000500-newest.png',
+      '/uploads/generated/img-1700000000100-oldest.png',
+    ]
+  );
+});
+
 test('getGeneratedImageHistoryEntries prefers the current session snapshot over the persisted session copy', () => {
   const result = getGeneratedImageHistoryEntries({
     sessions: [
