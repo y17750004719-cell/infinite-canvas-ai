@@ -1860,30 +1860,43 @@ test('getImageCardQualitySummary normalizes legacy aspect ratios and falls back 
   assert.equal(getImageCardQualitySummary({ aspectRatio: '', size: '1536x1024' }), '1:1 · 1536x1024');
 });
 
-test('getImageCardFrameSizeForAspectRatio keeps frame width and derives height from the selected aspect ratio', () => {
-  const landscape = getImageCardFrameSizeForAspectRatio('16:9', 348);
-  const portrait = getImageCardFrameSizeForAspectRatio('9:16', 348);
+test('getImageCardFrameSizeForAspectRatio uses a 384px minimum edge for the selected ratio', () => {
+  const square = getImageCardFrameSizeForAspectRatio('1:1');
+  const landscape = getImageCardFrameSizeForAspectRatio('16:9');
+  const portrait = getImageCardFrameSizeForAspectRatio('9:16');
 
-  assert.equal(landscape.width, 348);
-  assert.ok(Math.abs(landscape.height - 195.75) < 0.001);
-  assert.equal(portrait.width, 348);
-  assert.ok(Math.abs(portrait.height - 618.6666666667) < 0.001);
+  assert.deepEqual(square, {
+    width: 384,
+    height: 384,
+  });
+  assert.ok(Math.abs(landscape.width - 682.6666666667) < 0.001);
+  assert.equal(landscape.height, 384);
+  assert.equal(portrait.width, 384);
+  assert.ok(Math.abs(portrait.height - 682.6666666667) < 0.001);
 });
 
 test('getImageCardItemSizeForFrameSize rebuilds outer item size from the frame size', () => {
-  const result = getImageCardItemSizeForFrameSize(348, 195.75);
+  const result = getImageCardItemSizeForFrameSize(384, 384);
 
   assert.deepEqual(result, {
-    width: 380,
-    height: 231.75,
+    width: 416,
+    height: 420,
   });
 });
 
-test('getImageCardItemSizeForNaturalImage derives the image card item size from the real output dimensions', () => {
-  const result = getImageCardItemSizeForNaturalImage(1024, 1792, 348);
+test('getImageCardItemSizeForNaturalImage derives outer sizes from a 384px minimum edge', () => {
+  const square = getImageCardItemSizeForNaturalImage(1024, 1024);
+  const landscape = getImageCardItemSizeForNaturalImage(1920, 1080);
+  const portrait = getImageCardItemSizeForNaturalImage(1024, 1792);
 
-  assert.equal(result.width, 380);
-  assert.equal(result.height, 645);
+  assert.deepEqual(square, {
+    width: 416,
+    height: 420,
+  });
+  assert.ok(Math.abs(landscape.width - 714.6666666667) < 0.001);
+  assert.equal(landscape.height, 420);
+  assert.equal(portrait.width, 416);
+  assert.equal(portrait.height, 708);
 });
 
 test('buildImageCardOutputsState stores all outputs and activates the first output by default', () => {

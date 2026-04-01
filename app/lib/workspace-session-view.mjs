@@ -107,21 +107,29 @@ const RESOLUTION_TIER_MIN_EDGE = {
   '4K': 4096,
 };
 const IMAGE_CARD_ASPECT_RATIO_TOLERANCE = 0.03;
+const IMAGE_CARD_FRAME_MIN_EDGE = 384;
 
-export function getImageCardFrameSizeForAspectRatio(aspectRatio, frameWidth = 348) {
-  const safeFrameWidth = Number.isFinite(frameWidth) && frameWidth > 0 ? frameWidth : 348;
+export function getImageCardFrameSizeForAspectRatio(aspectRatio, minEdge = IMAGE_CARD_FRAME_MIN_EDGE) {
+  const safeMinEdge = Number.isFinite(minEdge) && minEdge > 0 ? minEdge : IMAGE_CARD_FRAME_MIN_EDGE;
   const parts = parseAspectRatioParts(aspectRatio);
 
   if (!parts) {
     return {
-      width: safeFrameWidth,
-      height: safeFrameWidth,
+      width: safeMinEdge,
+      height: safeMinEdge,
+    };
+  }
+
+  if (parts.widthRatio >= parts.heightRatio) {
+    return {
+      width: safeMinEdge * (parts.widthRatio / parts.heightRatio),
+      height: safeMinEdge,
     };
   }
 
   return {
-    width: safeFrameWidth,
-    height: safeFrameWidth * (parts.heightRatio / parts.widthRatio),
+    width: safeMinEdge,
+    height: safeMinEdge * (parts.heightRatio / parts.widthRatio),
   };
 }
 
@@ -134,7 +142,7 @@ export function getImageCardItemSizeForFrameSize(
     frameBottomInset = 12,
   } = {}
 ) {
-  const safeFrameWidth = Number.isFinite(frameWidth) && frameWidth > 0 ? frameWidth : 348;
+  const safeFrameWidth = Number.isFinite(frameWidth) && frameWidth > 0 ? frameWidth : IMAGE_CARD_FRAME_MIN_EDGE;
   const safeFrameHeight = Number.isFinite(frameHeight) && frameHeight > 0 ? frameHeight : safeFrameWidth;
   const safeInsetX = Number.isFinite(frameInsetX) ? frameInsetX : 16;
   const safeFrameTopInset = Number.isFinite(frameTopInset) ? frameTopInset : 24;
@@ -149,16 +157,18 @@ export function getImageCardItemSizeForFrameSize(
 export function getImageCardItemSizeForNaturalImage(
   naturalWidth,
   naturalHeight,
-  frameWidth = 348,
+  minEdge = IMAGE_CARD_FRAME_MIN_EDGE,
   insets
 ) {
-  const safeFrameWidth = Number.isFinite(frameWidth) && frameWidth > 0 ? frameWidth : 348;
-  const safeNaturalWidth = Number.isFinite(naturalWidth) && naturalWidth > 0 ? naturalWidth : safeFrameWidth;
-  const safeNaturalHeight = Number.isFinite(naturalHeight) && naturalHeight > 0 ? naturalHeight : safeFrameWidth;
+  const safeMinEdge = Number.isFinite(minEdge) && minEdge > 0 ? minEdge : IMAGE_CARD_FRAME_MIN_EDGE;
+  const safeNaturalWidth = Number.isFinite(naturalWidth) && naturalWidth > 0 ? naturalWidth : safeMinEdge;
+  const safeNaturalHeight = Number.isFinite(naturalHeight) && naturalHeight > 0 ? naturalHeight : safeMinEdge;
+  const shortestEdge = Math.min(safeNaturalWidth, safeNaturalHeight);
+  const scale = shortestEdge > 0 ? safeMinEdge / shortestEdge : 1;
 
   return getImageCardItemSizeForFrameSize(
-    safeFrameWidth,
-    safeFrameWidth * (safeNaturalHeight / safeNaturalWidth),
+    safeNaturalWidth * scale,
+    safeNaturalHeight * scale,
     insets
   );
 }

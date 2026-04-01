@@ -253,10 +253,14 @@ const TEXT_CARD_DIMENSIONS = {
   width: 380,
   height: 430,
 } as const;
-const IMAGE_CARD_DIMENSIONS = TEXT_CARD_DIMENSIONS;
 const TEXT_CARD_FRAME_INSET_X = 16;
 const TEXT_CARD_FRAME_TOP = 24;
 const TEXT_CARD_FRAME_BOTTOM = 12;
+const IMAGE_CARD_MIN_EDGE = 384;
+const IMAGE_CARD_DIMENSIONS = {
+  width: IMAGE_CARD_MIN_EDGE + TEXT_CARD_FRAME_INSET_X * 2,
+  height: IMAGE_CARD_MIN_EDGE + TEXT_CARD_FRAME_TOP + TEXT_CARD_FRAME_BOTTOM,
+} as const;
 const TEXT_CARD_GENERATION_PANEL_DEFAULT_WIDTH = 480;
 const TEXT_CARD_GENERATION_PANEL_BASE_HEIGHT = 156;
 const TEXT_CARD_GENERATION_PANEL_PREVIEW_HEIGHT = 92;
@@ -464,7 +468,7 @@ const createImageCanvasItem = ({
   };
 };
 
-const IMAGE_CARD_DEFAULT_FRAME_WIDTH = IMAGE_CARD_DIMENSIONS.width - TEXT_CARD_FRAME_INSET_X * 2;
+const IMAGE_CARD_DEFAULT_FRAME_WIDTH = IMAGE_CARD_MIN_EDGE;
 const GENERATED_HISTORY_SOURCE_LABELS: Record<GeneratedImageHistoryEntry['source'], string> = {
   chat: '聊天生成',
   'image-card': 'Image 生成',
@@ -501,11 +505,6 @@ const createGeneratedImageHistoryEntry = ({
   messageId,
 });
 
-const getImageCardFrameWidthFromItem = (item: Pick<CanvasItem, 'width'> | null | undefined) => {
-  const frameWidth = (item?.width ?? 0) - TEXT_CARD_FRAME_INSET_X * 2;
-  return Number.isFinite(frameWidth) && frameWidth > 0 ? frameWidth : IMAGE_CARD_DEFAULT_FRAME_WIDTH;
-};
-
 const resizeCanvasItemFromCenter = (
   item: CanvasItem,
   nextSize: {
@@ -528,8 +527,7 @@ const resizeCanvasItemFromCenter = (
 };
 
 const resizeImageCardItemToAspectRatio = (item: CanvasItem, aspectRatio: string): CanvasItem => {
-  const frameWidth = getImageCardFrameWidthFromItem(item);
-  const frameSize = getImageCardFrameSizeForAspectRatio(aspectRatio, frameWidth);
+  const frameSize = getImageCardFrameSizeForAspectRatio(aspectRatio, IMAGE_CARD_MIN_EDGE);
   const nextSize = getImageCardItemSizeForFrameSize(frameSize.width, frameSize.height, {
     frameInsetX: TEXT_CARD_FRAME_INSET_X,
     frameTopInset: TEXT_CARD_FRAME_TOP,
@@ -544,8 +542,7 @@ const resizeImageCardItemToNaturalImage = (
   naturalWidth: number,
   naturalHeight: number
 ): CanvasItem => {
-  const frameWidth = getImageCardFrameWidthFromItem(item);
-  const nextSize = getImageCardItemSizeForNaturalImage(naturalWidth, naturalHeight, frameWidth, {
+  const nextSize = getImageCardItemSizeForNaturalImage(naturalWidth, naturalHeight, IMAGE_CARD_MIN_EDGE, {
     frameInsetX: TEXT_CARD_FRAME_INSET_X,
     frameTopInset: TEXT_CARD_FRAME_TOP,
     frameBottomInset: TEXT_CARD_FRAME_BOTTOM,
@@ -570,8 +567,8 @@ const loadCanvasGeneratedImageMeta = (localUrl: string) =>
     img.onload = () => {
       resolve({
         src: localUrl,
-        naturalWidth: img.naturalWidth || img.width || IMAGE_CARD_DIMENSIONS.width,
-        naturalHeight: img.naturalHeight || img.height || IMAGE_CARD_DIMENSIONS.height,
+        naturalWidth: img.naturalWidth || img.width || IMAGE_CARD_DEFAULT_FRAME_WIDTH,
+        naturalHeight: img.naturalHeight || img.height || IMAGE_CARD_DEFAULT_FRAME_WIDTH,
       });
     };
     img.onerror = () => reject(new Error('生成图片加载失败'));
@@ -1678,9 +1675,7 @@ const CanvasViewport = memo(function CanvasViewport({
   const selectedTextCardPanelCanvasWidth = selectedTextCardPanelFrameBounds
     ? Math.max(TEXT_CARD_GENERATION_PANEL_DEFAULT_WIDTH, selectedTextCardPanelFrameBounds.width)
     : 0;
-  const selectedImageCardPanelCanvasWidth = selectedImageCardPanelFrameBounds
-    ? Math.max(TEXT_CARD_GENERATION_PANEL_DEFAULT_WIDTH, selectedImageCardPanelFrameBounds.width)
-    : 0;
+  const selectedImageCardPanelCanvasWidth = TEXT_CARD_GENERATION_PANEL_DEFAULT_WIDTH;
   const selectedTextCardPanelDisplayInput = getDisplayableTextCardPanelDraft(selectedTextCardPanelInput);
   const selectedImageCardPanelDisplayInput = getDisplayableTextCardPanelDraft(selectedImageCardPanelInput);
   const focusSelectedTextCardPanelInput = useCallback(() => {

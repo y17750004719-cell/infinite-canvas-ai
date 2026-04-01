@@ -126,6 +126,22 @@ test('image card floating panel positioning no longer clamps against canvasSize 
   assert.equal(pageSource.includes('clampFloatingPanelToViewport({'), false);
 });
 
+test('image cards use image-specific default dimensions instead of aliasing text card dimensions', () => {
+  assert.equal(pageSource.includes('const IMAGE_CARD_DIMENSIONS = TEXT_CARD_DIMENSIONS;'), false);
+  assert.equal(pageSource.includes('const IMAGE_CARD_DIMENSIONS = {'), true);
+});
+
+test('selected image card panel keeps a fixed 480px canvas width', () => {
+  assert.equal(
+    pageSource.includes('const selectedImageCardPanelCanvasWidth = TEXT_CARD_GENERATION_PANEL_DEFAULT_WIDTH;'),
+    true
+  );
+  assert.equal(
+    pageSource.includes('? Math.max(TEXT_CARD_GENERATION_PANEL_DEFAULT_WIDTH, selectedImageCardPanelFrameBounds.width)'),
+    false
+  );
+});
+
 test('text card floating panel renders through a portal instead of the legacy in-canvas branch', () => {
   assert.equal(pageSource.includes('const selectedTextCardPanelViewportOrigin ='), true);
   assert.equal(pageSource.includes('const portaledSelectedTextCardPanel ='), true);
@@ -141,6 +157,10 @@ test('canvas viewport no longer keeps a legacy in-canvas image card floating pan
   assert.equal(pageSource.includes('{false && selectedImageCardPanelItem && selectedImageCardPanelFrameBounds && selectedImageCardPanelCanvasRect && ('), false);
   assert.equal(pageSource.includes('left: selectedImageCardPanelLeft + selectedImageCardQualityPopoverOffset.left * viewport.scale,'), false);
   assert.equal(pageSource.includes('left: selectedImageCardPanelLeft + selectedImageCardCountPopoverOffset.left * viewport.scale,'), false);
+});
+
+test('image card aspect ratio selection still routes through resizeImageCardItemToAspectRatio', () => {
+  assert.equal(pageSource.includes('? resizeImageCardItemToAspectRatio(item, normalizedAspectRatio)'), true);
 });
 
 test('image card generation always uses async task requests instead of keeping a single-image sync branch', () => {
