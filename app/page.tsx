@@ -24,6 +24,14 @@ import {
   normalizeProjectSession,
 } from './lib/session-persistence.mjs';
 import {
+  areCanvasUndoSnapshotsEqual,
+  createCanvasUndoSnapshot,
+  createEmptySessionCanvasHistoryState,
+  pushUndoSnapshot,
+  redoSnapshot,
+  undoSnapshot,
+} from './lib/canvas-history.mjs';
+import {
   appendImageCardOutput,
   buildAsyncImageTaskRequests,
   buildCanvasImageGenerationFailureMessage,
@@ -40,6 +48,7 @@ import {
   buildReferenceImageRequestPayload,
   canEnterManualTextMode,
   canStartCanvasTextGeneration,
+  createCanvasClipboardSnapshot,
   createCanvasCardItemAtCanvasPoint,
   finalizeManualTextCardItem,
   getDefaultImageCardModelOption,
@@ -48,6 +57,7 @@ import {
   getGeneratedImageHistoryEntries,
   getDirectImagePreviewsForTextCard,
   getDirectTextInputsForTextCard,
+  getImageToolResultSpawnPosition,
   getImageCardFrameSizeForAspectRatio,
   getImageCardItemSizeForFrameSize,
   getImageCardItemSizeForNaturalImage,
@@ -61,6 +71,7 @@ import {
   isImageCardItem,
   isOutputResolutionSufficient,
   moveCanvasItemsToFront,
+  materializeCanvasClipboardPaste,
   reorderIncomingImageConnections,
   resolveCanvasImagePasteTarget,
   shouldHandleCanvasImagePaste,
@@ -84,6 +95,8 @@ import { useWorkspaceSessionController } from './hooks/useWorkspaceSessionContro
 const DEBUG_CANVAS_CONNECTIONS = false;
 const CANVAS_OVERLAY_Z = 120;
 const CHAT_PANEL_Z = 180;
+const GLOBAL_NOTICE_Z = 220;
+const CANVAS_CLIPBOARD_PASTE_OFFSET = { x: 32, y: 32 };
 
 const extractPlainText = (value: React.ReactNode): string =>
   React.Children.toArray(value)
@@ -95,6 +108,49 @@ const extractPlainText = (value: React.ReactNode): string =>
       return '';
     })
     .join('');
+
+const sanitizeDownloadFileName = (value: string): string | null => {
+  const normalizedValue = value.trim().replace(/[\\/:*?"<>|]+/g, '-');
+  return normalizedValue.length > 0 ? normalizedValue : null;
+};
+
+const getDownloadFileNameFromDisposition = (headerValue: string | null): string | null => {
+  if (!headerValue) return null;
+
+  const utf8Match = headerValue.match(/filename\*=UTF-8''([^;]+)/i);
+  if (utf8Match?.[1]) {
+    try {
+      const decodedValue = decodeURIComponent(utf8Match[1]);
+      return sanitizeDownloadFileName(decodedValue);
+    } catch {
+      return sanitizeDownloadFileName(utf8Match[1]);
+    }
+  }
+
+  const quotedMatch = headerValue.match(/filename="([^"]+)"/i);
+  if (quotedMatch?.[1]) {
+    return sanitizeDownloadFileName(quotedMatch[1]);
+  }
+
+  const unquotedMatch = headerValue.match(/filename=([^;]+)/i);
+  if (unquotedMatch?.[1]) {
+    return sanitizeDownloadFileName(unquotedMatch[1]);
+  }
+
+  return null;
+};
+
+const getFallbackImageDownloadName = (src: string): string => {
+  try {
+    const parsedUrl = src.startsWith('/')
+      ? new URL(src, 'http://localhost')
+      : new URL(src);
+    const lastSegment = parsedUrl.pathname.split('/').filter(Boolean).at(-1) || 'zo-image.png';
+    return sanitizeDownloadFileName(lastSegment) || 'zo-image.png';
+  } catch {
+    return 'zo-image.png';
+  }
+};
 
 interface CanvasItem {
   id: string;
@@ -122,6 +178,22 @@ interface Connection {
   id: string;
   fromItemId: string;
   toItemId: string;
+}
+
+interface CanvasUndoSnapshot {
+  items: CanvasItem[];
+  connections: Connection[];
+  textCardPanelDrafts: Record<string, string>;
+  imageCardPanelDrafts: Record<string, string>;
+  imageCardModelById: Record<string, string>;
+  imageCardSizeById: Record<string, string>;
+  imageCardCountById: Record<string, number>;
+  imageCardAspectRatioById: Record<string, string>;
+}
+
+interface SessionCanvasHistoryState {
+  past: CanvasUndoSnapshot[];
+  future: CanvasUndoSnapshot[];
 }
 
 type ConnectionMode = 'idle' | 'armed' | 'dragging';
@@ -192,6 +264,22 @@ interface AssistantTextSelectionSession {
   isPointerDown: boolean;
   hasSelection: boolean;
   suppressOutsideClickUntil: number;
+}
+
+interface CanvasClipboardSnapshot {
+  items: CanvasItem[];
+  bounds: {
+    left: number;
+    top: number;
+    right: number;
+    bottom: number;
+  };
+  textCardPanelDrafts: Record<string, string>;
+  imageCardPanelDrafts: Record<string, string>;
+  imageCardModelById: Record<string, string>;
+  imageCardSizeById: Record<string, string>;
+  imageCardCountById: Record<string, number>;
+  imageCardAspectRatioById: Record<string, string>;
 }
 
 interface ChatTopic {
@@ -1496,6 +1584,7 @@ const CanvasViewport = memo(function CanvasViewport({
   onToggleTextPanelModelMenu,
   onSelectTextPanelModel,
   onSelectedTextCardPanelInputChange,
+  onSelectedTextCardPanelBlur,
   onSelectedTextCardPanelSubmit,
   onSelectedTextCardPanelCancel,
   onToggleImageCardModelMenu,
@@ -1506,6 +1595,7 @@ const CanvasViewport = memo(function CanvasViewport({
   onSelectImageCardCount,
   onSelectImageCardAspectRatio,
   onSelectedImageCardPanelInputChange,
+  onSelectedImageCardPanelBlur,
   onSelectedImageCardPanelSubmit,
   onSelectedImageCardPanelCancel,
   onItemDoubleClick,
@@ -1609,6 +1699,7 @@ const CanvasViewport = memo(function CanvasViewport({
   onToggleTextPanelModelMenu: () => void;
   onSelectTextPanelModel: (modelId: string) => void;
   onSelectedTextCardPanelInputChange: (value: string) => void;
+  onSelectedTextCardPanelBlur: () => void;
   onSelectedTextCardPanelSubmit: () => void;
   onSelectedTextCardPanelCancel: () => void;
   onToggleImageCardModelMenu: () => void;
@@ -1619,6 +1710,7 @@ const CanvasViewport = memo(function CanvasViewport({
   onSelectImageCardCount: (count: number) => void;
   onSelectImageCardAspectRatio: (aspectRatioId: string) => void;
   onSelectedImageCardPanelInputChange: (value: string) => void;
+  onSelectedImageCardPanelBlur: () => void;
   onSelectedImageCardPanelSubmit: () => void;
   onSelectedImageCardPanelCancel: () => void;
   onItemDoubleClick: (itemId: string) => void;
@@ -1954,6 +2046,9 @@ const CanvasViewport = memo(function CanvasViewport({
                     value={selectedImageCardPanelDisplayInput}
                     onChange={(e) => {
                       onSelectedImageCardPanelInputChange(e.target.value);
+                    }}
+                    onBlur={() => {
+                      onSelectedImageCardPanelBlur();
                     }}
                     onKeyDown={(e) => {
                       if (
@@ -2345,6 +2440,9 @@ const CanvasViewport = memo(function CanvasViewport({
                     value={selectedTextCardPanelDisplayInput}
                     onChange={(e) => {
                       onSelectedTextCardPanelInputChange(e.target.value);
+                    }}
+                    onBlur={() => {
+                      onSelectedTextCardPanelBlur();
                     }}
                     onKeyDown={(e) => {
                       if (
@@ -2937,9 +3035,9 @@ const IMAGE_NODE_TOOLBAR_ACTIONS = [
   { id: 'erase', label: '擦除', icon: X, enabled: false, disabledReason: undefined },
   { id: 'enhance', label: '增强', icon: Sparkles, enabled: false, disabledReason: undefined },
   { id: 'expand', label: '扩图', icon: Plus, enabled: false, disabledReason: undefined },
-  { id: 'cutout', label: '抠图', icon: ImageIcon, enabled: false, disabledReason: '暂不可用' },
+  { id: 'cutout', label: '抠图', icon: ImageIcon, enabled: true, disabledReason: undefined },
   { id: 'crop', label: '裁剪', icon: SlidersHorizontal, enabled: false, disabledReason: undefined },
-  { id: 'export', label: '导出', icon: Send, enabled: false, disabledReason: undefined },
+  { id: 'export', label: '导出', icon: Send, enabled: true, disabledReason: undefined },
 ] as const;
 
 const ADD_NODE_MENU_OPTIONS = [
@@ -3125,6 +3223,7 @@ export default function AIWorkspace() {
   const [showAddNodeMenu, setShowAddNodeMenu] = useState(false);
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [editingName, setEditingName] = useState('');
+  const [imageToolbarNotice, setImageToolbarNotice] = useState<string | null>(null);
   
   const [activeSkillJobId, setActiveSkillJobId] = useState<string | null>(null);
   const [activeSkillJobType, setActiveSkillJobType] = useState<'logo' | 'brand' | null>(null);
@@ -3159,7 +3258,17 @@ export default function AIWorkspace() {
   const streamMessageIdRef = useRef<string | null>(null);
   const pendingAssistantMessageIdRef = useRef<string | null>(null);
   const currentSessionIdRef = useRef<string | null>(null);
+  const canvasHistoryBySessionRef = useRef<Record<string, SessionCanvasHistoryState>>({});
+  const pendingCanvasHistorySnapshotRef = useRef<CanvasUndoSnapshot | null>(null);
   const latestChatInputRef = useRef('');
+  const imageToolbarNoticeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const canvasClipboardRef = useRef<{
+    snapshot: CanvasClipboardSnapshot | null;
+    pasteCount: number;
+  }>({
+    snapshot: null,
+    pasteCount: 0,
+  });
   const persistedGeneratedImageHistoryBySessionRef = useRef<Record<string, GeneratedImageHistoryEntry[]>>({});
   const assistantTextSelectionRef = useRef<AssistantTextSelectionSession>({
     startedInAssistant: false,
@@ -3345,6 +3454,153 @@ export default function AIWorkspace() {
   const copiedAssistantMessageTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   latestChatInputRef.current = chatInput;
 
+  const createCurrentCanvasUndoSnapshot = useCallback(() => {
+    return createCanvasUndoSnapshot({
+      items,
+      connections,
+      textCardPanelDrafts,
+      imageCardPanelDrafts,
+      imageCardModelById,
+      imageCardSizeById,
+      imageCardCountById,
+      imageCardAspectRatioById,
+    }) as CanvasUndoSnapshot;
+  }, [
+    connections,
+    imageCardAspectRatioById,
+    imageCardCountById,
+    imageCardModelById,
+    imageCardPanelDrafts,
+    imageCardSizeById,
+    items,
+    textCardPanelDrafts,
+  ]);
+
+  const pushCanvasUndoSnapshot = useCallback((snapshot: CanvasUndoSnapshot | null | undefined) => {
+    const sessionId = currentSessionIdRef.current;
+    if (!sessionId || !snapshot) {
+      return;
+    }
+
+    const currentHistory = canvasHistoryBySessionRef.current[sessionId] ?? createEmptySessionCanvasHistoryState();
+    canvasHistoryBySessionRef.current[sessionId] = pushUndoSnapshot({
+      history: currentHistory,
+      snapshot,
+    }) as SessionCanvasHistoryState;
+  }, []);
+
+  const commitCanvasUndoSnapshot = useCallback(() => {
+    if (!pendingCanvasHistorySnapshotRef.current) {
+      return;
+    }
+
+    pushCanvasUndoSnapshot(pendingCanvasHistorySnapshotRef.current);
+  }, [pushCanvasUndoSnapshot]);
+
+  const recordCurrentCanvasUndoSnapshot = useCallback(() => {
+    pushCanvasUndoSnapshot(createCurrentCanvasUndoSnapshot());
+  }, [createCurrentCanvasUndoSnapshot, pushCanvasUndoSnapshot]);
+
+  const capturePendingCanvasUndoSnapshot = useCallback(() => {
+    if (pendingCanvasHistorySnapshotRef.current) {
+      return;
+    }
+
+    pendingCanvasHistorySnapshotRef.current = createCurrentCanvasUndoSnapshot();
+  }, [createCurrentCanvasUndoSnapshot]);
+
+  const clearPendingCanvasUndoSnapshot = useCallback(() => {
+    pendingCanvasHistorySnapshotRef.current = null;
+  }, []);
+
+  const commitPendingCanvasUndoSnapshot = useCallback(() => {
+    if (!pendingCanvasHistorySnapshotRef.current) {
+      return;
+    }
+
+    const currentSnapshot = createCurrentCanvasUndoSnapshot();
+    if (!areCanvasUndoSnapshotsEqual(pendingCanvasHistorySnapshotRef.current, currentSnapshot)) {
+      // @ts-expect-error The commit helper reads the pending snapshot ref directly.
+      commitCanvasUndoSnapshot(pendingCanvasHistorySnapshotRef.current);
+    }
+
+    pendingCanvasHistorySnapshotRef.current = null;
+  }, [commitCanvasUndoSnapshot, createCurrentCanvasUndoSnapshot]);
+
+  const applyCanvasUndoSnapshot = useCallback((snapshot: CanvasUndoSnapshot) => {
+    setItems(snapshot.items);
+    setConnections(snapshot.connections);
+    setTextCardPanelDrafts(snapshot.textCardPanelDrafts);
+    setImageCardPanelDrafts(snapshot.imageCardPanelDrafts);
+    setImageCardModelById(snapshot.imageCardModelById);
+    setImageCardSizeById(snapshot.imageCardSizeById);
+    setImageCardCountById(snapshot.imageCardCountById);
+    setImageCardAspectRatioById(snapshot.imageCardAspectRatioById);
+    setSelectedId(null);
+    setSelectedIds([]);
+    setSelectedConnectionIds([]);
+    setHoveredCanvasItemId(null);
+    setHoveredInputPortItemId(null);
+    setHoveredOutputPortItemId(null);
+    setConnectionMode('idle');
+    setConnectionFromItemId(null);
+    setConnectionPoint(null);
+    setConnectionPointerId(null);
+    setFrozenPreviewConnection(null);
+    setPendingConnectionMenu(null);
+    setMagneticPorts({});
+    setConnectionSnapTargetId(null);
+    setEditingTextCardId(null);
+    setShowTextPanelModelMenu(false);
+    setShowImageCardModelMenu(false);
+    setShowImageCardQualityMenu(false);
+    setShowImageCardCountMenu(false);
+    setCanvasTextGenerationErrorById({});
+    setCanvasImageGenerationErrorById({});
+    pendingCanvasHistorySnapshotRef.current = null;
+    connectionSessionRef.current = null;
+  }, []);
+
+  const undoCanvasEdit = useCallback(() => {
+    const sessionId = currentSessionIdRef.current;
+    if (!sessionId) {
+      return;
+    }
+
+    const currentHistory = canvasHistoryBySessionRef.current[sessionId] ?? createEmptySessionCanvasHistoryState();
+    const result = undoSnapshot({
+      history: currentHistory,
+      currentSnapshot: createCurrentCanvasUndoSnapshot(),
+    });
+
+    if (!result.snapshot) {
+      return;
+    }
+
+    canvasHistoryBySessionRef.current[sessionId] = result.history as SessionCanvasHistoryState;
+    applyCanvasUndoSnapshot(result.snapshot as CanvasUndoSnapshot);
+  }, [applyCanvasUndoSnapshot, createCurrentCanvasUndoSnapshot]);
+
+  const redoCanvasEdit = useCallback(() => {
+    const sessionId = currentSessionIdRef.current;
+    if (!sessionId) {
+      return;
+    }
+
+    const currentHistory = canvasHistoryBySessionRef.current[sessionId] ?? createEmptySessionCanvasHistoryState();
+    const result = redoSnapshot({
+      history: currentHistory,
+      currentSnapshot: createCurrentCanvasUndoSnapshot(),
+    });
+
+    if (!result.snapshot) {
+      return;
+    }
+
+    canvasHistoryBySessionRef.current[sessionId] = result.history as SessionCanvasHistoryState;
+    applyCanvasUndoSnapshot(result.snapshot as CanvasUndoSnapshot);
+  }, [applyCanvasUndoSnapshot, createCurrentCanvasUndoSnapshot]);
+
   useEffect(() => {
     if (!editingTextCardId || !editingTextCardTextareaRef.current) return;
 
@@ -3405,6 +3661,14 @@ export default function AIWorkspace() {
   useEffect(() => {
     selectedIdRef.current = selectedId;
   }, [selectedId]);
+
+  useEffect(() => {
+    return () => {
+      if (imageToolbarNoticeTimeoutRef.current) {
+        clearTimeout(imageToolbarNoticeTimeoutRef.current);
+      }
+    };
+  }, []);
 
   useEffect(() => {
     if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
@@ -3851,6 +4115,7 @@ export default function AIWorkspace() {
             x: spawnPosition.x,
             y: spawnPosition.y,
           });
+          recordCurrentCanvasUndoSnapshot();
           setItems((prev) => [...prev, newItem]);
           resolve();
         };
@@ -3858,7 +4123,7 @@ export default function AIWorkspace() {
         img.src = imageUrl;
       });
     },
-    [getSpawnPosition]
+    [getSpawnPosition, recordCurrentCanvasUndoSnapshot]
   );
 
   const addGeneratedHistoryImageToCanvas = useCallback(
@@ -3906,9 +4171,71 @@ export default function AIWorkspace() {
         y: spawnPosition.y,
       });
 
+      recordCurrentCanvasUndoSnapshot();
       setItems((prev) => [...prev, newItem]);
     },
-    [getSpawnPosition]
+    [getSpawnPosition, recordCurrentCanvasUndoSnapshot]
+  );
+
+  const addBackgroundRemovedImageToCanvas = useCallback(
+    async ({
+      src,
+      naturalWidth,
+      naturalHeight,
+      sourceItemId,
+    }: {
+      src: string;
+      naturalWidth?: number;
+      naturalHeight?: number;
+      sourceItemId: string;
+    }) => {
+      const resolvedMeta =
+        Number.isFinite(naturalWidth) &&
+        naturalWidth > 0 &&
+        Number.isFinite(naturalHeight) &&
+        naturalHeight > 0
+          ? {
+              naturalWidth,
+              naturalHeight,
+            }
+          : await new Promise<{ naturalWidth: number; naturalHeight: number }>((resolve, reject) => {
+              const img = new window.Image();
+              img.onload = () => {
+                resolve({
+                  naturalWidth: img.width,
+                  naturalHeight: img.height,
+                });
+              };
+              img.onerror = () => reject(new Error('图片加载失败'));
+              img.src = src;
+            });
+
+      recordCurrentCanvasUndoSnapshot();
+      setItems((prev) => {
+        const displaySize = getConstrainedImageDisplaySize(
+          resolvedMeta.naturalWidth,
+          resolvedMeta.naturalHeight
+        );
+        const sourceItem = prev.find((item) => item.id === sourceItemId) ?? null;
+        const spawnPosition = sourceItem
+          ? getImageToolResultSpawnPosition({
+              sourceItem,
+              nextSize: displaySize,
+            })
+          : getSpawnPosition(displaySize);
+        const newItem = createImageCanvasItem({
+          id: `cutout-image-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+          src,
+          naturalWidth: resolvedMeta.naturalWidth,
+          naturalHeight: resolvedMeta.naturalHeight,
+          x: spawnPosition.x,
+          y: spawnPosition.y,
+        });
+
+        return [...prev, newItem];
+      });
+    },
+    [getSpawnPosition, recordCurrentCanvasUndoSnapshot]
   );
 
   const replaceImageAssetItemFromFile = useCallback(
@@ -3944,11 +4271,12 @@ export default function AIWorkspace() {
         img.src = imageUrl;
       });
 
+      recordCurrentCanvasUndoSnapshot();
       setItems((prev) =>
         prev.map((item) => (item.id === itemId ? getReplacedImageAssetItem(item, imageMeta) : item))
       );
     },
-    []
+    [recordCurrentCanvasUndoSnapshot]
   );
 
   const uploadImageFilesToCanvas = useCallback(
@@ -3979,26 +4307,78 @@ export default function AIWorkspace() {
     e.target.value = '';
   };
 
+  const getPrimarySelectedId = useCallback((ids: string[]) => ids[0] || null, []);
+
   const handleCanvasPaste = useCallback(
     async (e: React.ClipboardEvent<HTMLDivElement> | ClipboardEvent) => {
       const imageFiles = extractImageFilesFromClipboardItems(e.clipboardData?.items);
-      if (imageFiles.length === 0) {
+      if (imageFiles.length > 0) {
+        e.preventDefault();
+        const pasteTarget = resolveCanvasImagePasteTarget({
+          selectedId: selectedImageAssetItem?.id ?? selectedId,
+          selectedIds,
+          itemById,
+        });
+        if (pasteTarget.mode === 'replace') {
+          await replaceImageAssetItemFromFile(pasteTarget.itemId, imageFiles[0]);
+          return;
+        }
+        await uploadImageFilesToCanvas(imageFiles, 'pasted');
+        return;
+      }
+
+      const pastedCanvasClipboard = materializeCanvasClipboardPaste({
+        clipboard: canvasClipboardRef.current?.snapshot,
+        pasteCount: canvasClipboardRef.current?.pasteCount ?? 0,
+        offsetStep: CANVAS_CLIPBOARD_PASTE_OFFSET,
+        createId: (sourceId: string, index: number) =>
+          `${sourceId}-copy-${Date.now()}-${index + 1}-${Math.random().toString(36).slice(2, 7)}`,
+      }) as
+        | ({
+            items: CanvasItem[];
+            selectedIds: string[];
+            textCardPanelDrafts: Record<string, string>;
+            imageCardPanelDrafts: Record<string, string>;
+            imageCardModelById: Record<string, string>;
+            imageCardSizeById: Record<string, string>;
+            imageCardCountById: Record<string, number>;
+            imageCardAspectRatioById: Record<string, string>;
+            nextPasteCount: number;
+          })
+        | null;
+
+      if (!pastedCanvasClipboard) {
         return;
       }
 
       e.preventDefault();
-      const pasteTarget = resolveCanvasImagePasteTarget({
-        selectedId: selectedImageAssetItem?.id ?? selectedId,
-        selectedIds,
-        itemById,
-      });
-      if (pasteTarget.mode === 'replace') {
-        await replaceImageAssetItemFromFile(pasteTarget.itemId, imageFiles[0]);
-        return;
-      }
-      await uploadImageFilesToCanvas(imageFiles, 'pasted');
+      recordCurrentCanvasUndoSnapshot();
+      setItems((prev) => [...prev, ...pastedCanvasClipboard.items]);
+      setTextCardPanelDrafts((prev) => ({ ...prev, ...pastedCanvasClipboard.textCardPanelDrafts }));
+      setImageCardPanelDrafts((prev) => ({ ...prev, ...pastedCanvasClipboard.imageCardPanelDrafts }));
+      setImageCardModelById((prev) => ({ ...prev, ...pastedCanvasClipboard.imageCardModelById }));
+      setImageCardSizeById((prev) => ({ ...prev, ...pastedCanvasClipboard.imageCardSizeById }));
+      setImageCardCountById((prev) => ({ ...prev, ...pastedCanvasClipboard.imageCardCountById }));
+      setImageCardAspectRatioById((prev) => ({ ...prev, ...pastedCanvasClipboard.imageCardAspectRatioById }));
+      setSelectedConnectionIds([]);
+      setSelectedIds(pastedCanvasClipboard.selectedIds);
+      setSelectedId(getPrimarySelectedId(pastedCanvasClipboard.selectedIds));
+
+      canvasClipboardRef.current = {
+        snapshot: canvasClipboardRef.current?.snapshot ?? null,
+        pasteCount: pastedCanvasClipboard.nextPasteCount,
+      };
     },
-    [itemById, replaceImageAssetItemFromFile, selectedId, selectedIds, selectedImageAssetItem?.id, uploadImageFilesToCanvas]
+    [
+      getPrimarySelectedId,
+      itemById,
+      recordCurrentCanvasUndoSnapshot,
+      replaceImageAssetItemFromFile,
+      selectedId,
+      selectedIds,
+      selectedImageAssetItem?.id,
+      uploadImageFilesToCanvas,
+    ]
   );
 
   const handleChatImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -4089,6 +4469,7 @@ export default function AIWorkspace() {
   const handleSelectedTextCardPanelInputChange = useCallback(
     (value: string) => {
       if (!selectedTextCardPanelItem) return;
+      capturePendingCanvasUndoSnapshot();
       setCanvasTextGenerationErrorById((prev) => {
         if (!prev[selectedTextCardPanelItem.id]) return prev;
         const next = { ...prev };
@@ -4100,12 +4481,13 @@ export default function AIWorkspace() {
         [selectedTextCardPanelItem.id]: value,
       }));
     },
-    [selectedTextCardPanelItem]
+    [capturePendingCanvasUndoSnapshot, selectedTextCardPanelItem]
   );
 
   const handleSelectedImageCardPanelInputChange = useCallback(
     (value: string) => {
       if (!selectedImageCardPanelItem) return;
+      capturePendingCanvasUndoSnapshot();
       setCanvasImageGenerationErrorById((prev) => {
         if (!prev[selectedImageCardPanelItem.id]) return prev;
         const next = { ...prev };
@@ -4117,7 +4499,7 @@ export default function AIWorkspace() {
         [selectedImageCardPanelItem.id]: value,
       }));
     },
-    [selectedImageCardPanelItem]
+    [capturePendingCanvasUndoSnapshot, selectedImageCardPanelItem]
   );
 
   const handleManualTextCardInputChange = useCallback((itemId: string, value: string) => {
@@ -4135,6 +4517,7 @@ export default function AIWorkspace() {
   }, []);
 
   const handleImageCardOutputSelect = useCallback((itemId: string, outputIndex: number) => {
+    recordCurrentCanvasUndoSnapshot();
     setItems((prev) =>
       prev.map((item) => {
         if (item.id !== itemId || !Array.isArray(item.imageOutputs) || item.imageOutputs.length === 0) {
@@ -4155,20 +4538,22 @@ export default function AIWorkspace() {
         };
       })
     );
-  }, []);
+  }, [recordCurrentCanvasUndoSnapshot]);
 
   const finalizeManualTextCardEditing = useCallback((itemId: string) => {
+    commitPendingCanvasUndoSnapshot();
     setItems((prev) =>
       prev.map((item) => (item.id === itemId ? finalizeManualTextCardItem(item) : item))
     );
     setEditingTextCardId((prev) => (prev === itemId ? null : prev));
-  }, []);
+  }, [commitPendingCanvasUndoSnapshot]);
 
   const handleTextCardDoubleClick = useCallback((itemId: string) => {
     const item = itemsRef.current.find((entry) => entry.id === itemId);
     if (!item || item.type !== 'text' || item.textVariant !== 'card') return;
 
     if (item.textMode === 'manual') {
+      pendingCanvasHistorySnapshotRef.current = createCurrentCanvasUndoSnapshot();
       setEditingTextCardId(itemId);
       return;
     }
@@ -4184,6 +4569,7 @@ export default function AIWorkspace() {
       return;
     }
 
+    pendingCanvasHistorySnapshotRef.current = createCurrentCanvasUndoSnapshot();
     setItems((prev) =>
       prev.map((entry) =>
         entry.id === itemId
@@ -4195,7 +4581,7 @@ export default function AIWorkspace() {
       )
     );
     setEditingTextCardId(itemId);
-  }, [activeCanvasTextGenerationItemIds, connections]);
+  }, [activeCanvasTextGenerationItemIds, connections, createCurrentCanvasUndoSnapshot]);
 
   useEffect(() => {
     setTextCardPanelDrafts((prev) => {
@@ -4316,6 +4702,7 @@ export default function AIWorkspace() {
       e.stopPropagation();
 
       if (draggingPanelReference.sourceItemId !== sourceItemId) {
+        recordCurrentCanvasUndoSnapshot();
         setConnections((prev) =>
           reorderIncomingImageConnections({
             connections: prev,
@@ -4330,7 +4717,7 @@ export default function AIWorkspace() {
       setDraggingPanelReference(null);
       setDragOverPanelReference(null);
     },
-    [setConnections, draggingPanelReference]
+    [draggingPanelReference, recordCurrentCanvasUndoSnapshot, setConnections]
   );
 
   const handlePanelReferenceDragEnd = useCallback(() => {
@@ -4350,6 +4737,7 @@ export default function AIWorkspace() {
       visible: true,
       locked: false,
     };
+    recordCurrentCanvasUndoSnapshot();
     setItems(prev => [...prev, newItem]);
   };
 
@@ -4369,6 +4757,7 @@ export default function AIWorkspace() {
       visible: true,
       locked: false,
     };
+    recordCurrentCanvasUndoSnapshot();
     setItems(prev => [...prev, newItem]);
   };
 
@@ -4387,8 +4776,9 @@ export default function AIWorkspace() {
       visible: true,
       locked: false,
     };
+    recordCurrentCanvasUndoSnapshot();
     setItems((prev) => [...prev, newItem]);
-  }, [getSpawnPosition]);
+  }, [getSpawnPosition, recordCurrentCanvasUndoSnapshot]);
 
   const createTextItemAtCanvasPoint = useCallback((canvasPoint: { x: number; y: number }) => {
     const newItem = createCanvasCardItemAtCanvasPoint({
@@ -4708,8 +5098,6 @@ export default function AIWorkspace() {
   const toggleSelectionId = (ids: string[], id: string) =>
     ids.includes(id) ? ids.filter((entry) => entry !== id) : [...ids, id];
 
-  const getPrimarySelectedId = (ids: string[]) => ids[0] || null;
-
   const cubicBezierPoint = (
     p0: { x: number; y: number },
     p1: { x: number; y: number },
@@ -4803,13 +5191,15 @@ export default function AIWorkspace() {
   };
 
   const deleteItem = useCallback((id: string) => {
+    recordCurrentCanvasUndoSnapshot();
     setItems(prev => prev.filter(item => item.id !== id));
     setConnections(prev => prev.filter((connection) => connection.fromItemId !== id && connection.toItemId !== id));
     if (selectedId === id) setSelectedId(null);
     setSelectedIds(prev => prev.filter(selected => selected !== id));
-  }, [selectedId]);
+  }, [recordCurrentCanvasUndoSnapshot, selectedId]);
 
   const deleteConnection = (connectionId: string) => {
+    recordCurrentCanvasUndoSnapshot();
     setConnections((prev) => prev.filter((connection) => connection.id !== connectionId));
     setSelectedConnectionIds((prev) => prev.filter((id) => id !== connectionId));
   };
@@ -4946,6 +5336,7 @@ export default function AIWorkspace() {
     });
     if (session && session.mode === 'dragging' && session.fromItemId && session.snapTargetId && session.fromItemId !== session.snapTargetId) {
       clearPendingConnectionMenu();
+      recordCurrentCanvasUndoSnapshot();
       setConnections((prev) => {
         const exists = prev.some(
           (connection) =>
@@ -5137,6 +5528,7 @@ export default function AIWorkspace() {
   const beginDraggingSelectedItems = React.useCallback(
     (clientX: number, clientY: number, itemIds: string[], primaryId: string | null) => {
       if (itemIds.length === 0 || !primaryId) return;
+      pendingCanvasHistorySnapshotRef.current = createCurrentCanvasUndoSnapshot();
       cancelZoomAnimation();
       clearPendingConnectionMenu();
       setSelectedConnectionIds([]);
@@ -5152,7 +5544,7 @@ export default function AIWorkspace() {
           .map((item) => [item.id, { x: item.x, y: item.y }])
       );
     },
-    [cancelZoomAnimation, clearPendingConnectionMenu]
+    [cancelZoomAnimation, clearPendingConnectionMenu, createCurrentCanvasUndoSnapshot]
   );
 
   const handleCanvasPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -5346,6 +5738,8 @@ export default function AIWorkspace() {
       interactionFrameRef.current = null;
     }
 
+    commitPendingCanvasUndoSnapshot();
+
     if (currentSessionId) {
       scheduleCurrentSessionSave();
     }
@@ -5446,7 +5840,7 @@ export default function AIWorkspace() {
         getPrimarySelectedId(selectedIds)
       );
     },
-    [beginDraggingSelectedItems, isSpacePressed, selectedIds]
+    [beginDraggingSelectedItems, getPrimarySelectedId, isSpacePressed, selectedIds]
   );
 
   const handleItemMouseEnter = useCallback((itemId: string) => {
@@ -5474,7 +5868,7 @@ export default function AIWorkspace() {
     setSelectedId(itemId);
     setSelectedIds([itemId]);
     setItems((prev) => moveCanvasItemsToFront(prev, [itemId]));
-  }, []);
+  }, [getPrimarySelectedId]);
 
   const handleItemPointerDown = useCallback(
     (e: React.PointerEvent<HTMLDivElement>, itemId: string) => {
@@ -5497,6 +5891,7 @@ export default function AIWorkspace() {
   const handleCornerResizePointerDown = useCallback(
     (e: React.PointerEvent<HTMLButtonElement>, item: CanvasItem) => {
       if (item.type === 'image') return;
+      pendingCanvasHistorySnapshotRef.current = createCurrentCanvasUndoSnapshot();
       cancelZoomAnimation();
       e.preventDefault();
       e.stopPropagation();
@@ -5512,7 +5907,7 @@ export default function AIWorkspace() {
         itemId: item.id,
       };
     },
-    [cancelZoomAnimation]
+    [cancelZoomAnimation, createCurrentCanvasUndoSnapshot]
   );
 
   useEffect(() => {
@@ -5639,6 +6034,7 @@ export default function AIWorkspace() {
           return;
         }
 
+        recordCurrentCanvasUndoSnapshot();
         setItems((prev) =>
           prev.map((item) =>
             item.id === itemId
@@ -5685,7 +6081,7 @@ export default function AIWorkspace() {
         );
       }
     },
-    [activeCanvasTextGenerations]
+    [activeCanvasTextGenerations, recordCurrentCanvasUndoSnapshot]
   );
 
   const handleCancelCanvasTextGenerate = useCallback((itemId?: string | null) => {
@@ -5860,6 +6256,7 @@ export default function AIWorkspace() {
       setShowImageCardCountMenu(false);
       const currentImageCardItem = itemsRef.current.find((item) => item.id === itemId) ?? null;
       materializeImageCardHistoryForSession(generationSessionId, currentImageCardItem);
+      recordCurrentCanvasUndoSnapshot();
       setItems((prev) =>
         prev.map((item) =>
           item.id === itemId && isImageCardItem(item)
@@ -6092,7 +6489,7 @@ export default function AIWorkspace() {
         });
       }
     },
-    [activeCanvasImageGenerations, appendGeneratedImageHistoryForSession, materializeImageCardHistoryForSession]
+    [activeCanvasImageGenerations, appendGeneratedImageHistoryForSession, materializeImageCardHistoryForSession, recordCurrentCanvasUndoSnapshot]
   );
 
   const handleCancelCanvasImageGenerate = useCallback((itemId?: string | null) => {
@@ -6652,6 +7049,7 @@ export default function AIWorkspace() {
                 }),
               ]
             );
+            recordCurrentCanvasUndoSnapshot();
             setItems(prev => [...prev, newItem]);
           };
           img.src = logoUrl;
@@ -6945,6 +7343,7 @@ export default function AIWorkspace() {
                 }),
               ]
             );
+            recordCurrentCanvasUndoSnapshot();
             setItems(prev => [...prev, newItem]);
             
             setTimeout(() => {
@@ -7005,6 +7404,7 @@ export default function AIWorkspace() {
     const input = selectedTextCardPanelSubmitInput;
     if (!input) return;
 
+    commitPendingCanvasUndoSnapshot();
     void handleCanvasTextGenerate({
       itemId: selectedTextCardPanelItem.id,
       input,
@@ -7013,6 +7413,7 @@ export default function AIWorkspace() {
     });
   }, [
     activeCanvasTextGenerations,
+    commitPendingCanvasUndoSnapshot,
     handleCanvasTextGenerate,
     selectedTextCardPanelItem,
     selectedTextCardPanelLinkedImagePreviews,
@@ -7027,6 +7428,7 @@ export default function AIWorkspace() {
     const hasReferences = selectedImageCardPanelLinkedImagePreviews.length > 0;
     if (!input.trim() && !hasReferences) return;
 
+    commitPendingCanvasUndoSnapshot();
     void handleCanvasImageGenerate({
       itemId: selectedImageCardPanelItem.id,
       input,
@@ -7038,6 +7440,7 @@ export default function AIWorkspace() {
     });
   }, [
     activeCanvasImageGenerations,
+    commitPendingCanvasUndoSnapshot,
     handleCanvasImageGenerate,
     selectedImageCardPanelCount,
     selectedImageCardPanelAspectRatio,
@@ -7308,6 +7711,17 @@ export default function AIWorkspace() {
   }, [currentSessionId]);
 
   useEffect(() => {
+    pendingCanvasHistorySnapshotRef.current = null;
+  }, [currentSessionId, viewMode]);
+
+  useEffect(() => {
+    const activeSessionIds = new Set(sessions.map((session) => session.id));
+    canvasHistoryBySessionRef.current = Object.fromEntries(
+      Object.entries(canvasHistoryBySessionRef.current).filter(([sessionId]) => activeSessionIds.has(sessionId))
+    );
+  }, [sessions]);
+
+  useEffect(() => {
     canvasTextGenerateAbortControllersRef.current.forEach((controller, itemId) => {
       suppressCanvasTextAbortErrorItemIdsRef.current.add(itemId);
       controller.abort();
@@ -7483,6 +7897,101 @@ export default function AIWorkspace() {
     }
   };
 
+  const showImageToolbarNoticeWithTimeout = useCallback((message: string, autoHideMs?: number) => {
+    setImageToolbarNotice(message);
+    if (imageToolbarNoticeTimeoutRef.current) {
+      clearTimeout(imageToolbarNoticeTimeoutRef.current);
+      imageToolbarNoticeTimeoutRef.current = null;
+    }
+
+    if (Number.isFinite(autoHideMs) && autoHideMs && autoHideMs > 0) {
+      imageToolbarNoticeTimeoutRef.current = setTimeout(() => {
+        setImageToolbarNotice(null);
+        imageToolbarNoticeTimeoutRef.current = null;
+      }, autoHideMs);
+    }
+  }, []);
+
+  const handleImageToolbarAction = useCallback(async (actionId: (typeof IMAGE_NODE_TOOLBAR_ACTIONS)[number]['id']) => {
+    if (!selectedImageToolbarTarget?.src) return;
+
+    if (actionId === 'export') {
+      showImageToolbarNoticeWithTimeout('导出中…');
+
+      try {
+        const response = await fetch(`/api/image-tools/export?src=${encodeURIComponent(selectedImageToolbarTarget.src)}`);
+        if (!response.ok) {
+          const data = await response.json().catch(() => null);
+          throw new Error(
+            (data && typeof data.error === 'string' && data.error) ||
+              `导出失败: ${response.status}`
+          );
+        }
+
+        const blob = await response.blob();
+        const fileName =
+          getDownloadFileNameFromDisposition(response.headers.get('Content-Disposition')) ||
+          getFallbackImageDownloadName(selectedImageToolbarTarget.src);
+        const downloadUrl = URL.createObjectURL(blob);
+        const link = document.createElement('a');
+
+        link.href = downloadUrl;
+        link.download = fileName;
+        link.style.display = 'none';
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        URL.revokeObjectURL(downloadUrl);
+
+        showImageToolbarNoticeWithTimeout('导出完成', 2200);
+      } catch (error) {
+        console.error('Image export failed:', error);
+        showImageToolbarNoticeWithTimeout('导出失败', 2800);
+      }
+
+      return;
+    }
+
+    if (actionId !== 'cutout') return;
+
+    showImageToolbarNoticeWithTimeout('抠图中…');
+
+    try {
+      const response = await fetch('/api/image-tools/remove-background', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          imageUrl: selectedImageToolbarTarget.src,
+          sourceItemId: selectedImageToolbarTarget.itemId,
+        }),
+      });
+
+      const data = await response.json().catch(() => null);
+      if (!response.ok || !data || typeof data.url !== 'string' || data.url.length === 0) {
+        throw new Error(
+          (data && typeof data.error === 'string' && data.error) ||
+            `抠图失败: ${response.status}`
+        );
+      }
+
+      await addBackgroundRemovedImageToCanvas({
+        src: data.url,
+        naturalWidth:
+          Number.isFinite(data.naturalWidth) && data.naturalWidth > 0 ? data.naturalWidth : undefined,
+        naturalHeight:
+          Number.isFinite(data.naturalHeight) && data.naturalHeight > 0 ? data.naturalHeight : undefined,
+        sourceItemId: selectedImageToolbarTarget.itemId,
+      });
+
+      showImageToolbarNoticeWithTimeout('抠图完成', 2200);
+    } catch (error) {
+      console.error('Background removal failed:', error);
+      showImageToolbarNoticeWithTimeout('抠图失败', 2800);
+    }
+  }, [addBackgroundRemovedImageToCanvas, selectedImageToolbarTarget, showImageToolbarNoticeWithTimeout]);
+
   const handleLeftRailItemClick = useCallback((itemId: (typeof LEFT_RAIL_ITEMS)[number]['id']) => {
     if (itemId === 'history') {
       setShowGeneratedImageHistoryPanel((prev) => !prev);
@@ -7500,6 +8009,7 @@ export default function AIWorkspace() {
       }
 
       const spawnPoint = toCanvasPoint(pendingConnectionMenu.position);
+      recordCurrentCanvasUndoSnapshot();
       const newItem =
         optionId === 'image'
           ? createImageCardItemAtCanvasPoint(spawnPoint)
@@ -7516,7 +8026,7 @@ export default function AIWorkspace() {
 
       clearPendingConnectionMenu();
     },
-    [pendingConnectionMenu, toCanvasPoint, createImageCardItemAtCanvasPoint, createTextItemAtCanvasPoint, clearPendingConnectionMenu]
+    [pendingConnectionMenu, toCanvasPoint, createImageCardItemAtCanvasPoint, createTextItemAtCanvasPoint, clearPendingConnectionMenu, recordCurrentCanvasUndoSnapshot]
   );
 
   useEffect(() => {
@@ -7526,9 +8036,140 @@ export default function AIWorkspace() {
     };
   }, [clearMagneticPortResetTimer, detachConnectionWindowListeners]);
 
+  const isEditableUndoRedoTarget = (target: EventTarget | null) => {
+    const resolvedTarget =
+      target instanceof Node && target.nodeType === Node.TEXT_NODE
+        ? target.parentElement
+        : target;
+
+    if (resolvedTarget instanceof HTMLInputElement || resolvedTarget instanceof HTMLTextAreaElement) {
+      return true;
+    }
+
+    if (!(resolvedTarget instanceof HTMLElement)) {
+      return false;
+    }
+
+    if (resolvedTarget.isContentEditable) {
+      return true;
+    }
+
+    return !!resolvedTarget.closest('[contenteditable="true"]');
+  };
+
+  const hasActiveNonEditableTextSelection = useCallback(() => {
+    const isEditableSelectionTarget = (target: EventTarget | null) => {
+      const resolvedTarget =
+        target instanceof Node && target.nodeType === Node.TEXT_NODE
+          ? target.parentElement
+          : target;
+
+      if (resolvedTarget instanceof HTMLInputElement || resolvedTarget instanceof HTMLTextAreaElement) {
+        return true;
+      }
+
+      if (!(resolvedTarget instanceof HTMLElement)) {
+        return false;
+      }
+
+      if (resolvedTarget.isContentEditable) {
+        return true;
+      }
+
+      return !!resolvedTarget.closest('[contenteditable="true"]');
+    };
+
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount === 0 || selection.isCollapsed) return false;
+
+    if (hasActiveAssistantTextSelection()) {
+      return true;
+    }
+
+    const selectedText = selection.toString();
+    if (!selectedText.trim()) {
+      return false;
+    }
+
+    return !isEditableSelectionTarget(selection.anchorNode) && !isEditableSelectionTarget(selection.focusNode);
+  }, [hasActiveAssistantTextSelection]);
+
+  const copySelectedCanvasItemsToClipboard = useCallback(() => {
+    const snapshot = createCanvasClipboardSnapshot({
+      items: itemsRef.current,
+      selectedIds,
+      textCardPanelDrafts,
+      imageCardPanelDrafts,
+      imageCardModelById,
+      imageCardSizeById,
+      imageCardCountById,
+      imageCardAspectRatioById,
+    }) as CanvasClipboardSnapshot | null;
+
+    if (!snapshot) {
+      return false;
+    }
+
+    canvasClipboardRef.current = {
+      snapshot,
+      pasteCount: 0,
+    };
+    return true;
+  }, [
+    imageCardAspectRatioById,
+    imageCardCountById,
+    imageCardModelById,
+    imageCardPanelDrafts,
+    imageCardSizeById,
+    selectedIds,
+    textCardPanelDrafts,
+  ]);
+
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) return;
+      if (isEditableUndoRedoTarget(e.target)) return;
+
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') {
+        e.preventDefault();
+        const isRedoShortcut = e.shiftKey || (!e.metaKey && e.ctrlKey && e.key.toLowerCase() === 'y');
+        if (isRedoShortcut) {
+          redoCanvasEdit();
+        } else {
+          undoCanvasEdit();
+        }
+        return;
+      }
+
+      if (!e.metaKey && e.ctrlKey && e.key.toLowerCase() === 'y') {
+        e.preventDefault();
+        redoCanvasEdit();
+        return;
+      }
+
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'c') {
+        if (hasActiveNonEditableTextSelection()) {
+          return;
+        }
+
+        if (selectedIds.length === 0) {
+          return;
+        }
+
+        if (copySelectedCanvasItemsToClipboard()) {
+          e.preventDefault();
+        }
+        return;
+      }
+
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'v') {
+        if (hasActiveNonEditableTextSelection()) {
+          return;
+        }
+
+        if (!canvasClipboardRef.current?.snapshot) {
+          return;
+        }
+      }
 
       if (e.code === 'Space') {
         e.preventDefault();
@@ -7551,6 +8192,7 @@ export default function AIWorkspace() {
         if (selectedIds.length > 0 || selectedConnectionIds.length > 0) {
           const idsToDelete = [...selectedIds];
           const connectionIdsToDelete = new Set(selectedConnectionIds);
+          recordCurrentCanvasUndoSnapshot();
           setItems(prev => prev.filter(item => !idsToDelete.includes(item.id)));
           setConnections((prev) =>
             prev.filter(
@@ -7583,7 +8225,7 @@ export default function AIWorkspace() {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
     };
-  }, [selectedId, selectedIds, connectionPointerId, selectedConnectionIds, pendingConnectionMenu, clearPendingConnectionMenu, deleteItem, resetConnectionInteraction]);
+  }, [selectedId, selectedIds, connectionPointerId, selectedConnectionIds, pendingConnectionMenu, clearPendingConnectionMenu, copySelectedCanvasItemsToClipboard, deleteItem, hasActiveNonEditableTextSelection, recordCurrentCanvasUndoSnapshot, redoCanvasEdit, resetConnectionInteraction, undoCanvasEdit]);
 
   useEffect(() => {
     const handleWindowPaste = (e: ClipboardEvent) => {
@@ -7862,6 +8504,7 @@ export default function AIWorkspace() {
                 }),
               ]
             );
+            recordCurrentCanvasUndoSnapshot();
             setItems(prev => [...prev, newItem]);
           };
           img.src = item.localUrl;
@@ -7911,7 +8554,7 @@ export default function AIWorkspace() {
         clearTimeout(timer);
       }
     };
-  }, [activeSkillJobId, activeSkillJobType, appendGeneratedImageHistoryForSession, getSpawnPosition]);
+  }, [activeSkillJobId, activeSkillJobType, appendGeneratedImageHistoryForSession, getSpawnPosition, recordCurrentCanvasUndoSnapshot]);
 
   if (viewMode === 'gallery') {
     return (
@@ -8282,6 +8925,7 @@ export default function AIWorkspace() {
           setShowTextPanelModelMenu(false);
         }}
         onSelectedTextCardPanelInputChange={handleSelectedTextCardPanelInputChange}
+        onSelectedTextCardPanelBlur={commitPendingCanvasUndoSnapshot}
         onSelectedTextCardPanelSubmit={handleSelectedTextCardPanelSubmit}
         onSelectedTextCardPanelCancel={() => handleCancelCanvasTextGenerate(selectedTextCardPanelItem?.id ?? null)}
         onToggleImageCardModelMenu={() => {
@@ -8291,6 +8935,7 @@ export default function AIWorkspace() {
         }}
         onSelectImageCardModel={(modelId) => {
           if (!selectedImageCardPanelItem) return;
+          recordCurrentCanvasUndoSnapshot();
           setImageCardModelById((prev) => ({
             ...prev,
             [selectedImageCardPanelItem.id]: resolveImageCardModel(modelId, getDefaultImageCardModelOption().id),
@@ -8304,6 +8949,7 @@ export default function AIWorkspace() {
         }}
         onSelectImageCardSize={(sizeId) => {
           if (!selectedImageCardPanelItem) return;
+          recordCurrentCanvasUndoSnapshot();
           setImageCardSizeById((prev) => ({
             ...prev,
             [selectedImageCardPanelItem.id]: sizeId,
@@ -8317,6 +8963,7 @@ export default function AIWorkspace() {
         }}
         onSelectImageCardCount={(count) => {
           if (!selectedImageCardPanelItem) return;
+          recordCurrentCanvasUndoSnapshot();
           setImageCardCountById((prev) => ({
             ...prev,
             [selectedImageCardPanelItem.id]: count,
@@ -8326,6 +8973,7 @@ export default function AIWorkspace() {
         onSelectImageCardAspectRatio={(aspectRatioId) => {
           if (!selectedImageCardPanelItem) return;
           const normalizedAspectRatio = normalizeImageCardAspectRatio(aspectRatioId);
+          recordCurrentCanvasUndoSnapshot();
           setImageCardAspectRatioById((prev) => ({
             ...prev,
             [selectedImageCardPanelItem.id]: normalizedAspectRatio,
@@ -8340,6 +8988,7 @@ export default function AIWorkspace() {
           setShowImageCardQualityMenu(false);
         }}
         onSelectedImageCardPanelInputChange={handleSelectedImageCardPanelInputChange}
+        onSelectedImageCardPanelBlur={commitPendingCanvasUndoSnapshot}
         onSelectedImageCardPanelSubmit={handleSelectedImageCardPanelSubmit}
         onSelectedImageCardPanelCancel={() => handleCancelCanvasImageGenerate(selectedImageCardPanelItem?.id ?? null)}
         onItemDoubleClick={handleTextCardDoubleClick}
@@ -8381,6 +9030,10 @@ export default function AIWorkspace() {
                     data-image-node-toolbar-action={action.id}
                     type="button"
                     disabled={!action.enabled}
+                    onClick={() => {
+                      if (!action.enabled) return;
+                      void handleImageToolbarAction(action.id);
+                    }}
                     onPointerDown={(e) => {
                       e.stopPropagation();
                     }}
@@ -8400,6 +9053,17 @@ export default function AIWorkspace() {
           </div>,
           document.body
         )}
+
+      {imageToolbarNotice && (
+        <div
+          className="pointer-events-none fixed inset-x-0 top-4 flex justify-center px-4"
+          style={{ zIndex: GLOBAL_NOTICE_Z }}
+        >
+          <div className="rounded-full border border-white/[0.1] bg-[rgba(14,15,18,0.92)] px-4 py-2 text-[12px] font-medium tracking-[-0.02em] text-zinc-100 shadow-[0_18px_42px_rgba(0,0,0,0.34)] backdrop-blur-xl">
+            {imageToolbarNotice}
+          </div>
+        </div>
+      )}
 
       {/* Zoom Controller - Outside Canvas */}
       <div className="absolute left-4 bottom-4 z-50 flex items-center gap-2 rounded-xl border border-white/10 bg-[rgba(16,18,22,0.88)] p-1.5 shadow-[0_18px_50px_rgba(0,0,0,0.35)] backdrop-blur-xl">

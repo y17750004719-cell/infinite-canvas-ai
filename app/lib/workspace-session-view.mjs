@@ -428,6 +428,129 @@ export function extractImageFilesFromClipboardItems(items) {
     .filter((file) => file !== null);
 }
 
+function cloneClipboardValue(value) {
+  if (typeof globalThis.structuredClone === 'function') {
+    return globalThis.structuredClone(value);
+  }
+
+  return JSON.parse(JSON.stringify(value));
+}
+
+function pickClipboardStateByIds(source, idMap) {
+  if (!source || typeof source !== 'object' || idMap.size === 0) {
+    return {};
+  }
+
+  const next = {};
+  for (const [sourceId, nextId] of idMap.entries()) {
+    if (!Object.prototype.hasOwnProperty.call(source, sourceId)) continue;
+    next[nextId] = cloneClipboardValue(source[sourceId]);
+  }
+  return next;
+}
+
+export function createCanvasClipboardSnapshot({
+  items,
+  selectedIds,
+  textCardPanelDrafts = {},
+  imageCardPanelDrafts = {},
+  imageCardModelById = {},
+  imageCardSizeById = {},
+  imageCardCountById = {},
+  imageCardAspectRatioById = {},
+}) {
+  const normalizedSelectedIds = Array.isArray(selectedIds)
+    ? selectedIds.filter((id) => typeof id === 'string' && id.length > 0)
+    : [];
+  if (!Array.isArray(items) || items.length === 0 || normalizedSelectedIds.length === 0) {
+    return null;
+  }
+
+  const selectedIdSet = new Set(normalizedSelectedIds);
+  const selectedItems = items.filter((item) => selectedIdSet.has(item?.id));
+  if (selectedItems.length === 0) {
+    return null;
+  }
+
+  const idMap = new Map(selectedItems.map((item) => [item.id, item.id]));
+
+  const bounds = selectedItems.reduce(
+    (acc, item) => {
+      const left = Number.isFinite(item?.x) ? item.x : 0;
+      const top = Number.isFinite(item?.y) ? item.y : 0;
+      const width = Number.isFinite(item?.width) ? item.width : 0;
+      const height = Number.isFinite(item?.height) ? item.height : 0;
+
+      return {
+        left: Math.min(acc.left, left),
+        top: Math.min(acc.top, top),
+        right: Math.max(acc.right, left + width),
+        bottom: Math.max(acc.bottom, top + height),
+      };
+    },
+    {
+      left: Number.POSITIVE_INFINITY,
+      top: Number.POSITIVE_INFINITY,
+      right: Number.NEGATIVE_INFINITY,
+      bottom: Number.NEGATIVE_INFINITY,
+    }
+  );
+
+  return {
+    items: cloneClipboardValue(selectedItems),
+    bounds,
+    textCardPanelDrafts: pickClipboardStateByIds(textCardPanelDrafts, idMap),
+    imageCardPanelDrafts: pickClipboardStateByIds(imageCardPanelDrafts, idMap),
+    imageCardModelById: pickClipboardStateByIds(imageCardModelById, idMap),
+    imageCardSizeById: pickClipboardStateByIds(imageCardSizeById, idMap),
+    imageCardCountById: pickClipboardStateByIds(imageCardCountById, idMap),
+    imageCardAspectRatioById: pickClipboardStateByIds(imageCardAspectRatioById, idMap),
+  };
+}
+
+export function materializeCanvasClipboardPaste({
+  clipboard,
+  pasteCount = 0,
+  offsetStep = { x: 32, y: 32 },
+  createId = (sourceId, index) => `${sourceId}-copy-${index + 1}`,
+}) {
+  const sourceItems = Array.isArray(clipboard?.items) ? clipboard.items : [];
+  if (sourceItems.length === 0) {
+    return null;
+  }
+
+  const safePasteCount = Number.isFinite(pasteCount) && pasteCount >= 0 ? Math.floor(pasteCount) : 0;
+  const offsetX = (Number.isFinite(offsetStep?.x) ? offsetStep.x : 0) * (safePasteCount + 1);
+  const offsetY = (Number.isFinite(offsetStep?.y) ? offsetStep.y : 0) * (safePasteCount + 1);
+
+  const remappedIds = new Map();
+  const nextItems = sourceItems.map((item, index) => {
+    const sourceId = typeof item?.id === 'string' && item.id.length > 0 ? item.id : `clipboard-item-${index + 1}`;
+    const proposedId = createId(sourceId, index);
+    const nextId =
+      typeof proposedId === 'string' && proposedId.length > 0 ? proposedId : `${sourceId}-copy-${index + 1}`;
+    remappedIds.set(sourceId, nextId);
+
+    const nextItem = cloneClipboardValue(item);
+    nextItem.id = nextId;
+    nextItem.x = (Number.isFinite(nextItem.x) ? nextItem.x : 0) + offsetX;
+    nextItem.y = (Number.isFinite(nextItem.y) ? nextItem.y : 0) + offsetY;
+    return nextItem;
+  });
+
+  return {
+    items: nextItems,
+    selectedIds: nextItems.map((item) => item.id),
+    textCardPanelDrafts: pickClipboardStateByIds(clipboard?.textCardPanelDrafts, remappedIds),
+    imageCardPanelDrafts: pickClipboardStateByIds(clipboard?.imageCardPanelDrafts, remappedIds),
+    imageCardModelById: pickClipboardStateByIds(clipboard?.imageCardModelById, remappedIds),
+    imageCardSizeById: pickClipboardStateByIds(clipboard?.imageCardSizeById, remappedIds),
+    imageCardCountById: pickClipboardStateByIds(clipboard?.imageCardCountById, remappedIds),
+    imageCardAspectRatioById: pickClipboardStateByIds(clipboard?.imageCardAspectRatioById, remappedIds),
+    nextPasteCount: safePasteCount + 1,
+  };
+}
+
 export function shouldHandleCanvasImagePaste(target) {
   if (!target || typeof target !== 'object') {
     return true;

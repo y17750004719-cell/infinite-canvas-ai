@@ -854,6 +854,294 @@ test('shouldHandleCanvasImagePaste returns true for non-editable canvas targets 
   assert.equal(shouldHandleCanvasImagePaste(null), true);
 });
 
+test('createCanvasClipboardSnapshot keeps selected items in canvas order and copies bound panel state', () => {
+  assert.equal(typeof workspaceSessionView.createCanvasClipboardSnapshot, 'function');
+
+  const snapshot = workspaceSessionView.createCanvasClipboardSnapshot({
+    items: [
+      {
+        id: 'image-asset-1',
+        type: 'image',
+        x: 20,
+        y: 30,
+        width: 160,
+        height: 120,
+        rotation: 0,
+        src: '/asset.png',
+        naturalWidth: 1600,
+        naturalHeight: 1200,
+        visible: true,
+        locked: false,
+      },
+      {
+        id: 'text-card-1',
+        type: 'text',
+        x: 240,
+        y: 100,
+        width: 320,
+        height: 220,
+        rotation: 0,
+        textVariant: 'card',
+        textMode: 'manual',
+        text: '品牌主张',
+        visible: true,
+        locked: false,
+      },
+      {
+        id: 'image-card-1',
+        type: 'image',
+        x: 620,
+        y: 180,
+        width: 384,
+        height: 384,
+        rotation: 0,
+        imageVariant: 'card',
+        src: '/outputs/cover.png',
+        naturalWidth: 1024,
+        naturalHeight: 1024,
+        imageOutputs: [
+          {
+            src: '/outputs/cover.png',
+            naturalWidth: 1024,
+            naturalHeight: 1024,
+          },
+        ],
+        activeImageOutputIndex: 0,
+        visible: true,
+        locked: false,
+      },
+    ],
+    selectedIds: ['image-card-1', 'text-card-1'],
+    textCardPanelDrafts: {
+      'text-card-1': '给我一句简短品牌口号',
+      'other-text': 'ignore',
+    },
+    imageCardPanelDrafts: {
+      'image-card-1': '做一张主视觉海报',
+      'other-image': 'ignore',
+    },
+    imageCardModelById: {
+      'image-card-1': 'flux-dev',
+      'other-image': 'ignore',
+    },
+    imageCardSizeById: {
+      'image-card-1': '1024x1024',
+      'other-image': 'ignore',
+    },
+    imageCardCountById: {
+      'image-card-1': 3,
+      'other-image': 2,
+    },
+    imageCardAspectRatioById: {
+      'image-card-1': '16:9',
+      'other-image': '1:1',
+    },
+  });
+
+  assert.deepEqual(snapshot, {
+    items: [
+      {
+        id: 'text-card-1',
+        type: 'text',
+        x: 240,
+        y: 100,
+        width: 320,
+        height: 220,
+        rotation: 0,
+        textVariant: 'card',
+        textMode: 'manual',
+        text: '品牌主张',
+        visible: true,
+        locked: false,
+      },
+      {
+        id: 'image-card-1',
+        type: 'image',
+        x: 620,
+        y: 180,
+        width: 384,
+        height: 384,
+        rotation: 0,
+        imageVariant: 'card',
+        src: '/outputs/cover.png',
+        naturalWidth: 1024,
+        naturalHeight: 1024,
+        imageOutputs: [
+          {
+            src: '/outputs/cover.png',
+            naturalWidth: 1024,
+            naturalHeight: 1024,
+          },
+        ],
+        activeImageOutputIndex: 0,
+        visible: true,
+        locked: false,
+      },
+    ],
+    bounds: {
+      left: 240,
+      top: 100,
+      right: 1004,
+      bottom: 564,
+    },
+    textCardPanelDrafts: {
+      'text-card-1': '给我一句简短品牌口号',
+    },
+    imageCardPanelDrafts: {
+      'image-card-1': '做一张主视觉海报',
+    },
+    imageCardModelById: {
+      'image-card-1': 'flux-dev',
+    },
+    imageCardSizeById: {
+      'image-card-1': '1024x1024',
+    },
+    imageCardCountById: {
+      'image-card-1': 3,
+    },
+    imageCardAspectRatioById: {
+      'image-card-1': '16:9',
+    },
+  });
+});
+
+test('materializeCanvasClipboardPaste remaps ids, offsets items, and carries card state forward', () => {
+  assert.equal(typeof workspaceSessionView.materializeCanvasClipboardPaste, 'function');
+
+  const result = workspaceSessionView.materializeCanvasClipboardPaste({
+    clipboard: {
+      items: [
+        {
+          id: 'text-card-1',
+          type: 'text',
+          x: 240,
+          y: 100,
+          width: 320,
+          height: 220,
+          rotation: 0,
+          textVariant: 'card',
+          textMode: 'manual',
+          text: '品牌主张',
+          visible: true,
+          locked: false,
+        },
+        {
+          id: 'image-card-1',
+          type: 'image',
+          x: 620,
+          y: 180,
+          width: 384,
+          height: 384,
+          rotation: 0,
+          imageVariant: 'card',
+          src: '/outputs/cover.png',
+          naturalWidth: 1024,
+          naturalHeight: 1024,
+          imageOutputs: [
+            {
+              src: '/outputs/cover.png',
+              naturalWidth: 1024,
+              naturalHeight: 1024,
+            },
+          ],
+          activeImageOutputIndex: 0,
+          visible: true,
+          locked: false,
+        },
+      ],
+      bounds: {
+        left: 240,
+        top: 100,
+        right: 1004,
+        bottom: 564,
+      },
+      textCardPanelDrafts: {
+        'text-card-1': '给我一句简短品牌口号',
+      },
+      imageCardPanelDrafts: {
+        'image-card-1': '做一张主视觉海报',
+      },
+      imageCardModelById: {
+        'image-card-1': 'flux-dev',
+      },
+      imageCardSizeById: {
+        'image-card-1': '1024x1024',
+      },
+      imageCardCountById: {
+        'image-card-1': 3,
+      },
+      imageCardAspectRatioById: {
+        'image-card-1': '16:9',
+      },
+    },
+    pasteCount: 0,
+    offsetStep: { x: 32, y: 32 },
+    createId: (sourceId, index) => `copy-${index + 1}-${sourceId}`,
+  });
+
+  assert.deepEqual(result, {
+    items: [
+      {
+        id: 'copy-1-text-card-1',
+        type: 'text',
+        x: 272,
+        y: 132,
+        width: 320,
+        height: 220,
+        rotation: 0,
+        textVariant: 'card',
+        textMode: 'manual',
+        text: '品牌主张',
+        visible: true,
+        locked: false,
+      },
+      {
+        id: 'copy-2-image-card-1',
+        type: 'image',
+        x: 652,
+        y: 212,
+        width: 384,
+        height: 384,
+        rotation: 0,
+        imageVariant: 'card',
+        src: '/outputs/cover.png',
+        naturalWidth: 1024,
+        naturalHeight: 1024,
+        imageOutputs: [
+          {
+            src: '/outputs/cover.png',
+            naturalWidth: 1024,
+            naturalHeight: 1024,
+          },
+        ],
+        activeImageOutputIndex: 0,
+        visible: true,
+        locked: false,
+      },
+    ],
+    selectedIds: ['copy-1-text-card-1', 'copy-2-image-card-1'],
+    textCardPanelDrafts: {
+      'copy-1-text-card-1': '给我一句简短品牌口号',
+    },
+    imageCardPanelDrafts: {
+      'copy-2-image-card-1': '做一张主视觉海报',
+    },
+    imageCardModelById: {
+      'copy-2-image-card-1': 'flux-dev',
+    },
+    imageCardSizeById: {
+      'copy-2-image-card-1': '1024x1024',
+    },
+    imageCardCountById: {
+      'copy-2-image-card-1': 3,
+    },
+    imageCardAspectRatioById: {
+      'copy-2-image-card-1': '16:9',
+    },
+    nextPasteCount: 1,
+  });
+});
+
 test('resolveCanvasImagePasteTarget returns replace for a single selected image asset item', () => {
   const result = resolveCanvasImagePasteTarget({
     selectedId: 'image-1',

@@ -51,6 +51,22 @@ test('left rail history uses a dedicated generated image history panel state', (
   assert.equal(pageSource.includes('{showGeneratedImageHistoryPanel && ('), true);
 });
 
+test('canvas clipboard wiring adds app-level copy helpers and keyboard shortcuts', () => {
+  assert.equal(pageSource.includes('createCanvasClipboardSnapshot,'), true);
+  assert.equal(pageSource.includes('materializeCanvasClipboardPaste,'), true);
+  assert.equal(pageSource.includes('const canvasClipboardRef = useRef<{'), true);
+  assert.equal(pageSource.includes("if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'c') {"), true);
+  assert.equal(pageSource.includes("if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'v') {"), true);
+});
+
+test('canvas copy shortcuts avoid hijacking text selection and paste falls back after image clipboard handling', () => {
+  assert.equal(pageSource.includes('const hasActiveNonEditableTextSelection = useCallback(() => {'), true);
+  assert.equal(pageSource.includes('if (hasActiveNonEditableTextSelection()) {'), true);
+  assert.equal(pageSource.includes('const pastedCanvasClipboard = materializeCanvasClipboardPaste({'), true);
+  assert.equal(pageSource.includes('if (imageFiles.length > 0) {'), true);
+  assert.equal(pageSource.includes('canvasClipboardRef.current?.snapshot'), true);
+});
+
 test('left rail generated image history panel uses a wider layout than the original 320px menu', () => {
   assert.equal(pageSource.includes('w-[320px]'), false);
   assert.equal(pageSource.includes('w-[384px]'), true);
@@ -92,18 +108,32 @@ test('image nodes expose a shared toolbar target and render an above-node image 
   assert.equal(pageSource.includes('抠图'), true);
 });
 
-test('image toolbar actions keep cutout disabled with a temporary unavailable reason', () => {
+test('image toolbar actions enable cutout and export while keeping the other actions disabled', () => {
   assert.equal(pageSource.includes('const IMAGE_NODE_TOOLBAR_ACTIONS = ['), true);
   assert.equal(pageSource.includes("id: 'cutout'"), true);
-  assert.equal(pageSource.includes("disabledReason: '暂不可用'"), true);
-  assert.equal(pageSource.includes("id: 'cutout', label: '抠图', icon: ImageIcon, enabled: true"), false);
+  assert.equal(pageSource.includes("id: 'export'"), true);
+  assert.equal(pageSource.includes("disabledReason: '暂不可用'"), false);
+  assert.equal(pageSource.includes("id: 'cutout', label: '抠图', icon: ImageIcon, enabled: true"), true);
+  assert.equal(pageSource.includes("id: 'export', label: '导出', icon: Send, enabled: true"), true);
   assert.equal(pageSource.includes('enabled: false'), true);
 });
 
-test('image toolbar cutout no longer calls the removed remove-background route and shows unavailable copy', () => {
-  assert.equal(pageSource.includes("/api/image-tools/remove-background"), false);
+test('image toolbar cutout restores the remove-background route and status notices', () => {
+  assert.equal(pageSource.includes("/api/image-tools/remove-background"), true);
   assert.equal(pageSource.includes('抠图能力下一步接入'), false);
-  assert.equal(pageSource.includes('暂不可用'), true);
+  assert.equal(pageSource.includes('暂不可用'), false);
+  assert.equal(pageSource.includes('抠图中…'), true);
+  assert.equal(pageSource.includes('抠图完成'), true);
+  assert.equal(pageSource.includes('抠图失败'), true);
+});
+
+test('image toolbar export downloads the current image source through the export route with notices', () => {
+  assert.equal(pageSource.includes("/api/image-tools/export?src="), true);
+  assert.equal(pageSource.includes("showImageToolbarNoticeWithTimeout('导出中…');"), true);
+  assert.equal(pageSource.includes("showImageToolbarNoticeWithTimeout('导出完成', 2200);"), true);
+  assert.equal(pageSource.includes("showImageToolbarNoticeWithTimeout('导出失败', 2800);"), true);
+  assert.equal(pageSource.includes("const downloadUrl = URL.createObjectURL(blob);"), true);
+  assert.equal(pageSource.includes("link.download = fileName;"), true);
 });
 
 test('image toolbar positioning no longer clamps against canvas width and uses a fixed floating overlay', () => {
@@ -306,4 +336,29 @@ test('right chat panel renders through a page-level portal above canvas overlays
   assert.equal(pageSource.includes('style={{ zIndex: CHAT_PANEL_Z }}'), true);
   assert.equal(pageSource.includes("className=\"fixed right-4 top-4 isolate"), true);
   assert.equal(pageSource.includes("className=\"fixed inset-y-4 left-4 right-4 isolate"), true);
+});
+
+test('page wires session-scoped canvas undo history through a dedicated snapshot helper module', () => {
+  assert.equal(pageSource.includes("from './lib/canvas-history.mjs'"), true);
+  assert.equal(pageSource.includes('const canvasHistoryBySessionRef = useRef<Record<string, SessionCanvasHistoryState>>({});'), true);
+  assert.equal(pageSource.includes('const createCurrentCanvasUndoSnapshot = useCallback(() =>'), true);
+  assert.equal(pageSource.includes('const commitCanvasUndoSnapshot = useCallback(() =>'), true);
+  assert.equal(pageSource.includes('const undoCanvasEdit = useCallback(() =>'), true);
+  assert.equal(pageSource.includes('const redoCanvasEdit = useCallback(() =>'), true);
+});
+
+test('page keyboard handling supports canvas undo redo shortcuts while skipping editable targets', () => {
+  assert.equal(pageSource.includes('const isEditableUndoRedoTarget = (target: EventTarget | null) => {'), true);
+  assert.equal(pageSource.includes("if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') {"), true);
+  assert.equal(pageSource.includes('const isRedoShortcut = e.shiftKey || (!e.metaKey && e.ctrlKey && e.key.toLowerCase() === \'y\');'), true);
+  assert.equal(pageSource.includes('if (isEditableUndoRedoTarget(e.target)) return;'), true);
+  assert.equal(pageSource.includes('undoCanvasEdit();'), true);
+  assert.equal(pageSource.includes('redoCanvasEdit();'), true);
+});
+
+test('page captures drag resize and manual-text baselines before committing undo history once per completed edit', () => {
+  assert.equal(pageSource.includes('const pendingCanvasHistorySnapshotRef = useRef<CanvasUndoSnapshot | null>(null);'), true);
+  assert.equal(pageSource.includes('pendingCanvasHistorySnapshotRef.current = createCurrentCanvasUndoSnapshot();'), true);
+  assert.equal(pageSource.includes('commitCanvasUndoSnapshot(pendingCanvasHistorySnapshotRef.current);'), true);
+  assert.equal(pageSource.includes('pendingCanvasHistorySnapshotRef.current = null;'), true);
 });
