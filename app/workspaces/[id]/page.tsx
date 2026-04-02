@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
+import Image from 'next/image';
 import { useRouter, useParams } from 'next/navigation';
 import { ArrowLeft, Edit3, Trash2, Sparkles, Image as ImageIcon, Type, Square, FolderOpen, ArrowRight } from 'lucide-react';
 import {
@@ -63,10 +64,14 @@ export default function WorkspaceDetailPage() {
   const getItemPreview = (item: CanvasItem) => {
     if (item.type === 'image' && item.src) {
       return (
-        <img 
+        <Image
           src={item.src} 
           alt={item.id}
-          className="w-full h-auto"
+          width={item.naturalWidth || item.width || 1200}
+          height={item.naturalHeight || item.height || 900}
+          unoptimized
+          sizes="(max-width: 640px) 100vw, (max-width: 1280px) 50vw, 25vw"
+          className="h-auto w-full"
         />
       );
     }

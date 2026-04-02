@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { readdir, readFile, stat } from 'node:fs/promises';
 
-import { getImageDimensionsFromBuffer } from './background-removal.mjs';
+import { getImageDimensionsFromBuffer } from './image-metadata.mjs';
 import { extractGeneratedImageTimestampFromFilename } from './generated-image-history.mjs';
 
 const SUPPORTED_ARCHIVE_IMAGE_EXTENSIONS = new Set(['.png', '.jpg', '.jpeg', '.webp', '.gif']);

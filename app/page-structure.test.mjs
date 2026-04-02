@@ -92,16 +92,18 @@ test('image nodes expose a shared toolbar target and render an above-node image 
   assert.equal(pageSource.includes('抠图'), true);
 });
 
-test('image toolbar actions keep cutout enabled while leaving other actions disabled in the first version', () => {
+test('image toolbar actions keep cutout disabled with a temporary unavailable reason', () => {
   assert.equal(pageSource.includes('const IMAGE_NODE_TOOLBAR_ACTIONS = ['), true);
   assert.equal(pageSource.includes("id: 'cutout'"), true);
-  assert.equal(pageSource.includes('enabled: true'), true);
+  assert.equal(pageSource.includes("disabledReason: '暂不可用'"), true);
+  assert.equal(pageSource.includes("id: 'cutout', label: '抠图', icon: ImageIcon, enabled: true"), false);
   assert.equal(pageSource.includes('enabled: false'), true);
 });
 
-test('image toolbar cutout uses the dedicated remove-background route instead of the placeholder notice', () => {
-  assert.equal(pageSource.includes("/api/image-tools/remove-background"), true);
+test('image toolbar cutout no longer calls the removed remove-background route and shows unavailable copy', () => {
+  assert.equal(pageSource.includes("/api/image-tools/remove-background"), false);
   assert.equal(pageSource.includes('抠图能力下一步接入'), false);
+  assert.equal(pageSource.includes('暂不可用'), true);
 });
 
 test('image toolbar positioning no longer clamps against canvas width and uses a fixed floating overlay', () => {
@@ -299,11 +301,9 @@ test('node selection flows move selected canvas items to the front of the persis
 test('right chat panel renders through a page-level portal above canvas overlays', () => {
   assert.equal(pageSource.includes('const CANVAS_OVERLAY_Z = '), true);
   assert.equal(pageSource.includes('const CHAT_PANEL_Z = '), true);
-  assert.equal(pageSource.includes('const GLOBAL_NOTICE_Z = '), true);
   assert.equal(pageSource.includes('createPortal('), true);
   assert.equal(pageSource.includes('document.body'), true);
   assert.equal(pageSource.includes('style={{ zIndex: CHAT_PANEL_Z }}'), true);
   assert.equal(pageSource.includes("className=\"fixed right-4 top-4 isolate"), true);
   assert.equal(pageSource.includes("className=\"fixed inset-y-4 left-4 right-4 isolate"), true);
-  assert.equal(pageSource.includes('style={{ zIndex: GLOBAL_NOTICE_Z }}'), true);
 });

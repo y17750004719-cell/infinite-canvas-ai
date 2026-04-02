@@ -1,6 +1,7 @@
 'use client';
 
 import React from 'react';
+import Image from 'next/image';
 import { Edit3, Plus, Sparkles, X } from 'lucide-react';
 
 import type { ProjectSession } from '../../lib/db';
@@ -116,7 +117,14 @@ export function GalleryView({
               >
                 <div className="relative aspect-[4/3] overflow-hidden bg-[#0d1015]">
                   {previewImage ? (
-                    <img src={previewImage} alt={session.name} className="h-full w-full object-cover" />
+                    <Image
+                      src={previewImage}
+                      alt={session.name}
+                      fill
+                      unoptimized
+                      sizes="(max-width: 640px) 100vw, (max-width: 1280px) 50vw, 25vw"
+                      className="object-cover"
+                    />
                   ) : (
                     <div className="flex h-full w-full items-center justify-center">
                       <Sparkles size={32} className="text-zinc-700" />

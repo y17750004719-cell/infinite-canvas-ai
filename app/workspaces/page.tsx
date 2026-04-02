@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
+import Image from 'next/image';
 import { useRouter } from 'next/navigation';
 import { Plus, Trash2, Edit3, ArrowLeft, Sparkles, FolderOpen } from 'lucide-react';
 import {
@@ -234,10 +235,13 @@ export default function WorkspacesPage() {
                   {/* Preview Area */}
                   <div className="relative aspect-[4/3] bg-gray-100 overflow-hidden">
                     {previewImage ? (
-                      <img 
+                      <Image 
                         src={previewImage} 
                         alt={session.name}
-                        className="w-full h-full object-cover"
+                        fill
+                        unoptimized
+                        sizes="(max-width: 640px) 100vw, (max-width: 1280px) 50vw, 25vw"
+                        className="object-cover"
                       />
                     ) : (
                       <div className="w-full h-full flex items-center justify-center">

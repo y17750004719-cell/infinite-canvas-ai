@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useState, useRef, useEffect, useLayoutEffect, useCallback, memo } from 'react';
+import Image from 'next/image';
 import { createPortal } from 'react-dom';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -45,7 +46,6 @@ import {
   getDefaultTextPanelModelOption,
   getDisplayableTextCardPanelDraft,
   getGeneratedImageHistoryEntries,
-  getImageToolResultSpawnPosition,
   getDirectImagePreviewsForTextCard,
   getDirectTextInputsForTextCard,
   getImageCardFrameSizeForAspectRatio,
@@ -84,7 +84,6 @@ import { useWorkspaceSessionController } from './hooks/useWorkspaceSessionContro
 const DEBUG_CANVAS_CONNECTIONS = false;
 const CANVAS_OVERLAY_Z = 120;
 const CHAT_PANEL_Z = 180;
-const GLOBAL_NOTICE_Z = 220;
 
 const extractPlainText = (value: React.ReactNode): string =>
   React.Children.toArray(value)
@@ -570,7 +569,7 @@ const extractCanvasGeneratedImageUrls = (result: any): string[] => {
 
 const loadCanvasGeneratedImageMeta = (localUrl: string) =>
   new Promise<{ src: string; naturalWidth: number; naturalHeight: number }>((resolve, reject) => {
-    const img = new Image();
+    const img = new window.Image();
     img.onload = () => {
       resolve({
         src: localUrl,
@@ -1123,9 +1122,12 @@ const CanvasNodesLayer = memo(function CanvasNodesLayer({
             onPointerDown={(e) => onItemPointerDown(e, item.id)}
           >
             {isImageAssetItem(item) && item.src && (
-              <img
+              <Image
                 src={item.src}
                 alt=""
+                fill
+                unoptimized
+                sizes={`${Math.max(1, Math.round(item.width))}px`}
                 className="h-full w-full object-contain pointer-events-none"
                 style={{ borderRadius: `${NODE_CORNER_RADIUS}px` }}
                 draggable={false}
@@ -1186,10 +1188,13 @@ const CanvasNodesLayer = memo(function CanvasNodesLayer({
                     )}
                     {imageCardVisualState === 'content' && item.src && (
                       <div className="relative h-full w-full overflow-hidden bg-black/20">
-                        <img
+                        <Image
                           src={item.src}
                           alt=""
-                          className="h-full w-full object-cover pointer-events-none"
+                          fill
+                          unoptimized
+                          sizes={`${Math.max(1, Math.round(item.width - TEXT_CARD_FRAME_INSET_X * 2))}px`}
+                          className="object-cover pointer-events-none"
                           draggable={false}
                         />
                         {imageOutputCount > 1 && (
@@ -1913,10 +1918,13 @@ const CanvasViewport = memo(function CanvasViewport({
                                 : 'border-white/[0.08]'
                           } cursor-move`}
                         >
-                          <img
+                          <Image
                             src={preview.src}
                             alt={preview.alt || preview.label}
-                            className="h-full w-full object-cover"
+                            fill
+                            unoptimized
+                            sizes="80px"
+                            className="object-cover"
                             draggable={false}
                           />
                           <span className="pointer-events-none absolute left-1.5 top-1.5 rounded-full bg-black/70 px-2 py-0.5 text-[10px] font-medium tracking-[0.01em] text-zinc-100">
@@ -2301,10 +2309,13 @@ const CanvasViewport = memo(function CanvasViewport({
                                 : 'border-white/[0.08]'
                           } cursor-move`}
                         >
-                          <img
+                          <Image
                             src={preview.src}
                             alt={preview.alt || preview.label}
-                            className="h-full w-full object-cover"
+                            fill
+                            unoptimized
+                            sizes="80px"
+                            className="object-cover"
                             draggable={false}
                           />
                           <span className="pointer-events-none absolute left-1.5 top-1.5 rounded-full bg-black/70 px-2 py-0.5 text-[10px] font-medium tracking-[0.01em] text-zinc-100">
@@ -2922,13 +2933,13 @@ const LEFT_RAIL_ITEMS = [
 ] as const;
 
 const IMAGE_NODE_TOOLBAR_ACTIONS = [
-  { id: 'redraw', label: '重绘', icon: Pencil, enabled: false },
-  { id: 'erase', label: '擦除', icon: X, enabled: false },
-  { id: 'enhance', label: '增强', icon: Sparkles, enabled: false },
-  { id: 'expand', label: '扩图', icon: Plus, enabled: false },
-  { id: 'cutout', label: '抠图', icon: ImageIcon, enabled: true },
-  { id: 'crop', label: '裁剪', icon: SlidersHorizontal, enabled: false },
-  { id: 'export', label: '导出', icon: Send, enabled: false },
+  { id: 'redraw', label: '重绘', icon: Pencil, enabled: false, disabledReason: undefined },
+  { id: 'erase', label: '擦除', icon: X, enabled: false, disabledReason: undefined },
+  { id: 'enhance', label: '增强', icon: Sparkles, enabled: false, disabledReason: undefined },
+  { id: 'expand', label: '扩图', icon: Plus, enabled: false, disabledReason: undefined },
+  { id: 'cutout', label: '抠图', icon: ImageIcon, enabled: false, disabledReason: '暂不可用' },
+  { id: 'crop', label: '裁剪', icon: SlidersHorizontal, enabled: false, disabledReason: undefined },
+  { id: 'export', label: '导出', icon: Send, enabled: false, disabledReason: undefined },
 ] as const;
 
 const ADD_NODE_MENU_OPTIONS = [
@@ -3114,7 +3125,6 @@ export default function AIWorkspace() {
   const [showAddNodeMenu, setShowAddNodeMenu] = useState(false);
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [editingName, setEditingName] = useState('');
-  const [imageToolbarNotice, setImageToolbarNotice] = useState<string | null>(null);
   
   const [activeSkillJobId, setActiveSkillJobId] = useState<string | null>(null);
   const [activeSkillJobType, setActiveSkillJobType] = useState<'logo' | 'brand' | null>(null);
@@ -3149,8 +3159,8 @@ export default function AIWorkspace() {
   const streamMessageIdRef = useRef<string | null>(null);
   const pendingAssistantMessageIdRef = useRef<string | null>(null);
   const currentSessionIdRef = useRef<string | null>(null);
+  const latestChatInputRef = useRef('');
   const persistedGeneratedImageHistoryBySessionRef = useRef<Record<string, GeneratedImageHistoryEntry[]>>({});
-  const imageToolbarNoticeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const assistantTextSelectionRef = useRef<AssistantTextSelectionSession>({
     startedInAssistant: false,
     isPointerDown: false,
@@ -3333,6 +3343,7 @@ export default function AIWorkspace() {
     TEXT_PANEL_MODEL_OPTIONS.find((option) => option.id === selectedTextPanelModelId) || getDefaultTextPanelModelOption();
   const SKILL_TOKEN_SELECTOR = '[data-skill-token="true"]';
   const copiedAssistantMessageTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  latestChatInputRef.current = chatInput;
 
   useEffect(() => {
     if (!editingTextCardId || !editingTextCardTextareaRef.current) return;
@@ -3396,14 +3407,6 @@ export default function AIWorkspace() {
   }, [selectedId]);
 
   useEffect(() => {
-    return () => {
-      if (imageToolbarNoticeTimeoutRef.current) {
-        clearTimeout(imageToolbarNoticeTimeoutRef.current);
-      }
-    };
-  }, []);
-
-  useEffect(() => {
     if (typeof window === 'undefined' || typeof window.matchMedia !== 'function') {
       return;
     }
@@ -3424,27 +3427,27 @@ export default function AIWorkspace() {
     return () => mediaQuery.removeListener(updateReducedMotion);
   }, []);
 
-  const inferTopicSkill = (topic: ChatTopic | null): { id: string; label: string } | null => {
+  const inferTopicSkill = useCallback((topic: ChatTopic | null): { id: string; label: string } | null => {
     if (!topic) return null;
     if (topic.activeSkill) return topic.activeSkill;
 
     const messageWithSkill = [...topic.messages].reverse().find((message) => message.skill);
     return messageWithSkill?.skill || null;
-  };
+  }, []);
 
-  const getAssistantSelectableHost = (node: Node | null): HTMLElement | null => {
+  const getAssistantSelectableHost = useCallback((node: Node | null): HTMLElement | null => {
     if (!node) return null;
     if (node instanceof HTMLElement) {
       return node.closest('[data-assistant-selectable="true"]');
     }
     return node.parentElement?.closest('[data-assistant-selectable="true"]') ?? null;
-  };
+  }, []);
 
-  const isNodeInsideAssistantSelectable = (node: Node | null) => {
+  const isNodeInsideAssistantSelectable = useCallback((node: Node | null) => {
     const selectableHost = getAssistantSelectableHost(node);
     if (!selectableHost || !chatContainerRef.current) return false;
     return chatContainerRef.current.contains(selectableHost);
-  };
+  }, [getAssistantSelectableHost]);
 
   const hasActiveAssistantTextSelection = useCallback(() => {
     const selection = window.getSelection();
@@ -3453,7 +3456,7 @@ export default function AIWorkspace() {
       isNodeInsideAssistantSelectable(selection.anchorNode) ||
       isNodeInsideAssistantSelectable(selection.focusNode)
     );
-  }, []);
+  }, [isNodeInsideAssistantSelectable]);
 
   const markAssistantSelectionIntent = useCallback(() => {
     assistantTextSelectionRef.current.startedInAssistant = true;
@@ -3518,22 +3521,22 @@ export default function AIWorkspace() {
     };
   }, []);
 
-  const syncEditorHeight = () => {
+  const syncEditorHeight = useCallback(() => {
     const editor = chatInputEditorRef.current;
     if (!editor) return;
     editor.style.height = "auto";
     const next = Math.min(editor.scrollHeight || 24, 240);
     editor.style.height = `${next}px`;
     setChatInputHeight(next);
-  };
+  }, []);
 
-  const extractEditorPlainText = (root: HTMLElement): string => {
+  const extractEditorPlainText = useCallback((root: HTMLElement): string => {
     const cloned = root.cloneNode(true) as HTMLElement;
     cloned.querySelectorAll(SKILL_TOKEN_SELECTOR).forEach((node) => node.remove());
     return (cloned.innerText || "").replace(/\u00A0/g, " ");
-  };
+  }, [SKILL_TOKEN_SELECTOR]);
 
-  const moveCaretToEditorEnd = () => {
+  const moveCaretToEditorEnd = useCallback(() => {
     const editor = chatInputEditorRef.current;
     if (!editor) return;
     const selection = window.getSelection();
@@ -3543,9 +3546,9 @@ export default function AIWorkspace() {
     range.collapse(false);
     selection.removeAllRanges();
     selection.addRange(range);
-  };
+  }, []);
 
-  const syncEditorTextFromState = (value: string, moveCaretToEnd = false) => {
+  const syncEditorTextFromState = useCallback((value: string, moveCaretToEnd = false) => {
     const editor = chatInputEditorRef.current;
     if (!editor) return;
 
@@ -3574,7 +3577,7 @@ export default function AIWorkspace() {
     }
 
     syncEditorHeight();
-  };
+  }, [activeSkill, extractEditorPlainText, moveCaretToEditorEnd, syncEditorHeight]);
 
   const isCaretAtEditorStart = (): boolean => {
     const editor = chatInputEditorRef.current;
@@ -3831,7 +3834,7 @@ export default function AIWorkspace() {
       const imageUrl = data.url;
 
       await new Promise<void>((resolve, reject) => {
-        const img = new Image();
+        const img = new window.Image();
         img.onload = () => {
           const spawnPosition = getSpawnPosition(
             {
@@ -3878,7 +3881,7 @@ export default function AIWorkspace() {
               naturalHeight,
             }
           : await new Promise<{ naturalWidth: number; naturalHeight: number }>((resolve, reject) => {
-              const img = new Image();
+              const img = new window.Image();
               img.onload = () => {
                 resolve({
                   naturalWidth: img.width,
@@ -3908,66 +3911,6 @@ export default function AIWorkspace() {
     [getSpawnPosition]
   );
 
-  const addBackgroundRemovedImageToCanvas = useCallback(
-    async ({
-      src,
-      naturalWidth,
-      naturalHeight,
-      sourceItemId,
-    }: {
-      src: string;
-      naturalWidth?: number;
-      naturalHeight?: number;
-      sourceItemId: string;
-    }) => {
-      const resolvedMeta =
-        Number.isFinite(naturalWidth) &&
-        naturalWidth > 0 &&
-        Number.isFinite(naturalHeight) &&
-        naturalHeight > 0
-          ? {
-              naturalWidth,
-              naturalHeight,
-            }
-          : await new Promise<{ naturalWidth: number; naturalHeight: number }>((resolve, reject) => {
-              const img = new Image();
-              img.onload = () => {
-                resolve({
-                  naturalWidth: img.width,
-                  naturalHeight: img.height,
-                });
-              };
-              img.onerror = () => reject(new Error('图片加载失败'));
-              img.src = src;
-            });
-
-      setItems((prev) => {
-        const displaySize = getConstrainedImageDisplaySize(
-          resolvedMeta.naturalWidth,
-          resolvedMeta.naturalHeight
-        );
-        const sourceItem = prev.find((item) => item.id === sourceItemId) ?? null;
-        const spawnPosition = sourceItem
-          ? getImageToolResultSpawnPosition({
-              sourceItem,
-              nextSize: displaySize,
-            })
-          : getSpawnPosition(displaySize);
-        const newItem = createImageCanvasItem({
-          id: `cutout-image-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-          src,
-          naturalWidth: resolvedMeta.naturalWidth,
-          naturalHeight: resolvedMeta.naturalHeight,
-          x: spawnPosition.x,
-          y: spawnPosition.y,
-        });
-
-        return [...prev, newItem];
-      });
-    },
-    [getSpawnPosition]
-  );
-
   const replaceImageAssetItemFromFile = useCallback(
     async (itemId: string, file: File) => {
       const base64Data = await readAsDataURL(file);
@@ -3989,7 +3932,7 @@ export default function AIWorkspace() {
       const imageUrl = data.url;
 
       const imageMeta = await new Promise<{ src: string; naturalWidth: number; naturalHeight: number }>((resolve, reject) => {
-        const img = new Image();
+        const img = new window.Image();
         img.onload = () => {
           resolve({
             src: imageUrl,
@@ -4497,10 +4440,10 @@ export default function AIWorkspace() {
     y: item.y + item.height / 2,
   });
 
-  const toCanvasScreenPoint = (point: { x: number; y: number }) => ({
+  const toCanvasScreenPoint = useCallback((point: { x: number; y: number }) => ({
     x: point.x * viewport.scale + viewport.x,
     y: point.y * viewport.scale + viewport.y,
-  });
+  }), [viewport.scale, viewport.x, viewport.y]);
 
   const selectedImageToolbarItem = selectedImageToolbarTarget
     ? itemById[selectedImageToolbarTarget.itemId] ?? null
@@ -4546,10 +4489,10 @@ export default function AIWorkspace() {
     setFrozenPreviewConnection(null);
   }, []);
 
-  const toCanvasPoint = (screenPoint: { x: number; y: number }) => ({
+  const toCanvasPoint = useCallback((screenPoint: { x: number; y: number }) => ({
     x: (screenPoint.x - viewport.x) / viewport.scale,
     y: (screenPoint.y - viewport.y) / viewport.scale,
-  });
+  }), [viewport.x, viewport.y, viewport.scale]);
 
   const getMagneticPortKey = useCallback((itemId: string, side: PortSide) => `${itemId}:${side}`, []);
 
@@ -4690,7 +4633,7 @@ export default function AIWorkspace() {
     ]
   );
 
-  const beginConnectionDragFromItem = useCallback((
+  const beginConnectionDragFromItem = (
     item: CanvasItem,
     pointerId: number,
     source: 'bridge' | 'button'
@@ -4728,16 +4671,39 @@ export default function AIWorkspace() {
     }
 
     const portPoint = toCanvasScreenPoint(getRenderedPortOverlayPoint(item, 'right'));
-    startDraggingConnection(item.id, portPoint, capturedPointerId);
-  }, [
-    clearPendingConnectionMenu,
-    clearMagneticPortResetTimer,
-    hoveredOutputPortItemId,
-    hoveredCanvasItemId,
-    hoveredInputPortItemId,
-    connectionMode,
-    getRenderedPortOverlayPoint,
-  ]);
+    const initialPoint = { x: portPoint.x + 12, y: portPoint.y };
+    connectionSessionRef.current = {
+      mode: 'dragging',
+      fromItemId: item.id,
+      pointerId: capturedPointerId ?? null,
+      startPoint: portPoint,
+      point: initialPoint,
+      snapTargetId: null,
+      moved: false,
+    };
+    syncConnectionState(connectionSessionRef.current);
+    setIsDragging(false);
+    setIsMarqueeSelecting(false);
+    setMarqueeRect(null);
+    marqueeStartRef.current = null;
+    setSelectedConnectionIds([]);
+    connectionDragMovedRef.current = false;
+    debugCanvasConnection('start-dragging-connection', {
+      itemId: item.id,
+      pointerId: capturedPointerId ?? null,
+      startPoint: portPoint,
+      initialPoint,
+      connectionModeBeforeSync: connectionMode,
+      hoveredOutputPortItemId,
+    });
+    attachConnectionWindowListeners();
+    debugCanvasConnection('port-pointerdown', {
+      fromItemId: item.id,
+      x: portPoint.x,
+      y: portPoint.y,
+      pointerId: capturedPointerId ?? null,
+    });
+  };
 
   const toggleSelectionId = (ids: string[], id: string) =>
     ids.includes(id) ? ids.filter((entry) => entry !== id) : [...ids, id];
@@ -4836,19 +4802,19 @@ export default function AIWorkspace() {
     return { targetId: nearest.targetId, x: nearest.x, y: nearest.y };
   };
 
-  const deleteItem = (id: string) => {
+  const deleteItem = useCallback((id: string) => {
     setItems(prev => prev.filter(item => item.id !== id));
     setConnections(prev => prev.filter((connection) => connection.fromItemId !== id && connection.toItemId !== id));
     if (selectedId === id) setSelectedId(null);
     setSelectedIds(prev => prev.filter(selected => selected !== id));
-  };
+  }, [selectedId]);
 
   const deleteConnection = (connectionId: string) => {
     setConnections((prev) => prev.filter((connection) => connection.id !== connectionId));
     setSelectedConnectionIds((prev) => prev.filter((id) => id !== connectionId));
   };
 
-  const syncConnectionState = (session: ConnectionSession | null) => {
+  const syncConnectionState = useCallback((session: ConnectionSession | null) => {
     if (!session) {
       setConnectionMode('idle');
       setConnectionFromItemId(null);
@@ -4863,7 +4829,7 @@ export default function AIWorkspace() {
     setConnectionPoint(session.point);
     setConnectionPointerId(session.pointerId);
     setConnectionSnapTargetId(session.snapTargetId);
-  };
+  }, []);
 
   const getCanvasRelativePoint = (clientX: number, clientY: number) => {
     const canvasRect = canvasRef.current?.getBoundingClientRect();
@@ -4874,17 +4840,17 @@ export default function AIWorkspace() {
     };
   };
 
-  const detachConnectionWindowListeners = () => {
+  const detachConnectionWindowListeners = useCallback(() => {
     if (detachConnectionWindowListenersRef.current) {
       detachConnectionWindowListenersRef.current();
       detachConnectionWindowListenersRef.current = null;
     }
-  };
+  }, []);
 
-  const debugCanvasConnection = (event: string, payload?: Record<string, unknown>) => {
+  const debugCanvasConnection = useCallback((event: string, payload?: Record<string, unknown>) => {
     if (!DEBUG_CANVAS_CONNECTIONS) return;
     console.debug('[canvas-conn]', event, payload || {});
-  };
+  }, []);
 
   const attachConnectionWindowListeners = () => {
     detachConnectionWindowListeners();
@@ -4929,7 +4895,7 @@ export default function AIWorkspace() {
     };
   };
 
-  const resetConnectionInteraction = () => {
+  const resetConnectionInteraction = useCallback(() => {
     const session = connectionSessionRef.current;
     debugCanvasConnection('reset-start', {
       fromItemId: session?.fromItemId ?? null,
@@ -4947,42 +4913,7 @@ export default function AIWorkspace() {
     syncConnectionState(null);
     connectionDragMovedRef.current = false;
     debugCanvasConnection('reset');
-  };
-
-  const startDraggingConnection = (itemId: string, point: { x: number; y: number }, pointerId?: number | null) => {
-    const initialPoint = { x: point.x + 12, y: point.y };
-    connectionSessionRef.current = {
-      mode: 'dragging',
-      fromItemId: itemId,
-      pointerId: pointerId ?? null,
-      startPoint: point,
-      point: initialPoint,
-      snapTargetId: null,
-      moved: false,
-    };
-    syncConnectionState(connectionSessionRef.current);
-    setIsDragging(false);
-    setIsMarqueeSelecting(false);
-    setMarqueeRect(null);
-    marqueeStartRef.current = null;
-    setSelectedConnectionIds([]);
-    connectionDragMovedRef.current = false;
-    debugCanvasConnection('start-dragging-connection', {
-      itemId,
-      pointerId: pointerId ?? null,
-      startPoint: point,
-      initialPoint,
-      connectionModeBeforeSync: connectionMode,
-      hoveredOutputPortItemId,
-    });
-    attachConnectionWindowListeners();
-    debugCanvasConnection('port-pointerdown', {
-      fromItemId: itemId,
-      x: point.x,
-      y: point.y,
-      pointerId: pointerId ?? null,
-    });
-  };
+  }, [debugCanvasConnection, detachConnectionWindowListeners, syncConnectionState]);
 
   const updateConnectionPreview = (rawX: number, rawY: number) => {
     const session = connectionSessionRef.current;
@@ -5465,7 +5396,7 @@ export default function AIWorkspace() {
       setSelectedId(null);
       setSelectedIds([]);
     },
-    []
+    [resetConnectionInteraction]
   );
 
   const handleInputPortEnter = useCallback((itemId: string) => {
@@ -5489,21 +5420,18 @@ export default function AIWorkspace() {
     setHoveredOutputPortItemId((prev) => (prev === itemId ? null : prev));
   }, []);
 
-  const handleOutputPortPointerDown = useCallback(
-    (e: React.PointerEvent<HTMLElement>, item: CanvasItem, source: 'bridge' | 'button') => {
-      if (e.button !== 0) return;
-      e.preventDefault();
-      e.stopPropagation();
-      debugCanvasConnection(source === 'bridge' ? 'out-bridge-pointerdown' : 'out-button-pointerdown', {
-        itemId: item.id,
-        pointerId: e.pointerId,
-        connectionMode,
-        hoveredOutputPortItemId,
-      });
-      beginConnectionDragFromItem(item, e.pointerId, source);
-    },
-    [beginConnectionDragFromItem, connectionMode, hoveredOutputPortItemId]
-  );
+  const handleOutputPortPointerDown = (e: React.PointerEvent<HTMLElement>, item: CanvasItem, source: 'bridge' | 'button') => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    e.stopPropagation();
+    debugCanvasConnection(source === 'bridge' ? 'out-bridge-pointerdown' : 'out-button-pointerdown', {
+      itemId: item.id,
+      pointerId: e.pointerId,
+      connectionMode,
+      hoveredOutputPortItemId,
+    });
+    beginConnectionDragFromItem(item, e.pointerId, source);
+  };
 
   const handleSelectionGroupPointerDown = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
@@ -5606,7 +5534,7 @@ export default function AIWorkspace() {
     if (connectionSessionRef.current?.fromItemId && !validIds.has(connectionSessionRef.current.fromItemId)) {
       resetConnectionInteraction();
     }
-  }, [items, connectionPointerId, connections]);
+  }, [items, connectionPointerId, connections, resetConnectionInteraction]);
 
   useEffect(() => {
     return () => {
@@ -6693,7 +6621,7 @@ export default function AIWorkspace() {
             ];
           }));
 
-          const img = new Image();
+          const img = new window.Image();
           img.crossOrigin = 'anonymous';
           img.onload = () => {
             const spawnPosition = getSpawnPosition(
@@ -6986,7 +6914,7 @@ export default function AIWorkspace() {
             taskStatus: undefined,
           }));
           
-          const img = new Image();
+          const img = new window.Image();
           img.crossOrigin = 'anonymous';
           img.onload = () => {
             const spawnPosition = getSpawnPosition(
@@ -7555,64 +7483,6 @@ export default function AIWorkspace() {
     }
   };
 
-  const showImageToolbarNoticeWithTimeout = useCallback((message: string, autoHideMs?: number) => {
-    setImageToolbarNotice(message);
-    if (imageToolbarNoticeTimeoutRef.current) {
-      clearTimeout(imageToolbarNoticeTimeoutRef.current);
-      imageToolbarNoticeTimeoutRef.current = null;
-    }
-
-    if (Number.isFinite(autoHideMs) && autoHideMs && autoHideMs > 0) {
-      imageToolbarNoticeTimeoutRef.current = setTimeout(() => {
-        setImageToolbarNotice(null);
-        imageToolbarNoticeTimeoutRef.current = null;
-      }, autoHideMs);
-    }
-  }, []);
-
-  const handleImageToolbarAction = useCallback(async (actionId: (typeof IMAGE_NODE_TOOLBAR_ACTIONS)[number]['id']) => {
-    if (actionId !== 'cutout' || !selectedImageToolbarTarget?.src) return;
-
-    showImageToolbarNoticeWithTimeout('抠图中…');
-
-    try {
-      const response = await fetch('/api/image-tools/remove-background', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          imageUrl: selectedImageToolbarTarget.src,
-          sourceItemId: selectedImageToolbarTarget.itemId,
-        }),
-      });
-
-      const data = await response.json().catch(() => null);
-      if (!response.ok || !data || typeof data.url !== 'string' || data.url.length === 0) {
-        throw new Error(
-          (data && typeof data.error === 'string' && data.error) ||
-            `抠图失败: ${response.status}`
-        );
-      }
-
-      await addBackgroundRemovedImageToCanvas({
-        src: data.url,
-        naturalWidth:
-          Number.isFinite(data.naturalWidth) && data.naturalWidth > 0 ? data.naturalWidth : undefined,
-        naturalHeight:
-          Number.isFinite(data.naturalHeight) && data.naturalHeight > 0 ? data.naturalHeight : undefined,
-        sourceItemId: selectedImageToolbarTarget.itemId,
-      });
-
-      showImageToolbarNoticeWithTimeout('抠图完成', 2200);
-    } catch (error) {
-      showImageToolbarNoticeWithTimeout(
-        error instanceof Error && error.message ? error.message : '抠图失败',
-        2800
-      );
-    }
-  }, [addBackgroundRemovedImageToCanvas, selectedImageToolbarTarget, showImageToolbarNoticeWithTimeout]);
-
   const handleLeftRailItemClick = useCallback((itemId: (typeof LEFT_RAIL_ITEMS)[number]['id']) => {
     if (itemId === 'history') {
       setShowGeneratedImageHistoryPanel((prev) => !prev);
@@ -7654,7 +7524,7 @@ export default function AIWorkspace() {
       detachConnectionWindowListeners();
       clearMagneticPortResetTimer();
     };
-  }, [clearMagneticPortResetTimer]);
+  }, [clearMagneticPortResetTimer, detachConnectionWindowListeners]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -7713,7 +7583,7 @@ export default function AIWorkspace() {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
     };
-  }, [selectedId, selectedIds, connectionPointerId, selectedConnectionIds, pendingConnectionMenu, clearPendingConnectionMenu]);
+  }, [selectedId, selectedIds, connectionPointerId, selectedConnectionIds, pendingConnectionMenu, clearPendingConnectionMenu, deleteItem, resetConnectionInteraction]);
 
   useEffect(() => {
     const handleWindowPaste = (e: ClipboardEvent) => {
@@ -7799,7 +7669,7 @@ export default function AIWorkspace() {
       document.addEventListener('pointerdown', handlePointerDownOutside);
       return () => document.removeEventListener('pointerdown', handlePointerDownOutside);
     }
-  }, [showAvatarMenu, showProjectMenu, showAddNodeMenu, showGeneratedImageHistoryPanel, showHistoryPanel, showGenerationModeMenu, showSkillsMenu, showAspectRatioMenu, showImageCardModelMenu, showImageCardQualityMenu, showImageCardCountMenu, showTextPanelModelMenu, editingSessionId]);
+  }, [showAvatarMenu, showProjectMenu, showAddNodeMenu, showGeneratedImageHistoryPanel, showHistoryPanel, showGenerationModeMenu, showSkillsMenu, showAspectRatioMenu, showImageCardModelMenu, showImageCardQualityMenu, showImageCardCountMenu, showTextPanelModelMenu, editingSessionId, hasActiveAssistantTextSelection, isNodeInsideAssistantSelectable]);
 
   useEffect(() => {
     const handleSelectionChange = () => {
@@ -7839,7 +7709,7 @@ export default function AIWorkspace() {
       window.removeEventListener('pointerup', handlePointerEnd);
       window.removeEventListener('pointercancel', handlePointerEnd);
     };
-  }, []);
+  }, [hasActiveAssistantTextSelection]);
 
   useEffect(() => {
     const container = chatContainerRef.current;
@@ -7855,11 +7725,11 @@ export default function AIWorkspace() {
 
   useEffect(() => {
     syncEditorTextFromState(chatInput);
-  }, [chatInput]);
+  }, [chatInput, syncEditorTextFromState]);
 
   useEffect(() => {
-    syncEditorTextFromState(chatInput, true);
-  }, [activeSkill?.id]);
+    syncEditorTextFromState(latestChatInputRef.current, true);
+  }, [activeSkill?.id, syncEditorTextFromState]);
 
   useEffect(() => {
     if (!activeSkillJobId) return;
@@ -7959,7 +7829,7 @@ export default function AIWorkspace() {
 
           setImageCount((prev) => prev + 1);
 
-          const img = new Image();
+          const img = new window.Image();
           img.crossOrigin = 'anonymous';
           img.onload = () => {
             const orderOffset = processedSkillJobUrlsRef.current.size - 1;
@@ -8041,7 +7911,7 @@ export default function AIWorkspace() {
         clearTimeout(timer);
       }
     };
-  }, [activeSkillJobId, activeSkillJobType]);
+  }, [activeSkillJobId, activeSkillJobType, appendGeneratedImageHistoryForSession, getSpawnPosition]);
 
   if (viewMode === 'gallery') {
     return (
@@ -8181,11 +8051,14 @@ export default function AIWorkspace() {
                           }}
                           className="group overflow-hidden rounded-[20px] border border-white/[0.08] bg-white/[0.03] text-left transition-all hover:-translate-y-0.5 hover:border-white/[0.14] hover:bg-white/[0.05]"
                         >
-                          <div className="aspect-square overflow-hidden bg-black/30">
-                            <img
+                          <div className="relative aspect-square overflow-hidden bg-black/30">
+                            <Image
                               src={entry.src}
                               alt="历史生成图"
-                              className="h-full w-full object-cover transition-transform duration-200 group-hover:scale-[1.03]"
+                              fill
+                              unoptimized
+                              sizes="160px"
+                              className="object-cover transition-transform duration-200 group-hover:scale-[1.03]"
                               draggable={false}
                             />
                           </div>
@@ -8511,16 +8384,12 @@ export default function AIWorkspace() {
                     onPointerDown={(e) => {
                       e.stopPropagation();
                     }}
-                    onClick={() => {
-                      if (!action.enabled) return;
-                      handleImageToolbarAction(action.id);
-                    }}
                     className={`inline-flex h-8 items-center gap-1.5 rounded-full px-3 text-[12px] font-medium tracking-[-0.02em] transition-all ${
                       action.enabled
                         ? 'text-zinc-100 hover:bg-white/[0.08] hover:text-white'
                         : 'cursor-default text-zinc-500/85'
                     }`}
-                    title={action.enabled ? action.label : `${action.label} 即将支持`}
+                    title={action.enabled ? action.label : action.disabledReason ?? `${action.label} 即将支持`}
                   >
                     <Icon size={13} strokeWidth={2} className="shrink-0" />
                     <span className="whitespace-nowrap">{action.label}</span>
@@ -8531,17 +8400,6 @@ export default function AIWorkspace() {
           </div>,
           document.body
         )}
-
-      {imageToolbarNotice && (
-        <div
-          className="pointer-events-none fixed inset-x-0 top-4 flex justify-center px-4"
-          style={{ zIndex: GLOBAL_NOTICE_Z }}
-        >
-          <div className="rounded-full border border-white/[0.1] bg-[rgba(14,15,18,0.92)] px-4 py-2 text-[12px] font-medium tracking-[-0.02em] text-zinc-100 shadow-[0_18px_42px_rgba(0,0,0,0.34)] backdrop-blur-xl">
-            {imageToolbarNotice}
-          </div>
-        </div>
-      )}
 
       {/* Zoom Controller - Outside Canvas */}
       <div className="absolute left-4 bottom-4 z-50 flex items-center gap-2 rounded-xl border border-white/10 bg-[rgba(16,18,22,0.88)] p-1.5 shadow-[0_18px_50px_rgba(0,0,0,0.35)] backdrop-blur-xl">
@@ -8730,11 +8588,14 @@ export default function AIWorkspace() {
                         <div className="w-full flex justify-end mb-2">
                           <div className="flex flex-wrap justify-end gap-2">
                             {msg.referenceImages.map((img, index) => (
-                              <div key={`${msg.id}-ref-${index}`} className="relative">
-                                <img
+                              <div key={`${msg.id}-ref-${index}`} className="relative h-16 w-16">
+                                <Image
                                   src={img}
                                   alt={`参考图 image${index + 1}`}
-                                  className="h-16 w-16 rounded-md border border-[#262b33] object-cover"
+                                  fill
+                                  unoptimized
+                                  sizes="64px"
+                                  className="rounded-md border border-[#262b33] object-cover"
                                 />
                                 <span className="absolute left-0 top-0 px-1 py-0.5 rounded-br-md rounded-tl-md bg-black/75 text-white text-[9px] leading-none">
                                   {`image${index + 1}`}
@@ -8860,7 +8721,17 @@ export default function AIWorkspace() {
                         </div>
                       )}
                       {msg.imageName && <div className="mb-1.5 text-sm font-medium text-zinc-200">{msg.imageName}</div>}
-                      {msg.imageUrl && <img src={msg.imageUrl} alt="Generated" className="rounded-lg w-full" />}
+                      {msg.imageUrl && (
+                        <Image
+                          src={msg.imageUrl}
+                          alt="Generated"
+                          width={1024}
+                          height={1024}
+                          unoptimized
+                          sizes="(max-width: 768px) 90vw, 720px"
+                          className="h-auto w-full rounded-lg"
+                        />
+                      )}
                       {msg.model && <div className="mt-1.5 text-xs text-zinc-500">模型: {msg.model}</div>}
                     </div>
                   )}
@@ -8912,9 +8783,16 @@ export default function AIWorkspace() {
                     onDragOver={(e) => handleReferenceDragOver(e, index)}
                     onDrop={(e) => handleReferenceDrop(e, index)}
                     onDragEnd={handleReferenceDragEnd}
-                    className={`relative group cursor-move transition-all ${draggingImageIndex === index ? 'opacity-50' : ''} ${dragOverImageIndex === index ? 'rounded-md ring-1 ring-zinc-100' : ''}`}
+                    className={`relative h-14 w-14 group cursor-move transition-all ${draggingImageIndex === index ? 'opacity-50' : ''} ${dragOverImageIndex === index ? 'rounded-md ring-1 ring-zinc-100' : ''}`}
                   >
-                    <img src={img} alt={`参考图 ${index + 1}`} className="h-14 w-14 rounded-md border border-white/10 object-cover" />
+                    <Image
+                      src={img}
+                      alt={`参考图 ${index + 1}`}
+                      fill
+                      unoptimized
+                      sizes="56px"
+                      className="rounded-md border border-white/10 object-cover"
+                    />
                     <span className="absolute left-0 top-0 px-1 py-0.5 rounded-br-md rounded-tl-md bg-black/75 text-white text-[9px] leading-none">
                       {`image${index + 1}`}
                     </span>
