@@ -12,6 +12,8 @@ import {
   upsertSession,
 } from '../lib/db';
 import { shouldFlushScheduledSessionSave } from '../lib/session-persistence.mjs';
+import { mergeCurrentSessionSnapshotIntoSessions } from '../lib/session-transition-state.mjs';
+import { resolveStateUpdate } from '../lib/state-update.mjs';
 
 export type WorkspaceViewMode = 'gallery' | 'editor';
 export type SessionMutationType = 'create' | 'delete';
@@ -52,7 +54,7 @@ export function useWorkspaceSessionController<TResolvedSessionState>({
   isHighFrequencyInteractionActive,
   sessionSaveSignal,
 }: UseWorkspaceSessionControllerArgs<TResolvedSessionState>) {
-  const [sessions, setSessions] = useState<ProjectSession[]>([]);
+  const [sessions, setSessionsState] = useState<ProjectSession[]>([]);
   const [currentSessionId, setCurrentSessionId] = useState('');
   const [pendingSessionAction, setPendingSessionAction] = useState<PendingSessionActionState | null>(null);
   const [sessionActionError, setSessionActionError] = useState<string | null>(null);
@@ -70,6 +72,12 @@ export function useWorkspaceSessionController<TResolvedSessionState>({
   useLayoutEffect(() => {
     sessionsRef.current = sessions;
   }, [sessions]);
+
+  const setSessions = useCallback((value: SetStateAction<ProjectSession[]>) => {
+    const nextSessions = resolveStateUpdate(value, sessionsRef.current);
+    sessionsRef.current = nextSessions;
+    setSessionsState(nextSessions);
+  }, []);
 
   useLayoutEffect(() => {
     currentSessionIdRef.current = currentSessionId;
@@ -222,6 +230,34 @@ export function useWorkspaceSessionController<TResolvedSessionState>({
     });
   }, [buildCurrentSessionSnapshot, enqueueSessionPersistenceTask]);
 
+  const commitCurrentSessionSnapshotBeforeTransition = useCallback(() => {
+    cancelPendingSessionSave();
+
+    const result = mergeCurrentSessionSnapshotIntoSessions({
+      sessions: sessionsRef.current,
+      currentSessionId: currentSessionIdRef.current,
+      buildCurrentSessionSnapshot,
+    }) as {
+      sessions: ProjectSession[];
+      currentSessionSnapshot: ProjectSession | null;
+    };
+
+    if (!result.currentSessionSnapshot) {
+      return result;
+    }
+
+    sessionsRef.current = result.sessions;
+    setSessions(result.sessions);
+
+    void enqueueSessionPersistenceTask(async () => {
+      await upsertSession(result.currentSessionSnapshot as ProjectSession);
+    }).catch((error) => {
+      console.error('Failed to persist current session before transition:', error);
+    });
+
+    return result;
+  }, [buildCurrentSessionSnapshot, cancelPendingSessionSave, enqueueSessionPersistenceTask]);
+
   const scheduleCurrentSessionSave = useCallback(() => {
     if (pendingSessionActionRef.current) return;
 
@@ -243,18 +279,19 @@ export function useWorkspaceSessionController<TResolvedSessionState>({
     });
   }, [flushCurrentSessionSave]);
 
-  const loadSession = useCallback((sessionId: string, sourceSessions: ProjectSession[] = sessionsRef.current) => {
+  const loadSession = useCallback((sessionId: string) => {
     if (pendingSessionActionRef.current) return;
-    const session = sourceSessions.find((entry) => entry.id === sessionId);
+    const { sessions: nextSessions } = commitCurrentSessionSnapshotBeforeTransition();
+    const session = nextSessions.find((entry) => entry.id === sessionId);
     if (!session) return;
 
     applyLoadedSessionState(session);
-  }, [applyLoadedSessionState]);
+  }, [applyLoadedSessionState, commitCurrentSessionSnapshotBeforeTransition]);
 
   const createNewProject = useCallback(async () => {
     if (pendingSessionActionRef.current) return;
 
-    interruptSessionPersistence();
+    commitCurrentSessionSnapshotBeforeTransition();
     const snapshot = captureWorkspaceUiSnapshot();
     const now = Date.now();
     const newSession = createEmptySession({ existingCount: snapshot.sessions.length, now });
@@ -262,6 +299,7 @@ export function useWorkspaceSessionController<TResolvedSessionState>({
 
     setSessionActionError(null);
     setPendingSessionAction({ type: 'create', sessionId: newSession.id });
+    sessionsRef.current = nextSessions;
     setSessions(nextSessions);
     applyLoadedSessionState(newSession);
     setViewMode('editor');
@@ -280,9 +318,9 @@ export function useWorkspaceSessionController<TResolvedSessionState>({
     }
   }, [
     applyLoadedSessionState,
+    commitCurrentSessionSnapshotBeforeTransition,
     captureWorkspaceUiSnapshot,
     enqueueSessionPersistenceTask,
-    interruptSessionPersistence,
     restoreWorkspaceUiSnapshot,
     setViewMode,
     syncWorkspaceUrl,
@@ -332,6 +370,7 @@ export function useWorkspaceSessionController<TResolvedSessionState>({
 
     setSessionActionError(null);
     setPendingSessionAction({ type: 'delete', sessionId });
+    sessionsRef.current = deletionResult.sessions;
     setSessions(deletionResult.sessions);
 
     if (sessionId === currentSessionIdRef.current && nextSession) {
@@ -363,6 +402,15 @@ export function useWorkspaceSessionController<TResolvedSessionState>({
     viewMode,
   ]);
 
+  const leaveEditor = useCallback(() => {
+    if (pendingSessionActionRef.current) return;
+
+    commitCurrentSessionSnapshotBeforeTransition();
+    interruptSessionPersistence();
+    setViewMode('gallery');
+    syncWorkspaceUrl(null);
+  }, [commitCurrentSessionSnapshotBeforeTransition, interruptSessionPersistence, setViewMode, syncWorkspaceUrl]);
+
   const enterEditor = useCallback((sessionId: string) => {
     if (pendingSessionActionRef.current) return;
     const session = sessionsRef.current.find((entry) => entry.id === sessionId);
@@ -393,6 +441,7 @@ export function useWorkspaceSessionController<TResolvedSessionState>({
           };
         });
 
+        sessionsRef.current = normalizedSessions;
         setSessions(normalizedSessions);
 
         const urlParams = new URLSearchParams(window.location.search);
@@ -441,6 +490,7 @@ export function useWorkspaceSessionController<TResolvedSessionState>({
     renameSession,
     deleteSession,
     loadSession,
+    leaveEditor,
     enterEditor,
     scheduleCurrentSessionSave,
   };

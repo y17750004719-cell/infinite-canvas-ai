@@ -23,6 +23,7 @@ import {
   normalizeTextCardPanelDrafts,
   normalizeProjectSession,
 } from './lib/session-persistence.mjs';
+import { resolveStateUpdate } from './lib/state-update.mjs';
 import {
   areCanvasUndoSnapshotsEqual,
   createCanvasUndoSnapshot,
@@ -289,6 +290,21 @@ interface ChatTopic {
   activeSkill?: { id: string; label: string } | null;
   createdAt: number;
   updatedAt: number;
+}
+
+interface SessionLiveState {
+  items: CanvasItem[];
+  connections: Connection[];
+  textCardPanelDrafts: Record<string, string>;
+  imageCardPanelDrafts: Record<string, string>;
+  imageCardModelById: Record<string, string>;
+  imageCardSizeById: Record<string, string>;
+  imageCardCountById: Record<string, number>;
+  imageCardAspectRatioById: Record<string, string>;
+  chatMessages: ChatMessage[];
+  activeSkill: { id: string; label: string } | null;
+  generatedImageHistoryBySession: Record<string, GeneratedImageHistoryEntry[]>;
+  viewport: { x: number; y: number; scale: number };
 }
 
 type Tool = 'select' | 'text' | 'image';
@@ -3129,7 +3145,7 @@ function CanvasActionMenuItem({
 export default function AIWorkspace() {
   const [viewMode, setViewMode] = useState<'gallery' | 'editor'>('gallery');
   const [tool, setTool] = useState<Tool>('select');
-  const [items, setItems] = useState<CanvasItem[]>([]);
+  const [items, setItemsState] = useState<CanvasItem[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [hoveredCanvasItemId, setHoveredCanvasItemId] = useState<string | null>(null);
@@ -3142,14 +3158,14 @@ export default function AIWorkspace() {
   const [frozenPreviewConnection, setFrozenPreviewConnection] = useState<FrozenPreviewConnection | null>(null);
   const [pendingConnectionMenu, setPendingConnectionMenu] = useState<PendingConnectionMenu | null>(null);
   const [magneticPorts, setMagneticPorts] = useState<MagneticPortMap>({});
-  const [viewport, setViewport] = useState({ x: 0, y: 0, scale: 1 });
+  const [viewport, setViewportState] = useState({ x: 0, y: 0, scale: 1 });
   const [isDragging, setIsDragging] = useState(false);
   const [isPanning, setIsPanning] = useState(false);
   const [isCornerResizing, setIsCornerResizing] = useState(false);
   const [isSpacePressed, setIsSpacePressed] = useState(false);
   const [isMarqueeSelecting, setIsMarqueeSelecting] = useState(false);
   const [marqueeRect, setMarqueeRect] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
-  const [connections, setConnections] = useState<Connection[]>([]);
+  const [connections, setConnectionsState] = useState<Connection[]>([]);
   const [selectedConnectionIds, setSelectedConnectionIds] = useState<string[]>([]);
   const [connectionSnapTargetId, setConnectionSnapTargetId] = useState<string | null>(null);
   const dragStart = useRef({ x: 0, y: 0 });
@@ -3180,7 +3196,7 @@ export default function AIWorkspace() {
   
   const [chatInput, setChatInput] = useState('');
   const [chatInputRows, setChatInputRows] = useState(1);
-  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
+  const [chatMessages, setChatMessagesState] = useState<ChatMessage[]>([]);
   const [isGenerating, setIsGenerating] = useState(false);
   const [activeCanvasTextGenerations, setActiveCanvasTextGenerations] = useState<
     Record<string, { status: 'running'; startedAt: number }>
@@ -3193,7 +3209,7 @@ export default function AIWorkspace() {
   const [hasStartedChat, setHasStartedChat] = useState(false);
   const [showAvatarMenu, setShowAvatarMenu] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [activeSkill, setActiveSkill] = useState<{ id: string; label: string } | null>(null);
+  const [activeSkill, setActiveSkillState] = useState<{ id: string; label: string } | null>(null);
   const [generationMode, setGenerationMode] = useState<GenerationMode>('auto');
   const [showGenerationModeMenu, setShowGenerationModeMenu] = useState(false);
   const [showSkillsMenu, setShowSkillsMenu] = useState(false);
@@ -3218,7 +3234,7 @@ export default function AIWorkspace() {
   const [showProjectMenu, setShowProjectMenu] = useState(false);
   const [showHistoryPanel, setShowHistoryPanel] = useState(false);
   const [showGeneratedImageHistoryPanel, setShowGeneratedImageHistoryPanel] = useState(false);
-  const [generatedImageHistoryBySession, setGeneratedImageHistoryBySession] = useState<Record<string, GeneratedImageHistoryEntry[]>>({});
+  const [generatedImageHistoryBySession, setGeneratedImageHistoryBySessionState] = useState<Record<string, GeneratedImageHistoryEntry[]>>({});
   const [archiveGeneratedImageHistoryEntries, setArchiveGeneratedImageHistoryEntries] = useState<GeneratedImageHistoryEntry[]>([]);
   const [showAddNodeMenu, setShowAddNodeMenu] = useState(false);
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
@@ -3282,12 +3298,12 @@ export default function AIWorkspace() {
   const [chatInputHeight, setChatInputHeight] = useState(24);
   const [copiedAssistantMessageId, setCopiedAssistantMessageId] = useState<string | null>(null);
   const [editingTextCardId, setEditingTextCardId] = useState<string | null>(null);
-  const [textCardPanelDrafts, setTextCardPanelDrafts] = useState<Record<string, string>>({});
-  const [imageCardPanelDrafts, setImageCardPanelDrafts] = useState<Record<string, string>>({});
-  const [imageCardModelById, setImageCardModelById] = useState<Record<string, string>>({});
-  const [imageCardSizeById, setImageCardSizeById] = useState<Record<string, string>>({});
-  const [imageCardCountById, setImageCardCountById] = useState<Record<string, number>>({});
-  const [imageCardAspectRatioById, setImageCardAspectRatioById] = useState<Record<string, string>>({});
+  const [textCardPanelDrafts, setTextCardPanelDraftsState] = useState<Record<string, string>>({});
+  const [imageCardPanelDrafts, setImageCardPanelDraftsState] = useState<Record<string, string>>({});
+  const [imageCardModelById, setImageCardModelByIdState] = useState<Record<string, string>>({});
+  const [imageCardSizeById, setImageCardSizeByIdState] = useState<Record<string, string>>({});
+  const [imageCardCountById, setImageCardCountByIdState] = useState<Record<string, number>>({});
+  const [imageCardAspectRatioById, setImageCardAspectRatioByIdState] = useState<Record<string, string>>({});
   const [selectedTextPanelModelId, setSelectedTextPanelModelId] = useState(getDefaultTextPanelModelOption().id);
   const [showTextPanelModelMenu, setShowTextPanelModelMenu] = useState(false);
   const [showImageCardModelMenu, setShowImageCardModelMenu] = useState(false);
@@ -3299,6 +3315,110 @@ export default function AIWorkspace() {
   const imageCardQualityPopoverRef = useRef<HTMLDivElement | null>(null);
   const imageCardCountMenuRef = useRef<HTMLDivElement | null>(null);
   const imageCardCountPopoverRef = useRef<HTMLDivElement | null>(null);
+  const sessionLiveStateRef = useRef<SessionLiveState>({
+    items,
+    connections,
+    textCardPanelDrafts,
+    imageCardPanelDrafts,
+    imageCardModelById,
+    imageCardSizeById,
+    imageCardCountById,
+    imageCardAspectRatioById,
+    chatMessages,
+    activeSkill,
+    generatedImageHistoryBySession,
+    viewport,
+  });
+  const syncSessionLiveState = useCallback((patch: Partial<SessionLiveState>) => {
+    if (Object.prototype.hasOwnProperty.call(patch, 'items')) {
+      itemsRef.current = patch.items ?? [];
+    }
+    if (Object.prototype.hasOwnProperty.call(patch, 'viewport')) {
+      viewportRef.current = patch.viewport ?? { x: 0, y: 0, scale: 1 };
+    }
+
+    sessionLiveStateRef.current = {
+      ...sessionLiveStateRef.current,
+      ...patch,
+    };
+  }, []);
+  const applySessionLiveStateUpdate = useCallback(
+    <K extends keyof SessionLiveState>(
+      key: K,
+      value: React.SetStateAction<SessionLiveState[K]>,
+      stateSetter: React.Dispatch<React.SetStateAction<SessionLiveState[K]>>
+    ) => {
+      const nextValue = resolveStateUpdate(value, sessionLiveStateRef.current[key]);
+      syncSessionLiveState({ [key]: nextValue } as Pick<SessionLiveState, K>);
+      stateSetter(nextValue);
+      return nextValue;
+    },
+    [syncSessionLiveState]
+  );
+  const setItems = useCallback(
+    (value: React.SetStateAction<CanvasItem[]>) =>
+      applySessionLiveStateUpdate('items', value, setItemsState),
+    [applySessionLiveStateUpdate]
+  );
+  const setConnections = useCallback(
+    (value: React.SetStateAction<Connection[]>) =>
+      applySessionLiveStateUpdate('connections', value, setConnectionsState),
+    [applySessionLiveStateUpdate]
+  );
+  const setTextCardPanelDrafts = useCallback(
+    (value: React.SetStateAction<Record<string, string>>) =>
+      applySessionLiveStateUpdate('textCardPanelDrafts', value, setTextCardPanelDraftsState),
+    [applySessionLiveStateUpdate]
+  );
+  const setImageCardPanelDrafts = useCallback(
+    (value: React.SetStateAction<Record<string, string>>) =>
+      applySessionLiveStateUpdate('imageCardPanelDrafts', value, setImageCardPanelDraftsState),
+    [applySessionLiveStateUpdate]
+  );
+  const setImageCardModelById = useCallback(
+    (value: React.SetStateAction<Record<string, string>>) =>
+      applySessionLiveStateUpdate('imageCardModelById', value, setImageCardModelByIdState),
+    [applySessionLiveStateUpdate]
+  );
+  const setImageCardSizeById = useCallback(
+    (value: React.SetStateAction<Record<string, string>>) =>
+      applySessionLiveStateUpdate('imageCardSizeById', value, setImageCardSizeByIdState),
+    [applySessionLiveStateUpdate]
+  );
+  const setImageCardCountById = useCallback(
+    (value: React.SetStateAction<Record<string, number>>) =>
+      applySessionLiveStateUpdate('imageCardCountById', value, setImageCardCountByIdState),
+    [applySessionLiveStateUpdate]
+  );
+  const setImageCardAspectRatioById = useCallback(
+    (value: React.SetStateAction<Record<string, string>>) =>
+      applySessionLiveStateUpdate('imageCardAspectRatioById', value, setImageCardAspectRatioByIdState),
+    [applySessionLiveStateUpdate]
+  );
+  const setChatMessages = useCallback(
+    (value: React.SetStateAction<ChatMessage[]>) =>
+      applySessionLiveStateUpdate('chatMessages', value, setChatMessagesState),
+    [applySessionLiveStateUpdate]
+  );
+  const setActiveSkill = useCallback(
+    (value: React.SetStateAction<{ id: string; label: string } | null>) =>
+      applySessionLiveStateUpdate('activeSkill', value, setActiveSkillState),
+    [applySessionLiveStateUpdate]
+  );
+  const setGeneratedImageHistoryBySession = useCallback(
+    (value: React.SetStateAction<Record<string, GeneratedImageHistoryEntry[]>>) =>
+      applySessionLiveStateUpdate(
+        'generatedImageHistoryBySession',
+        value,
+        setGeneratedImageHistoryBySessionState
+      ),
+    [applySessionLiveStateUpdate]
+  );
+  const setViewport = useCallback(
+    (value: React.SetStateAction<{ x: number; y: number; scale: number }>) =>
+      applySessionLiveStateUpdate('viewport', value, setViewportState),
+    [applySessionLiveStateUpdate]
+  );
   const multiSelectionBounds = React.useMemo(() => {
     if (selectedIds.length <= 1) return null;
     const selectedItems = items.filter((item) => selectedIds.includes(item.id));
@@ -3455,26 +3575,18 @@ export default function AIWorkspace() {
   latestChatInputRef.current = chatInput;
 
   const createCurrentCanvasUndoSnapshot = useCallback(() => {
+    const liveState = sessionLiveStateRef.current;
     return createCanvasUndoSnapshot({
-      items,
-      connections,
-      textCardPanelDrafts,
-      imageCardPanelDrafts,
-      imageCardModelById,
-      imageCardSizeById,
-      imageCardCountById,
-      imageCardAspectRatioById,
+      items: liveState.items,
+      connections: liveState.connections,
+      textCardPanelDrafts: liveState.textCardPanelDrafts,
+      imageCardPanelDrafts: liveState.imageCardPanelDrafts,
+      imageCardModelById: liveState.imageCardModelById,
+      imageCardSizeById: liveState.imageCardSizeById,
+      imageCardCountById: liveState.imageCardCountById,
+      imageCardAspectRatioById: liveState.imageCardAspectRatioById,
     }) as CanvasUndoSnapshot;
-  }, [
-    connections,
-    imageCardAspectRatioById,
-    imageCardCountById,
-    imageCardModelById,
-    imageCardPanelDrafts,
-    imageCardSizeById,
-    items,
-    textCardPanelDrafts,
-  ]);
+  }, []);
 
   const pushCanvasUndoSnapshot = useCallback((snapshot: CanvasUndoSnapshot | null | undefined) => {
     const sessionId = currentSessionIdRef.current;
@@ -7512,6 +7624,7 @@ export default function AIWorkspace() {
   };
 
   const buildCurrentSessionSnapshot = useCallback((session: ProjectSession) => {
+    const liveState = sessionLiveStateRef.current;
     let topics = session.topics || [];
     const activeId = session.activeTopicId;
 
@@ -7520,15 +7633,15 @@ export default function AIWorkspace() {
         if (topic.id !== activeId) return topic;
 
         let title = topic.title;
-        if ((title === '新对话' || !title) && chatMessages.length > 0) {
-          title = chatMessages[0].content.substring(0, 20) || '对话项目';
+        if ((title === '新对话' || !title) && liveState.chatMessages.length > 0) {
+          title = liveState.chatMessages[0].content.substring(0, 20) || '对话项目';
         }
 
         return {
           ...topic,
           title,
-          messages: chatMessages,
-          activeSkill: activeSkill || null,
+          messages: liveState.chatMessages,
+          activeSkill: liveState.activeSkill || null,
           updatedAt: Date.now(),
         };
       });
@@ -7536,25 +7649,25 @@ export default function AIWorkspace() {
 
     return buildPersistedSession(session, {
       updatedAt: Date.now(),
-      items,
-      textCardPanelDrafts,
-      imageCardPanelDrafts,
-      imageCardModelById,
-      imageCardSizeById,
-      imageCardCountById,
-      imageCardAspectRatioById,
-      connections,
-      messages: chatMessages,
+      items: liveState.items,
+      textCardPanelDrafts: liveState.textCardPanelDrafts,
+      imageCardPanelDrafts: liveState.imageCardPanelDrafts,
+      imageCardModelById: liveState.imageCardModelById,
+      imageCardSizeById: liveState.imageCardSizeById,
+      imageCardCountById: liveState.imageCardCountById,
+      imageCardAspectRatioById: liveState.imageCardAspectRatioById,
+      connections: liveState.connections,
+      messages: liveState.chatMessages,
       topics,
       activeTopicId: activeId,
       generatedImageHistory:
-        generatedImageHistoryBySession[session.id] ??
+        liveState.generatedImageHistoryBySession[session.id] ??
         persistedGeneratedImageHistoryBySessionRef.current[session.id] ??
         session.generatedImageHistory ??
         [],
-      viewport,
+      viewport: liveState.viewport,
     });
-  }, [activeSkill, chatMessages, connections, generatedImageHistoryBySession, imageCardAspectRatioById, imageCardCountById, imageCardModelById, imageCardPanelDrafts, imageCardSizeById, items, textCardPanelDrafts, viewport]);
+  }, []);
 
   const resolveCurrentSessionPresentationState = useCallback((session: ProjectSession) => {
     return resolveSessionPresentationState({
@@ -7567,25 +7680,38 @@ export default function AIWorkspace() {
   }, [inferTopicSkill]);
 
   const applyResolvedSessionState = useCallback((resolvedState: any) => {
-    setItems(resolvedState.items);
-    setConnections(resolvedState.connections || []);
-    setChatMessages(resolvedState.chatMessages || []);
-    setActiveSkill(resolvedState.activeSkill || null);
+    syncSessionLiveState({
+      items: resolvedState.items,
+      connections: resolvedState.connections || [],
+      chatMessages: resolvedState.chatMessages || [],
+      activeSkill: resolvedState.activeSkill || null,
+      textCardPanelDrafts: resolvedState.normalizedSession?.textCardPanelDrafts || {},
+      imageCardPanelDrafts: resolvedState.normalizedSession?.imageCardPanelDrafts || {},
+      imageCardModelById: resolvedState.normalizedSession?.imageCardModelById || {},
+      imageCardSizeById: resolvedState.normalizedSession?.imageCardSizeById || {},
+      imageCardCountById: resolvedState.normalizedSession?.imageCardCountById || {},
+      imageCardAspectRatioById: resolvedState.normalizedSession?.imageCardAspectRatioById || {},
+      viewport: resolvedState.viewport || { x: 0, y: 0, scale: 1 },
+    });
+    setItemsState(resolvedState.items);
+    setConnectionsState(resolvedState.connections || []);
+    setChatMessagesState(resolvedState.chatMessages || []);
+    setActiveSkillState(resolvedState.activeSkill || null);
     setEditingTextCardId(null);
-    setTextCardPanelDrafts(resolvedState.normalizedSession?.textCardPanelDrafts || {});
-    setImageCardPanelDrafts(resolvedState.normalizedSession?.imageCardPanelDrafts || {});
-    setImageCardModelById(resolvedState.normalizedSession?.imageCardModelById || {});
-    setImageCardSizeById(resolvedState.normalizedSession?.imageCardSizeById || {});
-    setImageCardCountById(resolvedState.normalizedSession?.imageCardCountById || {});
-    setImageCardAspectRatioById(resolvedState.normalizedSession?.imageCardAspectRatioById || {});
+    setTextCardPanelDraftsState(resolvedState.normalizedSession?.textCardPanelDrafts || {});
+    setImageCardPanelDraftsState(resolvedState.normalizedSession?.imageCardPanelDrafts || {});
+    setImageCardModelByIdState(resolvedState.normalizedSession?.imageCardModelById || {});
+    setImageCardSizeByIdState(resolvedState.normalizedSession?.imageCardSizeById || {});
+    setImageCardCountByIdState(resolvedState.normalizedSession?.imageCardCountById || {});
+    setImageCardAspectRatioByIdState(resolvedState.normalizedSession?.imageCardAspectRatioById || {});
     if (resolvedState.shouldResetWelcome) {
       setHideWelcomeByCenterSkillPick(false);
     }
-    setViewport(resolvedState.viewport || { x: 0, y: 0, scale: 1 });
+    setViewportState(resolvedState.viewport || { x: 0, y: 0, scale: 1 });
     setImageCount(resolvedState.imageCount || 0);
     setShowProjectMenu(false);
     setShowHistoryPanel(false);
-  }, []);
+  }, [syncSessionLiveState]);
 
   const isHighFrequencyInteractionActive =
     isDragging || isCornerResizing || isPanning || isMarqueeSelecting;
@@ -7619,6 +7745,7 @@ export default function AIWorkspace() {
     renameSession: persistRenameSession,
     deleteSession,
     loadSession,
+    leaveEditor,
     enterEditor,
     scheduleCurrentSessionSave,
   } = useWorkspaceSessionController({
@@ -8735,8 +8862,7 @@ export default function AIWorkspace() {
             className="flex h-10 w-10 items-center justify-center rounded-full border border-white/10 bg-[rgba(18,20,24,0.94)] text-sm font-medium text-zinc-100 shadow-[0_12px_28px_rgba(0,0,0,0.28)] transition-colors hover:bg-[rgba(30,33,40,0.96)]"
             onClick={(e) => { 
               e.stopPropagation(); 
-              setViewMode('gallery');
-              window.history.pushState({}, '', '/');
+              leaveEditor();
             }}
             aria-label="返回画廊"
           >

@@ -347,6 +347,36 @@ test('page wires session-scoped canvas undo history through a dedicated snapshot
   assert.equal(pageSource.includes('const redoCanvasEdit = useCallback(() =>'), true);
 });
 
+test('page routes the top-left return action through leaveEditor so the current canvas is committed before leaving', () => {
+  const backButtonStart = pageSource.indexOf('aria-label="返回画廊"');
+  assert.notEqual(backButtonStart, -1);
+
+  const backButtonBlockStart = pageSource.lastIndexOf('<button', backButtonStart);
+  const backButtonBlockEnd = pageSource.indexOf('</button>', backButtonStart);
+
+  assert.notEqual(backButtonBlockStart, -1);
+  assert.notEqual(backButtonBlockEnd, -1);
+  assert.ok(backButtonBlockEnd > backButtonBlockStart);
+
+  const backButtonBlock = pageSource.slice(backButtonBlockStart, backButtonBlockEnd);
+
+  assert.equal(pageSource.includes('leaveEditor,'), true);
+  assert.equal(backButtonBlock.includes('leaveEditor();'), true);
+  assert.equal(backButtonBlock.includes("setViewMode('gallery');"), false);
+  assert.equal(backButtonBlock.includes("window.history.pushState({}, '', '/');"), false);
+});
+
+test('page snapshots and transition persistence read from a live session state ref instead of stale render closures', () => {
+  assert.equal(pageSource.includes('const sessionLiveStateRef = useRef<'), true);
+  assert.equal(pageSource.includes('const applySessionLiveStateUpdate = useCallback('), true);
+  assert.equal(pageSource.includes('const liveState = sessionLiveStateRef.current;'), true);
+  assert.equal(pageSource.includes('items: liveState.items'), true);
+  assert.equal(pageSource.includes('connections: liveState.connections'), true);
+  assert.equal(pageSource.includes('messages: liveState.chatMessages'), true);
+  assert.equal(pageSource.includes('viewport: liveState.viewport'), true);
+  assert.equal(pageSource.includes('sessionLiveStateRef.current = {'), true);
+});
+
 test('page keyboard handling supports canvas undo redo shortcuts while skipping editable targets', () => {
   assert.equal(pageSource.includes('const isEditableUndoRedoTarget = (target: EventTarget | null) => {'), true);
   assert.equal(pageSource.includes("if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') {"), true);
