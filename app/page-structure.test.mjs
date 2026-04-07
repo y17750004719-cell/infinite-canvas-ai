@@ -76,7 +76,13 @@ test('left rail generated image history panel uses a wider layout than the origi
 test('generated image history merges persisted sessions with live session history and archive backfill entries', () => {
   assert.equal(pageSource.includes('const currentSessionHistorySnapshot = React.useMemo('), true);
   assert.equal(pageSource.includes('buildCurrentSessionSnapshot(currentSession)'), true);
-  assert.equal(pageSource.includes('const [generatedImageHistoryBySession, setGeneratedImageHistoryBySession] = useState<Record<string, GeneratedImageHistoryEntry[]>>({});'), true);
+  assert.equal(
+    pageSource.includes(
+      'const [generatedImageHistoryBySession, setGeneratedImageHistoryBySessionState] = useState<Record<string, GeneratedImageHistoryEntry[]>>({});'
+    ),
+    true
+  );
+  assert.equal(pageSource.includes('const setGeneratedImageHistoryBySession = useCallback('), true);
   assert.equal(pageSource.includes('const [archiveGeneratedImageHistoryEntries, setArchiveGeneratedImageHistoryEntries] = useState<GeneratedImageHistoryEntry[]>([]);'), true);
   assert.equal(pageSource.includes('const sessionsWithGeneratedImageHistory = React.useMemo('), true);
   assert.equal(pageSource.includes("fetch('/api/generated-images/history'"), true);
