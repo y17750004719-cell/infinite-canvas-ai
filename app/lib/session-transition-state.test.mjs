@@ -107,6 +107,38 @@ test('mergeCurrentSessionSnapshotIntoSessions persists connection-only changes w
   assert.deepEqual(result.sessions[1], untouchedSession);
 });
 
+test('mergeCurrentSessionSnapshotIntoSessions returns the switched-away session snapshot with the latest connection-only edit for immediate persistence', () => {
+  assert.equal(typeof mergeCurrentSessionSnapshotIntoSessions, 'function');
+  if (typeof mergeCurrentSessionSnapshotIntoSessions !== 'function') {
+    return;
+  }
+
+  const currentSession = buildSession({
+    id: 'session-current',
+    items: [
+      { id: 'image-1', type: 'image' },
+      { id: 'text-1', type: 'text' },
+    ],
+    connections: [],
+    updatedAt: 10,
+  });
+
+  const result = mergeCurrentSessionSnapshotIntoSessions({
+    sessions: [currentSession, buildSession({ id: 'session-other' })],
+    currentSessionId: 'session-current',
+    buildCurrentSessionSnapshot: (session) => ({
+      ...session,
+      updatedAt: 20,
+      connections: [{ id: 'conn-latest', fromItemId: 'image-1', toItemId: 'text-1' }],
+    }),
+  });
+
+  assert.deepEqual(result.currentSessionSnapshot?.connections, [
+    { id: 'conn-latest', fromItemId: 'image-1', toItemId: 'text-1' },
+  ]);
+  assert.equal(result.currentSessionSnapshot?.updatedAt, 20);
+});
+
 test('mergeCurrentSessionSnapshotIntoSessions returns the original sessions when the active session is missing', () => {
   assert.equal(typeof mergeCurrentSessionSnapshotIntoSessions, 'function');
   if (typeof mergeCurrentSessionSnapshotIntoSessions !== 'function') {

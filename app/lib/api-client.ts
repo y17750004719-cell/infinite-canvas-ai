@@ -1,4 +1,10 @@
 import { createLogger } from "./logger";
+import {
+  buildGeminiNoImageErrorMessage,
+  classifyGeminiImagePayload,
+  extractGeminiImageOutputs,
+  summarizeGeminiImagePayload,
+} from "./gemini-image-response.mjs";
 
 const API_URL =
   process.env.COMFLY_API_URL ||
@@ -633,44 +639,6 @@ async function referenceToInlineData(
   };
 }
 
-function extractGeminiOfficialImageOutputs(payload: unknown): Array<{ url: string; revised_prompt?: string }> {
-  const outputs: Array<{ url: string; revised_prompt?: string }> = [];
-
-  const visit = (value: unknown, depth = 0) => {
-    if (depth > 8 || value == null) return;
-
-    if (Array.isArray(value)) {
-      value.forEach((entry) => visit(entry, depth + 1));
-      return;
-    }
-
-    if (typeof value !== "object") {
-      return;
-    }
-
-    const record = value as Record<string, unknown>;
-    const inlineData =
-      record.inlineData && typeof record.inlineData === "object"
-        ? (record.inlineData as Record<string, unknown>)
-        : null;
-
-    if (inlineData) {
-      const mimeType = typeof inlineData.mimeType === "string" ? inlineData.mimeType : "image/png";
-      const data = typeof inlineData.data === "string" ? inlineData.data : "";
-      if (mimeType.startsWith("image/") && data) {
-        outputs.push({
-          url: `data:${mimeType};base64,${data}`,
-        });
-      }
-    }
-
-    Object.values(record).forEach((entry) => visit(entry, depth + 1));
-  };
-
-  visit(payload);
-  return outputs;
-}
-
 async function generateGeminiOfficialImage(request: UnifiedImageRequest): Promise<GenerationResponse> {
   if (!API_KEY) {
     throw new ImageGenerationError("Please set COMFLY_API_KEY or GPT_BEST_API_KEY in .env.local");
@@ -766,7 +734,8 @@ async function generateGeminiOfficialImage(request: UnifiedImageRequest): Promis
     }
 
     const payload = await response.json();
-    const outputs = extractGeminiOfficialImageOutputs(payload);
+    const outputs = extractGeminiImageOutputs(payload);
+    const payloadSummary = summarizeGeminiImagePayload(payload);
 
     basicLog("[SUPPLIER][PARSE]", {
       endpoint: `/v1beta/models/${request.model}:generateContent`,
@@ -777,7 +746,28 @@ async function generateGeminiOfficialImage(request: UnifiedImageRequest): Promis
     });
 
     if (outputs.length === 0) {
-      throw new ImageGenerationError("Gemini official image request failed: no image data returned", 502);
+      const classification = classifyGeminiImagePayload(payloadSummary);
+      basicLog("[SUPPLIER][PARSE_EMPTY]", {
+        endpoint: `/v1beta/models/${request.model}:generateContent`,
+        executionMode: request.executionMode === "async" ? "async" : "sync",
+        imageSize,
+        aspectRatio,
+        classification,
+        candidateCount: payloadSummary.candidateCount,
+        finishReasons: payloadSummary.finishReasons,
+        promptBlockReason: payloadSummary.promptBlockReason,
+        promptSafetyRatings: payloadSummary.promptSafetyRatings,
+        candidateSafetyRatings: payloadSummary.candidateSafetyRatings,
+        partTypes: payloadSummary.partTypes,
+        hasInlineData: payloadSummary.hasInlineData,
+        hasText: payloadSummary.hasText,
+        textPreview: payloadSummary.textPreview,
+        responseId: payloadSummary.responseId,
+        modelVersion: payloadSummary.modelVersion,
+        usageMetadata: payloadSummary.usageMetadata,
+        rawPayloadPreview: payloadSummary.rawPayloadPreview,
+      });
+      throw new ImageGenerationError(buildGeminiNoImageErrorMessage(classification), 502);
     }
 
     return {

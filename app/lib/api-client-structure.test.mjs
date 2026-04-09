@@ -65,7 +65,7 @@ test('api-client keeps official Gemini image request formatting for 1K 2K and 4K
   assert.equal(apiClientSource.includes('resolveGeminiOfficialImageSize'), true);
   assert.equal(apiClientSource.includes('imageSize'), true);
   assert.equal(apiClientSource.includes('responseModalities'), true);
-  assert.equal(apiClientSource.includes('inlineData'), true);
+  assert.equal(apiClientSource.includes('extractGeminiImageOutputs'), true);
 });
 
 test('api-client exact-size routing stays scoped to explicit 1K 2K and 4K requests', () => {
@@ -193,6 +193,33 @@ test('api-client logs supplier transport diagnostics for Gemini image and chat f
   );
   assert.equal(
     apiClientSource.includes('...buildSupplierRequestDiagnostics({'),
+    true
+  );
+});
+
+test('api-client adds Gemini no-image payload summaries and explicit failure classification', () => {
+  assert.equal(
+    apiClientSource.includes('summarizeGeminiImagePayload'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('classifyGeminiImagePayload'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('buildGeminiNoImageErrorMessage'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('rawPayloadPreview'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('finishReasons'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('promptBlockReason'),
     true
   );
 });

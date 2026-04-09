@@ -3277,6 +3277,7 @@ export default function AIWorkspace() {
   const canvasHistoryBySessionRef = useRef<Record<string, SessionCanvasHistoryState>>({});
   const pendingCanvasHistorySnapshotRef = useRef<CanvasUndoSnapshot | null>(null);
   const latestChatInputRef = useRef('');
+  const isHydratingSessionRef = useRef(false);
   const imageToolbarNoticeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const canvasClipboardRef = useRef<{
     snapshot: CanvasClipboardSnapshot | null;
@@ -6023,6 +6024,10 @@ export default function AIWorkspace() {
   );
 
   useEffect(() => {
+    if (isHydratingSessionRef.current) {
+      return;
+    }
+
     const validIds = new Set(items.map((item) => item.id));
     setConnections((prev) =>
       prev.filter((connection) => validIds.has(connection.fromItemId) && validIds.has(connection.toItemId))
@@ -6041,7 +6046,13 @@ export default function AIWorkspace() {
     if (connectionSessionRef.current?.fromItemId && !validIds.has(connectionSessionRef.current.fromItemId)) {
       resetConnectionInteraction();
     }
-  }, [items, connectionPointerId, connections, resetConnectionInteraction]);
+  }, [items, connectionPointerId, connections, resetConnectionInteraction, setConnections]);
+
+  useEffect(() => {
+    if (isHydratingSessionRef.current) {
+      isHydratingSessionRef.current = false;
+    }
+  });
 
   useEffect(() => {
     return () => {
@@ -7680,6 +7691,7 @@ export default function AIWorkspace() {
   }, [inferTopicSkill]);
 
   const applyResolvedSessionState = useCallback((resolvedState: any) => {
+    isHydratingSessionRef.current = true;
     syncSessionLiveState({
       items: resolvedState.items,
       connections: resolvedState.connections || [],
@@ -7698,6 +7710,10 @@ export default function AIWorkspace() {
     setChatMessagesState(resolvedState.chatMessages || []);
     setActiveSkillState(resolvedState.activeSkill || null);
     setEditingTextCardId(null);
+    setSelectedConnectionIds([]);
+    setConnectionSnapTargetId(null);
+    setPendingConnectionMenu(null);
+    setFrozenPreviewConnection(null);
     setTextCardPanelDraftsState(resolvedState.normalizedSession?.textCardPanelDrafts || {});
     setImageCardPanelDraftsState(resolvedState.normalizedSession?.imageCardPanelDrafts || {});
     setImageCardModelByIdState(resolvedState.normalizedSession?.imageCardModelById || {});
@@ -7711,6 +7727,7 @@ export default function AIWorkspace() {
     setImageCount(resolvedState.imageCount || 0);
     setShowProjectMenu(false);
     setShowHistoryPanel(false);
+    connectionSessionRef.current = null;
   }, [syncSessionLiveState]);
 
   const isHighFrequencyInteractionActive =

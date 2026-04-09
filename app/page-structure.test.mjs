@@ -383,6 +383,27 @@ test('page snapshots and transition persistence read from a live session state r
   assert.equal(pageSource.includes('sessionLiveStateRef.current = {'), true);
 });
 
+test('page guards connection cleanup while a switched canvas session is hydrating', () => {
+  const applyResolvedStateStart = pageSource.indexOf('const applyResolvedSessionState = useCallback((resolvedState: any) => {');
+  const applyResolvedStateEnd = pageSource.indexOf('  }, [syncSessionLiveState]);', applyResolvedStateStart);
+
+  assert.notEqual(applyResolvedStateStart, -1);
+  assert.notEqual(applyResolvedStateEnd, -1);
+  assert.ok(applyResolvedStateEnd > applyResolvedStateStart);
+
+  const applyResolvedStateBlock = pageSource.slice(applyResolvedStateStart, applyResolvedStateEnd);
+
+  assert.equal(pageSource.includes('const isHydratingSessionRef = useRef(false);'), true);
+  assert.equal(applyResolvedStateBlock.includes('isHydratingSessionRef.current = true;'), true);
+  assert.equal(applyResolvedStateBlock.includes('setSelectedConnectionIds([]);'), true);
+  assert.equal(applyResolvedStateBlock.includes('setConnectionSnapTargetId(null);'), true);
+  assert.equal(applyResolvedStateBlock.includes('setPendingConnectionMenu(null);'), true);
+  assert.equal(applyResolvedStateBlock.includes('setFrozenPreviewConnection(null);'), true);
+  assert.equal(applyResolvedStateBlock.includes('connectionSessionRef.current = null;'), true);
+  assert.equal(pageSource.includes('if (isHydratingSessionRef.current) {'), true);
+  assert.equal(pageSource.includes('isHydratingSessionRef.current = false;'), true);
+});
+
 test('page keyboard handling supports canvas undo redo shortcuts while skipping editable targets', () => {
   assert.equal(pageSource.includes('const isEditableUndoRedoTarget = (target: EventTarget | null) => {'), true);
   assert.equal(pageSource.includes("if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') {"), true);

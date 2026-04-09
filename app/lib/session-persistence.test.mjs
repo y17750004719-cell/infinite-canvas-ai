@@ -181,6 +181,41 @@ test('buildPersistedSession preserves manual text card mode on items', () => {
   assert.equal(result.items[0].text, '手动内容');
 });
 
+test('buildPersistedSession clones canvas state collections so later live edits cannot mutate the saved snapshot', () => {
+  const items = [
+    { id: 'image-1', type: 'image', x: 1, y: 2 },
+    { id: 'text-1', type: 'text', textVariant: 'card', text: 'draft' },
+  ];
+  const connections = [{ id: 'conn-1', fromItemId: 'image-1', toItemId: 'text-1' }];
+  const viewport = { x: 10, y: 20, scale: 2 };
+  const textCardPanelDrafts = { 'text-1': '保留这个提示词' };
+
+  const result = buildPersistedSession(
+    {
+      id: 'session-1',
+      name: 'Canvas',
+      createdAt: 1,
+      updatedAt: 1,
+      items: [],
+      messages: [],
+      viewport: { x: 0, y: 0, scale: 1 },
+    },
+    {
+      items,
+      connections,
+      viewport,
+      textCardPanelDrafts,
+    }
+  );
+
+  assert.notEqual(result.items, items);
+  assert.notEqual(result.items[0], items[0]);
+  assert.notEqual(result.connections, connections);
+  assert.notEqual(result.connections[0], connections[0]);
+  assert.notEqual(result.viewport, viewport);
+  assert.notEqual(result.textCardPanelDrafts, textCardPanelDrafts);
+});
+
 test('normalizeProjectSession keeps only connections whose endpoints still exist', () => {
   const result = normalizeProjectSession({
     id: 'session-1',
