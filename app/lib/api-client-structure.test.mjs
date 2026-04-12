@@ -7,56 +7,70 @@ import { fileURLToPath } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const apiClientSource = fs.readFileSync(path.join(__dirname, 'api-client.ts'), 'utf8');
 
+test('api-client resolves supplier endpoints from the runtime provider config instead of module-scoped env constants', () => {
+  assert.equal(
+    apiClientSource.includes('import { readProviderConfig, resolveProviderRequestTargets } from "./provider-config.mjs";'),
+    true
+  );
+  assert.equal(apiClientSource.includes('const API_URL ='), false);
+  assert.equal(apiClientSource.includes('const API_KEY ='), false);
+  assert.equal(apiClientSource.includes('const providerConfig = await readProviderConfig();'), true);
+  assert.equal(apiClientSource.includes('const providerTargets = resolveProviderRequestTargets(providerConfig.config.baseUrl);'), true);
+});
+
 test('api-client keeps the Gemini official image helper available as a non-default path', () => {
   assert.equal(
-    apiClientSource.includes('const endpoint = `${getGeminiOfficialApiBaseUrl()}/v1beta/models/${model}:generateContent`;'),
+    apiClientSource.includes('const endpoint = `${getGeminiOfficialApiBaseUrl(providerTargets)}/v1beta/models/${resolvedRequestModel}:generateContent`;'),
     true
   );
   assert.equal(
-    apiClientSource.includes('endpoint: `/v1beta/models/${request.model}:generateContent`'),
+    apiClientSource.includes('endpoint: `/v1beta/models/${resolvedRequestModel}:generateContent`'),
     true
   );
   assert.equal(
-    apiClientSource.includes('model: request.model'),
+    apiClientSource.includes('normalizedModel: model'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('resolvedRequestModel'),
     true
   );
 });
 
-test('api-client prioritizes the exact-size image helper before supplier edits or generations', () => {
+test('api-client keeps Gemini native image routing behind the official helper path and supports gemini-3.1 flash image as a live request model', () => {
   assert.equal(
     apiClientSource.includes('export function shouldUseExactImageSizeApi(model?: string, size?: string): boolean {'),
     true
   );
   assert.equal(
-    apiClientSource.includes('if (shouldUseExactImageSizeApi(request.model, request.size)) {'),
+    apiClientSource.includes('if (shouldUseExactImageSizeApi(normalizedModel, request.size)) {'),
     true
   );
   assert.equal(
     apiClientSource.includes('return generateGeminiOfficialImage({'),
     true
   );
+  const supportedGeminiSection = apiClientSource.match(/const SUPPORTED_GEMINI_OFFICIAL_IMAGE_MODELS = new Set\(\[(.*?)\]\);/s)?.[1] || '';
+  assert.equal(supportedGeminiSection.includes('"gemini-2.5-flash-image"'), true);
+  assert.equal(supportedGeminiSection.includes('"gemini-3-pro-image-preview"'), true);
+  assert.equal(supportedGeminiSection.includes('"gemini-3.1-flash-image-preview"'), true);
   assert.equal(
-    apiClientSource.includes('if (shouldUseImageEditsApi(request.model, images.length)) {'),
+    apiClientSource.includes('if (isGeminiOfficialImageModel(normalizedModel)) {'),
     true
   );
   assert.equal(
     apiClientSource.includes('return editImage({'),
-    true
+    false
   );
 });
 
-test('api-client recognizes gemini-3.1 flash image as an exact-size capable Gemini image model', () => {
+test('api-client keeps gemini-3.1 flash image preview as an official Gemini image request model', () => {
   assert.equal(apiClientSource.includes('SUPPORTED_GEMINI_OFFICIAL_IMAGE_MODELS'), true);
-  assert.equal(
-    apiClientSource.includes('"gemini-3.1-flash-image-preview"'),
-    true
-  );
+  const supportedGeminiSection = apiClientSource.match(/const SUPPORTED_GEMINI_OFFICIAL_IMAGE_MODELS = new Set\(\[(.*?)\]\);/s)?.[1] || '';
+  assert.equal(supportedGeminiSection.includes('"gemini-2.5-flash-image"'), true);
+  assert.equal(supportedGeminiSection.includes('"gemini-3.1-flash-image-preview"'), true);
   assert.equal(
     apiClientSource.includes('return normalizedModel.length > 0 && SUPPORTED_GEMINI_OFFICIAL_IMAGE_MODELS.has(normalizedModel);'),
-    true
-  );
-  assert.equal(
-    apiClientSource.includes('SUPPORTED_GEMINI_OFFICIAL_IMAGE_MODELS.has(normalizedModel)'),
     true
   );
 });
@@ -87,67 +101,236 @@ test('api-client exact-size routing stays scoped to explicit 1K 2K and 4K reques
   );
 });
 
-test('api-client uses a dedicated configurable timeout for async unified image submit while keeping sync submit at 120 seconds', () => {
+test('api-client uses a fixed 120 second timeout for Gemini official image submit requests', () => {
   assert.equal(
     apiClientSource.includes('const asyncImageSubmitTimeoutMs = parsePositiveInt(process.env.COMFLY_ASYNC_IMAGE_SUBMIT_TIMEOUT_MS, 600000);'),
     true
   );
   assert.equal(
-    apiClientSource.includes('const submitTimeoutMs = executionMode === "async" ? asyncImageSubmitTimeoutMs : 120000;'),
+    apiClientSource.includes('const timeoutMs = 120000;'),
     true
   );
   assert.equal(
-    apiClientSource.includes('const timeoutId = setTimeout(() => controller.abort(), submitTimeoutMs);'),
-    true
-  );
-});
-
-test('api-client treats nano-banana-2 as a supplier aspect-ratio image model without routing it through the Gemini official helper', () => {
-  assert.equal(apiClientSource.includes('const SUPPLIER_ASPECT_RATIO_IMAGE_MODELS = new Set(['), true);
-  assert.equal(apiClientSource.includes('"nano-banana-2"'), true);
-  assert.equal(apiClientSource.includes('function usesSupplierAspectRatioImageModel(model?: string): boolean {'), true);
-  assert.equal(apiClientSource.includes('const usesAspectRatioParam = usesSupplierAspectRatioImageModel(request.model);'), true);
-  assert.equal(apiClientSource.includes('if (usesAspectRatioParam) {'), true);
-});
-
-test('api-client sends supplier generations reference images in the image field and keeps edits reserved for explicit models', () => {
-  assert.equal(
-    apiClientSource.includes('const SUPPLIER_IMAGE_EDITS_MODELS = new Set(['),
-    true
-  );
-  assert.equal(
-    apiClientSource.includes('requestBody.image = request.reference_images;'),
-    true
-  );
-  assert.equal(
-    apiClientSource.includes('if (request.model === "nano-banana-2") {'),
-    true
-  );
-  assert.equal(
-    apiClientSource.includes('formData.append("image_size", request.size.trim());'),
+    apiClientSource.includes('const timeoutId = setTimeout(() => controller.abort(), timeoutMs);'),
     true
   );
 });
 
-test('api-client exposes nano-banana-2 in the available model catalog', () => {
+test('api-client decouples Gemini image supplier fetches from the outer request signal and retries retryable socket disconnects once', () => {
   assert.equal(
-    apiClientSource.includes('{ id: "nano-banana-2", name: "Nano Banana 2", provider: "Google" }'),
+    apiClientSource.includes('request.signal?.addEventListener("abort", onAbort);'),
+    false
+  );
+  assert.equal(
+    apiClientSource.includes('request.signal?.removeEventListener("abort", onAbort);'),
+    false
+  );
+  assert.equal(
+    apiClientSource.includes('const maxAttempts = 2;'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('function classifyGeminiImageTransportFailure(error: unknown): {'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('causeCode === "UND_ERR_SOCKET"'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('causeCode === "ECONNRESET"'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('causeMessage?.includes("other side closed")'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('causeMessage?.includes("client network socket disconnected before secure tls connection was established")'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('if (failureState.isRetryable && attempt < maxAttempts) {'),
     true
   );
 });
 
-test('api-client extracts nested supplier fail_reason for async image task failures', () => {
+test('api-client annotates Gemini image failures with failureClass retryability and retryAttempt metadata', () => {
   assert.equal(
-    apiClientSource.includes('typeof payload.data === "object"'),
+    apiClientSource.includes('failureClass?: "transport" | "timeout" | "upstream_http" | "payload" | "unknown";'),
     true
   );
   assert.equal(
-    apiClientSource.includes('fail_reason'),
+    apiClientSource.includes('retryAttempt?: number;'),
     true
   );
   assert.equal(
-    apiClientSource.includes('extractAsyncTaskFailureMessage('),
+    apiClientSource.includes('failureClass: failureState.failureClass'),
     true
+  );
+  assert.equal(
+    apiClientSource.includes('isRetryable: failureState.isRetryable'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('retryAttempt: attempt'),
+    true
+  );
+});
+
+test('api-client sends Gemini native reference images as inline_data parts and not as OpenAI-style image fields', () => {
+  assert.equal(apiClientSource.includes('inline_data'), true);
+  assert.equal(apiClientSource.includes('mime_type'), true);
+  assert.equal(apiClientSource.includes('contents:'), true);
+  assert.equal(apiClientSource.includes('requestBody.image = request.reference_images;'), false);
+});
+
+test('api-client maps square pixel sizes to Gemini imageSize tiers and sends them only for gemini-3-pro-image-preview', () => {
+  assert.equal(
+    apiClientSource.includes('function resolveGeminiOfficialImageSize(size?: string): "1K" | "2K" | "4K" {'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('if (longestEdge >= 4096) {'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('if (longestEdge >= 2048) {'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('function supportsGeminiImageSizeConfig(model?: string): boolean {'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('imageConfig.imageSize = imageSize;'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('if (supportsGeminiImageSizeConfig(model)) {'),
+    true
+  );
+});
+
+test('api-client also sends Gemini official imageSize config for gemini-2.5 flash image requests', () => {
+  assert.equal(
+    apiClientSource.includes('return supportsImageModelImageSizeConfig(normalizedModel);'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('from "./image-model-capabilities.mjs";'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('supportsImageModelImageSizeConfig'),
+    true
+  );
+});
+
+test('api-client resolves the 4k gemini request model variant before building the supplier endpoint', () => {
+  assert.equal(
+    apiClientSource.includes('const resolvedRequestModel = resolveImageRequestModel(model, request.size);'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('`/v1beta/models/${resolvedRequestModel}:generateContent`'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('resolvedRequestModel: resolvedRequestModel'),
+    true
+  );
+});
+
+test('api-client no longer keeps nano-banana compatibility mappings in the Gemini-only image path', () => {
+  assert.equal(
+    apiClientSource.includes('function normalizeImageRequestModel(model?: string): string {'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('return "gemini-2.5-flash-image";'),
+    false
+  );
+  assert.equal(
+    apiClientSource.includes('nano-banana-2'),
+    false
+  );
+  assert.equal(
+    apiClientSource.includes('const normalizedModel = normalizeImageRequestModel(model);'),
+    true
+  );
+});
+
+test('api-client no longer includes Fal queue response parsing for removed image models', () => {
+  assert.equal(
+    apiClientSource.includes('request_id'),
+    false
+  );
+  assert.equal(
+    apiClientSource.includes('status_url'),
+    false
+  );
+});
+
+test('api-client protocol logs expose Gemini request-mode diagnostics without Fal image modes', () => {
+  assert.equal(
+    apiClientSource.includes('mode: "gemini_official_image"'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('mode: "fal_nano_banana_generate"'),
+    false
+  );
+  assert.equal(
+    apiClientSource.includes('mode: "fal_nano_banana_edit"'),
+    false
+  );
+  assert.equal(
+    apiClientSource.includes('mode: "fal_nano_banana_result"'),
+    false
+  );
+  assert.equal(
+    apiClientSource.includes('requestedModel'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('normalizedModel'),
+    true
+  );
+});
+
+test('api-client exposes 4Z documented image request models in the available model catalog', () => {
+  assert.equal(
+    apiClientSource.includes('{ id: "gemini-2.5-flash-image", name: "Gemini 2.5 Flash Image", provider: "Google" }'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('{ id: "gemini-3.1-flash-image-preview", name: "Gemini 3.1 Flash Image", provider: "Google" }'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('Nano Banana'),
+    false
+  );
+  assert.equal(
+    apiClientSource.includes('{ id: "gemini-3-pro-image-preview", name: "Gemini 3 Pro (Image)", provider: "Google" }'),
+    true
+  );
+});
+
+test('api-client no longer relies on generic /images/tasks fail_reason parsing for image task failures', () => {
+  assert.equal(apiClientSource.includes('function extractAsyncTaskFailureMessage('), false);
+  assert.equal(apiClientSource.includes('fail_reason'), false);
+});
+
+test('api-client no longer converts local edit inputs into absolute URLs for removed Fal image models', () => {
+  assert.equal(
+    apiClientSource.includes('function toAbsoluteImageUrl('),
+    false
+  );
+  assert.equal(
+    apiClientSource.includes('requestOrigin'),
+    false
   );
 });
 
@@ -193,6 +376,44 @@ test('api-client logs supplier transport diagnostics for Gemini image and chat f
   );
   assert.equal(
     apiClientSource.includes('...buildSupplierRequestDiagnostics({'),
+    true
+  );
+});
+
+test('api-client routes Gemini text models through official generateContent and streamGenerateContent endpoints', () => {
+  assert.equal(
+    apiClientSource.includes('function isGeminiOfficialTextModel(model?: string): boolean {'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('? `${getGeminiOfficialApiBaseUrl(providerTargets)}/v1beta/models/${model}:generateContent`'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('? `${getGeminiOfficialApiBaseUrl(providerTargets)}/v1beta/models/${model}:streamGenerateContent?alt=sse`'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('convertChatMessagesToGeminiRequest'),
+    true
+  );
+});
+
+test('api-client converts Gemini chat messages and image parts into official contents/inline_data payloads', () => {
+  assert.equal(
+    apiClientSource.includes('systemInstruction'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('role: msg.role === "assistant" ? ("model" as const) : ("user" as const)'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('type: "image_url"'),
+    false
+  );
+  assert.equal(
+    apiClientSource.includes('inline_data'),
     true
   );
 });

@@ -5,37 +5,25 @@ import {
   extractGeminiImageOutputs,
   summarizeGeminiImagePayload,
 } from "./gemini-image-response.mjs";
-
-const API_URL =
-  process.env.COMFLY_API_URL ||
-  process.env.GPT_BEST_BASE_URL ||
-  "https://ai.comfly.chat/v1";
-const API_KEY =
-  process.env.COMFLY_API_KEY ||
-  process.env.GPT_BEST_API_KEY ||
-  "";
+import { getGeminiImageSizeEnum, getImageModelCapability, resolveImageRequestModel, supportsImageModelImageSizeConfig, supportsImageModelRequestedSize } from "./image-model-capabilities.mjs";
+import { readProviderConfig, resolveProviderRequestTargets } from "./provider-config.mjs";
 const LOG_LEVEL = (process.env.LOG_LEVEL || "basic").toLowerCase();
 const LOG_ENABLED = LOG_LEVEL !== "off";
 const LOG_DEBUG = LOG_LEVEL === "debug";
 const SUPPORTED_GEMINI_OFFICIAL_IMAGE_MODELS = new Set([
-  "gemini-3-pro-image-preview",
+  "gemini-2.5-flash-image",
   "gemini-3.1-flash-image-preview",
+  "gemini-3-pro-image-preview",
 ]);
 const EXACT_IMAGE_SIZE_REQUEST_SIZES = new Set([
   "1024x1024",
   "2048x2048",
   "4096x4096",
 ]);
-const SUPPLIER_REFERENCE_IMAGE_GENERATIONS_MODELS = new Set([
-  "gemini-3.1-flash-image-preview",
-]);
-const SUPPLIER_IMAGE_EDITS_MODELS = new Set([
-  "nano-banana-2",
-]);
-const SUPPLIER_ASPECT_RATIO_IMAGE_MODELS = new Set([
+const GEMINI_ASPECT_RATIO_IMAGE_MODELS = new Set([
+  "gemini-2.5-flash-image",
   "gemini-3.1-flash-image-preview",
   "gemini-3-pro-image-preview",
-  "nano-banana-2",
 ]);
 const apiClientLogger = createLogger("lib.api-client");
 
@@ -184,6 +172,22 @@ export interface GenerationResponse {
   }>;
 }
 
+interface AsyncImageTaskSubmitResponse {
+  task_id?: string;
+  id?: string;
+}
+
+interface AsyncImageTaskResultResponse {
+  status?: string;
+  data?: Array<{ url: string; revised_prompt?: string }> | { status?: string };
+  result?: {
+    status?: string;
+  };
+  output?: {
+    status?: string;
+  };
+}
+
 export interface UnifiedImageRequest {
   model: string;
   prompt: string;
@@ -198,47 +202,25 @@ export interface UnifiedImageRequest {
   signal?: AbortSignal;
 }
 
-interface AsyncImageTaskSubmitResponse {
-  task_id?: string;
-  id?: string;
-  status?: string;
-  message?: string;
-  error?: { message?: string } | string;
-  data?:
-    | Array<{ url: string; revised_prompt?: string }>
-    | { status?: string; data?: Array<{ url: string; revised_prompt?: string }> };
-  result?: {
-    status?: string;
-    data?: Array<{ url: string; revised_prompt?: string }>;
-  };
-  output?: {
-    status?: string;
-    data?: Array<{ url: string; revised_prompt?: string }>;
-  };
-}
-
-interface AsyncImageTaskResultResponse {
-  status?: string;
-  message?: string;
-  error?: { message?: string } | string;
-  last_error?: { message?: string } | string;
-  data?:
-    | Array<{ url: string; revised_prompt?: string }>
-    | { status?: string; data?: Array<{ url: string; revised_prompt?: string }> };
-  result?: {
-    status?: string;
-    data?: Array<{ url: string; revised_prompt?: string }>;
-  };
-  output?: {
-    status?: string;
-    data?: Array<{ url: string; revised_prompt?: string }>;
-  };
-}
-
 export class ImageGenerationError extends Error {
-  constructor(message: string, public statusCode?: number) {
+  failureClass?: "transport" | "timeout" | "upstream_http" | "payload" | "unknown";
+  isRetryable?: boolean;
+  retryAttempt?: number;
+
+  constructor(
+    message: string,
+    public statusCode?: number,
+    meta?: {
+      failureClass?: "transport" | "timeout" | "upstream_http" | "payload" | "unknown";
+      isRetryable?: boolean;
+      retryAttempt?: number;
+    }
+  ) {
     super(message);
     this.name = "ImageGenerationError";
+    this.failureClass = meta?.failureClass;
+    this.isRetryable = meta?.isRetryable;
+    this.retryAttempt = meta?.retryAttempt;
   }
 }
 
@@ -299,58 +281,67 @@ function normalizeAspectRatio(input?: string): string {
   return SUPPLIER_ALLOWED_ASPECT_RATIOS.has(raw) ? raw : "";
 }
 
-function getGeminiOfficialApiBaseUrl(): string {
-  const trimmed = API_URL.replace(/\/+$/, "");
-  if (trimmed.endsWith("/v1")) {
-    return trimmed.slice(0, -3);
-  }
-  return trimmed;
+function getGeminiOfficialApiBaseUrl(providerTargets: ReturnType<typeof resolveProviderRequestTargets>): string {
+  return providerTargets.geminiBaseUrl;
+}
+
+async function getProviderTransport() {
+  const providerConfig = await readProviderConfig();
+  const providerTargets = resolveProviderRequestTargets(providerConfig.config.baseUrl);
+  return {
+    providerConfig,
+    providerTargets,
+    apiKey: providerConfig.config.apiKey,
+  };
 }
 
 function normalizeImageModelKey(model?: string): string {
   return typeof model === "string" ? model.trim() : "";
 }
 
-function isGeminiOfficialImageModel(model?: string): boolean {
+function normalizeImageRequestModel(model?: string): string {
   const normalizedModel = normalizeImageModelKey(model);
+  return normalizedModel;
+}
+
+function isGeminiOfficialImageModel(model?: string): boolean {
+  const normalizedModel = normalizeImageRequestModel(model);
   return normalizedModel.length > 0 && SUPPORTED_GEMINI_OFFICIAL_IMAGE_MODELS.has(normalizedModel);
 }
 
 export function shouldUseExactImageSizeApi(model?: string, size?: string): boolean {
-  const normalizedModel = normalizeImageModelKey(model);
+  const normalizedModel = normalizeImageRequestModel(model);
   const normalizedSize = typeof size === "string" ? size.trim() : "";
+  const capability = getImageModelCapability(normalizedModel);
   return (
     normalizedModel.length > 0 &&
-    normalizedSize.length > 0 &&
+    capability.supportsAspectRatio &&
     SUPPORTED_GEMINI_OFFICIAL_IMAGE_MODELS.has(normalizedModel) &&
-    EXACT_IMAGE_SIZE_REQUEST_SIZES.has(normalizedSize)
+    normalizedSize.length > 0 &&
+    EXACT_IMAGE_SIZE_REQUEST_SIZES.has(normalizedSize) &&
+    supportsImageModelRequestedSize(normalizedModel, normalizedSize)
   );
 }
 
-function usesSupplierAspectRatioImageModel(model?: string): boolean {
-  const normalizedModel = normalizeImageModelKey(model);
-  return normalizedModel.length > 0 && SUPPLIER_ASPECT_RATIO_IMAGE_MODELS.has(normalizedModel);
+function usesGeminiAspectRatioImageModel(model?: string): boolean {
+  const normalizedModel = normalizeImageRequestModel(model);
+  return normalizedModel.length > 0 && GEMINI_ASPECT_RATIO_IMAGE_MODELS.has(normalizedModel);
+}
+
+function supportsGeminiImageSizeConfig(model?: string): boolean {
+  const normalizedModel = normalizeImageRequestModel(model);
+  return supportsImageModelImageSizeConfig(normalizedModel);
 }
 
 export function shouldUseImageEditsApi(model?: string, referenceImageCount = 0): boolean {
-  if (referenceImageCount <= 0) {
-    return false;
-  }
-
-  const normalizedModel = normalizeImageModelKey(model);
-  if (!normalizedModel) {
-    return false;
-  }
-
-  if (SUPPLIER_REFERENCE_IMAGE_GENERATIONS_MODELS.has(normalizedModel)) {
-    return false;
-  }
-
-  return SUPPLIER_IMAGE_EDITS_MODELS.has(normalizedModel);
+  return false;
 }
 
 function resolveGeminiOfficialImageSize(size?: string): "1K" | "2K" | "4K" {
   const raw = typeof size === "string" ? size.trim() : "";
+  if (raw === "1024x1024" || raw === "2048x2048" || raw === "4096x4096") {
+    return getGeminiImageSizeEnum(raw) as "1K" | "2K" | "4K";
+  }
   const match = raw.match(/^(\d+)x(\d+)$/i);
   if (!match) {
     return "1K";
@@ -367,6 +358,61 @@ function resolveGeminiOfficialImageSize(size?: string): "1K" | "2K" | "4K" {
     return "2K";
   }
   return "1K";
+}
+
+function resolveSupplierExecutionMode(
+  requestedMode: "sync" | "async" | undefined,
+  model?: string
+): "sync" | "async" {
+  if (requestedMode === "sync" || requestedMode === "async") {
+    return requestedMode;
+  }
+
+  return "sync";
+}
+
+function classifyGeminiImageTransportFailure(error: unknown): {
+  failureClass: "transport" | "timeout" | "upstream_http" | "payload" | "unknown";
+  isRetryable: boolean;
+} {
+  if (error instanceof ImageGenerationError) {
+    return {
+      failureClass: error.failureClass || (error.statusCode && error.statusCode >= 400 ? "upstream_http" : "unknown"),
+      isRetryable: Boolean(error.isRetryable),
+    };
+  }
+
+  if (error instanceof Error && error.name === "AbortError") {
+    return {
+      failureClass: "timeout",
+      isRetryable: false,
+    };
+  }
+
+  const cause = error instanceof Error ? (error.cause as { code?: unknown; message?: unknown } | undefined) : undefined;
+  const causeCode = typeof cause?.code === "string" ? cause.code : "";
+  const causeMessage = typeof cause?.message === "string" ? cause.message.toLowerCase() : "";
+  const errorMessage = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+
+  if (
+    errorMessage === "fetch failed" &&
+    (
+      causeCode === "UND_ERR_SOCKET" ||
+      causeCode === "ECONNRESET" ||
+      causeMessage?.includes("other side closed") ||
+      causeMessage?.includes("client network socket disconnected before secure tls connection was established")
+    )
+  ) {
+    return {
+      failureClass: "transport",
+      isRetryable: true,
+    };
+  }
+
+  return {
+    failureClass: "unknown",
+    isRetryable: false,
+  };
 }
 
 function sleep(ms: number): Promise<void> {
@@ -489,55 +535,6 @@ function toImageEntries(input: unknown, depth = 0): Array<{ url: string; revised
   return [];
 }
 
-function extractTaskData(payload: AsyncImageTaskResultResponse): Array<{ url: string; revised_prompt?: string }> {
-  return toImageEntries(payload);
-}
-
-function extractAsyncTaskFailureMessage(payload: AsyncImageTaskResultResponse): string | undefined {
-  const nestedDataRecord =
-    payload.data && !Array.isArray(payload.data) && typeof payload.data === "object"
-      ? (payload.data as Record<string, unknown>)
-      : null;
-  const nestedResultRecord =
-    payload.result && typeof payload.result === "object"
-      ? (payload.result as Record<string, unknown>)
-      : null;
-  const nestedOutputRecord =
-    payload.output && typeof payload.output === "object"
-      ? (payload.output as Record<string, unknown>)
-      : null;
-  const nestedDataFailReason =
-    typeof nestedDataRecord?.fail_reason === "string"
-      ? nestedDataRecord.fail_reason
-      : undefined;
-  const nestedResultFailReason =
-    typeof nestedResultRecord?.fail_reason === "string"
-      ? nestedResultRecord.fail_reason
-      : undefined;
-  const nestedOutputFailReason =
-    typeof nestedOutputRecord?.fail_reason === "string"
-      ? nestedOutputRecord.fail_reason
-      : undefined;
-
-  return (
-    (typeof payload.error === "object" && payload.error && "message" in payload.error
-      ? (payload.error as { message?: string }).message
-      : typeof payload.error === "string"
-        ? payload.error
-        : undefined) ||
-    (typeof payload.last_error === "object" && payload.last_error && "message" in payload.last_error
-      ? (payload.last_error as { message?: string }).message
-      : typeof payload.last_error === "string"
-        ? payload.last_error
-        : undefined) ||
-    nestedDataFailReason ||
-    nestedResultFailReason ||
-    nestedOutputFailReason ||
-    payload.message ||
-    undefined
-  );
-}
-
 function getArrayLength(value: unknown): number {
   return Array.isArray(value) ? value.length : 0;
 }
@@ -629,636 +626,84 @@ async function blobToBase64(blob: Blob): Promise<string> {
 async function referenceToInlineData(
   input: string,
   signal?: AbortSignal
-): Promise<{ inlineData: { mimeType: string; data: string } }> {
+): Promise<{ inline_data: { mime_type: string; data: string } }> {
   const { blob, mimeType } = await referenceToBlob(input, signal);
   return {
-    inlineData: {
-      mimeType,
+    inline_data: {
+      mime_type: mimeType,
       data: await blobToBase64(blob),
     },
   };
 }
 
 async function generateGeminiOfficialImage(request: UnifiedImageRequest): Promise<GenerationResponse> {
-  if (!API_KEY) {
-    throw new ImageGenerationError("Please set COMFLY_API_KEY or GPT_BEST_API_KEY in .env.local");
+  const { providerConfig, providerTargets, apiKey } = await getProviderTransport();
+  if (!apiKey) {
+    throw new ImageGenerationError("Please configure a supplier API Key in settings or environment");
   }
 
-  const model = typeof request.model === "string" ? request.model.trim() : "";
+  const model = normalizeImageRequestModel(request.model);
   if (!isGeminiOfficialImageModel(model)) {
     throw new ImageGenerationError(`Gemini official image request failed: model "${request.model}" is not supported`, 400);
   }
 
-  const endpoint = `${getGeminiOfficialApiBaseUrl()}/v1beta/models/${model}:generateContent`;
+  const resolvedRequestModel = resolveImageRequestModel(model, request.size);
+  const endpoint = `${getGeminiOfficialApiBaseUrl(providerTargets)}/v1beta/models/${resolvedRequestModel}:generateContent`;
   const aspectRatio = normalizeAspectRatio(request.aspect_ratio) || toAspectRatio(request.size);
   const imageSize = resolveGeminiOfficialImageSize(request.size);
   const prompt = typeof request.prompt === "string" ? request.prompt : "";
   const referenceImages = Array.isArray(request.images) ? request.images.filter(Boolean) : [];
-  const contentParts: Array<
-    | { inlineData: { mimeType: string; data: string } }
-    | { text: string }
-  > = await Promise.all(referenceImages.map((image) => referenceToInlineData(image, request.signal)));
-  contentParts.push({ text: prompt });
+  const referenceParts = await Promise.all(referenceImages.map((image) => referenceToInlineData(image, request.signal)));
+  const parts: Array<{ text: string } | { inline_data: { mime_type: string; data: string } }> = [
+    { text: prompt },
+    ...referenceParts,
+  ];
+  const imageConfig: Record<string, string> = {};
+  if (usesGeminiAspectRatioImageModel(model)) {
+    imageConfig.aspectRatio = aspectRatio;
+  }
+  if (supportsGeminiImageSizeConfig(model)) {
+    imageConfig.imageSize = imageSize;
+  }
 
   const requestBody = {
     contents: [
       {
         role: "user",
-        parts: contentParts,
+        parts,
       },
     ],
     generationConfig: {
-      responseModalities: ["IMAGE"],
-      imageConfig: {
-        aspectRatio,
-        imageSize,
-      },
+      responseModalities: ["TEXT", "IMAGE"],
+      imageConfig,
     },
   };
 
   basicLog("[SUPPLIER][PREP]", {
-    endpointBase: getGeminiOfficialApiBaseUrl(),
-    endpoint: `/v1beta/models/${model}:generateContent`,
-    model: request.model,
-    imageSize,
+    endpointBase: getGeminiOfficialApiBaseUrl(providerTargets),
+    endpoint: `/v1beta/models/${resolvedRequestModel}:generateContent`,
+    mode: "gemini_official_image",
+    requestedModel: request.model,
+    normalizedModel: model,
+    resolvedRequestModel: resolvedRequestModel,
+    imageSize: supportsGeminiImageSizeConfig(model) ? imageSize : null,
     aspectRatio,
     n: request.n || 1,
     referenceCount: referenceImages.length,
     executionMode: request.executionMode === "async" ? "async" : "sync",
-    apiKeyMasked: maskToken(API_KEY),
+    providerId: providerConfig.config.providerId,
+    apiKeyMasked: maskToken(apiKey),
   });
   debugLog("[SUPPLIER][PREP_PROMPT]", {
     promptPreview: prompt.slice(0, 200),
   });
 
-  const controller = new AbortController();
   const timeoutMs = 120000;
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-  const onAbort = () => controller.abort();
-  request.signal?.addEventListener("abort", onAbort);
-  const attempt = 1;
-  const maxAttempts = 1;
-  let requestStartedAt = Date.now();
+  const maxAttempts = 2;
 
-  try {
-    requestStartedAt = Date.now();
-    basicLog("[SUPPLIER][REQ]", {
-      method: "POST",
-      endpoint,
-      host: getEndpointHost(endpoint),
-      attempt,
-      maxAttempts,
-    });
-
-    const response = await fetch(endpoint, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${API_KEY}`,
-      },
-      body: JSON.stringify(requestBody),
-      signal: controller.signal,
-    });
-
-    basicLog("[SUPPLIER][RES]", {
-      method: "POST",
-      endpoint,
-      status: response.status,
-      statusText: response.statusText,
-      durationMs: Date.now() - requestStartedAt,
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new ImageGenerationError(`Gemini official image request failed: ${errorText || response.statusText}`, response.status);
-    }
-
-    const payload = await response.json();
-    const outputs = extractGeminiImageOutputs(payload);
-    const payloadSummary = summarizeGeminiImagePayload(payload);
-
-    basicLog("[SUPPLIER][PARSE]", {
-      endpoint: `/v1beta/models/${request.model}:generateContent`,
-      executionMode: request.executionMode === "async" ? "async" : "sync",
-      imageCount: outputs.length,
-      imageSize,
-      aspectRatio,
-    });
-
-    if (outputs.length === 0) {
-      const classification = classifyGeminiImagePayload(payloadSummary);
-      basicLog("[SUPPLIER][PARSE_EMPTY]", {
-        endpoint: `/v1beta/models/${request.model}:generateContent`,
-        executionMode: request.executionMode === "async" ? "async" : "sync",
-        imageSize,
-        aspectRatio,
-        classification,
-        candidateCount: payloadSummary.candidateCount,
-        finishReasons: payloadSummary.finishReasons,
-        promptBlockReason: payloadSummary.promptBlockReason,
-        promptSafetyRatings: payloadSummary.promptSafetyRatings,
-        candidateSafetyRatings: payloadSummary.candidateSafetyRatings,
-        partTypes: payloadSummary.partTypes,
-        hasInlineData: payloadSummary.hasInlineData,
-        hasText: payloadSummary.hasText,
-        textPreview: payloadSummary.textPreview,
-        responseId: payloadSummary.responseId,
-        modelVersion: payloadSummary.modelVersion,
-        usageMetadata: payloadSummary.usageMetadata,
-        rawPayloadPreview: payloadSummary.rawPayloadPreview,
-      });
-      throw new ImageGenerationError(buildGeminiNoImageErrorMessage(classification), 502);
-    }
-
-    return {
-      created: Math.floor(Date.now() / 1000),
-      data: outputs,
-    };
-  } catch (error) {
-    basicLog("[SUPPLIER][ERR]", {
-      endpoint: `/v1beta/models/${request.model}:generateContent`,
-      mode: "gemini_official_image",
-      model: request.model,
-      imageSize,
-      aspectRatio,
-      referenceCount: referenceImages.length,
-      ...buildSupplierRequestDiagnostics({
-        endpoint,
-        requestStartedAt,
-        timeoutMs,
-        attempt,
-        maxAttempts,
-      }),
-      ...getErrorDiagnostics(error),
-    });
-    debugError("[SUPPLIER][ERR]", {
-      endpoint: `/v1beta/models/${request.model}:generateContent`,
-      mode: "gemini_official_image",
-      model: request.model,
-      imageSize,
-      aspectRatio,
-      referenceCount: referenceImages.length,
-      ...buildSupplierRequestDiagnostics({
-        endpoint,
-        requestStartedAt,
-        timeoutMs,
-        attempt,
-        maxAttempts,
-      }),
-      ...getErrorDiagnostics(error),
-    });
-
-    if (error instanceof Error && error.name === "AbortError") {
-      if (request.signal?.aborted) {
-        throw new ImageGenerationError("Request cancelled by user", 499);
-      }
-      throw new ImageGenerationError("Gemini official image request timed out", 504);
-    }
-    if (error instanceof ImageGenerationError) {
-      throw error;
-    }
-    throw new ImageGenerationError(
-      error instanceof Error ? `Gemini official image request failed: ${error.message}` : "Gemini official image request failed",
-      502
-    );
-  } finally {
-    clearTimeout(timeoutId);
-    request.signal?.removeEventListener("abort", onAbort);
-  }
-}
-
-export async function editImage(request: EditRequest): Promise<GenerationResponse> {
-  if (!API_KEY) {
-    throw new ImageGenerationError("Please set COMFLY_API_KEY or GPT_BEST_API_KEY in .env.local");
-  }
-  if (!Array.isArray(request.images) || request.images.length === 0) {
-    throw new ImageGenerationError("At least one reference image is required for edits", 400);
-  }
-
-  const executionMode = request.executionMode === "async" ? "async" : "sync";
-  const endpoint = executionMode === "async"
-    ? `${API_URL}/images/edits?async=true`
-    : `${API_URL}/images/edits`;
-  const formData = new FormData();
-  formData.append("model", request.model);
-  formData.append("prompt", request.prompt);
-  formData.append("n", String(request.n || 1));
-  if (typeof request.aspect_ratio === "string" && request.aspect_ratio.trim()) {
-    formData.append("aspect_ratio", request.aspect_ratio.trim());
-  }
-  if (typeof request.size === "string" && request.size.trim()) {
-    if (request.model === "nano-banana-2") {
-      formData.append("image_size", request.size.trim());
-    } else {
-      formData.append("size", request.size.trim());
-    }
-  }
-
-  const imageEntries = await Promise.all(
-    request.images.map((img) => referenceToBlob(img, request.signal))
-  );
-  imageEntries.forEach((entry, index) => {
-    const ext = entry.mimeType.includes("jpeg")
-      ? "jpg"
-      : entry.mimeType.includes("webp")
-        ? "webp"
-        : entry.mimeType.includes("gif")
-          ? "gif"
-          : "png";
-    formData.append("image", entry.blob, `reference-${index + 1}.${ext}`);
-  });
-
-  if (request.mask) {
-    const maskEntry = await referenceToBlob(request.mask, request.signal);
-    const maskExt = maskEntry.mimeType.includes("jpeg")
-      ? "jpg"
-      : maskEntry.mimeType.includes("webp")
-        ? "webp"
-        : maskEntry.mimeType.includes("gif")
-          ? "gif"
-          : "png";
-    formData.append("mask", maskEntry.blob, `mask.${maskExt}`);
-  }
-
-  basicLog("[SUPPLIER][PREP]", {
-    endpointBase: API_URL,
-    endpoint: executionMode === "async" ? "/images/edits?async=true" : "/images/edits",
-    model: request.model,
-    n: request.n || 1,
-    formFieldImageCount: imageEntries.length,
-    hasMask: Boolean(request.mask),
-    sentAspectRatio: request.aspect_ratio || null,
-    sentSize: request.size || null,
-    executionMode,
-    submitTimeoutMs: executionMode === "async" ? asyncImageSubmitTimeoutMs : 120000,
-    apiKeyMasked: maskToken(API_KEY),
-  });
-  debugLog("[SUPPLIER][PREP_PROMPT]", {
-    promptPreview: request.prompt.slice(0, 200),
-  });
-
-  const controller = new AbortController();
-  const submitTimeoutMs = executionMode === "async" ? asyncImageSubmitTimeoutMs : 120000;
-  const timeoutId = setTimeout(() => controller.abort(), submitTimeoutMs);
-  const onAbort = () => controller.abort();
-  request.signal?.addEventListener("abort", onAbort);
-  let requestStartedAt = Date.now();
-
-  try {
-    requestStartedAt = Date.now();
-    basicLog("[SUPPLIER][REQ]", {
-      method: "POST",
-      endpoint,
-      host: getEndpointHost(endpoint),
-    });
-
-    const response = await fetch(endpoint, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${API_KEY}`,
-      },
-      body: formData,
-      signal: controller.signal,
-    });
-
-    basicLog("[SUPPLIER][RES]", {
-      method: "POST",
-      endpoint,
-      status: response.status,
-      statusText: response.statusText,
-      durationMs: Date.now() - requestStartedAt,
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      const errorLower = errorText.toLowerCase();
-      if (
-        errorLower.includes("model") &&
-        (errorLower.includes("not support") || errorLower.includes("unsupported") || errorLower.includes("invalid")) &&
-        errorLower.includes("edit")
-      ) {
-        throw new ImageGenerationError(`Edits failed: model "${request.model}" is not supported for /images/edits`, response.status);
-      }
-      throw new ImageGenerationError(`Edits failed: ${errorText || response.statusText}`, response.status);
-    }
-
-    if (executionMode === "sync") {
-      const payload = await response.json() as GenerationResponse;
-      const counts = summarizeImagePayloadCounts(payload);
-      basicLog("[SUPPLIER][PARSE]", {
-        endpoint: "/images/edits",
-        executionMode,
-        rawDataCount: counts.rawDataCount,
-        nestedDataCount: counts.nestedDataCount,
-        resultDataCount: counts.resultDataCount,
-        outputDataCount: counts.outputDataCount,
-        extractedCount: counts.extractedCount,
-      });
-      if (!payload.data || payload.data.length === 0) {
-        const extracted = toImageEntries(payload);
-        if (extracted.length === 0) {
-          throw new ImageGenerationError("Edits failed: no image data returned", 502);
-        }
-        return {
-          created: payload.created || Math.floor(Date.now() / 1000),
-          data: extracted,
-        };
-      }
-      return payload;
-    }
-
-    const submitResult = await response.json() as AsyncImageTaskSubmitResponse;
-    const submitData = extractTaskData(submitResult as AsyncImageTaskResultResponse);
-    const submitStatus = extractTaskStatus(submitResult as AsyncImageTaskResultResponse);
-
-    if (submitData.length > 0) {
-      basicLog("[SUPPLIER][TASK]", {
-        source: "submit",
-        endpoint: "/images/edits",
-        status: submitStatus || "DIRECT_DATA",
-        taskId: submitResult.task_id || submitResult.id || null,
-        dataCount: submitData.length,
-      });
-      return {
-        created: Math.floor(Date.now() / 1000),
-        data: submitData,
-      };
-    }
-
-    if (submitStatus && ["FAILURE", "FAILED", "ERROR", "CANCELLED", "CANCELED", "TIMEOUT", "TIMED_OUT"].includes(submitStatus)) {
-      const submitFailureMessage =
-        (typeof submitResult.error === "object" && submitResult.error && "message" in submitResult.error
-          ? (submitResult.error as { message?: string }).message
-          : typeof submitResult.error === "string"
-            ? submitResult.error
-            : undefined) ||
-        submitResult.message ||
-        "Edits failed on submit";
-      throw new ImageGenerationError(`Edits failed: ${submitFailureMessage}`, 502);
-    }
-
-    const taskId = extractTaskId(submitResult);
-    const result = await pollAsyncImageTask(taskId, request.signal);
-    return result;
-  } catch (error) {
-    basicLog("[SUPPLIER][ERR]", {
-      mode: "image_edit",
-      executionMode,
-      model: request.model,
-      n: request.n || 1,
-      formFieldImageCount: request.images.length,
-      hasMask: Boolean(request.mask),
-      ...buildSupplierRequestDiagnostics({
-        endpoint,
-        requestStartedAt,
-        timeoutMs: submitTimeoutMs,
-      }),
-      ...getErrorDiagnostics(error),
-    });
-    debugError("[SUPPLIER][ERR]", {
-      mode: "image_edit",
-      executionMode,
-      model: request.model,
-      n: request.n || 1,
-      formFieldImageCount: request.images.length,
-      hasMask: Boolean(request.mask),
-      ...buildSupplierRequestDiagnostics({
-        endpoint,
-        requestStartedAt,
-        timeoutMs: submitTimeoutMs,
-      }),
-      ...getErrorDiagnostics(error),
-    });
-
-    if (error instanceof Error && error.name === "AbortError") {
-      if (request.signal?.aborted) {
-        throw new ImageGenerationError("Request cancelled by user", 499);
-      }
-      throw new ImageGenerationError("Image edit request timed out", 504);
-    }
-    if (error instanceof ImageGenerationError) {
-      throw error;
-    }
-    throw new ImageGenerationError(error instanceof Error ? `Edits failed: ${error.message}` : "Edits failed", 502);
-  } finally {
-    clearTimeout(timeoutId);
-    request.signal?.removeEventListener("abort", onAbort);
-  }
-}
-
-export async function runImageTask(request: UnifiedImageRequest): Promise<GenerationResponse> {
-  const images = Array.isArray(request.images) ? request.images.filter(Boolean) : [];
-  if (shouldUseExactImageSizeApi(request.model, request.size)) {
-    return generateGeminiOfficialImage({
-      ...request,
-      images,
-    });
-  }
-
-  if (shouldUseImageEditsApi(request.model, images.length)) {
-    return editImage({
-      model: request.model,
-      prompt: request.prompt,
-      images,
-      mask: request.mask,
-      n: request.n,
-      size: request.size,
-      aspect_ratio: request.aspect_ratio,
-      executionMode: request.executionMode,
-      signal: request.signal,
-    });
-  }
-
-  return generateImage({
-    model: request.model,
-    prompt: request.prompt,
-    n: request.n,
-    reference_images: images.length > 0 ? images : undefined,
-    size: request.size,
-    aspect_ratio: request.aspect_ratio,
-    quality: request.quality,
-    response_format: request.response_format,
-    executionMode: request.executionMode,
-    signal: request.signal,
-  });
-}
-
-async function pollAsyncImageTask(taskId: string, signal?: AbortSignal): Promise<GenerationResponse> {
-  const pollTimeoutMs = parsePositiveInt(process.env.COMFLY_ASYNC_POLL_TIMEOUT_MS, 600000);
-  const pollIntervalMs = parsePositiveInt(process.env.COMFLY_ASYNC_POLL_INTERVAL_MS, 2000);
-  const startAt = Date.now();
-  let pollCount = 0;
-  let lastLoggedStatus = "";
-  const successStatuses = new Set(["SUCCESS", "SUCCEEDED", "COMPLETED", "DONE", "FINISHED"]);
-  const failureStatuses = new Set(["FAILURE", "FAILED", "ERROR", "CANCELLED", "CANCELED", "TIMEOUT", "TIMED_OUT"]);
-
-  while (Date.now() - startAt < pollTimeoutMs) {
-    if (signal?.aborted) {
-      throw new ImageGenerationError("Request cancelled by user", 499);
-    }
-
-    pollCount += 1;
-    const pollStartedAt = Date.now();
-    debugLog("[SUPPLIER][REQ]", {
-      method: "GET",
-      endpoint: `${API_URL}/images/tasks/${taskId}`,
-      taskId,
-      pollCount,
-    });
-
-    const response = await fetch(`${API_URL}/images/tasks/${taskId}`, {
-      method: "GET",
-      headers: {
-        Authorization: `Bearer ${API_KEY}`,
-      },
-      signal,
-    });
-
-    debugLog("[SUPPLIER][RES]", {
-      method: "GET",
-      endpoint: `${API_URL}/images/tasks/${taskId}`,
-      taskId,
-      pollCount,
-      status: response.status,
-      durationMs: Date.now() - pollStartedAt,
-    });
-
-    if (!response.ok) {
-      const errorText = await response.text();
-      debugError("Supplier async task poll error:", {
-        taskId,
-        status: response.status,
-        raw: errorText,
-      });
-      const error = parseErrorPayload(errorText);
-      throw new ImageGenerationError(
-        (error.error as { message?: string } | undefined)?.message ||
-          `Async task query failed with status ${response.status}: ${errorText}`,
-        response.status
-      );
-    }
-
-    const taskResult = await response.json() as AsyncImageTaskResultResponse;
-    const status = extractTaskStatus(taskResult);
-    const data = extractTaskData(taskResult);
-
-    if (!status && data.length > 0) {
-      basicLog("[SUPPLIER][TASK]", {
-        taskId,
-        pollCount,
-        status: "EMPTY_STATUS_WITH_DATA",
-        elapsedMs: Date.now() - startAt,
-      });
-      return {
-        created: Math.floor(Date.now() / 1000),
-        data,
-      };
-    }
-
-    if (status !== lastLoggedStatus) {
-      basicLog("[SUPPLIER][TASK]", {
-        taskId,
-        pollCount,
-        status,
-        elapsedMs: Date.now() - startAt,
-      });
-      lastLoggedStatus = status;
-    }
-
-    if (successStatuses.has(status)) {
-      if (data.length === 0) {
-        const rawSnippet = JSON.stringify(taskResult).slice(0, 1200);
-        debugError("Supplier async task success but empty data:", {
-          taskId,
-          status,
-          raw: rawSnippet,
-        });
-        throw new ImageGenerationError("Async task succeeded but no image data returned", 502);
-      }
-      return {
-        created: Math.floor(Date.now() / 1000),
-        data,
-      };
-    }
-
-    if (failureStatuses.has(status)) {
-      const failureMessage = extractAsyncTaskFailureMessage(taskResult) || "Async image generation failed";
-
-      debugError("Supplier async task failed:", {
-        taskId,
-        status,
-        message: failureMessage,
-        raw: JSON.stringify(taskResult).slice(0, 1000),
-      });
-
-      throw new ImageGenerationError(failureMessage, 502);
-    }
-
-    await sleepWithAbort(pollIntervalMs, signal);
-  }
-
-  throw new ImageGenerationError("Async image generation polling timed out", 504);
-}
-
-export async function generateImage(
-  request: GenerationRequest
-): Promise<GenerationResponse> {
-  if (!API_KEY) {
-    throw new ImageGenerationError(
-      "Please set COMFLY_API_KEY or GPT_BEST_API_KEY in .env.local"
-    );
-  }
-
-  const requestedSize = request.size || "2048x2048";
-  const requestedAspectRatio = normalizeAspectRatio(request.aspect_ratio);
-  const aspectRatio = requestedAspectRatio || toAspectRatio(requestedSize);
-  const usesAspectRatioParam = usesSupplierAspectRatioImageModel(request.model);
-
-  const requestBody: Record<string, unknown> = {
-    model: request.model,
-    prompt: request.prompt,
-    n: request.n || 1,
-    quality: request.quality || "standard",
-    response_format: request.response_format || "url",
-  };
-  if (usesAspectRatioParam) {
-    requestBody.aspect_ratio = aspectRatio;
-  } else {
-    requestBody.size = requestedSize;
-  }
-
-  // 供应商统一生图协议使用 image 字段承载参考图列表
-  if (request.reference_images && request.reference_images.length > 0) {
-    requestBody.image = request.reference_images;
-  }
-
-  const executionMode = request.executionMode === "async" ? "async" : "sync";
-  const endpoint = executionMode === "async"
-    ? `${API_URL}/images/generations?async=true`
-    : `${API_URL}/images/generations`;
-
-  basicLog("[SUPPLIER][PREP]", {
-    endpointBase: API_URL,
-    model: request.model,
-    size: requestedSize,
-    aspectRatio: usesAspectRatioParam ? aspectRatio : null,
-    n: requestBody.n,
-    executionMode: request.executionMode || "sync",
-    submitTimeoutMs: executionMode === "async" ? asyncImageSubmitTimeoutMs : 120000,
-    referenceCount: Array.isArray(request.reference_images) ? request.reference_images.length : 0,
-    apiKeyMasked: maskToken(API_KEY),
-  });
-  debugLog("[SUPPLIER][PREP_PROMPT]", {
-    promptPreview: request.prompt.slice(0, 200),
-  });
-
-  const maxAttempts = 3;
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     const controller = new AbortController();
-    const submitTimeoutMs = executionMode === "async" ? asyncImageSubmitTimeoutMs : 120000;
-    const timeoutId = setTimeout(() => controller.abort(), submitTimeoutMs);
-    const onAbort = () => controller.abort();
-    request.signal?.addEventListener("abort", onAbort);
+    const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
     let requestStartedAt = Date.now();
 
     try {
@@ -1267,6 +712,7 @@ export async function generateImage(
         method: "POST",
         endpoint,
         host: getEndpointHost(endpoint),
+        mode: "gemini_official_image",
         attempt,
         maxAttempts,
       });
@@ -1275,7 +721,7 @@ export async function generateImage(
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${API_KEY}`,
+          Authorization: `Bearer ${apiKey}`,
         },
         body: JSON.stringify(requestBody),
         signal: controller.signal,
@@ -1284,166 +730,199 @@ export async function generateImage(
       basicLog("[SUPPLIER][RES]", {
         method: "POST",
         endpoint,
-        attempt,
+        mode: "gemini_official_image",
         status: response.status,
         statusText: response.statusText,
         durationMs: Date.now() - requestStartedAt,
       });
 
-      clearTimeout(timeoutId);
-      request.signal?.removeEventListener("abort", onAbort);
-
       if (!response.ok) {
         const errorText = await response.text();
-        debugError("Supplier generation error:", {
-          status: response.status,
-          model: request.model,
-          size: request.size,
-          promptPreview: request.prompt.slice(0, 120),
-          raw: errorText,
+        throw new ImageGenerationError(
+          `Gemini official image request failed: ${errorText || response.statusText}`,
+          response.status,
+          {
+            failureClass: "upstream_http",
+            isRetryable: false,
+            retryAttempt: attempt,
+          }
+        );
+      }
+
+      const payload = await response.json();
+      const outputs = extractGeminiImageOutputs(payload);
+      const payloadSummary = summarizeGeminiImagePayload(payload);
+
+      basicLog("[SUPPLIER][PARSE]", {
+        endpoint: `/v1beta/models/${resolvedRequestModel}:generateContent`,
+        mode: "gemini_official_image",
+        executionMode: request.executionMode === "async" ? "async" : "sync",
+        imageCount: outputs.length,
+        imageSize: supportsGeminiImageSizeConfig(model) ? imageSize : null,
+        aspectRatio,
+      });
+
+      if (outputs.length === 0) {
+        const classification = classifyGeminiImagePayload(payloadSummary);
+        basicLog("[SUPPLIER][PARSE_EMPTY]", {
+          endpoint: `/v1beta/models/${resolvedRequestModel}:generateContent`,
+          executionMode: request.executionMode === "async" ? "async" : "sync",
+          imageSize: supportsGeminiImageSizeConfig(model) ? imageSize : null,
+          aspectRatio,
+          classification,
+          candidateCount: payloadSummary.candidateCount,
+          finishReasons: payloadSummary.finishReasons,
+          promptBlockReason: payloadSummary.promptBlockReason,
+          promptSafetyRatings: payloadSummary.promptSafetyRatings,
+          candidateSafetyRatings: payloadSummary.candidateSafetyRatings,
+          partTypes: payloadSummary.partTypes,
+          hasInlineData: payloadSummary.hasInlineData,
+          hasText: payloadSummary.hasText,
+          textPreview: payloadSummary.textPreview,
+          responseId: payloadSummary.responseId,
+          modelVersion: payloadSummary.modelVersion,
+          usageMetadata: payloadSummary.usageMetadata,
+          rawPayloadPreview: payloadSummary.rawPayloadPreview,
         });
-        const error = parseErrorPayload(errorText);
-        const errorMessage =
-          (error.error as { message?: string } | undefined)?.message ||
-          `API request failed with status ${response.status}: ${errorText}`;
-
-        if (response.status === 429 && attempt < maxAttempts) {
-          const delayMs = 1000 * Math.pow(2, attempt - 1);
-          debugWarn(`Rate limited, retrying in ${delayMs}ms (attempt ${attempt}/${maxAttempts})`);
-          await sleep(delayMs);
-          continue;
-        }
-
-        throw new ImageGenerationError(errorMessage, response.status);
-      }
-
-      if (executionMode === "sync") {
-        const syncResult = await response.json() as GenerationResponse;
-        const counts = summarizeImagePayloadCounts(syncResult);
-        basicLog("[SUPPLIER][PARSE]", {
-          endpoint: "/images/generations",
-          executionMode,
-          rawDataCount: counts.rawDataCount,
-          nestedDataCount: counts.nestedDataCount,
-          resultDataCount: counts.resultDataCount,
-          outputDataCount: counts.outputDataCount,
-          extractedCount: counts.extractedCount,
+        throw new ImageGenerationError(buildGeminiNoImageErrorMessage(classification), 502, {
+          failureClass: "payload",
+          isRetryable: false,
+          retryAttempt: attempt,
         });
-        debugLog("generateImage sync success:", JSON.stringify(syncResult, null, 2).substring(0, 300));
-        return syncResult;
       }
 
-      const submitResult = await response.json() as AsyncImageTaskSubmitResponse;
-      const submitData = extractTaskData(submitResult as AsyncImageTaskResultResponse);
-      const submitStatus = extractTaskStatus(submitResult as AsyncImageTaskResultResponse);
-
-      if (submitData.length > 0) {
-        basicLog("[SUPPLIER][TASK]", {
-          source: "submit",
-          status: submitStatus || "DIRECT_DATA",
-          taskId: submitResult.task_id || submitResult.id || null,
-          dataCount: submitData.length,
-        });
-        return {
-          created: Math.floor(Date.now() / 1000),
-          data: submitData,
-        };
-      }
-
-      if (submitStatus && ["FAILURE", "FAILED", "ERROR", "CANCELLED", "CANCELED", "TIMEOUT", "TIMED_OUT"].includes(submitStatus)) {
-        const submitFailureMessage =
-          (typeof submitResult.error === "object" && submitResult.error && "message" in submitResult.error
-            ? (submitResult.error as { message?: string }).message
-            : typeof submitResult.error === "string"
-              ? submitResult.error
-              : undefined) ||
-          submitResult.message ||
-          "Async image generation failed on submit";
-        throw new ImageGenerationError(submitFailureMessage, 502);
-      }
-
-      const taskId = extractTaskId(submitResult);
-      debugLog("generateImage async task_id:", taskId);
-
-      const result = await pollAsyncImageTask(taskId, request.signal);
-      debugLog("generateImage async success:", JSON.stringify(result, null, 2).substring(0, 300));
-      return result;
+      return {
+        created: Math.floor(Date.now() / 1000),
+        data: outputs,
+      };
     } catch (error) {
-      if (error instanceof Error && error.name === "AbortError") {
-        if (request.signal?.aborted) {
-          throw new ImageGenerationError("Request cancelled by user", 499);
-        }
-        throw new ImageGenerationError("Image generation submit timed out", 504);
-      }
-
-      if (error instanceof ImageGenerationError) {
-        throw error;
-      }
-
-      const isSocketClosed =
-        error instanceof TypeError &&
-        error.message === "fetch failed" &&
-        typeof (error as { cause?: { code?: string } }).cause?.code === "string" &&
-        (error as { cause?: { code?: string } }).cause?.code === "UND_ERR_SOCKET";
+      const failureState = classifyGeminiImageTransportFailure(error);
 
       basicLog("[SUPPLIER][ERR]", {
-        mode: "image_generate",
-        executionMode,
-        model: request.model,
-        size: request.size || null,
-        n: request.n || 1,
-        referenceCount: Array.isArray(request.reference_images) ? request.reference_images.length : 0,
-        willRetry: isSocketClosed && attempt < maxAttempts,
+        endpoint: `/v1beta/models/${resolvedRequestModel}:generateContent`,
+        mode: "gemini_official_image",
+        requestedModel: request.model,
+        normalizedModel: model,
+        resolvedRequestModel: resolvedRequestModel,
+        imageSize: supportsGeminiImageSizeConfig(model) ? imageSize : null,
+        aspectRatio,
+        referenceCount: referenceImages.length,
+        failureClass: failureState.failureClass,
+        isRetryable: failureState.isRetryable,
+        retryAttempt: attempt,
+        requestSize: request.size || null,
+        requestCount: request.n || 1,
         ...buildSupplierRequestDiagnostics({
           endpoint,
           requestStartedAt,
-          timeoutMs: submitTimeoutMs,
+          timeoutMs,
           attempt,
           maxAttempts,
         }),
         ...getErrorDiagnostics(error),
       });
       debugError("[SUPPLIER][ERR]", {
-        mode: "image_generate",
-        executionMode,
-        model: request.model,
-        size: request.size || null,
-        n: request.n || 1,
-        referenceCount: Array.isArray(request.reference_images) ? request.reference_images.length : 0,
-        willRetry: isSocketClosed && attempt < maxAttempts,
+        endpoint: `/v1beta/models/${resolvedRequestModel}:generateContent`,
+        mode: "gemini_official_image",
+        requestedModel: request.model,
+        normalizedModel: model,
+        resolvedRequestModel: resolvedRequestModel,
+        imageSize: supportsGeminiImageSizeConfig(model) ? imageSize : null,
+        aspectRatio,
+        referenceCount: referenceImages.length,
+        failureClass: failureState.failureClass,
+        isRetryable: failureState.isRetryable,
+        retryAttempt: attempt,
+        requestSize: request.size || null,
+        requestCount: request.n || 1,
         ...buildSupplierRequestDiagnostics({
           endpoint,
           requestStartedAt,
-          timeoutMs: submitTimeoutMs,
+          timeoutMs,
           attempt,
           maxAttempts,
         }),
         ...getErrorDiagnostics(error),
       });
 
-      if (isSocketClosed && attempt < maxAttempts) {
-        const delayMs = 1000 * Math.pow(2, attempt - 1);
-        debugWarn(`Socket closed, retrying in ${delayMs}ms (attempt ${attempt}/${maxAttempts})`);
-        await sleep(delayMs);
+      if (failureState.isRetryable && attempt < maxAttempts) {
+        debugWarn("Retrying retryable Gemini image transport failure", {
+          endpoint,
+          mode: "gemini_official_image",
+          retryAttempt: attempt,
+          nextRetryAttempt: attempt + 1,
+          requestSize: request.size || null,
+          requestCount: request.n || 1,
+          failureClass: failureState.failureClass,
+        });
+        clearTimeout(timeoutId);
+        await sleep(350);
         continue;
       }
 
-      if (isSocketClosed) {
-        throw new ImageGenerationError("上游连接中断，请稍后重试", 503);
-      }
+      clearTimeout(timeoutId);
 
-      if (error instanceof Error) {
-        throw new ImageGenerationError(error.message, 502);
+      if (error instanceof Error && error.name === "AbortError") {
+        throw new ImageGenerationError("Gemini official image request timed out", 504, {
+          failureClass: "timeout",
+          isRetryable: false,
+          retryAttempt: attempt,
+        });
       }
-
-      throw new ImageGenerationError("Image generation failed", 502);
+      if (error instanceof ImageGenerationError) {
+        if (!error.failureClass) {
+          error.failureClass = failureState.failureClass;
+        }
+        if (typeof error.isRetryable !== "boolean") {
+          error.isRetryable = failureState.isRetryable;
+        }
+        if (typeof error.retryAttempt !== "number") {
+          error.retryAttempt = attempt;
+        }
+        throw error;
+      }
+      throw new ImageGenerationError(
+        error instanceof Error ? `Gemini official image request failed: ${error.message}` : "Gemini official image request failed",
+        502,
+        {
+          failureClass: failureState.failureClass,
+          isRetryable: failureState.isRetryable,
+          retryAttempt: attempt,
+        }
+      );
     } finally {
       clearTimeout(timeoutId);
-      request.signal?.removeEventListener("abort", onAbort);
     }
   }
 
-  throw new ImageGenerationError("Image generation failed after retries", 429);
+  throw new ImageGenerationError("Gemini official image request failed", 502, {
+    failureClass: "unknown",
+    isRetryable: false,
+    retryAttempt: maxAttempts,
+  });
+}
+
+export async function runImageTask(request: UnifiedImageRequest): Promise<GenerationResponse> {
+  const images = Array.isArray(request.images) ? request.images.filter(Boolean) : [];
+  const normalizedModel = normalizeImageRequestModel(request.model);
+
+  if (shouldUseExactImageSizeApi(normalizedModel, request.size)) {
+    return generateGeminiOfficialImage({
+      ...request,
+      model: normalizedModel,
+      images,
+    });
+  }
+
+  if (isGeminiOfficialImageModel(normalizedModel)) {
+    return generateGeminiOfficialImage({
+      ...request,
+      model: normalizedModel,
+      images,
+    });
+  }
+
+  throw new ImageGenerationError(`Image generation failed: model "${request.model}" is not supported`, 400);
 }
 
 export interface ChatRequest {
@@ -1486,12 +965,44 @@ type SupplierChatStreamPayload = {
   }>;
 };
 
+type GeminiContentPart = {
+  text?: string;
+  thought?: boolean;
+};
+
+type GeminiGenerateContentPayload = {
+  candidates?: Array<{
+    content?: {
+      parts?: GeminiContentPart[];
+    };
+  }>;
+};
+
 export type ChatStreamEvent =
   | { type: "start"; model?: string }
   | { type: "delta"; channel: "content" | "reasoning"; content: string }
   | { type: "done" };
 
 function extractStreamDeltaEvents(parsed: SupplierChatStreamPayload): ChatStreamEvent[] {
+  if ("candidates" in parsed) {
+    const geminiParsed = parsed as unknown as GeminiGenerateContentPayload;
+    const parts = Array.isArray(geminiParsed.candidates?.[0]?.content?.parts)
+      ? geminiParsed.candidates?.[0]?.content?.parts || []
+      : [];
+    const events: ChatStreamEvent[] = [];
+    for (const part of parts) {
+      if (!part || typeof part.text !== "string" || !part.text) {
+        continue;
+      }
+      if (part.thought) {
+        events.push({ type: "delta", channel: "reasoning", content: part.text });
+      } else {
+        events.push({ type: "delta", channel: "content", content: part.text });
+      }
+    }
+    return events;
+  }
+
   const content =
     parsed.choices?.[0]?.delta?.content ??
     parsed.choices?.[0]?.message?.content ??
@@ -1511,16 +1022,99 @@ function extractStreamDeltaEvents(parsed: SupplierChatStreamPayload): ChatStream
   return events;
 }
 
+function isGeminiOfficialTextModel(model?: string): boolean {
+  const normalizedModel = normalizeImageModelKey(model);
+  return normalizedModel.startsWith("gemini-");
+}
+
+async function convertChatMessagesToGeminiRequest(
+  messages: ChatRequest["messages"],
+  signal?: AbortSignal
+): Promise<{
+  systemInstruction?: { parts: Array<{ text: string }> };
+  contents: Array<{ role: "user" | "model"; parts: Array<{ text: string } | { inline_data: { mime_type: string; data: string } }> }>;
+}> {
+  const systemTexts = messages
+    .filter((msg) => msg.role === "system")
+    .flatMap((msg) => {
+      if (typeof msg.content === "string") {
+        return [msg.content];
+      }
+      return msg.content
+        .filter((part) => part.type === "text")
+        .map((part) => part.text);
+    })
+    .filter(Boolean);
+
+  const contents = await Promise.all(
+    messages
+      .filter((msg) => msg.role !== "system")
+      .map(async (msg) => {
+        const parts = typeof msg.content === "string"
+          ? [{ text: msg.content }]
+          : await Promise.all(
+              msg.content.map(async (part) => {
+                if (part.type === "text") {
+                  return { text: part.text };
+                }
+                return referenceToInlineData(part.image_url.url, signal);
+              })
+            );
+
+        return {
+          role: msg.role === "assistant" ? ("model" as const) : ("user" as const),
+          parts,
+        };
+      })
+  );
+
+  return {
+    systemInstruction: systemTexts.length > 0
+      ? {
+          parts: [{ text: systemTexts.join("\n\n") }],
+        }
+      : undefined,
+    contents,
+  };
+}
+
+function extractGeminiTextResponse(payload: GeminiGenerateContentPayload): { content: string; reasoning: string } {
+  const parts = Array.isArray(payload.candidates?.[0]?.content?.parts)
+    ? payload.candidates?.[0]?.content?.parts || []
+    : [];
+  let content = "";
+  let reasoning = "";
+
+  for (const part of parts) {
+    if (!part || typeof part.text !== "string" || !part.text) {
+      continue;
+    }
+
+    if (part.thought) {
+      reasoning += part.text;
+    } else {
+      content += part.text;
+    }
+  }
+
+  return { content, reasoning };
+}
+
 export async function chat(
   request: ChatRequest
 ): Promise<ChatResponse> {
-  if (!API_KEY) {
+  const { providerConfig, providerTargets, apiKey } = await getProviderTransport();
+  if (!apiKey) {
     throw new ImageGenerationError(
-      "Please set COMFLY_API_KEY or GPT_BEST_API_KEY in .env.local"
+      "Please configure a supplier API Key in settings or environment"
     );
   }
 
-  const endpoint = `${API_URL}/chat/completions`;
+  const model = normalizeImageModelKey(request.model);
+  const isGeminiModel = isGeminiOfficialTextModel(model);
+  const endpoint = isGeminiModel
+    ? `${getGeminiOfficialApiBaseUrl(providerTargets)}/v1beta/models/${model}:generateContent`
+    : `${providerTargets.openAiBaseUrl}/chat/completions`;
   const attempt = 1;
   const maxAttempts = 1;
   let requestStartedAt = Date.now();
@@ -1532,19 +1126,24 @@ export async function chat(
       endpoint,
       host: getEndpointHost(endpoint),
       mode: "chat",
-      model: request.model,
+      model,
       messageCount: request.messages.length,
+      providerId: providerConfig.config.providerId,
       attempt,
       maxAttempts,
     });
+
+    const requestBody = isGeminiModel
+      ? await convertChatMessagesToGeminiRequest(request.messages, request.signal)
+      : { model, messages: request.messages };
 
     const response = await fetch(endpoint, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${API_KEY}`,
+        Authorization: `Bearer ${apiKey}`,
       },
-      body: JSON.stringify({ model: request.model, messages: request.messages }),
+      body: JSON.stringify(requestBody),
       signal: request.signal,
     });
 
@@ -1564,11 +1163,26 @@ export async function chat(
       durationMs: Date.now() - requestStartedAt,
     });
 
-    return response.json();
+    const payload = await response.json();
+    if (!isGeminiModel) {
+      return payload;
+    }
+
+    const geminiResponse = extractGeminiTextResponse(payload as GeminiGenerateContentPayload);
+    return {
+      choices: [
+        {
+          message: {
+            content: geminiResponse.content,
+            reasoning_content: geminiResponse.reasoning || undefined,
+          },
+        },
+      ],
+    };
   } catch (error) {
     basicLog("[SUPPLIER][ERR]", {
       mode: "chat",
-      model: request.model,
+      model,
       messageCount: request.messages.length,
       ...buildSupplierRequestDiagnostics({
         endpoint,
@@ -1580,7 +1194,7 @@ export async function chat(
     });
     debugError("[SUPPLIER][ERR]", {
       mode: "chat",
-      model: request.model,
+      model,
       messageCount: request.messages.length,
       ...buildSupplierRequestDiagnostics({
         endpoint,
@@ -1597,13 +1211,18 @@ export async function chat(
 export async function* chatStream(
   request: ChatStreamRequest
 ): AsyncGenerator<ChatStreamEvent, void, unknown> {
-  if (!API_KEY) {
+  const { providerConfig, providerTargets, apiKey } = await getProviderTransport();
+  if (!apiKey) {
     throw new ImageGenerationError(
-      "Please set COMFLY_API_KEY or GPT_BEST_API_KEY in .env.local"
+      "Please configure a supplier API Key in settings or environment"
     );
   }
 
-  const endpoint = `${API_URL}/chat/completions`;
+  const model = normalizeImageModelKey(request.model);
+  const isGeminiModel = isGeminiOfficialTextModel(model);
+  const endpoint = isGeminiModel
+    ? `${getGeminiOfficialApiBaseUrl(providerTargets)}/v1beta/models/${model}:streamGenerateContent?alt=sse`
+    : `${providerTargets.openAiBaseUrl}/chat/completions`;
   const attempt = 1;
   const maxAttempts = 1;
   let requestStartedAt = Date.now();
@@ -1616,23 +1235,28 @@ export async function* chatStream(
       endpoint,
       host: getEndpointHost(endpoint),
       mode: "chat_stream",
-      model: request.model,
+      model,
       messageCount: request.messages.length,
+      providerId: providerConfig.config.providerId,
       attempt,
       maxAttempts,
     });
+
+    const requestBody = isGeminiModel
+      ? await convertChatMessagesToGeminiRequest(request.messages, request.signal)
+      : {
+          model,
+          messages: request.messages,
+          stream: true,
+        };
 
     response = await fetch(endpoint, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${API_KEY}`,
+        Authorization: `Bearer ${apiKey}`,
       },
-      body: JSON.stringify({
-        model: request.model,
-        messages: request.messages,
-        stream: true,
-      }),
+      body: JSON.stringify(requestBody),
       signal: request.signal,
     });
 
@@ -1640,7 +1264,7 @@ export async function* chatStream(
       const errorText = await response.text();
       debugError("Supplier chat stream error:", {
         status: response.status,
-        model: request.model,
+        model,
         raw: errorText,
       });
       const error = parseErrorPayload(errorText);
@@ -1665,7 +1289,7 @@ export async function* chatStream(
   } catch (error) {
     basicLog("[SUPPLIER][ERR]", {
       mode: "chat_stream",
-      model: request.model,
+      model,
       messageCount: request.messages.length,
       ...buildSupplierRequestDiagnostics({
         endpoint,
@@ -1677,7 +1301,7 @@ export async function* chatStream(
     });
     debugError("[SUPPLIER][ERR]", {
       mode: "chat_stream",
-      model: request.model,
+      model,
       messageCount: request.messages.length,
       ...buildSupplierRequestDiagnostics({
         endpoint,
@@ -1690,7 +1314,7 @@ export async function* chatStream(
     throw error;
   }
 
-  yield { type: "start", model: request.model };
+  yield { type: "start", model };
 
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
@@ -1753,8 +1377,8 @@ export async function* chatStream(
 export const AVAILABLE_MODELS = [
   { id: "gemini-2.0-flash-exp", name: "Gemini 2.0 Flash", provider: "Google" },
   { id: "gemini-3-pro-image-preview", name: "Gemini 3 Pro (Image)", provider: "Google" },
-  { id: "gemini-3.1-flash-image-preview", name: "Gemini 3.1 Flash (Image)", provider: "Google" },
-  { id: "nano-banana-2", name: "Nano Banana 2", provider: "Google" },
+  { id: "gemini-2.5-flash-image", name: "Gemini 2.5 Flash Image", provider: "Google" },
+  { id: "gemini-3.1-flash-image-preview", name: "Gemini 3.1 Flash Image", provider: "Google" },
   { id: "gemini-3.1-flash", name: "Gemini 3.1 Flash", provider: "Google" },
   { id: "gemini-3.5-flash", name: "Gemini 3.5 Flash", provider: "Google" },
   { id: "gemini-3.5-flash-preview-05-20", name: "Gemini 3.5 Flash (Preview)", provider: "Google" },

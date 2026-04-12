@@ -1,7 +1,7 @@
 import fs from "fs";
 import path from "path";
 import { runImageTask } from "./api-client";
-import { resolvePublicAssetDataUrl } from "./api-security.mjs";
+import { buildRuntimeAssetUrl, LOCAL_ASSET_ALLOWED_EXTENSIONS, resolveLocalAssetDataUrl } from "./local-assets.mjs";
 import { createLogger, serializeError } from "./logger";
 
 const LOG_LEVEL = (process.env.LOG_LEVEL || "basic").toLowerCase();
@@ -165,9 +165,10 @@ async function normalizeReferenceImages(inputs?: string[]): Promise<string[]> {
       continue;
     }
 
-    const dataUrl = resolvePublicAssetDataUrl(input, {
+    const dataUrl = resolveLocalAssetDataUrl(input, {
+      runtimeDir: path.join(process.cwd(), "runtime"),
       publicDir: path.join(process.cwd(), "public"),
-      allowedExtensions: [".png", ".jpg", ".jpeg", ".webp", ".gif"],
+      allowedExtensions: LOCAL_ASSET_ALLOWED_EXTENSIONS,
     });
     if (dataUrl) {
       normalized.push(dataUrl);
@@ -424,7 +425,7 @@ async function saveImageToLocal(imageUrl: string, key: string): Promise<{ filena
   const timestamp = Date.now();
   const random = Math.random().toString(36).substring(2, 8);
   const filename = `${key}-${timestamp}-${random}.png`;
-  const outputDir = path.join(process.cwd(), "public", "uploads", "generated");
+  const outputDir = path.join(process.cwd(), "runtime", "uploads", "generated");
   const filepath = path.join(outputDir, filename);
 
   if (!fs.existsSync(outputDir)) {
@@ -443,7 +444,7 @@ async function saveImageToLocal(imageUrl: string, key: string): Promise<{ filena
   const buffer = await response.arrayBuffer();
   fs.writeFileSync(filepath, Buffer.from(buffer));
 
-  return { filename, localUrl: `/uploads/generated/${filename}` };
+  return { filename, localUrl: buildRuntimeAssetUrl(`uploads/generated/${filename}`) };
 }
 
 function nowId(): string {

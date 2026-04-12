@@ -10,38 +10,55 @@ import {
   resolveBackgroundRemovalSource,
   resolveBackgroundRemovalEndpoints,
 } from './recraft-background-removal.mjs';
+import { updateProviderConfig } from './provider-config.mjs';
 
 const PNG_1X1 = Buffer.from(
   '89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4890000000a49444154789c6360000002000154a24f5d0000000049454e44ae426082',
   'hex'
 );
 
-test('resolveBackgroundRemovalSource resolves public relative paths into local files', () => {
+test('resolveBackgroundRemovalSource resolves runtime asset paths into local files', () => {
+  const runtimeDir = path.join(process.cwd(), 'runtime');
   const publicDir = path.join(process.cwd(), 'public');
 
   assert.deepEqual(
-    resolveBackgroundRemovalSource('/uploads/example.png', {
+    resolveBackgroundRemovalSource('/api/local-assets/uploads/example.png', {
+      runtimeDir,
       publicDir,
       requestOrigin: 'http://localhost:3000',
     }),
     {
       kind: 'local',
-      value: path.join(publicDir, 'uploads', 'example.png'),
+      value: path.join(runtimeDir, 'uploads', 'example.png'),
     }
   );
 });
 
-test('resolveBackgroundRemovalSource treats same-origin asset urls as local files and remote https urls as remote', () => {
+test('resolveBackgroundRemovalSource treats same-origin runtime and legacy asset urls as local files and remote https urls as remote', () => {
+  const runtimeDir = path.join(process.cwd(), 'runtime');
   const publicDir = path.join(process.cwd(), 'public');
 
   assert.deepEqual(
-    resolveBackgroundRemovalSource('http://localhost:3000/uploads/generated/sample.png?cache=1', {
+    resolveBackgroundRemovalSource('http://localhost:3000/api/local-assets/uploads/generated/sample.png?cache=1', {
+      runtimeDir,
       publicDir,
       requestOrigin: 'http://localhost:3000',
     }),
     {
       kind: 'local',
-      value: path.join(publicDir, 'uploads', 'generated', 'sample.png'),
+      value: path.join(runtimeDir, 'uploads', 'generated', 'sample.png'),
+    }
+  );
+
+  assert.deepEqual(
+    resolveBackgroundRemovalSource('http://localhost:3000/uploads/generated/legacy.png?cache=1', {
+      runtimeDir,
+      publicDir,
+      requestOrigin: 'http://localhost:3000',
+    }),
+    {
+      kind: 'local',
+      value: path.join(publicDir, 'uploads', 'generated', 'legacy.png'),
     }
   );
 
@@ -60,14 +77,16 @@ test('resolveBackgroundRemovalSource treats same-origin asset urls as local file
 test('createRecraftBackgroundRemovalRequest sends file uploads with fixed response_format=url', async () => {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), 'recraft-bg-remove-'));
   const publicDir = path.join(tempDir, 'public');
-  const uploadsDir = path.join(publicDir, 'uploads');
+  const runtimeDir = path.join(tempDir, 'runtime');
+  const uploadsDir = path.join(runtimeDir, 'uploads');
 
   try {
     await mkdir(uploadsDir, { recursive: true });
     await writeFile(path.join(uploadsDir, 'sample.png'), PNG_1X1);
 
     const request = await createRecraftBackgroundRemovalRequest({
-      imageUrl: '/uploads/sample.png',
+      imageUrl: '/api/local-assets/uploads/sample.png',
+      runtimeDir,
       publicDir,
       requestOrigin: 'http://localhost:3000',
       apiKey: 'test-key',
@@ -83,7 +102,7 @@ test('createRecraftBackgroundRemovalRequest sends file uploads with fixed respon
       sourceFileName: 'sample.png',
       sourceMimeType: 'image/png',
       sourceSizeBytes: PNG_1X1.length,
-      sourceRefPreview: '/uploads/sample.png',
+      sourceRefPreview: '/api/local-assets/uploads/sample.png',
       responseFormat: 'url',
     });
   } finally {
@@ -107,6 +126,7 @@ test('resolveBackgroundRemovalEndpoints keeps the documented runtime path and ex
 test('createRecraftBackgroundRemovalRequest marks remote uploads with source metadata', async () => {
   const request = await createRecraftBackgroundRemovalRequest({
     imageUrl: 'https://example.com/assets/remote-input.png?token=secret',
+    runtimeDir: path.join(process.cwd(), 'runtime'),
     publicDir: path.join(process.cwd(), 'public'),
     requestOrigin: 'http://localhost:3000',
     apiKey: 'test-key',
@@ -130,6 +150,38 @@ test('createRecraftBackgroundRemovalRequest marks remote uploads with source met
     sourceRefPreview: 'https://example.com/assets/remote-input.png',
     responseFormat: 'url',
   });
+});
+
+test('createRecraftBackgroundRemovalRequest falls back to the runtime provider config when explicit credentials are omitted', async () => {
+  const tempDir = await mkdtemp(path.join(os.tmpdir(), 'recraft-bg-provider-'));
+  const publicDir = path.join(tempDir, 'public');
+  const runtimeDir = path.join(tempDir, 'runtime');
+  const uploadsDir = path.join(runtimeDir, 'uploads');
+
+  try {
+    await mkdir(uploadsDir, { recursive: true });
+    await writeFile(path.join(uploadsDir, 'sample.png'), PNG_1X1);
+    await updateProviderConfig(
+      {
+        providerId: 'custom',
+        baseUrl: 'https://supplier.example.com/v1',
+        apiKey: 'runtime-secret',
+      },
+      { runtimeDir, env: {} }
+    );
+
+    const request = await createRecraftBackgroundRemovalRequest({
+      imageUrl: '/api/local-assets/uploads/sample.png',
+      runtimeDir,
+      publicDir,
+      requestOrigin: 'http://localhost:3000',
+    });
+
+    assert.equal(request.endpoint, 'https://supplier.example.com/recraft/v1/images/removeBackground');
+    assert.equal(request.headers.Authorization, 'Bearer runtime-secret');
+  } finally {
+    await rm(tempDir, { recursive: true, force: true });
+  }
 });
 
 test('extractRecraftBackgroundRemovalUrl reads the supplier image url and rejects missing results', () => {

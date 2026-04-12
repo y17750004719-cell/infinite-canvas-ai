@@ -46,7 +46,7 @@ test('left rail history uses a dedicated generated image history panel state', (
     pageSource.includes('const [showGeneratedImageHistoryPanel, setShowGeneratedImageHistoryPanel] = useState(false);'),
     true
   );
-  assert.equal(pageSource.includes("if (item.id === 'history') {"), true);
+  assert.equal(pageSource.includes("if (itemId === 'history') {"), true);
   assert.equal(pageSource.includes('setShowGeneratedImageHistoryPanel((prev) => !prev);'), true);
   assert.equal(pageSource.includes('{showGeneratedImageHistoryPanel && ('), true);
 });
@@ -71,6 +71,14 @@ test('left rail generated image history panel uses a wider layout than the origi
   assert.equal(pageSource.includes('w-[320px]'), false);
   assert.equal(pageSource.includes('w-[384px]'), true);
   assert.equal(pageSource.includes('className="min-w-0 flex-1"'), true);
+});
+
+test('image card quality controls use model-driven size options without rendering actual resolution helper text', () => {
+  assert.equal(pageSource.includes('const selectedImageCardSizeOptions = React.useMemo('), true);
+  assert.equal(pageSource.includes('getSupportedImageCardSizeOptions(selectedImageCardPanelModelId)'), true);
+  assert.equal(pageSource.includes('const selectedImageCardResolutionStatus = React.useMemo('), false);
+  assert.equal(pageSource.includes('实际尺寸'), false);
+  assert.equal(pageSource.includes('selectedImageCardResolutionStatus.warning'), false);
 });
 
 test('generated image history merges persisted sessions with live session history and archive backfill entries', () => {
@@ -302,12 +310,10 @@ test('image card generation validates actual output resolution before appending 
 
   const generateBlock = pageSource.slice(generateStart, generateEnd);
 
-  assert.equal(generateBlock.includes('isOutputResolutionSufficient({'), true);
-  assert.equal(generateBlock.includes('getResolutionFailureReason({'), true);
+  assert.equal(generateBlock.includes('getImageCardResolutionStatus({'), false);
+  assert.equal(generateBlock.includes('acceptedOutputs: outputMetas'), true);
   assert.equal(generateBlock.includes('appendImageCardOutput({'), true);
-  assert.ok(
-    generateBlock.indexOf('isOutputResolutionSufficient({') < generateBlock.indexOf('appendImageCardOutput({')
-  );
+  assert.equal(generateBlock.includes('warningCount: 0'), true);
 });
 
 test('image card generation uses the shared failure message helper for partial success states', () => {

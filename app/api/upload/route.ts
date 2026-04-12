@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server';
 import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { createStoredImageName, parseImageDataUrl } from '../../lib/api-security.mjs';
+import { buildRuntimeAssetUrl } from '../../lib/local-assets.mjs';
 import { createLogger, createRequestId, serializeError } from '../../lib/logger';
 
 const LOG_ALL_REQUESTS = process.env.LOG_ALL_REQUESTS !== '0';
@@ -34,7 +35,7 @@ export async function POST(request: NextRequest) {
       maxBytes: MAX_UPLOAD_BYTES,
     });
 
-    const uploadsDir = path.join(process.cwd(), 'public', 'uploads');
+    const uploadsDir = path.join(process.cwd(), 'runtime', 'uploads');
     await mkdir(uploadsDir, { recursive: true });
 
     const newFileName = createStoredImageName(parsedImage.extension);
@@ -42,7 +43,7 @@ export async function POST(request: NextRequest) {
 
     await writeFile(filePath, parsedImage.buffer);
 
-    const url = `/uploads/${newFileName}`;
+    const url = buildRuntimeAssetUrl(`uploads/${newFileName}`);
 
     if (LOG_ALL_REQUESTS) {
       await logger.info('request.success', 'Upload request stored image locally', {

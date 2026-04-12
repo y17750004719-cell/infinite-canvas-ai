@@ -13,11 +13,11 @@ test('image export route exists and validates the src query parameter', () => {
   assert.equal(routeSource.includes("return NextResponse.json({ error: 'Image source is required' }, { status: 400 });"), true);
 });
 
-test('image export route resolves local public assets with image-only validation', () => {
+test('image export route resolves local runtime and legacy assets with image-only validation', () => {
   const routeSource = fs.readFileSync(routePath, 'utf8');
 
-  assert.equal(routeSource.includes('resolvePublicAssetPath(sourceUrl,'), true);
-  assert.equal(routeSource.includes("allowedExtensions: ['.png', '.jpg', '.jpeg', '.webp', '.gif']"), true);
+  assert.equal(routeSource.includes('resolveLocalAssetPath(sourceUrl,'), true);
+  assert.equal(routeSource.includes('LOCAL_ASSET_ALLOWED_EXTENSIONS'), true);
   assert.equal(routeSource.includes("return NextResponse.json({ error: 'Unsupported image source' }, { status: 400 });"), true);
 });
 

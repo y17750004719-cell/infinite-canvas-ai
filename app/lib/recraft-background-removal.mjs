@@ -1,10 +1,10 @@
 import path from 'node:path';
 import { readFile } from 'node:fs/promises';
 
-import { resolvePublicAssetPath } from './api-security.mjs';
+import { LOCAL_ASSET_ALLOWED_EXTENSIONS, resolveLocalAssetPath } from './local-assets.mjs';
 import { createReferencePreview } from './background-removal-diagnostics.mjs';
+import { readProviderConfig, resolveProviderRequestTargets } from './provider-config.mjs';
 
-const ALLOWED_PUBLIC_IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.webp', '.gif'];
 const DEFAULT_BACKGROUND_REMOVAL_BASE_URL = 'https://gpt-best.cn';
 const MAX_SOURCE_BYTES = 20 * 1024 * 1024;
 const EXTENSION_TO_MIME_TYPE = new Map([
@@ -76,16 +76,17 @@ function inferMimeType(fileName, fallbackMimeType = 'image/png') {
   return EXTENSION_TO_MIME_TYPE.get(extension) || fallbackMimeType;
 }
 
-export function resolveBackgroundRemovalSource(imageUrl, { publicDir, requestOrigin } = {}) {
+export function resolveBackgroundRemovalSource(imageUrl, { runtimeDir, publicDir, requestOrigin } = {}) {
   const normalizedInput = typeof imageUrl === 'string' ? imageUrl.trim() : '';
   if (!normalizedInput) {
     throw new Error('Image URL is required');
   }
 
   if (normalizedInput.startsWith('/')) {
-    const localPath = resolvePublicAssetPath(normalizedInput, {
+    const localPath = resolveLocalAssetPath(normalizedInput, {
+      runtimeDir,
       publicDir,
-      allowedExtensions: ALLOWED_PUBLIC_IMAGE_EXTENSIONS,
+      allowedExtensions: LOCAL_ASSET_ALLOWED_EXTENSIONS,
     });
 
     if (!localPath) {
@@ -111,9 +112,10 @@ export function resolveBackgroundRemovalSource(imageUrl, { publicDir, requestOri
 
   const normalizedOrigin = normalizeOrigin(requestOrigin);
   if (normalizedOrigin && parsedUrl.origin === normalizedOrigin) {
-    const localPath = resolvePublicAssetPath(parsedUrl.pathname, {
+    const localPath = resolveLocalAssetPath(parsedUrl.pathname, {
+      runtimeDir,
       publicDir,
-      allowedExtensions: ALLOWED_PUBLIC_IMAGE_EXTENSIONS,
+      allowedExtensions: LOCAL_ASSET_ALLOWED_EXTENSIONS,
     });
 
     if (!localPath) {
@@ -213,6 +215,7 @@ function createSourceReferencePreview(source, imageUrl) {
 
 export async function createRecraftBackgroundRemovalRequest({
   imageUrl,
+  runtimeDir,
   publicDir,
   requestOrigin,
   apiKey,
@@ -222,6 +225,7 @@ export async function createRecraftBackgroundRemovalRequest({
   readFileImpl,
 } = {}) {
   const source = resolveBackgroundRemovalSource(imageUrl, {
+    runtimeDir,
     publicDir,
     requestOrigin,
   });
@@ -234,12 +238,25 @@ export async function createRecraftBackgroundRemovalRequest({
   const formData = new FormData();
   formData.append('file', uploadFile.blob, uploadFile.fileName);
   formData.append('response_format', 'url');
-  const endpoints = resolveBackgroundRemovalEndpoints(baseUrl);
+  const providerConfig =
+    typeof baseUrl === 'string' && baseUrl.trim() && typeof apiKey === 'string' && apiKey.trim()
+      ? null
+      : await readProviderConfig({ runtimeDir });
+  const resolvedBaseUrl =
+    (typeof baseUrl === 'string' && baseUrl.trim()) ||
+    providerConfig?.config.baseUrl ||
+    '';
+  const resolvedApiKey =
+    (typeof apiKey === 'string' && apiKey.trim()) ||
+    providerConfig?.config.apiKey ||
+    '';
+  const providerTargets = resolveProviderRequestTargets(resolvedBaseUrl);
+  const endpoints = resolveBackgroundRemovalEndpoints(providerTargets.recraftBaseUrl);
 
   return {
     endpoint: endpoints.runtimeEndpoint,
     headers: {
-      Authorization: `Bearer ${resolveBackgroundRemovalApiKey(apiKey)}`,
+      Authorization: `Bearer ${resolveBackgroundRemovalApiKey(resolvedApiKey)}`,
     },
     body: formData,
     sourceMeta: {

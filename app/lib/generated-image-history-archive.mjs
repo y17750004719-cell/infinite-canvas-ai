@@ -16,7 +16,7 @@ function buildArchiveEntryId(filename) {
 
 export async function listGeneratedImageArchiveEntries({
   directoryPath,
-  publicPathPrefix = '/uploads/generated',
+  publicPathPrefix = '/api/local-assets/uploads/generated',
 } = /** @type {{ directoryPath?: string, publicPathPrefix?: string }} */ ({})) {
   if (typeof directoryPath !== 'string' || directoryPath.length === 0) {
     return [];

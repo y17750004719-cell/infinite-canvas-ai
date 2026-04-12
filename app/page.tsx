@@ -8,7 +8,7 @@ import remarkGfm from 'remark-gfm';
 import { 
   MousePointer2, Type, Image as ImageIcon,
   Share2, History, Settings, Paperclip,
-  Send, Sparkles, X, ChevronDown, Trash2, Edit3, ArrowLeft, Plus, SlidersHorizontal, Copy, Check, Video, Pencil, Package2, Workflow, Clock3
+  Send, Sparkles, X, ChevronDown, Trash2, Edit3, ArrowLeft, Plus, SlidersHorizontal, Copy, Check, Video, Pencil, Package2, Workflow, Clock3, Eye, EyeOff
 } from 'lucide-react';
 import { GeneratedImageHistoryEntry, ProjectSession } from './lib/db';
 import { ASPECT_RATIOS } from './lib/aspect-ratios';
@@ -63,14 +63,13 @@ import {
   getImageCardItemSizeForFrameSize,
   getImageCardItemSizeForNaturalImage,
   getImageCardQualitySummary,
-  getResolutionFailureReason,
+  getSupportedImageCardSizeOptions,
   getSelectedImageToolbarSource,
   isEventInsideTextCardPanel,
   extractImageFilesFromClipboardItems,
   getReplacedImageAssetItem,
   isImageAssetItem,
   isImageCardItem,
-  isOutputResolutionSufficient,
   moveCanvasItemsToFront,
   materializeCanvasClipboardPaste,
   reorderIncomingImageConnections,
@@ -85,6 +84,7 @@ import {
   resolveCanvasImageTaskExecutionMode,
   resolveFloatingPopoverOffset,
   resolveImageCardModel,
+  resolveImageCardSize,
   resolveSessionPresentationState,
   settleCanvasImageGenerationRequests,
   shouldPreventScrollableRegionWheelDefault,
@@ -309,6 +309,17 @@ interface SessionLiveState {
 
 type Tool = 'select' | 'text' | 'image';
 type GenerationMode = 'auto' | 'image' | 'chat';
+type ProviderSettingsProviderId = 'comfly' | 'gpt-best' | 'custom';
+type ProviderSettingsSource = 'runtime' | 'env';
+
+interface ProviderSettingsResponse {
+  providerId: ProviderSettingsProviderId;
+  baseUrl: string;
+  hasApiKey: boolean;
+  maskedApiKey: string;
+  source: ProviderSettingsSource;
+  updatedAt?: string;
+}
 
 const tools = [
   { id: 'select', icon: MousePointer2, label: '选择' },
@@ -323,6 +334,15 @@ const quickActions = [
   { id: 'packaging', label: '包装设计' },
   { id: 'brand', label: '品牌识别系统' },
 ];
+
+const PROVIDER_SETTINGS_PRESET_OPTIONS = [
+  { id: 'comfly', label: 'Comfly', baseUrl: 'https://ai.comfly.chat/v1' },
+  { id: 'gpt-best', label: 'GPT-Best', baseUrl: 'https://gpt-best.cn' },
+  { id: 'custom', label: '自定义', baseUrl: 'https://api.openai.com/v1' },
+] as const;
+
+const getProviderSettingsProviderLabel = (providerId: ProviderSettingsProviderId) =>
+  PROVIDER_SETTINGS_PRESET_OPTIONS.find((option) => option.id === providerId)?.label || '自定义';
 
 type SkillSelectSource = 'center_quick_action' | 'bottom_skill_bar';
 
@@ -1584,6 +1604,7 @@ const CanvasViewport = memo(function CanvasViewport({
   selectedImageCardModel,
   imageCardModelOptions,
   selectedImageCardPanelSize,
+  selectedImageCardSizeOptions,
   selectedImageCardPanelCount,
   selectedImageCardPanelAspectRatio,
   isSelectedImageCardGenerating,
@@ -1699,6 +1720,7 @@ const CanvasViewport = memo(function CanvasViewport({
   selectedImageCardModel: { id: string; label: string };
   imageCardModelOptions: Array<{ id: string; label: string }>;
   selectedImageCardPanelSize: string;
+  selectedImageCardSizeOptions: Array<{ id: string; label: string }>;
   selectedImageCardPanelCount: number;
   selectedImageCardPanelAspectRatio: string;
   isSelectedImageCardGenerating: boolean;
@@ -2300,11 +2322,11 @@ const CanvasViewport = memo(function CanvasViewport({
                     <div className="mb-2.5 flex items-center justify-between">
                       <span className="text-[11px] font-medium tracking-[0.04em] text-zinc-500">清晰度</span>
                       <span className="text-[11px] font-medium text-zinc-400">
-                        {IMAGE_CARD_SIZE_OPTIONS.find((item) => item.id === selectedImageCardPanelSize)?.label || selectedImageCardPanelSize}
+                        {selectedImageCardSizeOptions.find((item) => item.id === selectedImageCardPanelSize)?.label || selectedImageCardPanelSize}
                       </span>
                     </div>
                     <div className="inline-flex w-full items-center rounded-[14px] border border-white/[0.06] bg-[rgba(255,255,255,0.03)] p-1">
-                      {IMAGE_CARD_SIZE_OPTIONS.map((option) => {
+                      {selectedImageCardSizeOptions.map((option) => {
                         const isSelected = option.id === selectedImageCardPanelSize;
                         return (
                           <button
@@ -3044,6 +3066,7 @@ const LEFT_RAIL_ITEMS = [
   { id: 'assets', label: '资产', icon: Package2 },
   { id: 'workflow', label: '工作流', icon: Workflow },
   { id: 'history', label: '历史', icon: Clock3 },
+  { id: 'settings', label: '设置', icon: Settings },
 ] as const;
 
 const IMAGE_NODE_TOOLBAR_ACTIONS = [
@@ -3234,6 +3257,19 @@ export default function AIWorkspace() {
   const [showProjectMenu, setShowProjectMenu] = useState(false);
   const [showHistoryPanel, setShowHistoryPanel] = useState(false);
   const [showGeneratedImageHistoryPanel, setShowGeneratedImageHistoryPanel] = useState(false);
+  const [showProviderSettingsModal, setShowProviderSettingsModal] = useState(false);
+  const [providerSettingsLoading, setProviderSettingsLoading] = useState(false);
+  const [providerSettingsSaving, setProviderSettingsSaving] = useState(false);
+  const [providerSettingsError, setProviderSettingsError] = useState<string | null>(null);
+  const [providerSettingsProviderId, setProviderSettingsProviderId] = useState<ProviderSettingsProviderId>('comfly');
+  const [providerSettingsCurrentProviderId, setProviderSettingsCurrentProviderId] = useState<ProviderSettingsProviderId>('comfly');
+  const [providerSettingsBaseUrl, setProviderSettingsBaseUrl] = useState<string>(PROVIDER_SETTINGS_PRESET_OPTIONS[0].baseUrl);
+  const [providerSettingsApiKey, setProviderSettingsApiKey] = useState('');
+  const [providerSettingsMaskedApiKey, setProviderSettingsMaskedApiKey] = useState('');
+  const [providerSettingsHasApiKey, setProviderSettingsHasApiKey] = useState(false);
+  const [providerSettingsSource, setProviderSettingsSource] = useState<ProviderSettingsSource>('env');
+  const [providerSettingsUrlManuallyEdited, setProviderSettingsUrlManuallyEdited] = useState(false);
+  const [isProviderSettingsApiKeyVisible, setIsProviderSettingsApiKeyVisible] = useState(false);
   const [generatedImageHistoryBySession, setGeneratedImageHistoryBySessionState] = useState<Record<string, GeneratedImageHistoryEntry[]>>({});
   const [archiveGeneratedImageHistoryEntries, setArchiveGeneratedImageHistoryEntries] = useState<GeneratedImageHistoryEntry[]>([]);
   const [showAddNodeMenu, setShowAddNodeMenu] = useState(false);
@@ -3511,8 +3547,15 @@ export default function AIWorkspace() {
   const selectedImageCardPanelModelId = selectedImageCardPanelItem
     ? resolveImageCardModel(imageCardModelById[selectedImageCardPanelItem.id], getDefaultImageCardModelOption().id)
     : getDefaultImageCardModelOption().id;
+  const selectedImageCardSizeOptions = React.useMemo(
+    () => getSupportedImageCardSizeOptions(selectedImageCardPanelModelId),
+    [selectedImageCardPanelModelId]
+  );
   const selectedImageCardPanelSize = selectedImageCardPanelItem
-    ? imageCardSizeById[selectedImageCardPanelItem.id] ?? IMAGE_CARD_SIZE_OPTIONS[0].id
+    ? resolveImageCardSize(
+        selectedImageCardPanelModelId,
+        imageCardSizeById[selectedImageCardPanelItem.id] ?? IMAGE_CARD_SIZE_OPTIONS[0].id
+      )
     : IMAGE_CARD_SIZE_OPTIONS[0].id;
   const selectedImageCardPanelCount = selectedImageCardPanelItem
     ? imageCardCountById[selectedImageCardPanelItem.id] ?? IMAGE_CARD_COUNT_OPTIONS[0].id
@@ -6132,17 +6175,24 @@ export default function AIWorkspace() {
         if (!response.ok) {
           const errorText = await response.text();
           let errorMessage = `API Error: ${response.status} ${response.statusText}`;
+          let failureClass: string | null = null;
           try {
-            const errorData = JSON.parse(errorText) as { error?: string };
+            const errorData = JSON.parse(errorText) as { error?: string; failureClass?: string };
             if (errorData.error) {
               errorMessage = errorData.error;
+            }
+            if (typeof errorData.failureClass === 'string' && errorData.failureClass) {
+              failureClass = errorData.failureClass;
             }
           } catch {
             if (errorText) {
               errorMessage = errorText;
             }
           }
-          throw new Error(errorMessage);
+          const requestError = new Error(errorMessage) as Error & { failureClass?: string; statusCode?: number };
+          requestError.failureClass = failureClass || undefined;
+          requestError.statusCode = response.status;
+          throw requestError;
         }
 
         const result = await response.json();
@@ -6318,39 +6368,11 @@ export default function AIWorkspace() {
         }
 
         const outputMetas = await Promise.all(outputUrls.map((localUrl) => loadCanvasGeneratedImageMeta(localUrl)));
-        const validOutputs = [];
-        let failedOutputCount = 0;
-        let failureReason: string | null = null;
-
-        for (const outputMeta of outputMetas) {
-          if (
-            isOutputResolutionSufficient({
-              requestedSize: size,
-              aspectRatio,
-              naturalWidth: outputMeta.naturalWidth,
-              naturalHeight: outputMeta.naturalHeight,
-            })
-          ) {
-            validOutputs.push(outputMeta);
-            continue;
-          }
-
-          failedOutputCount += 1;
-          if (!failureReason) {
-            failureReason =
-              getResolutionFailureReason({
-                requestedSize: size,
-                aspectRatio,
-                naturalWidth: outputMeta.naturalWidth,
-                naturalHeight: outputMeta.naturalHeight,
-              }) || '返回图未达到目标分辨率要求';
-          }
-        }
 
         return {
-          validOutputs,
-          failedOutputCount,
-          failureReason,
+          acceptedOutputs: outputMetas,
+          warningCount: 0,
+          warningMessage: null,
         };
       };
 
@@ -6415,20 +6437,20 @@ export default function AIWorkspace() {
           executionMode: taskExecutionMode,
           runTask: async (requestBody) => {
             try {
-              const { validOutputs, failedOutputCount, failureReason } = await requestImageGeneration(requestBody, controller.signal);
+              const { acceptedOutputs, warningCount, warningMessage } = await requestImageGeneration(requestBody, controller.signal);
 
               if (
                 currentSessionIdRef.current !== generationSessionId ||
                 !itemsRef.current.some((item) => item.id === itemId)
               ) {
-                return { completed: 0, failed: 0, failureReason: null };
+                return { completed: 0, failed: 0, failureReason: null, warningCount: 0, warningMessage: null };
               }
 
-              if (validOutputs.length > 0) {
+              if (acceptedOutputs.length > 0) {
                 const historyTimestamp = Date.now();
                 appendGeneratedImageHistoryForSession(
                   generationSessionId,
-                  validOutputs.map((outputMeta, index) =>
+                  acceptedOutputs.map((outputMeta, index) =>
                     createGeneratedImageHistoryEntry({
                       src: outputMeta.src,
                       naturalWidth: outputMeta.naturalWidth,
@@ -6442,7 +6464,7 @@ export default function AIWorkspace() {
                 );
               }
 
-              for (const outputMeta of validOutputs) {
+              for (const outputMeta of acceptedOutputs) {
                 setItems((prev) =>
                   prev.map((item) => {
                     if (item.id !== itemId) {
@@ -6479,16 +6501,18 @@ export default function AIWorkspace() {
                   ...prev,
                   [itemId]: {
                     ...entry,
-                    completed: Math.min(entry.total, entry.completed + validOutputs.length),
-                    failed: Math.min(entry.total, entry.failed + failedOutputCount),
+                    completed: Math.min(entry.total, entry.completed + acceptedOutputs.length),
+                    failed: entry.failed,
                   },
                 };
               });
 
               return {
-                completed: validOutputs.length,
-                failed: failedOutputCount,
-                failureReason,
+                completed: acceptedOutputs.length,
+                failed: 0,
+                failureReason: null,
+                warningCount,
+                warningMessage,
               };
             } catch (error) {
               if (
@@ -6525,6 +6549,13 @@ export default function AIWorkspace() {
 
         const failures = taskResults.filter((result) => result.status === 'rejected');
         const requestFailureCount = failures.length;
+        const transportFailureCount = failures.reduce((total, result) => {
+          const failureClass =
+            result.reason && typeof result.reason === 'object' && 'failureClass' in result.reason
+              ? (result.reason as { failureClass?: string }).failureClass
+              : null;
+          return total + (failureClass === 'transport' ? 1 : 0);
+        }, 0);
         const completedCount = taskResults.reduce((total, result) => {
           if (result.status !== 'fulfilled') return total;
           return total + (result.value?.completed ?? 0);
@@ -6565,12 +6596,14 @@ export default function AIWorkspace() {
           }
 
           const failureMessage =
-            buildCanvasImageGenerationFailureMessage({
-              requestedCount: asyncRequests.length,
-              completedCount,
-              validationFailureCount,
-              requestFailureCount,
-            }) || `请求 ${asyncRequests.length} 张，成功 ${completedCount} 张；请手动补生成剩余 ${failedCount} 张`;
+            transportFailureCount > 0 && transportFailureCount === requestFailureCount
+              ? `连接中断，请重试剩余 ${failedCount} 张`
+              : buildCanvasImageGenerationFailureMessage({
+                  requestedCount: asyncRequests.length,
+                  completedCount,
+                  validationFailureCount,
+                  requestFailureCount,
+                }) || `请求 ${asyncRequests.length} 张，成功 ${completedCount} 张；请手动补生成剩余 ${failedCount} 张`;
 
           setCanvasImageGenerationErrorById((prev) => ({
             ...prev,
@@ -8051,10 +8084,116 @@ export default function AIWorkspace() {
     if (Number.isFinite(autoHideMs) && autoHideMs && autoHideMs > 0) {
       imageToolbarNoticeTimeoutRef.current = setTimeout(() => {
         setImageToolbarNotice(null);
-        imageToolbarNoticeTimeoutRef.current = null;
+      imageToolbarNoticeTimeoutRef.current = null;
       }, autoHideMs);
     }
   }, []);
+
+  const applyProviderSettingsResponse = useCallback((data: ProviderSettingsResponse) => {
+    const nextProviderId = data.providerId || 'custom';
+    setProviderSettingsProviderId(nextProviderId);
+    setProviderSettingsCurrentProviderId(nextProviderId);
+    setProviderSettingsBaseUrl(data.baseUrl || '');
+    setProviderSettingsApiKey('');
+    setProviderSettingsHasApiKey(Boolean(data.hasApiKey));
+    setProviderSettingsMaskedApiKey(typeof data.maskedApiKey === 'string' ? data.maskedApiKey : '');
+    setProviderSettingsSource(data.source === 'runtime' ? 'runtime' : 'env');
+    setProviderSettingsUrlManuallyEdited(false);
+    setIsProviderSettingsApiKeyVisible(false);
+  }, []);
+
+  const loadProviderSettings = useCallback(async () => {
+    setProviderSettingsLoading(true);
+    setProviderSettingsError(null);
+
+    try {
+      const response = await fetch('/api/settings/provider', {
+        cache: 'no-store',
+      });
+      const data = (await response.json().catch(() => null)) as ProviderSettingsResponse | { error?: string } | null;
+      if (!response.ok || !data || typeof data !== 'object' || !('providerId' in data)) {
+        throw new Error(
+          data && typeof data === 'object' && 'error' in data && typeof data.error === 'string'
+            ? data.error
+            : '加载供应商配置失败'
+        );
+      }
+
+      applyProviderSettingsResponse(data);
+    } catch (error) {
+      setProviderSettingsError(error instanceof Error ? error.message : '加载供应商配置失败');
+    } finally {
+      setProviderSettingsLoading(false);
+    }
+  }, [applyProviderSettingsResponse]);
+
+  const openProviderSettingsModal = useCallback(() => {
+    setShowHistoryPanel(false);
+    setShowGeneratedImageHistoryPanel(false);
+    setShowProviderSettingsModal(true);
+    void loadProviderSettings();
+  }, [loadProviderSettings]);
+
+  const closeProviderSettingsModal = useCallback(() => {
+    setShowProviderSettingsModal(false);
+    setProviderSettingsApiKey('');
+    setProviderSettingsError(null);
+    setProviderSettingsLoading(false);
+    setProviderSettingsSaving(false);
+    setProviderSettingsUrlManuallyEdited(false);
+    setIsProviderSettingsApiKeyVisible(false);
+  }, []);
+
+  const handleProviderSettingsProviderChange = useCallback((nextProviderId: ProviderSettingsProviderId) => {
+    setProviderSettingsProviderId(nextProviderId);
+    setProviderSettingsError(null);
+
+    if (!providerSettingsUrlManuallyEdited) {
+      const matchedPreset = PROVIDER_SETTINGS_PRESET_OPTIONS.find((option) => option.id === nextProviderId);
+      setProviderSettingsBaseUrl(matchedPreset?.baseUrl || '');
+    }
+  }, [providerSettingsUrlManuallyEdited]);
+
+  const handleProviderSettingsSave = useCallback(async () => {
+    setProviderSettingsSaving(true);
+    setProviderSettingsError(null);
+
+    try {
+      const response = await fetch('/api/settings/provider', {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          providerId: providerSettingsProviderId,
+          baseUrl: providerSettingsBaseUrl,
+          apiKey: providerSettingsApiKey,
+        }),
+      });
+      const data = (await response.json().catch(() => null)) as ProviderSettingsResponse | { error?: string } | null;
+      if (!response.ok || !data || typeof data !== 'object' || !('providerId' in data)) {
+        throw new Error(
+          data && typeof data === 'object' && 'error' in data && typeof data.error === 'string'
+            ? data.error
+            : '保存供应商配置失败'
+        );
+      }
+
+      applyProviderSettingsResponse(data);
+      setShowProviderSettingsModal(false);
+      showImageToolbarNoticeWithTimeout('供应商配置已保存', 2200);
+    } catch (error) {
+      setProviderSettingsError(error instanceof Error ? error.message : '保存供应商配置失败');
+    } finally {
+      setProviderSettingsSaving(false);
+    }
+  }, [
+    applyProviderSettingsResponse,
+    providerSettingsApiKey,
+    providerSettingsBaseUrl,
+    providerSettingsProviderId,
+    showImageToolbarNoticeWithTimeout,
+  ]);
 
   const handleImageToolbarAction = useCallback(async (actionId: (typeof IMAGE_NODE_TOOLBAR_ACTIONS)[number]['id']) => {
     if (!selectedImageToolbarTarget?.src) return;
@@ -8141,7 +8280,10 @@ export default function AIWorkspace() {
       setShowGeneratedImageHistoryPanel((prev) => !prev);
       return;
     }
-  }, []);
+    if (itemId === 'settings') {
+      openProviderSettingsModal();
+    }
+  }, [openProviderSettingsModal]);
 
   const handlePendingConnectionMenuAction = useCallback(
     (optionId: (typeof CONNECTION_MENU_OPTIONS)[number]['id']) => {
@@ -8797,12 +8939,11 @@ export default function AIWorkspace() {
                     type="button"
                     onClick={(e) => {
                       e.stopPropagation();
-                      if (item.id === 'history') {
-                        handleLeftRailItemClick(item.id);
-                      }
+                      handleLeftRailItemClick(item.id);
                     }}
                     className={`flex w-full flex-col items-center gap-0.5 rounded-[18px] px-1 py-1.5 transition-colors hover:bg-white/[0.04] ${
-                      item.id === 'history' && showGeneratedImageHistoryPanel
+                      ((item.id === 'history' && showGeneratedImageHistoryPanel) ||
+                        (item.id === 'settings' && showProviderSettingsModal))
                         ? 'bg-white/[0.08] text-zinc-100'
                         : 'text-zinc-500 hover:text-zinc-300'
                     }`}
@@ -9049,6 +9190,7 @@ export default function AIWorkspace() {
         selectedImageCardModel={selectedImageCardModel}
         imageCardModelOptions={IMAGE_CARD_MODEL_OPTIONS}
         selectedImageCardPanelSize={selectedImageCardPanelSize}
+        selectedImageCardSizeOptions={selectedImageCardSizeOptions}
         selectedImageCardPanelCount={selectedImageCardPanelCount}
         selectedImageCardPanelAspectRatio={selectedImageCardPanelAspectRatio}
         isSelectedImageCardGenerating={isSelectedImageCardGenerating}
@@ -9078,10 +9220,19 @@ export default function AIWorkspace() {
         }}
         onSelectImageCardModel={(modelId) => {
           if (!selectedImageCardPanelItem) return;
+          const resolvedModelId = resolveImageCardModel(modelId, getDefaultImageCardModelOption().id);
+          const resolvedSizeId = resolveImageCardSize(
+            resolvedModelId,
+            imageCardSizeById[selectedImageCardPanelItem.id] ?? IMAGE_CARD_SIZE_OPTIONS[0].id
+          );
           recordCurrentCanvasUndoSnapshot();
           setImageCardModelById((prev) => ({
             ...prev,
-            [selectedImageCardPanelItem.id]: resolveImageCardModel(modelId, getDefaultImageCardModelOption().id),
+            [selectedImageCardPanelItem.id]: resolvedModelId,
+          }));
+          setImageCardSizeById((prev) => ({
+            ...prev,
+            [selectedImageCardPanelItem.id]: resolvedSizeId,
           }));
           setShowImageCardModelMenu(false);
         }}
@@ -9095,7 +9246,7 @@ export default function AIWorkspace() {
           recordCurrentCanvasUndoSnapshot();
           setImageCardSizeById((prev) => ({
             ...prev,
-            [selectedImageCardPanelItem.id]: sizeId,
+            [selectedImageCardPanelItem.id]: resolveImageCardSize(selectedImageCardPanelModelId, sizeId),
           }));
           setShowImageCardQualityMenu(false);
         }}
@@ -9197,6 +9348,166 @@ export default function AIWorkspace() {
           document.body
         )}
 
+      {typeof document !== 'undefined' &&
+        showProviderSettingsModal &&
+        createPortal(
+          <div className="fixed inset-0 z-[230] flex items-center justify-center p-4">
+            <button
+              type="button"
+              className="absolute inset-0 bg-black/70 backdrop-blur-sm"
+              aria-label="关闭供应商配置"
+              onClick={closeProviderSettingsModal}
+            />
+            <div
+              className="relative z-[1] w-full max-w-[540px] overflow-hidden rounded-[28px] border border-white/[0.08] bg-[rgba(12,14,18,0.96)] shadow-[0_36px_110px_rgba(0,0,0,0.52)] backdrop-blur-xl"
+              onClick={(e) => {
+                e.stopPropagation();
+              }}
+            >
+              <div className="flex items-start justify-between border-b border-white/[0.08] px-6 py-5">
+                <div>
+                  <div className="text-[18px] font-semibold tracking-[-0.03em] text-zinc-50">供应商配置</div>
+                  <div className="mt-1 text-[12px] leading-5 text-zinc-500">
+                    当前所有模型请求都会复用这份供应商 URL 与 API Key
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  className="rounded-full border border-white/[0.08] bg-white/[0.04] p-2 text-zinc-400 transition-colors hover:bg-white/[0.08] hover:text-zinc-100"
+                  onClick={closeProviderSettingsModal}
+                  aria-label="关闭供应商配置"
+                >
+                  <X size={16} />
+                </button>
+              </div>
+
+              <div className="space-y-5 px-6 py-5">
+                {providerSettingsError && (
+                  <div className="rounded-2xl border border-red-500/20 bg-red-500/10 px-4 py-3 text-[12px] text-red-100">
+                    {providerSettingsError}
+                  </div>
+                )}
+
+                {providerSettingsLoading ? (
+                  <div className="rounded-[22px] border border-white/[0.08] bg-white/[0.03] px-4 py-6 text-center text-[13px] text-zinc-400">
+                    加载供应商配置中…
+                  </div>
+                ) : (
+                  <>
+                    <div>
+                      <div className="text-[11px] font-medium uppercase tracking-[0.18em] text-zinc-500">当前供应商</div>
+                      <div className="mt-3 rounded-2xl border border-white/[0.08] bg-white/[0.03] px-4 py-3">
+                        <div className="text-[14px] font-medium tracking-[-0.02em] text-zinc-100">
+                          {getProviderSettingsProviderLabel(providerSettingsCurrentProviderId)}
+                        </div>
+                        <div className="mt-1 text-[12px] leading-5 text-zinc-500">{providerSettingsBaseUrl}</div>
+                      </div>
+                    </div>
+
+                    <label className="block">
+                      <div className="mb-2 text-[12px] font-medium text-zinc-300">切换供应商</div>
+                      <div className="relative">
+                        <select
+                          value={providerSettingsProviderId}
+                          onChange={(e) => {
+                            handleProviderSettingsProviderChange(e.target.value as ProviderSettingsProviderId);
+                          }}
+                          className="w-full appearance-none rounded-2xl border border-white/[0.08] bg-white/[0.03] px-4 py-3 text-[14px] text-zinc-100 outline-none transition-colors focus:border-white/[0.16] focus:bg-white/[0.05]"
+                        >
+                          {PROVIDER_SETTINGS_PRESET_OPTIONS.map((option) => (
+                            <option key={option.id} value={option.id} className="bg-[#121418] text-zinc-100">
+                              {option.label}
+                            </option>
+                          ))}
+                        </select>
+                        <ChevronDown
+                          size={16}
+                          className="pointer-events-none absolute right-4 top-1/2 -translate-y-1/2 text-zinc-500"
+                        />
+                      </div>
+                    </label>
+
+                    <label className="block">
+                      <div className="mb-2 text-[12px] font-medium text-zinc-300">Base URL</div>
+                      <input
+                        value={providerSettingsBaseUrl}
+                        onChange={(e) => {
+                          setProviderSettingsBaseUrl(e.target.value);
+                          setProviderSettingsUrlManuallyEdited(true);
+                          setProviderSettingsError(null);
+                        }}
+                        placeholder="https://your-provider.example.com/v1"
+                        className="w-full rounded-2xl border border-white/[0.08] bg-white/[0.03] px-4 py-3 text-[14px] text-zinc-100 outline-none transition-colors placeholder:text-zinc-600 focus:border-white/[0.16] focus:bg-white/[0.05]"
+                      />
+                    </label>
+
+                    <label className="block">
+                      <div className="mb-2 flex items-center justify-between gap-3 text-[12px] font-medium text-zinc-300">
+                        <span>API Key</span>
+                        <span className="text-[11px] font-normal text-zinc-500">
+                          {providerSettingsHasApiKey
+                            ? `当前已保存 ${providerSettingsMaskedApiKey || '已配置'}`
+                            : '当前未保存 API Key'}
+                        </span>
+                      </div>
+                      <div className="relative">
+                        <input
+                          type={isProviderSettingsApiKeyVisible ? 'text' : 'password'}
+                          value={providerSettingsApiKey}
+                          onChange={(e) => {
+                            setProviderSettingsApiKey(e.target.value);
+                            setProviderSettingsError(null);
+                          }}
+                          placeholder={providerSettingsHasApiKey ? '留空则保留当前 API Key' : '输入新的 API Key'}
+                          className="w-full rounded-2xl border border-white/[0.08] bg-white/[0.03] px-4 py-3 pr-11 text-[14px] text-zinc-100 outline-none transition-colors placeholder:text-zinc-600 focus:border-white/[0.16] focus:bg-white/[0.05]"
+                        />
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setIsProviderSettingsApiKeyVisible((prev) => !prev);
+                          }}
+                          className="absolute right-3 top-1/2 inline-flex -translate-y-1/2 items-center justify-center rounded-full p-1.5 text-zinc-500 transition-colors hover:bg-white/[0.06] hover:text-zinc-200"
+                          aria-label={isProviderSettingsApiKeyVisible ? '隐藏 API Key' : '显示 API Key'}
+                          title={isProviderSettingsApiKeyVisible ? '隐藏 API Key' : '显示 API Key'}
+                        >
+                          {isProviderSettingsApiKeyVisible ? <EyeOff size={16} /> : <Eye size={16} />}
+                        </button>
+                      </div>
+                    </label>
+
+                    <div className="rounded-2xl border border-white/[0.08] bg-white/[0.03] px-4 py-3 text-[12px] leading-5 text-zinc-400">
+                      当前配置来源：
+                      <span className="ml-1 text-zinc-200">{providerSettingsSource === 'runtime' ? '运行时配置' : '环境变量回退'}</span>
+                    </div>
+                  </>
+                )}
+              </div>
+
+              <div className="flex items-center justify-end gap-3 border-t border-white/[0.08] px-6 py-4">
+                <button
+                  type="button"
+                  className="rounded-full border border-white/[0.08] px-4 py-2 text-[13px] font-medium text-zinc-300 transition-colors hover:bg-white/[0.05] hover:text-zinc-100"
+                  onClick={closeProviderSettingsModal}
+                  disabled={providerSettingsSaving}
+                >
+                  取消
+                </button>
+                <button
+                  type="button"
+                  className="rounded-full bg-white px-4 py-2 text-[13px] font-semibold text-black transition-colors hover:bg-zinc-200 disabled:cursor-not-allowed disabled:bg-zinc-500 disabled:text-zinc-200"
+                  onClick={() => {
+                    void handleProviderSettingsSave();
+                  }}
+                  disabled={providerSettingsLoading || providerSettingsSaving}
+                >
+                  {providerSettingsSaving ? '保存中…' : '保存'}
+                </button>
+              </div>
+            </div>
+          </div>,
+          document.body
+        )}
+
       {imageToolbarNotice && (
         <div
           className="pointer-events-none fixed inset-x-0 top-4 flex justify-center px-4"
@@ -9273,7 +9584,11 @@ export default function AIWorkspace() {
                   <History size={18} className={showHistoryPanel ? "text-zinc-100" : "text-zinc-500"} />
                 </button>
               </div>
-              <button className="rounded-lg p-2 transition-colors hover:bg-white/8" title="设置">
+              <button
+                className="rounded-lg p-2 transition-colors hover:bg-white/8"
+                title="设置"
+                onClick={openProviderSettingsModal}
+              >
                 <Settings size={18} className="text-zinc-500" />
               </button>
               <button 

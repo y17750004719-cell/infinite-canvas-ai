@@ -31,10 +31,12 @@ import {
   getDirectTextInputsForTextCard,
   getDisplayableTextCardPanelDraft,
   getGeneratedImageHistoryEntries,
+  getSupportedImageCardSizeOptions,
   getImageToolResultSpawnPosition,
   getSelectedImageToolbarSource,
   getTextCardPanelPlaceholder,
   getImageCardQualitySummary,
+  getImageCardResolutionStatus,
   getImageCardFrameSizeForAspectRatio,
   getImageCardItemSizeForFrameSize,
   getImageCardItemSizeForNaturalImage,
@@ -1861,7 +1863,7 @@ test('buildCanvasImageGenerationRequest preserves 4K size requests for image car
   assert.deepEqual(result, {
     messages: [{ role: 'user', content: '请生成一张高精度产品海报' }],
     intent: 'image',
-    model: 'gemini-3.1-flash-image-preview',
+    model: 'gemini-3.1-flash-image-preview-4k',
     size: '4096x4096',
     n: 1,
     aspect_ratio: '1:1',
@@ -1958,7 +1960,7 @@ test('buildAsyncImageTaskRequests expands 4K multi-image generation into four ex
   assert.deepEqual(result[0], {
     messages: [{ role: 'user', content: '生成 4K 主视觉' }],
     intent: 'image',
-    model: 'gemini-3.1-flash-image-preview',
+    model: 'gemini-3.1-flash-image-preview-4k',
     size: '4096x4096',
     n: 1,
     aspect_ratio: '1:1',
@@ -1998,7 +2000,7 @@ test('resolveCanvasImageTaskExecutionMode keeps non-exact-size or single-image r
 
   assert.equal(
     resolveCanvasImageTaskExecutionMode({
-      modelId: 'nano-banana-2',
+      modelId: 'gemini-3-pro-image-preview',
       size: '2048x2048',
       count: 2,
     }),
@@ -2250,29 +2252,46 @@ test('getDefaultImageCardModelOption returns Gemini 3.1 Flash Image as the defau
   });
 });
 
-test('IMAGE_CARD_MODEL_OPTIONS includes nano-banana-2 as a non-default image-card model option', () => {
+test('IMAGE_CARD_MODEL_OPTIONS exposes the documented 4Z image request models', () => {
   assert.deepEqual(workspaceSessionView.IMAGE_CARD_MODEL_OPTIONS, [
     {
       id: 'gemini-3.1-flash-image-preview',
       label: 'Gemini 3.1 Flash Image',
     },
     {
-      id: 'nano-banana-2',
-      label: 'Nano Banana 2',
+      id: 'gemini-2.5-flash-image',
+      label: 'Gemini 2.5 Flash Image',
+    },
+    {
+      id: 'gemini-3-pro-image-preview',
+      label: 'Gemini 3 Pro Image',
     },
   ]);
 });
 
-test('resolveImageCardModel accepts the supported image model', () => {
+test('getSupportedImageCardSizeOptions returns model-driven fixed size choices', () => {
+  assert.deepEqual(
+    getSupportedImageCardSizeOptions('gemini-2.5-flash-image').map((option) => option.id),
+    ['1024x1024', '2048x2048', '4096x4096']
+  );
+});
+
+test('resolveImageCardModel accepts the supported documented image model', () => {
   const result = resolveImageCardModel('gemini-3.1-flash-image-preview');
 
   assert.equal(result, 'gemini-3.1-flash-image-preview');
 });
 
-test('resolveImageCardModel accepts nano-banana-2 as a supported image model', () => {
-  const result = resolveImageCardModel('nano-banana-2');
+test('resolveImageCardModel accepts gemini-3-pro-image-preview as a supported image model', () => {
+  const result = resolveImageCardModel('gemini-3-pro-image-preview');
 
-  assert.equal(result, 'nano-banana-2');
+  assert.equal(result, 'gemini-3-pro-image-preview');
+});
+
+test('resolveImageCardModel falls back to default when removed nano-banana ids are requested', () => {
+  assert.equal(resolveImageCardModel('gemini-3.1-flash-image-preview'), 'gemini-3.1-flash-image-preview');
+  assert.equal(resolveImageCardModel('nano-banana-2'), 'gemini-3.1-flash-image-preview');
+  assert.equal(resolveImageCardModel('nano-banana'), 'gemini-3.1-flash-image-preview');
 });
 
 test('normalizeImageCardAspectRatio maps auto and empty values to 1:1', () => {
@@ -2295,6 +2314,38 @@ test('getImageCardQualitySummary combines aspect ratio and size label into a sin
 test('getImageCardQualitySummary normalizes legacy aspect ratios and falls back to the raw size when needed', () => {
   assert.equal(getImageCardQualitySummary({ aspectRatio: 'auto', size: '1024x1024' }), '1:1 · 1K');
   assert.equal(getImageCardQualitySummary({ aspectRatio: '', size: '1536x1024' }), '1:1 · 1536x1024');
+});
+
+test('getImageCardResolutionStatus returns a warning when the actual output is below the requested 2K target', () => {
+  assert.deepEqual(
+    getImageCardResolutionStatus({
+      requestedSize: '2048x2048',
+      aspectRatio: '1:1',
+      naturalWidth: 1536,
+      naturalHeight: 1536,
+    }),
+    {
+      actualLabel: '1536×1536',
+      warning: '实际返回 1536×1536，未达到目标 2K',
+      meetsRequestedResolution: false,
+    }
+  );
+});
+
+test('getImageCardResolutionStatus reports a clean actual size when the output meets the requested target', () => {
+  assert.deepEqual(
+    getImageCardResolutionStatus({
+      requestedSize: '2048x2048',
+      aspectRatio: '1:1',
+      naturalWidth: 2048,
+      naturalHeight: 2048,
+    }),
+    {
+      actualLabel: '2048×2048',
+      warning: null,
+      meetsRequestedResolution: true,
+    }
+  );
 });
 
 test('getImageCardFrameSizeForAspectRatio uses a 384px minimum edge for the selected ratio', () => {

@@ -47,3 +47,34 @@ test('generate route saves and returns every successful generated image output i
     true
   );
 });
+
+test('generate route decouples image supplier calls from the incoming request signal and returns failure classification metadata', () => {
+  assert.equal(
+    routeSource.includes('executionMode: resolvedExecutionMode,\n          signal: request.signal,'),
+    false
+  );
+  assert.equal(
+    routeSource.includes('executionMode: resolvedExecutionMode,\n            signal: request.signal,'),
+    false
+  );
+  assert.equal(
+    routeSource.includes('failureClass: error instanceof ImageGenerationError ? error.failureClass : "unknown",'),
+    true
+  );
+  assert.equal(
+    routeSource.includes('const errorMeta ='),
+    true
+  );
+  assert.equal(
+    routeSource.includes('failureClass: error.failureClass,'),
+    true
+  );
+  assert.equal(
+    routeSource.includes('isRetryable: error.isRetryable,'),
+    true
+  );
+  assert.equal(
+    routeSource.includes('retryAttempt: error.retryAttempt,'),
+    true
+  );
+});

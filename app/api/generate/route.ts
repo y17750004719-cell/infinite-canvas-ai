@@ -3,13 +3,15 @@ import { chat, chatStream, ImageGenerationError, runImageTask, shouldUseExactIma
 import fs from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { createStoredImageName, resolvePublicAssetPath } from "../../lib/api-security.mjs";
+import { createStoredImageName } from "../../lib/api-security.mjs";
+import { buildRuntimeAssetUrl, LOCAL_ASSET_ALLOWED_EXTENSIONS, resolveLocalAssetPath } from "../../lib/local-assets.mjs";
 import { resolveImageCardModel, resolveImageGenerationFallbackSizes, resolveTextPanelChatModel } from "../../lib/workspace-session-view.mjs";
 import { createLogger, createRequestId, serializeError } from "../../lib/logger";
 
 const DEBUG_API_LOGS = process.env.LOG_ALL_REQUESTS !== "0";
 const PUBLIC_DIR = path.join(process.cwd(), "public");
-const GENERATED_UPLOADS_DIR = path.join(PUBLIC_DIR, "uploads", "generated");
+const RUNTIME_DIR = path.join(process.cwd(), "runtime");
+const GENERATED_UPLOADS_DIR = path.join(RUNTIME_DIR, "uploads", "generated");
 const MAX_REFERENCE_IMAGE_BYTES = 12 * 1024 * 1024;
 const MAX_SAVED_IMAGE_BYTES = 20 * 1024 * 1024;
 const ALLOWED_PUBLIC_IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".webp", ".gif"];
@@ -108,7 +110,7 @@ async function saveImageToLocal(imageUrl: string): Promise<{ filename: string; l
 
     return {
       filename,
-      localUrl: `/uploads/generated/${filename}`,
+      localUrl: buildRuntimeAssetUrl(`uploads/generated/${filename}`),
     };
   }
 
@@ -164,7 +166,7 @@ async function saveImageToLocal(imageUrl: string): Promise<{ filename: string; l
 
     return {
       filename,
-      localUrl: `/uploads/generated/${filename}`,
+      localUrl: buildRuntimeAssetUrl(`uploads/generated/${filename}`),
     };
   } catch (error) {
     void generateLogger.error("save_image.error", "Error saving generated image", {
@@ -185,7 +187,7 @@ async function saveImagesToLocal(imageUrls: string[]): Promise<Array<{ filename:
 }
 
 const AGENT_MODEL = "gemini-3.1-flash-lite-preview-thinking-medium";
-const IMAGE_MODEL = "gemini-3.1-flash-image-preview";
+const IMAGE_MODEL = "gemini-2.5-flash-image";
 const DEFAULT_IMAGE_SIZES = ["2048x2048", "1024x1024", "4096x4096", "1024x1792", "1792x1024"];
 const ALLOWED_ASPECT_RATIOS = new Set([
   "1:1",
@@ -346,7 +348,9 @@ function loadSkillContent(skillId: string): string | null {
   }
 }
 
-function normalizeChatReferenceImage(input: string): string | null {
+function normalizeChatReferenceImage(
+  input: string,
+): string | null {
   if (typeof input !== "string" || !input.trim()) {
     return null;
   }
@@ -360,9 +364,10 @@ function normalizeChatReferenceImage(input: string): string | null {
   }
 
   if (input.startsWith("/")) {
-    const filePath = resolvePublicAssetPath(input, {
+    const filePath = resolveLocalAssetPath(input, {
+      runtimeDir: RUNTIME_DIR,
       publicDir: PUBLIC_DIR,
-      allowedExtensions: ALLOWED_PUBLIC_IMAGE_EXTENSIONS,
+      allowedExtensions: LOCAL_ASSET_ALLOWED_EXTENSIONS,
     });
     if (!filePath || !fs.existsSync(filePath)) {
       return null;
@@ -653,7 +658,6 @@ export async function POST(request: NextRequest) {
           aspect_ratio: resolvedAspectRatio,
           n: n || 1,
           executionMode: resolvedExecutionMode,
-          signal: request.signal,
         });
       } catch (error) {
         const message = error instanceof Error ? error.message : "Unknown edits error";
@@ -661,15 +665,31 @@ export async function POST(request: NextRequest) {
           reqId,
           ...getErrorDiagnostics(error),
         });
+        const errorMeta =
+          error instanceof ImageGenerationError
+            ? {
+                failureClass: error.failureClass,
+                isRetryable: error.isRetryable,
+                retryAttempt: error.retryAttempt,
+              }
+            : undefined;
         const normalizedMessage = message.toLowerCase();
         if (
           normalizedMessage.includes("aspect_ratio") ||
           normalizedMessage.includes("size") ||
           normalizedMessage.includes("ratio unsupported")
         ) {
-          throw new ImageGenerationError("Image task failed: ratio unsupported", error instanceof ImageGenerationError ? error.statusCode : 502);
+          throw new ImageGenerationError(
+            "Image task failed: ratio unsupported",
+            error instanceof ImageGenerationError ? error.statusCode : 502,
+            errorMeta
+          );
         }
-        throw new ImageGenerationError(`Image task failed: ${message}`, error instanceof ImageGenerationError ? error.statusCode : 502);
+        throw new ImageGenerationError(
+          `Image task failed: ${message}`,
+          error instanceof ImageGenerationError ? error.statusCode : 502,
+          errorMeta
+        );
       }
 
       if (!imageResult.data || imageResult.data.length === 0) {
@@ -752,7 +772,6 @@ export async function POST(request: NextRequest) {
             aspect_ratio: resolvedAspectRatio,
             n: n || 1,
             executionMode: resolvedExecutionMode,
-            signal: request.signal,
           });
           actualSize = candidateSize;
           lastError = null;
@@ -883,9 +902,19 @@ export async function POST(request: NextRequest) {
     const statusCode = error instanceof ImageGenerationError && error.statusCode
       ? error.statusCode
       : 500;
+    const failureClass = error instanceof ImageGenerationError && error.failureClass
+      ? error.failureClass
+      : "unknown";
+    const isRetryable = error instanceof ImageGenerationError ? Boolean(error.isRetryable) : false;
+    const retryAttempt = error instanceof ImageGenerationError && typeof error.retryAttempt === "number"
+      ? error.retryAttempt
+      : null;
 
     await requestLogger.error("request.error", "Generate API error", {
       statusCode,
+      failureClass,
+      isRetryable,
+      retryAttempt,
       error: serializeError(error),
       ...getErrorDiagnostics(error),
     });
@@ -893,11 +922,15 @@ export async function POST(request: NextRequest) {
     await logResponse(statusCode, {
       mode: "error",
       error: errorMessage,
+      failureClass,
+      isRetryable,
+      retryAttempt,
     });
 
     return NextResponse.json({
       status: 'error',
       error: errorMessage,
+      failureClass: error instanceof ImageGenerationError ? error.failureClass : "unknown",
       stack: process.env.NODE_ENV === 'development' ? errorStack : undefined,
     }, { status: statusCode });
   }

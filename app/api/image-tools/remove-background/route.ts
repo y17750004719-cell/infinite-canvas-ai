@@ -3,6 +3,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { createStoredImageName } from '../../../lib/api-security.mjs';
+import { buildRuntimeAssetUrl } from '../../../lib/local-assets.mjs';
 import {
   createDownloadFailureDiagnostics,
   createReferencePreview,
@@ -21,7 +22,7 @@ import {
 export const runtime = 'nodejs';
 
 const LOG_ALL_REQUESTS = process.env.LOG_ALL_REQUESTS !== '0';
-const GENERATED_UPLOADS_DIR = path.join(process.cwd(), 'public', 'uploads', 'generated');
+const GENERATED_UPLOADS_DIR = path.join(process.cwd(), 'runtime', 'uploads', 'generated');
 const MAX_RESULT_BYTES = 20 * 1024 * 1024;
 
 type StageError = Error & {
@@ -296,7 +297,7 @@ export async function POST(request: NextRequest) {
 
     return NextResponse.json({
       success: true,
-      url: `/uploads/generated/${filename}`,
+      url: buildRuntimeAssetUrl(`uploads/generated/${filename}`),
       naturalWidth: dimensions?.naturalWidth,
       naturalHeight: dimensions?.naturalHeight,
     });

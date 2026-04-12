@@ -3,6 +3,12 @@ import {
   mergeGeneratedImageHistoryEntries,
   normalizeGeneratedImageHistory,
 } from './generated-image-history.mjs';
+import {
+  getImageSizeLabel,
+  resolveImageRequestModel,
+  getSupportedImageSizeOptions,
+  resolveSupportedImageSize,
+} from './image-model-capabilities.mjs';
 
 const DEFAULT_VIEWPORT = { x: 0, y: 0, scale: 1 };
 export const CANVAS_TEXT_GENERATION_CONCURRENCY_LIMIT = 5;
@@ -20,13 +26,20 @@ export const IMAGE_CARD_MODEL_OPTIONS = [
     label: 'Gemini 3.1 Flash Image',
   },
   {
-    id: 'nano-banana-2',
-    label: 'Nano Banana 2',
+    id: 'gemini-2.5-flash-image',
+    label: 'Gemini 2.5 Flash Image',
+  },
+  {
+    id: 'gemini-3-pro-image-preview',
+    label: 'Gemini 3 Pro Image',
   },
 ];
 
+export const IMAGE_CARD_SIZE_OPTIONS = getSupportedImageSizeOptions(IMAGE_CARD_MODEL_OPTIONS[0]?.id);
+
 const SERIAL_EXACT_SIZE_IMAGE_MODELS = new Set([
   'gemini-3.1-flash-image-preview',
+  'gemini-2.5-flash-image',
 ]);
 const SERIAL_EXACT_SIZE_REQUEST_SIZES = new Set([
   '1024x1024',
@@ -74,6 +87,14 @@ export function resolveImageCardModel(requestedModel, fallbackModel = getDefault
   }
 
   return fallbackModel;
+}
+
+export function getSupportedImageCardSizeOptions(modelId, fallbackModel = getDefaultImageCardModelOption()?.id) {
+  return getSupportedImageSizeOptions(resolveImageCardModel(modelId, fallbackModel));
+}
+
+export function resolveImageCardSize(modelId, requestedSize, fallbackSize = IMAGE_CARD_SIZE_OPTIONS[0]?.id) {
+  return resolveSupportedImageSize(resolveImageCardModel(modelId), requestedSize, fallbackSize);
 }
 
 export function normalizeImageCardAspectRatio(value, fallbackValue = '1:1') {
@@ -180,15 +201,7 @@ export function getImageCardItemSizeForNaturalImage(
 export function getImageCardQualitySummary({ aspectRatio, size }) {
   const normalizedAspectRatio = normalizeImageCardAspectRatio(aspectRatio);
   const normalizedSize = typeof size === 'string' ? size.trim() : '';
-
-  let sizeLabel = normalizedSize;
-  if (normalizedSize === '1024x1024') {
-    sizeLabel = '1K';
-  } else if (normalizedSize === '2048x2048') {
-    sizeLabel = '2K';
-  } else if (normalizedSize === '4096x4096') {
-    sizeLabel = '4K';
-  }
+  const sizeLabel = getImageSizeLabel(normalizedSize);
 
   return `${normalizedAspectRatio} · ${sizeLabel}`;
 }
@@ -293,6 +306,52 @@ export function getResolutionFailureReason({
   }
 
   return null;
+}
+
+export function getImageCardResolutionStatus({
+  requestedSize,
+  aspectRatio,
+  naturalWidth,
+  naturalHeight,
+}) {
+  const safeNaturalWidth = Number.isFinite(naturalWidth) ? Math.floor(naturalWidth) : 0;
+  const safeNaturalHeight = Number.isFinite(naturalHeight) ? Math.floor(naturalHeight) : 0;
+  if (safeNaturalWidth <= 0 || safeNaturalHeight <= 0) {
+    return null;
+  }
+
+  const actualLabel = `${safeNaturalWidth}×${safeNaturalHeight}`;
+  const meetsRequestedResolution = isOutputResolutionSufficient({
+    requestedSize,
+    aspectRatio,
+    naturalWidth: safeNaturalWidth,
+    naturalHeight: safeNaturalHeight,
+  });
+
+  if (meetsRequestedResolution) {
+    return {
+      actualLabel,
+      warning: null,
+      meetsRequestedResolution: true,
+    };
+  }
+
+  const resolutionTier = resolveRequestedResolutionTier(requestedSize);
+  const failureReason = getResolutionFailureReason({
+    requestedSize,
+    aspectRatio,
+    naturalWidth: safeNaturalWidth,
+    naturalHeight: safeNaturalHeight,
+  });
+
+  return {
+    actualLabel,
+    warning:
+      failureReason && failureReason.includes('宽高比')
+        ? `实际返回 ${actualLabel}，${failureReason}`
+        : `实际返回 ${actualLabel}，未达到目标 ${resolutionTier}`,
+    meetsRequestedResolution: false,
+  };
 }
 
 export function resolveImageGenerationFallbackSizes(requestedSize) {
@@ -1127,6 +1186,7 @@ export function buildCanvasImageGenerationRequest({
   const trimmedInput = typeof input === 'string' ? input.trim() : '';
   const references = buildReferenceImageRequestPayload(linkedImagePreviews);
   const resolvedModel = resolveImageCardModel(modelId);
+  const resolvedSize = resolveImageCardSize(resolvedModel, size);
 
   const request = {
     messages: [{ role: 'user', content: trimmedInput }],
@@ -1134,11 +1194,11 @@ export function buildCanvasImageGenerationRequest({
   };
 
   if (resolvedModel) {
-    request.model = resolvedModel;
+    request.model = resolveImageRequestModel(resolvedModel, resolvedSize);
   }
 
-  if (typeof size === 'string' && size.trim()) {
-    request.size = size.trim();
+  if (typeof resolvedSize === 'string' && resolvedSize.trim()) {
+    request.size = resolvedSize.trim();
   }
 
   if (Number.isFinite(count) && count > 0) {

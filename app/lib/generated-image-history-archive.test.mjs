@@ -13,7 +13,7 @@ const PNG_1X1 = Buffer.from(
 
 test('listGeneratedImageArchiveEntries scans local generated files and sorts newest first', async () => {
   const tempDir = await mkdtemp(path.join(os.tmpdir(), 'generated-history-archive-'));
-  const generatedDir = path.join(tempDir, 'public', 'uploads', 'generated');
+  const generatedDir = path.join(tempDir, 'runtime', 'uploads', 'generated');
 
   try {
     await mkdir(generatedDir, { recursive: true });
@@ -30,9 +30,9 @@ test('listGeneratedImageArchiveEntries scans local generated files and sorts new
     assert.deepEqual(
       result.map((entry) => ({ src: entry.src, source: entry.source })),
       [
-        { src: '/uploads/generated/img-1700000003000-new.png', source: 'archive' },
-        { src: '/uploads/generated/img-1700000001000-old.png', source: 'archive' },
-        { src: '/uploads/generated/poster-no-timestamp.png', source: 'archive' },
+        { src: '/api/local-assets/uploads/generated/img-1700000003000-new.png', source: 'archive' },
+        { src: '/api/local-assets/uploads/generated/img-1700000001000-old.png', source: 'archive' },
+        { src: '/api/local-assets/uploads/generated/poster-no-timestamp.png', source: 'archive' },
       ]
     );
     assert.equal(result[0].createdAt, 1700000003000);

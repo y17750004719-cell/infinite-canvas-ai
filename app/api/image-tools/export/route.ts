@@ -2,11 +2,12 @@ import { NextRequest, NextResponse } from 'next/server';
 import { readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 
-import { resolvePublicAssetPath } from '../../../lib/api-security.mjs';
+import { LOCAL_ASSET_ALLOWED_EXTENSIONS, resolveLocalAssetPath } from '../../../lib/local-assets.mjs';
 
 export const runtime = 'nodejs';
 
 const PUBLIC_DIR = path.join(process.cwd(), 'public');
+const RUNTIME_DIR = path.join(process.cwd(), 'runtime');
 const MAX_EXPORT_BYTES = 20 * 1024 * 1024;
 const DEFAULT_CONTENT_TYPE = 'image/png';
 
@@ -53,9 +54,10 @@ function resolveDownloadFileName(fileReference: string, contentType = ''): strin
 }
 
 async function loadLocalImageAsset(sourceUrl: string) {
-  const resolvedPath = resolvePublicAssetPath(sourceUrl, {
+  const resolvedPath = resolveLocalAssetPath(sourceUrl, {
+    runtimeDir: RUNTIME_DIR,
     publicDir: PUBLIC_DIR,
-    allowedExtensions: ['.png', '.jpg', '.jpeg', '.webp', '.gif'],
+    allowedExtensions: LOCAL_ASSET_ALLOWED_EXTENSIONS,
   });
   if (!resolvedPath) {
     return null;

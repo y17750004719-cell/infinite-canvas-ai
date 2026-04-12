@@ -10,6 +10,12 @@ import {
   parseImageDataUrl,
   resolvePublicAssetPath,
 } from './api-security.mjs';
+import {
+  buildRuntimeAssetUrl,
+  resolveLocalAssetDataUrl,
+  resolveLocalAssetPath,
+  resolveLocalAssetPathFromRouteSegments,
+} from './local-assets.mjs';
 
 const PNG_BYTES = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00]);
 const JPEG_BYTES = Buffer.from([0xff, 0xd8, 0xff, 0xdb, 0x00]);
@@ -100,5 +106,87 @@ test('resolvePublicAssetDataUrl only reads image files that stay inside the publ
       allowedExtensions: ['.png', '.jpg', '.jpeg', '.webp', '.gif'],
     }),
     null
+  );
+});
+
+test('buildRuntimeAssetUrl returns the canonical local-assets api path', () => {
+  assert.equal(buildRuntimeAssetUrl('uploads/generated/sample.png'), '/api/local-assets/uploads/generated/sample.png');
+});
+
+test('resolveLocalAssetPath prefers runtime asset urls and keeps legacy uploads readable', () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'zo-local-assets-'));
+  const runtimeDir = path.join(tempRoot, 'runtime');
+  const publicDir = path.join(tempRoot, 'public');
+  const runtimeAssetPath = path.join(runtimeDir, 'uploads', 'generated', 'sample.png');
+  const legacyAssetPath = path.join(publicDir, 'uploads', 'legacy.png');
+  fs.mkdirSync(path.dirname(runtimeAssetPath), { recursive: true });
+  fs.mkdirSync(path.dirname(legacyAssetPath), { recursive: true });
+  fs.writeFileSync(runtimeAssetPath, PNG_BYTES);
+  fs.writeFileSync(legacyAssetPath, PNG_BYTES);
+
+  const runtimeResolved = resolveLocalAssetPath('/api/local-assets/uploads/generated/sample.png?cache=1', {
+    runtimeDir,
+    publicDir,
+    allowedExtensions: ['.png', '.jpg', '.jpeg', '.webp', '.gif'],
+  });
+  const legacyResolved = resolveLocalAssetPath('/uploads/legacy.png?cache=1', {
+    runtimeDir,
+    publicDir,
+    allowedExtensions: ['.png', '.jpg', '.jpeg', '.webp', '.gif'],
+  });
+
+  assert.equal(runtimeResolved, runtimeAssetPath);
+  assert.equal(legacyResolved, legacyAssetPath);
+});
+
+test('resolveLocalAssetPathFromRouteSegments only accepts runtime image paths inside runtime/', () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'zo-local-assets-route-'));
+  const runtimeDir = path.join(tempRoot, 'runtime');
+  const validAssetPath = path.join(runtimeDir, 'uploads', 'sample.png');
+  fs.mkdirSync(path.dirname(validAssetPath), { recursive: true });
+  fs.writeFileSync(validAssetPath, PNG_BYTES);
+
+  assert.equal(
+    resolveLocalAssetPathFromRouteSegments(['uploads', 'sample.png'], {
+      runtimeDir,
+      allowedExtensions: ['.png', '.jpg', '.jpeg', '.webp', '.gif'],
+    }),
+    validAssetPath
+  );
+  assert.equal(
+    resolveLocalAssetPathFromRouteSegments(['..', 'secret.txt'], {
+      runtimeDir,
+      allowedExtensions: ['.png', '.jpg', '.jpeg', '.webp', '.gif'],
+    }),
+    null
+  );
+});
+
+test('resolveLocalAssetDataUrl reads runtime asset urls and legacy uploads through one compatibility layer', () => {
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'zo-local-assets-data-'));
+  const runtimeDir = path.join(tempRoot, 'runtime');
+  const publicDir = path.join(tempRoot, 'public');
+  const runtimeAssetPath = path.join(runtimeDir, 'uploads', 'generated', 'sample.png');
+  const legacyAssetPath = path.join(publicDir, 'uploads', 'legacy.png');
+  fs.mkdirSync(path.dirname(runtimeAssetPath), { recursive: true });
+  fs.mkdirSync(path.dirname(legacyAssetPath), { recursive: true });
+  fs.writeFileSync(runtimeAssetPath, PNG_BYTES);
+  fs.writeFileSync(legacyAssetPath, PNG_BYTES);
+
+  assert.equal(
+    resolveLocalAssetDataUrl('/api/local-assets/uploads/generated/sample.png', {
+      runtimeDir,
+      publicDir,
+      allowedExtensions: ['.png', '.jpg', '.jpeg', '.webp', '.gif'],
+    }),
+    `data:image/png;base64,${PNG_BYTES.toString('base64')}`
+  );
+  assert.equal(
+    resolveLocalAssetDataUrl('/uploads/legacy.png', {
+      runtimeDir,
+      publicDir,
+      allowedExtensions: ['.png', '.jpg', '.jpeg', '.webp', '.gif'],
+    }),
+    `data:image/png;base64,${PNG_BYTES.toString('base64')}`
   );
 });

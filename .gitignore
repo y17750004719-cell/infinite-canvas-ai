@@ -17,6 +17,7 @@ coverage
 .vscode/
 .idea/
 public/uploads/*
+runtime/
 .omx/
 .codex/*
 !.codex/agents/

@@ -12,7 +12,7 @@ const NO_STORE_HEADERS = {
 export async function GET() {
   try {
     const entries = await listGeneratedImageArchiveEntries({
-      directoryPath: path.join(process.cwd(), 'public', 'uploads', 'generated'),
+      directoryPath: path.join(process.cwd(), 'runtime', 'uploads', 'generated'),
     });
 
     return NextResponse.json({ entries }, { headers: NO_STORE_HEADERS });

@@ -12,13 +12,13 @@ test('remove-background route exists again and guards invalid JSON bodies', () =
   assert.equal(routeSource.includes("return NextResponse.json({ error: 'Invalid JSON body' }, { status: 400 });"), true);
 });
 
-test('remove-background route uses the Recraft helper and returns local generated uploads', () => {
+test('remove-background route uses the Recraft helper and returns runtime generated asset urls', () => {
   const routeSource = fs.readFileSync(routePath, 'utf8');
 
   assert.equal(routeSource.includes('createRecraftBackgroundRemovalRequest'), true);
   assert.equal(routeSource.includes('extractRecraftBackgroundRemovalUrl'), true);
-  assert.equal(routeSource.includes('public\', \'uploads\', \'generated\''), true);
-  assert.equal(routeSource.includes('url: `/uploads/generated/${filename}`'), true);
+  assert.equal(routeSource.includes("'runtime', 'uploads', 'generated'"), true);
+  assert.equal(routeSource.includes('url: buildRuntimeAssetUrl(`uploads/generated/${filename}`)'), true);
   assert.equal(routeSource.includes('naturalWidth: dimensions?.naturalWidth'), true);
   assert.equal(routeSource.includes('naturalHeight: dimensions?.naturalHeight'), true);
 });
