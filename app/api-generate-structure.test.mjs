@@ -78,3 +78,34 @@ test('generate route decouples image supplier calls from the incoming request si
     true
   );
 });
+
+test('generate route uses model capability size allowlists for gpt-image-2 and skips derived aspect ratios for size-only models', () => {
+  assert.equal(
+    routeSource.includes('import { getImageModelCapability } from "../../lib/image-model-capabilities.mjs";'),
+    true
+  );
+  assert.equal(
+    routeSource.includes('const capabilityAllowlist = getImageModelCapability(model).supportedSizes;'),
+    true
+  );
+  assert.equal(
+    routeSource.includes(': capabilityAllowlist.length > 0'),
+    true
+  );
+  assert.equal(
+    routeSource.includes('const supportsAspectRatio = getImageModelCapability(resolvedImageModel).supportsAspectRatio;'),
+    true
+  );
+  assert.equal(
+    routeSource.includes('const resolvedAspectRatio = supportsAspectRatio ? (requestedAspectRatio || aspectRatioFromSize(imageSize)) : "";'),
+    true
+  );
+  assert.equal(
+    routeSource.includes('aspect_ratio: resolvedAspectRatio || undefined,'),
+    true
+  );
+  assert.equal(
+    routeSource.includes('quality: typeof quality === "string" ? quality : undefined,'),
+    true
+  );
+});

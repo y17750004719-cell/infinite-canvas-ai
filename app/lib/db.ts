@@ -76,6 +76,7 @@ export interface ProjectSession {
   imageCardPanelDrafts?: Record<string, string>;
   imageCardModelById?: Record<string, string>;
   imageCardSizeById?: Record<string, string>;
+  imageCardQualityById?: Record<string, string>;
   imageCardCountById?: Record<string, number>;
   imageCardAspectRatioById?: Record<string, string>;
   connections?: Array<{

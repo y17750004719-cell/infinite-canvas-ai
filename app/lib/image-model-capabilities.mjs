@@ -4,10 +4,17 @@ export const IMAGE_SIZE_OPTIONS = [
   { id: '4096x4096', label: '4K', imageSize: '4K' },
 ];
 
+const GPT_IMAGE_2_SIZE_OPTIONS = [
+  { id: '1024x1024', label: '1024×1024', imageSize: '1024x1024' },
+  { id: '1536x1024', label: '1536×1024', imageSize: '1536x1024' },
+  { id: '1024x1536', label: '1024×1536', imageSize: '1024x1536' },
+];
+
 const DEFAULT_IMAGE_MODEL_CAPABILITY = {
   supportsAspectRatio: true,
   supportedSizes: IMAGE_SIZE_OPTIONS.map((option) => option.id),
   requestModelBySize: {},
+  sizeOptions: undefined,
 };
 
 export const IMAGE_MODEL_CAPABILITIES = {
@@ -38,6 +45,16 @@ export const IMAGE_MODEL_CAPABILITIES = {
       '4096x4096': 'gemini-3-pro-image-preview',
     },
   },
+  'gpt-image-2': {
+    supportsAspectRatio: false,
+    supportedSizes: GPT_IMAGE_2_SIZE_OPTIONS.map((option) => option.id),
+    requestModelBySize: {
+      '1024x1024': 'gpt-image-2',
+      '1536x1024': 'gpt-image-2',
+      '1024x1536': 'gpt-image-2',
+    },
+    sizeOptions: GPT_IMAGE_2_SIZE_OPTIONS,
+  },
 };
 
 export function getImageModelCapability(modelId) {
@@ -47,6 +64,9 @@ export function getImageModelCapability(modelId) {
 
 export function getSupportedImageSizeOptions(modelId) {
   const capability = getImageModelCapability(modelId);
+  if (Array.isArray(capability.sizeOptions) && capability.sizeOptions.length > 0) {
+    return capability.sizeOptions;
+  }
   const allowedSizeIds = new Set(capability.supportedSizes);
   return IMAGE_SIZE_OPTIONS.filter((option) => allowedSizeIds.has(option.id));
 }
@@ -93,8 +113,20 @@ export function resolveImageRequestModel(modelId, requestedSize) {
   return mappedModelId || normalizedModelId;
 }
 
-export function getImageSizeLabel(sizeId) {
-  return IMAGE_SIZE_OPTIONS.find((option) => option.id === sizeId)?.label || sizeId;
+export function getImageSizeLabel(modelId, sizeId) {
+  const normalizedModelId =
+    typeof sizeId === 'undefined' ? undefined : typeof modelId === 'string' ? modelId.trim() : undefined;
+  const normalizedSizeId =
+    typeof sizeId === 'undefined'
+      ? typeof modelId === 'string'
+        ? modelId.trim()
+        : ''
+      : typeof sizeId === 'string'
+        ? sizeId.trim()
+        : '';
+
+  const options = normalizedModelId ? getSupportedImageSizeOptions(normalizedModelId) : IMAGE_SIZE_OPTIONS;
+  return options.find((option) => option.id === normalizedSizeId)?.label || normalizedSizeId;
 }
 
 export function getGeminiImageSizeEnum(sizeId) {

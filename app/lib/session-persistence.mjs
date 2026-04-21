@@ -107,6 +107,19 @@ export function normalizeImageCardSizeById(values, items) {
   }, {});
 }
 
+export function normalizeImageCardQualityById(values, items) {
+  if (!isRecord(values)) return {};
+
+  const validImageCardIds = getValidImageCardIds(items);
+  return Object.entries(values).reduce((result, [itemId, value]) => {
+    if (!validImageCardIds.has(itemId)) return result;
+    if (typeof value !== 'string' || value.trim().length === 0) return result;
+
+    result[itemId] = value.trim();
+    return result;
+  }, {});
+}
+
 export function normalizeImageCardCountById(values, items) {
   if (!isRecord(values)) return {};
 
@@ -144,6 +157,7 @@ export function normalizeProjectSession(session) {
     imageCardPanelDrafts: normalizeImageCardPanelDrafts(session?.imageCardPanelDrafts, normalizedItems),
     imageCardModelById: normalizeImageCardModelById(session?.imageCardModelById, normalizedItems),
     imageCardSizeById: normalizeImageCardSizeById(session?.imageCardSizeById, normalizedItems),
+    imageCardQualityById: normalizeImageCardQualityById(session?.imageCardQualityById, normalizedItems),
     imageCardCountById: normalizeImageCardCountById(session?.imageCardCountById, normalizedItems),
     imageCardAspectRatioById: normalizeImageCardAspectRatioById(session?.imageCardAspectRatioById, normalizedItems),
     generatedImageHistory: normalizeGeneratedImageHistory(session?.generatedImageHistory),
@@ -170,6 +184,9 @@ export function buildPersistedSession(session, patch) {
   const normalizedImageCardSizeById = cloneValue(
     normalizeImageCardSizeById(nextSession.imageCardSizeById, normalizedItems)
   );
+  const normalizedImageCardQualityById = cloneValue(
+    normalizeImageCardQualityById(nextSession.imageCardQualityById, normalizedItems)
+  );
   const normalizedImageCardCountById = cloneValue(
     normalizeImageCardCountById(nextSession.imageCardCountById, normalizedItems)
   );
@@ -188,6 +205,7 @@ export function buildPersistedSession(session, patch) {
     imageCardPanelDrafts: normalizedImageCardPanelDrafts,
     imageCardModelById: normalizedImageCardModelById,
     imageCardSizeById: normalizedImageCardSizeById,
+    imageCardQualityById: normalizedImageCardQualityById,
     imageCardCountById: normalizedImageCardCountById,
     imageCardAspectRatioById: normalizedImageCardAspectRatioById,
     generatedImageHistory: normalizedGeneratedImageHistory,

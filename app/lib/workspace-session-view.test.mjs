@@ -931,6 +931,10 @@ test('createCanvasClipboardSnapshot keeps selected items in canvas order and cop
       'image-card-1': '1024x1024',
       'other-image': 'ignore',
     },
+    imageCardQualityById: {
+      'image-card-1': 'high',
+      'other-image': 'ignore',
+    },
     imageCardCountById: {
       'image-card-1': 3,
       'other-image': 2,
@@ -998,6 +1002,9 @@ test('createCanvasClipboardSnapshot keeps selected items in canvas order and cop
     },
     imageCardSizeById: {
       'image-card-1': '1024x1024',
+    },
+    imageCardQualityById: {
+      'image-card-1': 'high',
     },
     imageCardCountById: {
       'image-card-1': 3,
@@ -1070,6 +1077,9 @@ test('materializeCanvasClipboardPaste remaps ids, offsets items, and carries car
       imageCardSizeById: {
         'image-card-1': '1024x1024',
       },
+      imageCardQualityById: {
+        'image-card-1': 'high',
+      },
       imageCardCountById: {
         'image-card-1': 3,
       },
@@ -1134,6 +1144,9 @@ test('materializeCanvasClipboardPaste remaps ids, offsets items, and carries car
     },
     imageCardSizeById: {
       'copy-2-image-card-1': '1024x1024',
+    },
+    imageCardQualityById: {
+      'copy-2-image-card-1': 'high',
     },
     imageCardCountById: {
       'copy-2-image-card-1': 3,
@@ -2259,11 +2272,15 @@ test('getDefaultImageCardModelOption returns Gemini 3.1 Flash Image as the defau
   });
 });
 
-test('IMAGE_CARD_MODEL_OPTIONS exposes the documented 4Z image request models', () => {
+test('IMAGE_CARD_MODEL_OPTIONS exposes the supported image request models including gpt-image-2', () => {
   assert.deepEqual(workspaceSessionView.IMAGE_CARD_MODEL_OPTIONS, [
     {
       id: 'gemini-3.1-flash-image-preview',
       label: 'Gemini 3.1 Flash Image',
+    },
+    {
+      id: 'gpt-image-2',
+      label: 'GPT Image 2',
     },
     {
       id: 'gemini-2.5-flash-image',
@@ -2295,6 +2312,19 @@ test('resolveImageCardModel accepts gemini-3-pro-image-preview as a supported im
   assert.equal(result, 'gemini-3-pro-image-preview');
 });
 
+test('resolveImageCardModel accepts gpt-image-2 as a supported image model', () => {
+  const result = resolveImageCardModel('gpt-image-2');
+
+  assert.equal(result, 'gpt-image-2');
+});
+
+test('getSupportedImageCardSizeOptions returns official gpt-image-2 size choices', () => {
+  assert.deepEqual(
+    getSupportedImageCardSizeOptions('gpt-image-2').map((option) => option.id),
+    ['1024x1024', '1536x1024', '1024x1536']
+  );
+});
+
 test('resolveImageCardModel falls back to default when removed nano-banana ids are requested', () => {
   assert.equal(resolveImageCardModel('gemini-3.1-flash-image-preview'), 'gemini-3.1-flash-image-preview');
   assert.equal(resolveImageCardModel('nano-banana-2'), 'gemini-3.1-flash-image-preview');
@@ -2313,14 +2343,39 @@ test('normalizeImageCardAspectRatio preserves valid explicit aspect ratios', () 
 });
 
 test('getImageCardQualitySummary combines aspect ratio and size label into a single trigger label', () => {
-  assert.equal(getImageCardQualitySummary({ aspectRatio: '1:1', size: '1024x1024' }), '1:1 · 1K');
-  assert.equal(getImageCardQualitySummary({ aspectRatio: '9:16', size: '2048x2048' }), '9:16 · 2K');
-  assert.equal(getImageCardQualitySummary({ aspectRatio: '16:9', size: '4096x4096' }), '16:9 · 4K');
+  assert.equal(getImageCardQualitySummary({ modelId: 'gemini-3.1-flash-image-preview', aspectRatio: '1:1', size: '1024x1024' }), '1:1 · 1K');
+  assert.equal(getImageCardQualitySummary({ modelId: 'gemini-3.1-flash-image-preview', aspectRatio: '9:16', size: '2048x2048' }), '9:16 · 2K');
+  assert.equal(getImageCardQualitySummary({ modelId: 'gemini-3.1-flash-image-preview', aspectRatio: '16:9', size: '4096x4096' }), '16:9 · 4K');
+  assert.equal(getImageCardQualitySummary({ modelId: 'gpt-image-2', aspectRatio: '9:16', size: '1536x1024', quality: 'High' }), '横图 · High');
+  assert.equal(getImageCardQualitySummary({ modelId: 'gpt-image-2', aspectRatio: '1:1', size: '1024x1024' }), '方图');
+  assert.equal(getImageCardQualitySummary({ modelId: 'gpt-image-2', aspectRatio: '9:16', size: '1024x1536' }), '竖图');
 });
 
 test('getImageCardQualitySummary normalizes legacy aspect ratios and falls back to the raw size when needed', () => {
-  assert.equal(getImageCardQualitySummary({ aspectRatio: 'auto', size: '1024x1024' }), '1:1 · 1K');
-  assert.equal(getImageCardQualitySummary({ aspectRatio: '', size: '1536x1024' }), '1:1 · 1536x1024');
+  assert.equal(getImageCardQualitySummary({ modelId: 'gemini-3.1-flash-image-preview', aspectRatio: 'auto', size: '1024x1024' }), '1:1 · 1K');
+  assert.equal(getImageCardQualitySummary({ modelId: 'gemini-3.1-flash-image-preview', aspectRatio: '', size: '1536x1024' }), '1:1 · 1536x1024');
+});
+
+test('buildCanvasImageGenerationRequest omits aspect_ratio for gpt-image-2 and normalizes unsupported old sizes to the official default', () => {
+  const result = buildCanvasImageGenerationRequest({
+    input: '生成一张封面',
+    linkedImagePreviews: [],
+    modelId: 'gpt-image-2',
+    size: '2048x2048',
+    quality: 'high',
+    count: 1,
+    aspectRatio: '9:16',
+  });
+
+  assert.deepEqual(result, {
+    messages: [{ role: 'user', content: '生成一张封面' }],
+    intent: 'image',
+    model: 'gpt-image-2',
+    size: '1024x1024',
+    quality: 'high',
+    n: 1,
+    executionMode: 'async',
+  });
 });
 
 test('getImageCardResolutionStatus returns a warning when the actual output is below the requested 2K target', () => {

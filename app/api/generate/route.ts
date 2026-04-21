@@ -5,6 +5,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createStoredImageName } from "../../lib/api-security.mjs";
 import { buildRuntimeAssetUrl, LOCAL_ASSET_ALLOWED_EXTENSIONS, resolveLocalAssetPath } from "../../lib/local-assets.mjs";
+import { getImageModelCapability } from "../../lib/image-model-capabilities.mjs";
 import { resolveImageCardModel, resolveImageGenerationFallbackSizes, resolveTextPanelChatModel } from "../../lib/workspace-session-view.mjs";
 import { createLogger, createRequestId, serializeError } from "../../lib/logger";
 
@@ -237,14 +238,17 @@ function resolveImageSize(requested: unknown, model: string): string {
   const modelEnvKey = `IMAGE_SIZE_ALLOWLIST_${sanitizeModelKey(model)}`;
   const modelAllowlist = parseSizeAllowlist(process.env[modelEnvKey]);
   const globalAllowlist = parseSizeAllowlist(process.env.IMAGE_SIZE_ALLOWLIST);
+  const capabilityAllowlist = getImageModelCapability(model).supportedSizes;
   const allowlist = modelAllowlist.length > 0
     ? modelAllowlist
     : globalAllowlist.length > 0
       ? globalAllowlist
-      : DEFAULT_IMAGE_SIZES;
+      : capabilityAllowlist.length > 0
+        ? capabilityAllowlist
+        : DEFAULT_IMAGE_SIZES;
 
   const requestedSize = typeof requested === "string" ? requested.trim() : "";
-  if (!requestedSize) return allowlist[0] || DEFAULT_IMAGE_SIZES[0];
+  if (!requestedSize) return allowlist[0] || capabilityAllowlist[0] || DEFAULT_IMAGE_SIZES[0];
   if (allowlist.includes(requestedSize)) return requestedSize;
 
   debugWarn("Unsupported image size for current allowlist, fallback to default", {
@@ -252,7 +256,7 @@ function resolveImageSize(requested: unknown, model: string): string {
     allowlist,
     model,
   });
-  return allowlist[0] || DEFAULT_IMAGE_SIZES[0];
+  return allowlist[0] || capabilityAllowlist[0] || DEFAULT_IMAGE_SIZES[0];
 }
 
 function gcd(a: number, b: number): number {
@@ -475,9 +479,10 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ status: "error", error: "Invalid JSON body" }, { status: 400 });
     }
 
-    const { messages: incomingMessages, size, aspect_ratio, n, reference_images, reference_labels, skill, intent, model, executionMode } = body as {
+    const { messages: incomingMessages, size, quality, aspect_ratio, n, reference_images, reference_labels, skill, intent, model, executionMode } = body as {
       messages: Array<{ role: "user" | "assistant" | "system"; content: string }>;
       size?: string;
+      quality?: string;
       aspect_ratio?: string;
       n?: number;
       reference_images?: string[];
@@ -604,8 +609,9 @@ export async function POST(request: NextRequest) {
     if (resolved.intent === "image" && hasReferenceImages) {
       const resolvedImageModel = resolveImageCardModel(model, IMAGE_MODEL);
       const imageSize = resolveImageSize(size, resolvedImageModel);
+      const supportsAspectRatio = getImageModelCapability(resolvedImageModel).supportsAspectRatio;
       const requestedAspectRatio = normalizeAspectRatio(aspect_ratio);
-      const resolvedAspectRatio = requestedAspectRatio || aspectRatioFromSize(imageSize);
+      const resolvedAspectRatio = supportsAspectRatio ? (requestedAspectRatio || aspectRatioFromSize(imageSize)) : "";
       const normalizedReferenceImages = reference_images
         .map((img) => normalizeChatReferenceImage(img))
         .filter((img): img is string => !!img);
@@ -655,7 +661,8 @@ export async function POST(request: NextRequest) {
           prompt: resolved.prompt,
           images: normalizedReferenceImages,
           size: imageSize,
-          aspect_ratio: resolvedAspectRatio,
+          quality: typeof quality === "string" ? quality : undefined,
+          aspect_ratio: resolvedAspectRatio || undefined,
           n: n || 1,
           executionMode: resolvedExecutionMode,
         });
@@ -738,8 +745,9 @@ export async function POST(request: NextRequest) {
       const resolvedImageModel = resolveImageCardModel(model, IMAGE_MODEL);
       const requestedSize = typeof size === "string" ? size : "";
       const imageSize = resolveImageSize(size, resolvedImageModel);
+      const supportsAspectRatio = getImageModelCapability(resolvedImageModel).supportsAspectRatio;
       const requestedAspectRatio = normalizeAspectRatio(aspect_ratio);
-      const resolvedAspectRatio = requestedAspectRatio || aspectRatioFromSize(imageSize);
+      const resolvedAspectRatio = supportsAspectRatio ? (requestedAspectRatio || aspectRatioFromSize(imageSize)) : "";
       debugLog("Resolved image generation dimensions", {
         reqId,
         requestedSize,
@@ -769,7 +777,8 @@ export async function POST(request: NextRequest) {
             model: resolvedImageModel,
             prompt: resolved.prompt,
             size: candidateSize,
-            aspect_ratio: resolvedAspectRatio,
+            quality: typeof quality === "string" ? quality : undefined,
+            aspect_ratio: resolvedAspectRatio || undefined,
             n: n || 1,
             executionMode: resolvedExecutionMode,
           });

@@ -23,6 +23,7 @@ import {
   normalizeTextCardPanelDrafts,
   normalizeProjectSession,
 } from './lib/session-persistence.mjs';
+import { getImageModelCapability } from './lib/image-model-capabilities.mjs';
 import { resolveStateUpdate } from './lib/state-update.mjs';
 import {
   areCanvasUndoSnapshotsEqual,
@@ -189,6 +190,7 @@ interface CanvasUndoSnapshot {
   imageCardPanelDrafts: Record<string, string>;
   imageCardModelById: Record<string, string>;
   imageCardSizeById: Record<string, string>;
+  imageCardQualityById: Record<string, string>;
   imageCardCountById: Record<string, number>;
   imageCardAspectRatioById: Record<string, string>;
 }
@@ -280,8 +282,22 @@ interface CanvasClipboardSnapshot {
   imageCardPanelDrafts: Record<string, string>;
   imageCardModelById: Record<string, string>;
   imageCardSizeById: Record<string, string>;
+  imageCardQualityById: Record<string, string>;
   imageCardCountById: Record<string, number>;
   imageCardAspectRatioById: Record<string, string>;
+}
+
+interface MaterializedCanvasClipboardPaste {
+  items: CanvasItem[];
+  selectedIds: string[];
+  textCardPanelDrafts: Record<string, string>;
+  imageCardPanelDrafts: Record<string, string>;
+  imageCardModelById: Record<string, string>;
+  imageCardSizeById: Record<string, string>;
+  imageCardQualityById: Record<string, string>;
+  imageCardCountById: Record<string, number>;
+  imageCardAspectRatioById: Record<string, string>;
+  nextPasteCount: number;
 }
 
 interface ChatTopic {
@@ -300,6 +316,7 @@ interface SessionLiveState {
   imageCardPanelDrafts: Record<string, string>;
   imageCardModelById: Record<string, string>;
   imageCardSizeById: Record<string, string>;
+  imageCardQualityById: Record<string, string>;
   imageCardCountById: Record<string, number>;
   imageCardAspectRatioById: Record<string, string>;
   chatMessages: ChatMessage[];
@@ -466,6 +483,35 @@ const getImageCardAspectRatioPreviewSize = (aspectRatioId: string) => {
     height: maxPreviewEdge,
   };
 };
+
+const getImageCardSizePresetLabel = (sizeId: string) => {
+  const normalizedSizeId = typeof sizeId === 'string' ? sizeId.trim() : '';
+  if (normalizedSizeId === '1024x1024') return '方图';
+  if (normalizedSizeId === '1536x1024') return '横图';
+  if (normalizedSizeId === '1024x1536') return '竖图';
+  return normalizedSizeId;
+};
+
+const getImageCardSizePreviewSize = (sizeId: string) => {
+  const normalizedSizeId = typeof sizeId === 'string' ? sizeId.trim() : '';
+  if (normalizedSizeId === '1536x1024') {
+    return { width: 18, height: 12 };
+  }
+  if (normalizedSizeId === '1024x1536') {
+    return { width: 12, height: 18 };
+  }
+  return { width: 18, height: 18 };
+};
+
+const IMAGE_CARD_QUALITY_OPTIONS = [
+  { id: 'auto', label: 'Auto' },
+  { id: 'high', label: 'High' },
+  { id: 'medium', label: 'Medium' },
+  { id: 'low', label: 'Low' },
+];
+
+const getImageCardQualityLabel = (qualityId: string) =>
+  IMAGE_CARD_QUALITY_OPTIONS.find((option) => option.id === qualityId)?.label || qualityId;
 
 const getConstrainedImageDisplaySize = (
   naturalWidth: number,
@@ -692,19 +738,52 @@ const extractCanvasGeneratedImageUrls = (result: any): string[] => {
   return typeof result?.result?.localUrl === 'string' ? [result.result.localUrl] : [];
 };
 
-const loadCanvasGeneratedImageMeta = (localUrl: string) =>
-  new Promise<{ src: string; naturalWidth: number; naturalHeight: number }>((resolve, reject) => {
-    const img = new window.Image();
-    img.onload = () => {
-      resolve({
-        src: localUrl,
-        naturalWidth: img.naturalWidth || img.width || IMAGE_CARD_DEFAULT_FRAME_WIDTH,
-        naturalHeight: img.naturalHeight || img.height || IMAGE_CARD_DEFAULT_FRAME_WIDTH,
-      });
-    };
-    img.onerror = () => reject(new Error('生成图片加载失败'));
-    img.src = localUrl;
+const waitForCanvasImagePreview = (delayMs: number) =>
+  new Promise<void>((resolve) => {
+    window.setTimeout(resolve, delayMs);
   });
+
+const loadCanvasGeneratedImageMeta = async (localUrl: string) => {
+  const maxAttempts = 3;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await new Promise<{ src: string; naturalWidth: number; naturalHeight: number }>((resolve, reject) => {
+        const img = new window.Image();
+        img.onload = () => {
+          resolve({
+            src: localUrl,
+            naturalWidth: img.naturalWidth || img.width || IMAGE_CARD_DEFAULT_FRAME_WIDTH,
+            naturalHeight: img.naturalHeight || img.height || IMAGE_CARD_DEFAULT_FRAME_WIDTH,
+          });
+        };
+        img.onerror = () => reject(new Error('生成图片加载失败'));
+        img.src = attempt === 1 ? localUrl : `${localUrl}${localUrl.includes('?') ? '&' : '?'}previewRetry=${attempt}`;
+      });
+    } catch (error) {
+      if (attempt >= maxAttempts) {
+        console.warn('Canvas generated image preview fallback:', {
+          localUrl,
+          attempts: attempt,
+          error: error instanceof Error ? error.message : String(error),
+        });
+        return {
+          src: localUrl,
+          naturalWidth: IMAGE_CARD_DEFAULT_FRAME_WIDTH,
+          naturalHeight: IMAGE_CARD_DEFAULT_FRAME_WIDTH,
+        };
+      }
+
+      await waitForCanvasImagePreview(180);
+    }
+  }
+
+  return {
+    src: localUrl,
+    naturalWidth: IMAGE_CARD_DEFAULT_FRAME_WIDTH,
+    naturalHeight: IMAGE_CARD_DEFAULT_FRAME_WIDTH,
+  };
+};
 
 const stopCanvasWheelFromScrollableRegion: React.WheelEventHandler<HTMLElement> = (e) => {
   e.stopPropagation();
@@ -1628,11 +1707,14 @@ const CanvasViewport = memo(function CanvasViewport({
   imageCardModelOptions,
   selectedImageCardPanelSize,
   selectedImageCardSizeOptions,
+  selectedImageCardPanelQuality,
   selectedImageCardPanelCount,
   selectedImageCardPanelAspectRatio,
+  selectedImageCardSupportsAspectRatio,
   isSelectedImageCardGenerating,
   showImageCardModelMenu,
   imageCardModelMenuRef,
+  imageCardModelPopoverRef,
   showImageCardQualityMenu,
   imageCardQualityMenuRef,
   imageCardQualityPopoverRef,
@@ -1651,6 +1733,7 @@ const CanvasViewport = memo(function CanvasViewport({
   onSelectImageCardModel,
   onToggleImageCardQualityMenu,
   onSelectImageCardSize,
+  onSelectImageCardQuality,
   onToggleImageCardCountMenu,
   onSelectImageCardCount,
   onSelectImageCardAspectRatio,
@@ -1744,11 +1827,14 @@ const CanvasViewport = memo(function CanvasViewport({
   imageCardModelOptions: Array<{ id: string; label: string }>;
   selectedImageCardPanelSize: string;
   selectedImageCardSizeOptions: Array<{ id: string; label: string }>;
+  selectedImageCardPanelQuality: string;
   selectedImageCardPanelCount: number;
   selectedImageCardPanelAspectRatio: string;
+  selectedImageCardSupportsAspectRatio: boolean;
   isSelectedImageCardGenerating: boolean;
   showImageCardModelMenu: boolean;
   imageCardModelMenuRef: React.RefObject<HTMLDivElement | null>;
+  imageCardModelPopoverRef: React.RefObject<HTMLDivElement | null>;
   showImageCardQualityMenu: boolean;
   imageCardQualityMenuRef: React.RefObject<HTMLDivElement | null>;
   imageCardQualityPopoverRef: React.RefObject<HTMLDivElement | null>;
@@ -1767,6 +1853,7 @@ const CanvasViewport = memo(function CanvasViewport({
   onSelectImageCardModel: (modelId: string) => void;
   onToggleImageCardQualityMenu: () => void;
   onSelectImageCardSize: (sizeId: string) => void;
+  onSelectImageCardQuality: (qualityId: string) => void;
   onToggleImageCardCountMenu: () => void;
   onSelectImageCardCount: (count: number) => void;
   onSelectImageCardAspectRatio: (aspectRatioId: string) => void;
@@ -1801,6 +1888,7 @@ const CanvasViewport = memo(function CanvasViewport({
   const selectedTextCardPanelTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const selectedImageCardPanelTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const selectedImageCardPanelRootRef = useRef<HTMLDivElement | null>(null);
+  const [selectedImageCardModelPopoverOffset, setSelectedImageCardModelPopoverOffset] = useState<{ left: number; top: number } | null>(null);
   const [selectedImageCardQualityPopoverOffset, setSelectedImageCardQualityPopoverOffset] = useState<{ left: number; top: number } | null>(null);
   const [selectedImageCardCountPopoverOffset, setSelectedImageCardCountPopoverOffset] = useState<{ left: number; top: number } | null>(null);
   const [selectedTextCardPanelInputMetrics, setSelectedTextCardPanelInputMetrics] = useState(() => ({
@@ -1899,6 +1987,29 @@ const CanvasViewport = memo(function CanvasViewport({
       prev.height === nextMetrics.height && prev.isOverflowing === nextMetrics.isOverflowing ? prev : nextMetrics
     );
   }, [selectedImageCardPanelCanvasWidth, selectedImageCardPanelDisplayInput, selectedImageCardPanelItem]);
+  useLayoutEffect(() => {
+    if (!showImageCardModelMenu || !selectedImageCardPanelItem) {
+      setSelectedImageCardModelPopoverOffset(null);
+      return;
+    }
+
+    const panelElement = selectedImageCardPanelRootRef.current;
+    const anchorElement = imageCardModelMenuRef.current;
+    if (!panelElement || !anchorElement || viewport.scale <= 0) {
+      return;
+    }
+
+    const panelRect = panelElement.getBoundingClientRect();
+    const anchorRect = anchorElement.getBoundingClientRect();
+
+    setSelectedImageCardModelPopoverOffset(
+      resolveFloatingPopoverOffset({
+        panelRect,
+        anchorRect,
+        scale: viewport.scale,
+      })
+    );
+  }, [imageCardModelMenuRef, selectedImageCardPanelItem, showImageCardModelMenu, viewport.scale]);
   useLayoutEffect(() => {
     if (!showImageCardQualityMenu || !selectedImageCardPanelItem) {
       setSelectedImageCardQualityPopoverOffset(null);
@@ -2160,37 +2271,6 @@ const CanvasViewport = memo(function CanvasViewport({
               >
                 <div className="flex min-w-0 items-center gap-5">
                   <div className="relative" ref={imageCardModelMenuRef}>
-                    {showImageCardModelMenu && (
-                      <div
-                        data-text-card-panel-control="true"
-                        className="absolute bottom-full left-0 mb-2 min-w-[248px] overflow-hidden rounded-[18px] border border-white/[0.1] bg-[rgba(24,24,27,0.985)] p-1.5 shadow-[0_24px_64px_rgba(0,0,0,0.42)] backdrop-blur-xl"
-                        onPointerDown={(e) => {
-                          e.stopPropagation();
-                        }}
-                      >
-                        {imageCardModelOptions.map((option) => {
-                          const isSelected = option.id === selectedImageCardModel.id;
-                          return (
-                            <button
-                              key={option.id}
-                              type="button"
-                              onClick={() => {
-                                onSelectImageCardModel(option.id);
-                              }}
-                              className={`flex w-full items-center justify-between rounded-[14px] px-3 py-2.5 text-left transition-colors ${
-                                isSelected ? 'bg-white/[0.08] text-zinc-50' : 'text-zinc-300 hover:bg-white/[0.05]'
-                              }`}
-                            >
-                              <div className="min-w-0">
-                                <div className="truncate text-[13px] font-semibold tracking-[-0.02em]">{option.label}</div>
-                                <div className="truncate text-[11px] text-zinc-500">{option.id}</div>
-                              </div>
-                              {isSelected && <Check size={15} className="ml-3 shrink-0 text-zinc-100" />}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    )}
                     <button
                       data-text-card-panel-control="true"
                       type="button"
@@ -2225,8 +2305,10 @@ const CanvasViewport = memo(function CanvasViewport({
                     >
                       <span>
                         {getImageCardQualitySummary({
+                          modelId: selectedImageCardModel.id,
                           aspectRatio: selectedImageCardPanelAspectRatio,
                           size: selectedImageCardPanelSize,
+                          quality: selectedImageCardSupportsAspectRatio ? '' : getImageCardQualityLabel(selectedImageCardPanelQuality),
                         })}
                       </span>
                       <ChevronDown size={14} className={`text-zinc-500 transition-transform ${showImageCardQualityMenu ? 'rotate-180' : ''}`} />
@@ -2286,6 +2368,44 @@ const CanvasViewport = memo(function CanvasViewport({
               </div>
             </div>
           </div>
+            {showImageCardModelMenu && selectedImageCardModelPopoverOffset && (
+              <div
+                ref={imageCardModelPopoverRef}
+                data-text-card-panel-control="true"
+                className="pointer-events-auto fixed z-[116] min-w-[248px] overflow-hidden rounded-[18px] border border-white/[0.1] bg-[rgba(24,24,27,0.985)] p-1.5 shadow-[0_24px_64px_rgba(0,0,0,0.42)] backdrop-blur-xl"
+                style={{
+                  left: selectedImageCardPanelViewportOrigin.left + selectedImageCardModelPopoverOffset.left * viewport.scale,
+                  top: selectedImageCardPanelViewportOrigin.top + selectedImageCardModelPopoverOffset.top * viewport.scale - 8,
+                  transform: `translateY(-100%) scale(${viewport.scale})`,
+                  transformOrigin: 'top left',
+                }}
+                onPointerDown={(e) => {
+                  e.stopPropagation();
+                }}
+              >
+                {imageCardModelOptions.map((option) => {
+                  const isSelected = option.id === selectedImageCardModel.id;
+                  return (
+                    <button
+                      key={option.id}
+                      type="button"
+                      onClick={() => {
+                        onSelectImageCardModel(option.id);
+                      }}
+                      className={`flex w-full items-center justify-between rounded-[14px] px-3 py-2.5 text-left transition-colors ${
+                        isSelected ? 'bg-white/[0.08] text-zinc-50' : 'text-zinc-300 hover:bg-white/[0.05]'
+                      }`}
+                    >
+                      <div className="min-w-0">
+                        <div className="truncate text-[13px] font-semibold tracking-[-0.02em]">{option.label}</div>
+                        <div className="truncate text-[11px] text-zinc-500">{option.id}</div>
+                      </div>
+                      {isSelected && <Check size={15} className="ml-3 shrink-0 text-zinc-100" />}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
             {showImageCardQualityMenu && selectedImageCardQualityPopoverOffset && (
               <div
                 ref={imageCardQualityPopoverRef}
@@ -2303,57 +2423,66 @@ const CanvasViewport = memo(function CanvasViewport({
                 }}
               >
                 <div className="rounded-[18px] border border-white/[0.06] bg-[rgba(255,255,255,0.025)] p-3">
-                  <div className="mb-2.5 flex items-center justify-between">
-                    <span className="text-[11px] font-medium tracking-[0.04em] text-zinc-500">比例</span>
-                    <span className="text-[11px] font-medium text-zinc-400">
-                      {getImageCardAspectRatioShortLabel(selectedImageCardPanelAspectRatio)}
-                    </span>
-                  </div>
-                  <div className="grid grid-cols-4 gap-1.5">
-                    {ASPECT_RATIOS.filter((option) => option.id !== 'auto').map((option) => {
-                      const isSelected = option.id === selectedImageCardPanelAspectRatio;
-                      const previewSize = getImageCardAspectRatioPreviewSize(option.id);
-                      return (
-                        <button
-                          key={option.id}
-                          type="button"
-                          onClick={() => {
-                            onSelectImageCardAspectRatio(option.id);
-                          }}
-                          className={`flex min-h-[58px] flex-col items-center justify-center gap-1.5 rounded-[14px] border px-1.5 py-2 text-center transition-colors ${
-                            isSelected
-                              ? 'border-white/[0.14] bg-white/[0.09] text-zinc-50 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]'
-                              : 'border-white/[0.06] bg-[rgba(255,255,255,0.02)] text-zinc-300 hover:border-white/[0.12] hover:bg-white/[0.05]'
-                          }`}
-                        >
-                          <span className="flex h-7 w-7 items-center justify-center rounded-[10px] border border-white/[0.08] bg-[rgba(7,8,10,0.28)]">
-                            <span
-                              className={`rounded-[6px] border ${
-                                isSelected ? 'border-zinc-100/80 bg-zinc-100/10' : 'border-zinc-400/60 bg-white/[0.03]'
-                              }`}
-                              style={{
-                                width: `${previewSize.width}px`,
-                                height: `${previewSize.height}px`,
+                  {selectedImageCardSupportsAspectRatio && (
+                    <>
+                      <div className="mb-2.5 flex items-center justify-between">
+                        <span className="text-[11px] font-medium tracking-[0.04em] text-zinc-500">比例</span>
+                        <span className="text-[11px] font-medium text-zinc-400">
+                          {getImageCardAspectRatioShortLabel(selectedImageCardPanelAspectRatio)}
+                        </span>
+                      </div>
+                      <div className="grid grid-cols-4 gap-1.5">
+                        {ASPECT_RATIOS.filter((option) => option.id !== 'auto').map((option) => {
+                          const isSelected = option.id === selectedImageCardPanelAspectRatio;
+                          const previewSize = getImageCardAspectRatioPreviewSize(option.id);
+                          return (
+                            <button
+                              key={option.id}
+                              type="button"
+                              onClick={() => {
+                                onSelectImageCardAspectRatio(option.id);
                               }}
-                            />
-                          </span>
-                          <span className="text-[11px] font-semibold tracking-[-0.02em]">
-                            {option.id}
-                          </span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                  <div className="mt-3.5 border-t border-white/[0.06] pt-3.5">
+                              className={`flex min-h-[58px] flex-col items-center justify-center gap-1.5 rounded-[14px] border px-1.5 py-2 text-center transition-colors ${
+                                isSelected
+                                  ? 'border-white/[0.14] bg-white/[0.09] text-zinc-50 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]'
+                                  : 'border-white/[0.06] bg-[rgba(255,255,255,0.02)] text-zinc-300 hover:border-white/[0.12] hover:bg-white/[0.05]'
+                              }`}
+                            >
+                              <span className="flex h-7 w-7 items-center justify-center rounded-[10px] border border-white/[0.08] bg-[rgba(7,8,10,0.28)]">
+                                <span
+                                  className={`rounded-[6px] border ${
+                                    isSelected ? 'border-zinc-100/80 bg-zinc-100/10' : 'border-zinc-400/60 bg-white/[0.03]'
+                                  }`}
+                                  style={{
+                                    width: `${previewSize.width}px`,
+                                    height: `${previewSize.height}px`,
+                                  }}
+                                />
+                              </span>
+                              <span className="text-[11px] font-semibold tracking-[-0.02em]">
+                                {option.id}
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </>
+                  )}
+                  <div className={`${selectedImageCardSupportsAspectRatio ? 'mt-3.5 border-t border-white/[0.06] pt-3.5' : ''}`}>
                     <div className="mb-2.5 flex items-center justify-between">
-                      <span className="text-[11px] font-medium tracking-[0.04em] text-zinc-500">清晰度</span>
+                      <span className="text-[11px] font-medium tracking-[0.04em] text-zinc-500">
+                        {selectedImageCardSupportsAspectRatio ? '清晰度' : '尺寸'}
+                      </span>
                       <span className="text-[11px] font-medium text-zinc-400">
-                        {selectedImageCardSizeOptions.find((item) => item.id === selectedImageCardPanelSize)?.label || selectedImageCardPanelSize}
+                        {selectedImageCardSupportsAspectRatio
+                          ? selectedImageCardSizeOptions.find((item) => item.id === selectedImageCardPanelSize)?.label || selectedImageCardPanelSize
+                          : getImageCardSizePresetLabel(selectedImageCardPanelSize)}
                       </span>
                     </div>
                     <div className="inline-flex w-full items-center rounded-[14px] border border-white/[0.06] bg-[rgba(255,255,255,0.03)] p-1">
                       {selectedImageCardSizeOptions.map((option) => {
                         const isSelected = option.id === selectedImageCardPanelSize;
+                        const previewSize = getImageCardSizePreviewSize(option.id);
                         return (
                           <button
                             key={option.id}
@@ -2367,12 +2496,60 @@ const CanvasViewport = memo(function CanvasViewport({
                                 : 'text-zinc-300 hover:bg-white/[0.05]'
                             }`}
                           >
-                            {option.label}
+                            {selectedImageCardSupportsAspectRatio ? (
+                              option.label
+                            ) : (
+                              <span className="flex flex-col items-center justify-center gap-1.5">
+                                <span className="flex h-7 w-7 items-center justify-center rounded-[10px] border border-white/[0.08] bg-[rgba(7,8,10,0.28)]">
+                                  <span
+                                    className={`rounded-[6px] border ${
+                                      isSelected ? 'border-black/70 bg-black/10' : 'border-zinc-400/60 bg-white/[0.03]'
+                                    }`}
+                                    style={{
+                                      width: `${previewSize.width}px`,
+                                      height: `${previewSize.height}px`,
+                                    }}
+                                  />
+                                </span>
+                                <span>{getImageCardSizePresetLabel(option.id)}</span>
+                              </span>
+                            )}
                           </button>
                         );
                       })}
                     </div>
                   </div>
+                  {!selectedImageCardSupportsAspectRatio && (
+                    <div className="mt-3.5 border-t border-white/[0.06] pt-3.5">
+                      <div className="mb-2.5 flex items-center justify-between">
+                        <span className="text-[11px] font-medium tracking-[0.04em] text-zinc-500">质量</span>
+                        <span className="text-[11px] font-medium text-zinc-400">
+                          {getImageCardQualityLabel(selectedImageCardPanelQuality)}
+                        </span>
+                      </div>
+                      <div className="inline-flex w-full items-center rounded-[14px] border border-white/[0.06] bg-[rgba(255,255,255,0.03)] p-1">
+                        {IMAGE_CARD_QUALITY_OPTIONS.map((option) => {
+                          const isSelected = option.id === selectedImageCardPanelQuality;
+                          return (
+                            <button
+                              key={option.id}
+                              type="button"
+                              onClick={() => {
+                                onSelectImageCardQuality(option.id);
+                              }}
+                              className={`flex-1 rounded-[11px] px-2.5 py-1.5 text-[12px] font-semibold tracking-[-0.02em] transition-colors ${
+                                isSelected
+                                  ? 'bg-[#f5f7fb] text-black shadow-[0_8px_20px_rgba(0,0,0,0.18)]'
+                                  : 'text-zinc-300 hover:bg-white/[0.05]'
+                              }`}
+                            >
+                              {option.label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
                 </div>
               </div>
             )}
@@ -3368,6 +3545,7 @@ export default function AIWorkspace() {
   const [imageCardPanelDrafts, setImageCardPanelDraftsState] = useState<Record<string, string>>({});
   const [imageCardModelById, setImageCardModelByIdState] = useState<Record<string, string>>({});
   const [imageCardSizeById, setImageCardSizeByIdState] = useState<Record<string, string>>({});
+  const [imageCardQualityById, setImageCardQualityByIdState] = useState<Record<string, string>>({});
   const [imageCardCountById, setImageCardCountByIdState] = useState<Record<string, number>>({});
   const [imageCardAspectRatioById, setImageCardAspectRatioByIdState] = useState<Record<string, string>>({});
   const [selectedTextPanelModelId, setSelectedTextPanelModelId] = useState(getDefaultTextPanelModelOption().id);
@@ -3377,6 +3555,7 @@ export default function AIWorkspace() {
   const [showImageCardCountMenu, setShowImageCardCountMenu] = useState(false);
   const editingTextCardTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const imageCardModelMenuRef = useRef<HTMLDivElement | null>(null);
+  const imageCardModelPopoverRef = useRef<HTMLDivElement | null>(null);
   const imageCardQualityMenuRef = useRef<HTMLDivElement | null>(null);
   const imageCardQualityPopoverRef = useRef<HTMLDivElement | null>(null);
   const imageCardCountMenuRef = useRef<HTMLDivElement | null>(null);
@@ -3388,6 +3567,7 @@ export default function AIWorkspace() {
     imageCardPanelDrafts,
     imageCardModelById,
     imageCardSizeById,
+    imageCardQualityById,
     imageCardCountById,
     imageCardAspectRatioById,
     chatMessages,
@@ -3449,6 +3629,11 @@ export default function AIWorkspace() {
   const setImageCardSizeById = useCallback(
     (value: React.SetStateAction<Record<string, string>>) =>
       applySessionLiveStateUpdate('imageCardSizeById', value, setImageCardSizeByIdState),
+    [applySessionLiveStateUpdate]
+  );
+  const setImageCardQualityById = useCallback(
+    (value: React.SetStateAction<Record<string, string>>) =>
+      applySessionLiveStateUpdate('imageCardQualityById', value, setImageCardQualityByIdState),
     [applySessionLiveStateUpdate]
   );
   const setImageCardCountById = useCallback(
@@ -3586,6 +3771,13 @@ export default function AIWorkspace() {
         imageCardSizeById[selectedImageCardPanelItem.id] ?? IMAGE_CARD_SIZE_OPTIONS[0].id
       )
     : IMAGE_CARD_SIZE_OPTIONS[0].id;
+  const selectedImageCardSupportsAspectRatio = React.useMemo(
+    () => getImageModelCapability(selectedImageCardPanelModelId).supportsAspectRatio,
+    [selectedImageCardPanelModelId]
+  );
+  const selectedImageCardPanelQuality = selectedImageCardPanelItem
+    ? imageCardQualityById[selectedImageCardPanelItem.id] ?? IMAGE_CARD_QUALITY_OPTIONS[0].id
+    : IMAGE_CARD_QUALITY_OPTIONS[0].id;
   const selectedImageCardPanelCount = selectedImageCardPanelItem
     ? imageCardCountById[selectedImageCardPanelItem.id] ?? IMAGE_CARD_COUNT_OPTIONS[0].id
     : IMAGE_CARD_COUNT_OPTIONS[0].id;
@@ -3656,6 +3848,7 @@ export default function AIWorkspace() {
       imageCardPanelDrafts: liveState.imageCardPanelDrafts,
       imageCardModelById: liveState.imageCardModelById,
       imageCardSizeById: liveState.imageCardSizeById,
+      imageCardQualityById: liveState.imageCardQualityById,
       imageCardCountById: liveState.imageCardCountById,
       imageCardAspectRatioById: liveState.imageCardAspectRatioById,
     }) as CanvasUndoSnapshot;
@@ -3719,6 +3912,7 @@ export default function AIWorkspace() {
     setImageCardPanelDrafts(snapshot.imageCardPanelDrafts);
     setImageCardModelById(snapshot.imageCardModelById);
     setImageCardSizeById(snapshot.imageCardSizeById);
+    setImageCardQualityById(snapshot.imageCardQualityById);
     setImageCardCountById(snapshot.imageCardCountById);
     setImageCardAspectRatioById(snapshot.imageCardAspectRatioById);
     setSelectedId(null);
@@ -3823,6 +4017,11 @@ export default function AIWorkspace() {
     });
 
     setImageCardSizeById((prev) => {
+      const nextEntries = Object.entries(prev).filter(([itemId]) => imageCardIds.has(itemId));
+      return nextEntries.length === Object.keys(prev).length ? prev : Object.fromEntries(nextEntries);
+    });
+
+    setImageCardQualityById((prev) => {
       const nextEntries = Object.entries(prev).filter(([itemId]) => imageCardIds.has(itemId));
       return nextEntries.length === Object.keys(prev).length ? prev : Object.fromEntries(nextEntries);
     });
@@ -4522,19 +4721,7 @@ export default function AIWorkspace() {
         offsetStep: CANVAS_CLIPBOARD_PASTE_OFFSET,
         createId: (sourceId: string, index: number) =>
           `${sourceId}-copy-${Date.now()}-${index + 1}-${Math.random().toString(36).slice(2, 7)}`,
-      }) as
-        | ({
-            items: CanvasItem[];
-            selectedIds: string[];
-            textCardPanelDrafts: Record<string, string>;
-            imageCardPanelDrafts: Record<string, string>;
-            imageCardModelById: Record<string, string>;
-            imageCardSizeById: Record<string, string>;
-            imageCardCountById: Record<string, number>;
-            imageCardAspectRatioById: Record<string, string>;
-            nextPasteCount: number;
-          })
-        | null;
+      }) as MaterializedCanvasClipboardPaste | null;
 
       if (!pastedCanvasClipboard) {
         return;
@@ -4547,6 +4734,7 @@ export default function AIWorkspace() {
       setImageCardPanelDrafts((prev) => ({ ...prev, ...pastedCanvasClipboard.imageCardPanelDrafts }));
       setImageCardModelById((prev) => ({ ...prev, ...pastedCanvasClipboard.imageCardModelById }));
       setImageCardSizeById((prev) => ({ ...prev, ...pastedCanvasClipboard.imageCardSizeById }));
+      setImageCardQualityById((prev) => ({ ...prev, ...pastedCanvasClipboard.imageCardQualityById }));
       setImageCardCountById((prev) => ({ ...prev, ...pastedCanvasClipboard.imageCardCountById }));
       setImageCardAspectRatioById((prev) => ({ ...prev, ...pastedCanvasClipboard.imageCardAspectRatioById }));
       setSelectedConnectionIds([]);
@@ -6348,6 +6536,7 @@ export default function AIWorkspace() {
       linkedImagePreviews,
       modelId,
       size,
+      quality,
       count,
       aspectRatio,
     }: {
@@ -6356,6 +6545,7 @@ export default function AIWorkspace() {
       linkedImagePreviews: Array<{ id: string; src: string; label: string; alt?: string }>;
       modelId: string;
       size: string;
+      quality: string;
       count: number;
       aspectRatio: string;
     }) => {
@@ -6456,6 +6646,7 @@ export default function AIWorkspace() {
           linkedImagePreviews,
           modelId,
           size,
+          quality,
           count,
           aspectRatio,
         });
@@ -7624,6 +7815,7 @@ export default function AIWorkspace() {
       linkedImagePreviews: selectedImageCardPanelLinkedImagePreviews,
       modelId: selectedImageCardPanelModelId,
       size: selectedImageCardPanelSize,
+      quality: selectedImageCardPanelQuality,
       count: selectedImageCardPanelCount,
       aspectRatio: selectedImageCardPanelAspectRatio,
     });
@@ -7631,6 +7823,7 @@ export default function AIWorkspace() {
     activeCanvasImageGenerations,
     commitPendingCanvasUndoSnapshot,
     handleCanvasImageGenerate,
+    selectedImageCardPanelQuality,
     selectedImageCardPanelCount,
     selectedImageCardPanelAspectRatio,
     selectedImageCardPanelItem,
@@ -7731,6 +7924,7 @@ export default function AIWorkspace() {
       imageCardPanelDrafts: liveState.imageCardPanelDrafts,
       imageCardModelById: liveState.imageCardModelById,
       imageCardSizeById: liveState.imageCardSizeById,
+      imageCardQualityById: liveState.imageCardQualityById,
       imageCardCountById: liveState.imageCardCountById,
       imageCardAspectRatioById: liveState.imageCardAspectRatioById,
       connections: liveState.connections,
@@ -7767,6 +7961,7 @@ export default function AIWorkspace() {
       imageCardPanelDrafts: resolvedState.normalizedSession?.imageCardPanelDrafts || {},
       imageCardModelById: resolvedState.normalizedSession?.imageCardModelById || {},
       imageCardSizeById: resolvedState.normalizedSession?.imageCardSizeById || {},
+      imageCardQualityById: resolvedState.normalizedSession?.imageCardQualityById || {},
       imageCardCountById: resolvedState.normalizedSession?.imageCardCountById || {},
       imageCardAspectRatioById: resolvedState.normalizedSession?.imageCardAspectRatioById || {},
       viewport: resolvedState.viewport || { x: 0, y: 0, scale: 1 },
@@ -7784,6 +7979,7 @@ export default function AIWorkspace() {
     setImageCardPanelDraftsState(resolvedState.normalizedSession?.imageCardPanelDrafts || {});
     setImageCardModelByIdState(resolvedState.normalizedSession?.imageCardModelById || {});
     setImageCardSizeByIdState(resolvedState.normalizedSession?.imageCardSizeById || {});
+    setImageCardQualityByIdState(resolvedState.normalizedSession?.imageCardQualityById || {});
     setImageCardCountByIdState(resolvedState.normalizedSession?.imageCardCountById || {});
     setImageCardAspectRatioByIdState(resolvedState.normalizedSession?.imageCardAspectRatioById || {});
     if (resolvedState.shouldResetWelcome) {
@@ -7815,7 +8011,7 @@ export default function AIWorkspace() {
       activeSkill,
       generatedImageHistoryBySession,
     }),
-    [activeSkill, chatMessages, connections, generatedImageHistoryBySession, imageCardAspectRatioById, imageCardCountById, imageCardModelById, imageCardPanelDrafts, imageCardSizeById, imageCount, items, textCardPanelDrafts, viewport]
+    [activeSkill, chatMessages, connections, generatedImageHistoryBySession, imageCardAspectRatioById, imageCardCountById, imageCardModelById, imageCardPanelDrafts, imageCardQualityById, imageCardSizeById, imageCount, items, textCardPanelDrafts, viewport]
   );
 
   const {
@@ -8421,6 +8617,7 @@ export default function AIWorkspace() {
       imageCardPanelDrafts,
       imageCardModelById,
       imageCardSizeById,
+      imageCardQualityById,
       imageCardCountById,
       imageCardAspectRatioById,
     }) as CanvasClipboardSnapshot | null;
@@ -8439,6 +8636,7 @@ export default function AIWorkspace() {
     imageCardCountById,
     imageCardModelById,
     imageCardPanelDrafts,
+    imageCardQualityById,
     imageCardSizeById,
     selectedIds,
     textCardPanelDrafts,
@@ -8608,7 +8806,10 @@ export default function AIWorkspace() {
       if (textPanelModelMenuRef.current && !textPanelModelMenuRef.current.contains(e.target as Node)) {
         setShowTextPanelModelMenu(false);
       }
-      if (imageCardModelMenuRef.current && !imageCardModelMenuRef.current.contains(e.target as Node)) {
+      const isInsideImageCardModelMenu =
+        !!imageCardModelMenuRef.current?.contains(e.target as Node) ||
+        !!imageCardModelPopoverRef.current?.contains(e.target as Node);
+      if (!isInsideImageCardModelMenu) {
         setShowImageCardModelMenu(false);
       }
       const isInsideImageCardQualityMenu =
@@ -9224,11 +9425,14 @@ export default function AIWorkspace() {
         imageCardModelOptions={IMAGE_CARD_MODEL_OPTIONS}
         selectedImageCardPanelSize={selectedImageCardPanelSize}
         selectedImageCardSizeOptions={selectedImageCardSizeOptions}
+        selectedImageCardPanelQuality={selectedImageCardPanelQuality}
         selectedImageCardPanelCount={selectedImageCardPanelCount}
         selectedImageCardPanelAspectRatio={selectedImageCardPanelAspectRatio}
+        selectedImageCardSupportsAspectRatio={selectedImageCardSupportsAspectRatio}
         isSelectedImageCardGenerating={isSelectedImageCardGenerating}
         showImageCardModelMenu={showImageCardModelMenu}
         imageCardModelMenuRef={imageCardModelMenuRef}
+        imageCardModelPopoverRef={imageCardModelPopoverRef}
         showImageCardQualityMenu={showImageCardQualityMenu}
         imageCardQualityMenuRef={imageCardQualityMenuRef}
         imageCardQualityPopoverRef={imageCardQualityPopoverRef}
@@ -9282,6 +9486,14 @@ export default function AIWorkspace() {
             [selectedImageCardPanelItem.id]: resolveImageCardSize(selectedImageCardPanelModelId, sizeId),
           }));
           setShowImageCardQualityMenu(false);
+        }}
+        onSelectImageCardQuality={(qualityId) => {
+          if (!selectedImageCardPanelItem) return;
+          recordCurrentCanvasUndoSnapshot();
+          setImageCardQualityById((prev) => ({
+            ...prev,
+            [selectedImageCardPanelItem.id]: qualityId,
+          }));
         }}
         onToggleImageCardCountMenu={() => {
           setShowImageCardModelMenu(false);

@@ -15,6 +15,9 @@ const SUPPORTED_GEMINI_OFFICIAL_IMAGE_MODELS = new Set([
   "gemini-3.1-flash-image-preview",
   "gemini-3-pro-image-preview",
 ]);
+const SUPPORTED_OPENAI_COMPATIBLE_IMAGE_MODELS = new Set([
+  "gpt-image-2",
+]);
 const EXACT_IMAGE_SIZE_REQUEST_SIZES = new Set([
   "1024x1024",
   "2048x2048",
@@ -285,6 +288,10 @@ function getGeminiOfficialApiBaseUrl(providerTargets: ReturnType<typeof resolveP
   return providerTargets.geminiBaseUrl;
 }
 
+function getOpenAiCompatibleImageApiBaseUrl(providerTargets: ReturnType<typeof resolveProviderRequestTargets>): string {
+  return providerTargets.openAiBaseUrl;
+}
+
 async function getProviderTransport() {
   const providerConfig = await readProviderConfig();
   const providerTargets = resolveProviderRequestTargets(providerConfig.config.baseUrl);
@@ -307,6 +314,11 @@ function normalizeImageRequestModel(model?: string): string {
 function isGeminiOfficialImageModel(model?: string): boolean {
   const normalizedModel = normalizeImageRequestModel(model);
   return normalizedModel.length > 0 && SUPPORTED_GEMINI_OFFICIAL_IMAGE_MODELS.has(normalizedModel);
+}
+
+function isOpenAiCompatibleImageModel(model?: string): boolean {
+  const normalizedModel = normalizeImageRequestModel(model);
+  return normalizedModel.length > 0 && SUPPORTED_OPENAI_COMPATIBLE_IMAGE_MODELS.has(normalizedModel);
 }
 
 export function shouldUseExactImageSizeApi(model?: string, size?: string): boolean {
@@ -902,6 +914,173 @@ async function generateGeminiOfficialImage(request: UnifiedImageRequest): Promis
   });
 }
 
+async function generateOpenAiCompatibleImage(request: UnifiedImageRequest): Promise<GenerationResponse> {
+  const { providerConfig, providerTargets, apiKey } = await getProviderTransport();
+  if (!apiKey) {
+    throw new ImageGenerationError("Please configure a supplier API Key in settings or environment");
+  }
+
+  const model = normalizeImageRequestModel(request.model);
+  if (!isOpenAiCompatibleImageModel(model)) {
+    throw new ImageGenerationError(`OpenAI compatible image request failed: model "${request.model}" is not supported`, 400);
+  }
+
+  const endpoint = `${getOpenAiCompatibleImageApiBaseUrl(providerTargets)}/images/generations`;
+  const prompt = typeof request.prompt === "string" ? request.prompt : "";
+  const referenceImages = Array.isArray(request.images) ? request.images.filter(Boolean) : [];
+  const supportsAspectRatio = getImageModelCapability(model).supportsAspectRatio;
+  const aspectRatio = supportsAspectRatio ? (normalizeAspectRatio(request.aspect_ratio) || toAspectRatio(request.size)) : "";
+  const requestBody: Record<string, unknown> = {
+    model,
+    prompt,
+  };
+
+  if (typeof request.size === "string" && request.size.trim()) {
+    requestBody.size = request.size.trim();
+  }
+  if (typeof request.quality === "string" && request.quality.trim()) {
+    requestBody.quality = request.quality.trim();
+  }
+  if (supportsAspectRatio && aspectRatio) {
+    requestBody.aspect_ratio = aspectRatio;
+  }
+  if (referenceImages.length > 0) {
+    requestBody.image = referenceImages;
+  }
+
+  const attempt = 1;
+  const maxAttempts = 1;
+  let requestStartedAt = Date.now();
+
+  try {
+    requestStartedAt = Date.now();
+    basicLog("[SUPPLIER][REQ]", {
+      method: "POST",
+      endpoint,
+      host: getEndpointHost(endpoint),
+      mode: "openai_compatible_image",
+      model,
+      imageSize: typeof requestBody.size === "string" ? requestBody.size : null,
+      aspectRatio,
+      referenceCount: referenceImages.length,
+      providerId: providerConfig.config.providerId,
+      attempt,
+      maxAttempts,
+    });
+
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(requestBody),
+      signal: request.signal,
+    });
+
+    basicLog("[SUPPLIER][RES]", {
+      method: "POST",
+      endpoint,
+      mode: "openai_compatible_image",
+      status: response.status,
+      statusText: response.statusText,
+      durationMs: Date.now() - requestStartedAt,
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new ImageGenerationError(
+        `OpenAI compatible image request failed: ${errorText || response.statusText}`,
+        response.status,
+        {
+          failureClass: "upstream_http",
+          isRetryable: false,
+          retryAttempt: attempt,
+        }
+      );
+    }
+
+    const payload = await response.json();
+    const outputs = toImageEntries(payload);
+
+    basicLog("[SUPPLIER][PARSE]", {
+      endpoint: "/images/generations",
+      mode: "openai_compatible_image",
+      imageCount: outputs.length,
+      imageSize: typeof requestBody.size === "string" ? requestBody.size : null,
+      aspectRatio,
+      referenceCount: referenceImages.length,
+    });
+
+    if (outputs.length === 0) {
+      basicLog("[SUPPLIER][PARSE_EMPTY]", {
+        endpoint: "/images/generations",
+        mode: "openai_compatible_image",
+        imageSize: typeof requestBody.size === "string" ? requestBody.size : null,
+        aspectRatio,
+        referenceCount: referenceImages.length,
+        ...summarizeImagePayloadCounts(payload),
+      });
+      throw new ImageGenerationError("OpenAI compatible image request returned no images", 502, {
+        failureClass: "payload",
+        isRetryable: false,
+        retryAttempt: attempt,
+      });
+    }
+
+    return {
+      created: Math.floor(Date.now() / 1000),
+      data: outputs,
+    };
+  } catch (error) {
+    const failureState = classifyGeminiImageTransportFailure(error);
+
+    basicLog("[SUPPLIER][ERR]", {
+      endpoint: "/images/generations",
+      mode: "openai_compatible_image",
+      requestedModel: request.model,
+      normalizedModel: model,
+      imageSize: typeof requestBody.size === "string" ? requestBody.size : null,
+      aspectRatio,
+      referenceCount: referenceImages.length,
+      failureClass: failureState.failureClass,
+      isRetryable: failureState.isRetryable,
+      retryAttempt: attempt,
+      requestCount: request.n || 1,
+      ...buildSupplierRequestDiagnostics({
+        endpoint,
+        requestStartedAt,
+        attempt,
+        maxAttempts,
+      }),
+      ...getErrorDiagnostics(error),
+    });
+
+    if (error instanceof ImageGenerationError) {
+      if (!error.failureClass) {
+        error.failureClass = failureState.failureClass;
+      }
+      if (typeof error.isRetryable !== "boolean") {
+        error.isRetryable = failureState.isRetryable;
+      }
+      if (typeof error.retryAttempt !== "number") {
+        error.retryAttempt = attempt;
+      }
+      throw error;
+    }
+
+    throw new ImageGenerationError(
+      error instanceof Error ? `OpenAI compatible image request failed: ${error.message}` : "OpenAI compatible image request failed",
+      502,
+      {
+        failureClass: failureState.failureClass,
+        isRetryable: failureState.isRetryable,
+        retryAttempt: attempt,
+      }
+    );
+  }
+}
+
 export async function runImageTask(request: UnifiedImageRequest): Promise<GenerationResponse> {
   const images = Array.isArray(request.images) ? request.images.filter(Boolean) : [];
   const normalizedModel = normalizeImageRequestModel(request.model);
@@ -916,6 +1095,14 @@ export async function runImageTask(request: UnifiedImageRequest): Promise<Genera
 
   if (isGeminiOfficialImageModel(normalizedModel)) {
     return generateGeminiOfficialImage({
+      ...request,
+      model: normalizedModel,
+      images,
+    });
+  }
+
+  if (isOpenAiCompatibleImageModel(normalizedModel)) {
+    return generateOpenAiCompatibleImage({
       ...request,
       model: normalizedModel,
       images,
@@ -1387,6 +1574,7 @@ export const AVAILABLE_MODELS = [
   { id: "flux-pro", name: "Flux Pro", provider: "Flux" },
   { id: "dall-e-3", name: "DALL-E 3", provider: "OpenAI" },
   { id: "gpt-image-1", name: "GPT Image 1", provider: "OpenAI" },
+  { id: "gpt-image-2", name: "GPT Image 2", provider: "OpenAI" },
   { id: "stable-diffusion-v3-medium", name: "SD3 Medium", provider: "Stability AI" },
 ];
 

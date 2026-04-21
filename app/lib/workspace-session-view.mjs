@@ -4,6 +4,7 @@ import {
   normalizeGeneratedImageHistory,
 } from './generated-image-history.mjs';
 import {
+  getImageModelCapability,
   getImageSizeLabel,
   getSupportedImageSizeOptions,
   resolveSupportedImageSize,
@@ -23,6 +24,10 @@ export const IMAGE_CARD_MODEL_OPTIONS = [
   {
     id: 'gemini-3.1-flash-image-preview',
     label: 'Gemini 3.1 Flash Image',
+  },
+  {
+    id: 'gpt-image-2',
+    label: 'GPT Image 2',
   },
   {
     id: 'gemini-2.5-flash-image',
@@ -189,11 +194,23 @@ export function getImageCardItemSizeForNaturalImage(
   );
 }
 
-export function getImageCardQualitySummary({ aspectRatio, size }) {
+export function getImageCardQualitySummary({ modelId, aspectRatio, size, quality }) {
+  const capability = getImageModelCapability(modelId);
   const normalizedAspectRatio = normalizeImageCardAspectRatio(aspectRatio);
   const normalizedSize = typeof size === 'string' ? size.trim() : '';
-  const sizeLabel = getImageSizeLabel(normalizedSize);
+  const sizeLabel = getImageSizeLabel(modelId, normalizedSize);
+  const normalizedQuality = typeof quality === 'string' ? quality.trim() : '';
 
+  if (!capability.supportsAspectRatio) {
+    let presetLabel = sizeLabel;
+    if (normalizedSize === '1024x1024') presetLabel = '方图';
+    if (normalizedSize === '1536x1024') presetLabel = '横图';
+    if (normalizedSize === '1024x1536') presetLabel = '竖图';
+    if (normalizedQuality) {
+      return `${presetLabel} · ${normalizedQuality}`;
+    }
+    return presetLabel;
+  }
   return `${normalizedAspectRatio} · ${sizeLabel}`;
 }
 
@@ -522,6 +539,7 @@ export function createCanvasClipboardSnapshot({
   imageCardPanelDrafts = {},
   imageCardModelById = {},
   imageCardSizeById = {},
+  imageCardQualityById = {},
   imageCardCountById = {},
   imageCardAspectRatioById = {},
 }) {
@@ -569,6 +587,7 @@ export function createCanvasClipboardSnapshot({
     imageCardPanelDrafts: pickClipboardStateByIds(imageCardPanelDrafts, idMap),
     imageCardModelById: pickClipboardStateByIds(imageCardModelById, idMap),
     imageCardSizeById: pickClipboardStateByIds(imageCardSizeById, idMap),
+    imageCardQualityById: pickClipboardStateByIds(imageCardQualityById, idMap),
     imageCardCountById: pickClipboardStateByIds(imageCardCountById, idMap),
     imageCardAspectRatioById: pickClipboardStateByIds(imageCardAspectRatioById, idMap),
   };
@@ -611,6 +630,7 @@ export function materializeCanvasClipboardPaste({
     imageCardPanelDrafts: pickClipboardStateByIds(clipboard?.imageCardPanelDrafts, remappedIds),
     imageCardModelById: pickClipboardStateByIds(clipboard?.imageCardModelById, remappedIds),
     imageCardSizeById: pickClipboardStateByIds(clipboard?.imageCardSizeById, remappedIds),
+    imageCardQualityById: pickClipboardStateByIds(clipboard?.imageCardQualityById, remappedIds),
     imageCardCountById: pickClipboardStateByIds(clipboard?.imageCardCountById, remappedIds),
     imageCardAspectRatioById: pickClipboardStateByIds(clipboard?.imageCardAspectRatioById, remappedIds),
     nextPasteCount: safePasteCount + 1,
@@ -1186,6 +1206,7 @@ export function buildCanvasImageGenerationRequest({
   linkedImagePreviews = [],
   modelId,
   size,
+  quality = 'auto',
   count,
   aspectRatio = 'auto',
   executionMode = 'async',
@@ -1194,6 +1215,7 @@ export function buildCanvasImageGenerationRequest({
   const references = buildReferenceImageRequestPayload(linkedImagePreviews);
   const resolvedModel = resolveImageCardModel(modelId);
   const resolvedSize = resolveImageCardSize(resolvedModel, size);
+  const supportsAspectRatio = getImageModelCapability(resolvedModel).supportsAspectRatio;
 
   const request = {
     messages: [{ role: 'user', content: trimmedInput }],
@@ -1212,7 +1234,11 @@ export function buildCanvasImageGenerationRequest({
     request.n = count;
   }
 
-  if (typeof aspectRatio === 'string' && aspectRatio.trim() && aspectRatio !== 'auto') {
+  if (!supportsAspectRatio && typeof quality === 'string' && quality.trim()) {
+    request.quality = quality.trim();
+  }
+
+  if (supportsAspectRatio && typeof aspectRatio === 'string' && aspectRatio.trim() && aspectRatio !== 'auto') {
     request.aspect_ratio = aspectRatio;
   }
 
@@ -1233,6 +1259,7 @@ export function buildAsyncImageTaskRequests({
   linkedImagePreviews = [],
   modelId,
   size,
+  quality = 'auto',
   count,
   aspectRatio = 'auto',
 }) {
@@ -1247,6 +1274,7 @@ export function buildAsyncImageTaskRequests({
       linkedImagePreviews,
       modelId,
       size,
+      quality,
       count: 1,
       aspectRatio,
       executionMode: 'async',

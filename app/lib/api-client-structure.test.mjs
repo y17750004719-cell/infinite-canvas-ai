@@ -75,6 +75,28 @@ test('api-client keeps gemini-3.1 flash image preview as an official Gemini imag
   );
 });
 
+test('api-client also supports gpt-image-2 through the OpenAI compatible image path', () => {
+  const supportedOpenAiCompatibleSection =
+    apiClientSource.match(/const SUPPORTED_OPENAI_COMPATIBLE_IMAGE_MODELS = new Set\(\[(.*?)\]\);/s)?.[1] || '';
+  assert.equal(supportedOpenAiCompatibleSection.includes('"gpt-image-2"'), true);
+  assert.equal(
+    apiClientSource.includes('function isOpenAiCompatibleImageModel(model?: string): boolean {'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('return normalizedModel.length > 0 && SUPPORTED_OPENAI_COMPATIBLE_IMAGE_MODELS.has(normalizedModel);'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('if (isOpenAiCompatibleImageModel(normalizedModel)) {'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('return generateOpenAiCompatibleImage({'),
+    true
+  );
+});
+
 test('api-client keeps official Gemini image request formatting for 1K 2K and 4K outputs', () => {
   assert.equal(apiClientSource.includes('resolveGeminiOfficialImageSize'), true);
   assert.equal(apiClientSource.includes('imageSize'), true);
@@ -314,6 +336,45 @@ test('api-client exposes 4Z documented image request models in the available mod
   );
   assert.equal(
     apiClientSource.includes('{ id: "gemini-3-pro-image-preview", name: "Gemini 3 Pro (Image)", provider: "Google" }'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('{ id: "gpt-image-2", name: "GPT Image 2", provider: "OpenAI" }'),
+    true
+  );
+});
+
+test('api-client builds an OpenAI compatible image request body with image references for gpt-image-2', () => {
+  assert.equal(
+    apiClientSource.includes('const endpoint = `${getOpenAiCompatibleImageApiBaseUrl(providerTargets)}/images/generations`;'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('mode: "openai_compatible_image"'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('requestBody.image = referenceImages;'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('const supportsAspectRatio = getImageModelCapability(model).supportsAspectRatio;'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('requestBody.quality = request.quality.trim();'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('if (supportsAspectRatio && aspectRatio) {'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('requestBody.aspect_ratio = aspectRatio;'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('const outputs = toImageEntries(payload);'),
     true
   );
 });

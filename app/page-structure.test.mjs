@@ -27,6 +27,24 @@ test('image card floating menus are not rendered inside the pending connection m
   );
 });
 
+test('image card model menu uses a dedicated fixed popover outside the clipped panel footer', () => {
+  assert.equal(pageSource.includes('const [selectedImageCardModelPopoverOffset, setSelectedImageCardModelPopoverOffset] = useState<{ left: number; top: number } | null>(null);'), true);
+  assert.equal(pageSource.includes('imageCardModelPopoverRef: React.RefObject<HTMLDivElement | null>;'), true);
+  assert.equal(pageSource.includes('{showImageCardModelMenu && selectedImageCardModelPopoverOffset && ('), true);
+  assert.equal(pageSource.includes('ref={imageCardModelPopoverRef}'), true);
+  assert.equal(pageSource.includes('className="pointer-events-auto fixed z-[116] min-w-[248px] overflow-hidden rounded-[18px] border border-white/[0.1] bg-[rgba(24,24,27,0.985)] p-1.5 shadow-[0_24px_64px_rgba(0,0,0,0.42)] backdrop-blur-xl"'), true);
+  assert.equal(pageSource.includes("transform: `translateY(-100%) scale(${viewport.scale})`"), true);
+});
+
+test('canvas image preview metadata retries local asset loading before falling back to default dimensions', () => {
+  assert.equal(pageSource.includes('const waitForCanvasImagePreview = (delayMs: number) =>'), true);
+  assert.equal(pageSource.includes('const maxAttempts = 3;'), true);
+  assert.equal(pageSource.includes("img.src = attempt === 1 ? localUrl : `${localUrl}${localUrl.includes('?') ? '&' : '?'}previewRetry=${attempt}`;"), true);
+  assert.equal(pageSource.includes("console.warn('Canvas generated image preview fallback:'"), true);
+  assert.equal(pageSource.includes('naturalWidth: IMAGE_CARD_DEFAULT_FRAME_WIDTH,'), true);
+  assert.equal(pageSource.includes('naturalHeight: IMAGE_CARD_DEFAULT_FRAME_WIDTH,'), true);
+});
+
 test('image card content images fill the card content area with object-cover', () => {
   const imageCardContentStart = pageSource.indexOf("{imageCardVisualState === 'content' && item.src && (");
   const imageCardContentEnd = pageSource.indexOf('{item.type === \'shape\' &&', imageCardContentStart);
@@ -81,6 +99,24 @@ test('left rail generated image history panel uses a wider layout than the origi
 test('image card quality controls use model-driven size options without rendering actual resolution helper text', () => {
   assert.equal(pageSource.includes('const selectedImageCardSizeOptions = React.useMemo('), true);
   assert.equal(pageSource.includes('getSupportedImageCardSizeOptions(selectedImageCardPanelModelId)'), true);
+  assert.equal(pageSource.includes('const selectedImageCardSupportsAspectRatio = React.useMemo('), true);
+  assert.equal(pageSource.includes('() => getImageModelCapability(selectedImageCardPanelModelId).supportsAspectRatio,'), true);
+  assert.equal(pageSource.includes('const IMAGE_CARD_QUALITY_OPTIONS = ['), true);
+  assert.equal(pageSource.includes("label: 'Auto'"), true);
+  assert.equal(pageSource.includes("label: 'High'"), true);
+  assert.equal(pageSource.includes("label: 'Medium'"), true);
+  assert.equal(pageSource.includes("label: 'Low'"), true);
+  assert.equal(pageSource.includes('selectedImageCardPanelQuality={selectedImageCardPanelQuality}'), true);
+  assert.equal(pageSource.includes('onSelectImageCardQuality={(qualityId) => {'), true);
+  assert.equal(pageSource.includes('{selectedImageCardSupportsAspectRatio && ('), true);
+  assert.equal(pageSource.includes("getImageCardQualitySummary({\n                          modelId: selectedImageCardModel.id,"), true);
+  assert.equal(pageSource.includes('const getImageCardSizePresetLabel = (sizeId: string) =>'), true);
+  assert.equal(pageSource.includes("if (normalizedSizeId === '1024x1024') return '方图';"), true);
+  assert.equal(pageSource.includes("if (normalizedSizeId === '1536x1024') return '横图';"), true);
+  assert.equal(pageSource.includes("if (normalizedSizeId === '1024x1536') return '竖图';"), true);
+  assert.equal(pageSource.includes('const getImageCardSizePreviewSize = (sizeId: string) =>'), true);
+  assert.equal(pageSource.includes("!selectedImageCardSupportsAspectRatio && ("), true);
+  assert.equal(pageSource.includes(">{getImageCardQualityLabel(selectedImageCardPanelQuality)}<"), false);
   assert.equal(pageSource.includes('const selectedImageCardResolutionStatus = React.useMemo('), false);
   assert.equal(pageSource.includes('实际尺寸'), false);
   assert.equal(pageSource.includes('selectedImageCardResolutionStatus.warning'), false);

@@ -30,6 +30,10 @@ const normalizeSnapshot = (snapshot) => ({
     snapshot?.imageCardSizeById && typeof snapshot.imageCardSizeById === 'object'
       ? cloneValue(snapshot.imageCardSizeById)
       : {},
+  imageCardQualityById:
+    snapshot?.imageCardQualityById && typeof snapshot.imageCardQualityById === 'object'
+      ? cloneValue(snapshot.imageCardQualityById)
+      : {},
   imageCardCountById:
     snapshot?.imageCardCountById && typeof snapshot.imageCardCountById === 'object'
       ? cloneValue(snapshot.imageCardCountById)
