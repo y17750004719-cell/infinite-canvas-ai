@@ -5,7 +5,6 @@ import {
 } from './generated-image-history.mjs';
 import {
   getImageSizeLabel,
-  resolveImageRequestModel,
   getSupportedImageSizeOptions,
   resolveSupportedImageSize,
 } from './image-model-capabilities.mjs';
@@ -36,16 +35,8 @@ export const IMAGE_CARD_MODEL_OPTIONS = [
 ];
 
 export const IMAGE_CARD_SIZE_OPTIONS = getSupportedImageSizeOptions(IMAGE_CARD_MODEL_OPTIONS[0]?.id);
-
-const SERIAL_EXACT_SIZE_IMAGE_MODELS = new Set([
-  'gemini-3.1-flash-image-preview',
-  'gemini-2.5-flash-image',
-]);
-const SERIAL_EXACT_SIZE_REQUEST_SIZES = new Set([
-  '1024x1024',
-  '2048x2048',
-  '4096x4096',
-]);
+const CANVAS_BACKGROUND_BASE_DOT_GAP = 20;
+const CANVAS_BACKGROUND_MIN_DOT_GAP = 14;
 
 export function getDefaultTextPanelModelOption() {
   return TEXT_PANEL_MODEL_OPTIONS[0];
@@ -390,6 +381,22 @@ export function finalizeManualTextCardItem(item) {
     ...item,
     textMode: 'manual',
   };
+}
+
+export function resolveCanvasBackgroundDotGap(
+  scale,
+  {
+    baseGap = CANVAS_BACKGROUND_BASE_DOT_GAP,
+    minimumGap = CANVAS_BACKGROUND_MIN_DOT_GAP,
+  } = {}
+) {
+  const safeScale = Number.isFinite(scale) && scale > 0 ? scale : 1;
+  const safeBaseGap = Number.isFinite(baseGap) && baseGap > 0 ? baseGap : CANVAS_BACKGROUND_BASE_DOT_GAP;
+  const safeMinimumGap = Number.isFinite(minimumGap) && minimumGap > 0
+    ? Math.min(minimumGap, safeBaseGap)
+    : Math.min(CANVAS_BACKGROUND_MIN_DOT_GAP, safeBaseGap);
+
+  return Math.max(safeMinimumGap, safeBaseGap * safeScale);
 }
 
 export function isImageCardItem(item) {
@@ -1194,7 +1201,7 @@ export function buildCanvasImageGenerationRequest({
   };
 
   if (resolvedModel) {
-    request.model = resolveImageRequestModel(resolvedModel, resolvedSize);
+    request.model = resolvedModel;
   }
 
   if (typeof resolvedSize === 'string' && resolvedSize.trim()) {
@@ -1252,18 +1259,6 @@ export function resolveCanvasImageTaskExecutionMode({
   size,
   count,
 }) {
-  const normalizedModelId = typeof modelId === 'string' ? modelId.trim() : '';
-  const normalizedSize = typeof size === 'string' ? size.trim() : '';
-  const safeCount = Number.isFinite(count) && count > 0 ? Math.floor(count) : 0;
-
-  if (
-    safeCount > 1 &&
-    SERIAL_EXACT_SIZE_IMAGE_MODELS.has(normalizedModelId) &&
-    SERIAL_EXACT_SIZE_REQUEST_SIZES.has(normalizedSize)
-  ) {
-    return 'serial';
-  }
-
   return 'parallel';
 }
 

@@ -82,6 +82,7 @@ import {
   normalizeImageCardAspectRatio,
   removeCanvasTextGenerationEntry,
   resolveCanvasImageTaskExecutionMode,
+  resolveCanvasBackgroundDotGap,
   resolveFloatingPopoverOffset,
   resolveImageCardModel,
   resolveImageCardSize,
@@ -825,13 +826,15 @@ const CanvasBackgroundLayer = memo(function CanvasBackgroundLayer({
 }: {
   viewport: ViewportState;
 }) {
+  const dotGap = resolveCanvasBackgroundDotGap(viewport.scale);
+
   return (
     <div
       className="pointer-events-none absolute inset-0"
       style={{
         backgroundColor: DARK_THEME.appBg,
         backgroundImage: `radial-gradient(${DARK_THEME.canvasDot} 0.9px, transparent 0.9px)`,
-        backgroundSize: `${20 * viewport.scale}px ${20 * viewport.scale}px`,
+        backgroundSize: `${dotGap}px ${dotGap}px`,
         backgroundPosition: `${viewport.x}px ${viewport.y}px`,
       }}
     />
@@ -1428,35 +1431,55 @@ const CanvasNodesLayer = memo(function CanvasNodesLayer({
                         className="panel-scrollbar h-full min-w-0 w-full overflow-y-auto"
                         onWheel={stopCanvasWheelFromScrollableRegion}
                       >
-                        <div className="min-h-full w-full min-w-0 break-words">
+                        <div
+                          data-assistant-selectable="true"
+                          className="assistant-selectable-node pointer-events-auto min-h-full w-full min-w-0 break-words px-6 py-5"
+                          onPointerDown={(e) => {
+                            e.stopPropagation();
+                          }}
+                          onDoubleClick={(e) => {
+                            e.stopPropagation();
+                          }}
+                        >
                           <TextCardMarkdown content={item.text || ''} />
                         </div>
                       </div>
                     )}
                     {textCardVisualState === 'manual-editing' && (
-                      <textarea
-                        data-manual-text-card-editor="true"
-                        ref={item.id === editingTextCardId ? editingTextCardTextareaRef : null}
-                        value={item.text || ''}
-                        onChange={(e) => onManualTextCardInputChange(item.id, e.target.value)}
-                        onBlur={() => onManualTextCardBlur(item.id)}
-                        onPointerDown={(e) => {
-                          e.stopPropagation();
-                        }}
-                        onDoubleClick={(e) => {
-                          e.stopPropagation();
-                        }}
-                        onWheel={stopCanvasWheelFromScrollableRegion}
-                        className={`panel-scrollbar h-full min-w-0 w-full resize-none bg-transparent ${TEXT_CARD_BODY_TEXT_CLASSNAME} outline-none placeholder:text-zinc-500`}
-                        placeholder="请输入文本内容..."
-                      />
+                      <div className="h-full w-full px-6 py-5">
+                        <textarea
+                          data-manual-text-card-editor="true"
+                          ref={item.id === editingTextCardId ? editingTextCardTextareaRef : null}
+                          value={item.text || ''}
+                          onChange={(e) => onManualTextCardInputChange(item.id, e.target.value)}
+                          onBlur={() => onManualTextCardBlur(item.id)}
+                          onPointerDown={(e) => {
+                            e.stopPropagation();
+                          }}
+                          onDoubleClick={(e) => {
+                            e.stopPropagation();
+                          }}
+                          onWheel={stopCanvasWheelFromScrollableRegion}
+                          className={`panel-scrollbar h-full min-w-0 w-full resize-none bg-transparent ${TEXT_CARD_BODY_TEXT_CLASSNAME} outline-none placeholder:text-zinc-500`}
+                          placeholder="请输入文本内容..."
+                        />
+                      </div>
                     )}
                     {textCardVisualState === 'manual-content' && (
                       <div
                         className="panel-scrollbar h-full min-w-0 w-full overflow-y-auto"
                         onWheel={stopCanvasWheelFromScrollableRegion}
                       >
-                        <div className={`min-h-full w-full min-w-0 whitespace-pre-wrap break-words ${TEXT_CARD_BODY_TEXT_CLASSNAME}`}>
+                        <div
+                          data-assistant-selectable="true"
+                          className={`assistant-selectable-node pointer-events-auto min-h-full w-full min-w-0 whitespace-pre-wrap break-words px-6 py-5 ${TEXT_CARD_BODY_TEXT_CLASSNAME}`}
+                          onPointerDown={(e) => {
+                            e.stopPropagation();
+                          }}
+                          onDoubleClick={(e) => {
+                            e.stopPropagation();
+                          }}
+                        >
                           {item.text || ''}
                         </div>
                       </div>
@@ -2108,6 +2131,9 @@ const CanvasViewport = memo(function CanvasViewport({
                     onPointerDown={(e) => {
                       e.stopPropagation();
                     }}
+                    onPaste={(e) => {
+                      e.stopPropagation();
+                    }}
                     onWheel={stopCanvasWheelFromScrollableRegion}
                     autoFocus={false}
                     readOnly={false}
@@ -2500,6 +2526,9 @@ const CanvasViewport = memo(function CanvasViewport({
                       }
                     }}
                     onPointerDown={(e) => {
+                      e.stopPropagation();
+                    }}
+                    onPaste={(e) => {
                       e.stopPropagation();
                     }}
                     onWheel={stopCanvasWheelFromScrollableRegion}
@@ -4467,6 +4496,10 @@ export default function AIWorkspace() {
 
   const handleCanvasPaste = useCallback(
     async (e: React.ClipboardEvent<HTMLDivElement> | ClipboardEvent) => {
+      if (!shouldHandleCanvasImagePaste(e.target)) {
+        return;
+      }
+
       const imageFiles = extractImageFilesFromClipboardItems(e.clipboardData?.items);
       if (imageFiles.length > 0) {
         e.preventDefault();

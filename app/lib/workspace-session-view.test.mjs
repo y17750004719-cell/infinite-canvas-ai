@@ -62,6 +62,7 @@ import {
   getReplacedImageAssetItem,
   resolveCanvasImagePasteTarget,
   reorderIncomingImageConnections,
+  resolveCanvasBackgroundDotGap,
   settleCanvasImageGenerationRequests,
   shouldHandleCanvasImagePaste,
   shouldPreventScrollableRegionWheelDefault,
@@ -1863,7 +1864,7 @@ test('buildCanvasImageGenerationRequest preserves 4K size requests for image car
   assert.deepEqual(result, {
     messages: [{ role: 'user', content: '请生成一张高精度产品海报' }],
     intent: 'image',
-    model: 'gemini-3.1-flash-image-preview-4k',
+    model: 'gemini-3.1-flash-image-preview',
     size: '4096x4096',
     n: 1,
     aspect_ratio: '1:1',
@@ -1960,7 +1961,7 @@ test('buildAsyncImageTaskRequests expands 4K multi-image generation into four ex
   assert.deepEqual(result[0], {
     messages: [{ role: 'user', content: '生成 4K 主视觉' }],
     intent: 'image',
-    model: 'gemini-3.1-flash-image-preview-4k',
+    model: 'gemini-3.1-flash-image-preview',
     size: '4096x4096',
     n: 1,
     aspect_ratio: '1:1',
@@ -1969,17 +1970,17 @@ test('buildAsyncImageTaskRequests expands 4K multi-image generation into four ex
   assert.deepEqual(result[3], result[0]);
 });
 
-test('resolveCanvasImageTaskExecutionMode uses serial mode for exact-size Gemini multi-image requests', () => {
+test('resolveCanvasImageTaskExecutionMode now uses parallel mode for exact-size Gemini multi-image requests', () => {
   const result = resolveCanvasImageTaskExecutionMode({
     modelId: 'gemini-3.1-flash-image-preview',
     size: '2048x2048',
     count: 2,
   });
 
-  assert.equal(result, 'serial');
+  assert.equal(result, 'parallel');
 });
 
-test('resolveCanvasImageTaskExecutionMode keeps non-exact-size or single-image requests in parallel mode', () => {
+test('resolveCanvasImageTaskExecutionMode keeps all checked request shapes in parallel mode', () => {
   assert.equal(
     resolveCanvasImageTaskExecutionMode({
       modelId: 'gemini-3.1-flash-image-preview',
@@ -2006,6 +2007,12 @@ test('resolveCanvasImageTaskExecutionMode keeps non-exact-size or single-image r
     }),
     'parallel'
   );
+});
+
+test('resolveCanvasBackgroundDotGap keeps a minimum gap when zooming out the canvas', () => {
+  assert.equal(resolveCanvasBackgroundDotGap(1), 20);
+  assert.equal(resolveCanvasBackgroundDotGap(0.7), 14);
+  assert.equal(resolveCanvasBackgroundDotGap(0.35), 14);
 });
 
 test('settleCanvasImageGenerationRequests runs serial tasks one at a time and preserves later successes after failures', async () => {

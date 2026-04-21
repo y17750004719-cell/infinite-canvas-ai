@@ -60,10 +60,15 @@ test('canvas clipboard wiring adds app-level copy helpers and keyboard shortcuts
 });
 
 test('canvas copy shortcuts avoid hijacking text selection and paste falls back after image clipboard handling', () => {
+  const panelPasteStopPropagationSnippet =
+    'onPaste={(e) => {\n                      e.stopPropagation();\n                    }}\n                    onWheel={stopCanvasWheelFromScrollableRegion}';
+
   assert.equal(pageSource.includes('const hasActiveNonEditableTextSelection = useCallback(() => {'), true);
   assert.equal(pageSource.includes('if (hasActiveNonEditableTextSelection()) {'), true);
+  assert.equal(pageSource.includes('if (!shouldHandleCanvasImagePaste(e.target)) {'), true);
   assert.equal(pageSource.includes('const pastedCanvasClipboard = materializeCanvasClipboardPaste({'), true);
   assert.equal(pageSource.includes('if (imageFiles.length > 0) {'), true);
+  assert.equal(pageSource.split(panelPasteStopPropagationSnippet).length - 1, 2);
   assert.equal(pageSource.includes('canvasClipboardRef.current?.snapshot'), true);
 });
 
@@ -236,20 +241,45 @@ test('text card content and manual states use edge-to-edge full-frame layouts wi
   assert.equal(textCardBranch.includes('className={`panel-scrollbar h-full w-full resize-none bg-transparent px-2 py-1'), false);
   assert.equal(
     textCardBranch.includes(
-      'className={`panel-scrollbar h-full min-w-0 w-full resize-none bg-transparent ${TEXT_CARD_BODY_TEXT_CLASSNAME} outline-none placeholder:text-zinc-500`}'
+      'className="assistant-selectable-node pointer-events-auto min-h-full w-full min-w-0 break-words px-6 py-5"'
     ),
     true
   );
-  assert.equal(textCardBranch.includes('className="min-h-full break-words"'), false);
-  assert.equal(textCardBranch.includes('className="min-h-full w-full min-w-0 break-words"'), true);
+  assert.equal(textCardBranch.includes('className="h-full w-full px-6 py-5"'), true);
   assert.equal(
-    textCardBranch.includes('className={`min-h-full whitespace-pre-wrap break-words ${TEXT_CARD_BODY_TEXT_CLASSNAME}`}'),
-    false
-  );
-  assert.equal(
-    textCardBranch.includes('className={`min-h-full w-full min-w-0 whitespace-pre-wrap break-words ${TEXT_CARD_BODY_TEXT_CLASSNAME}`}'),
+    textCardBranch.includes(
+      'className={`assistant-selectable-node pointer-events-auto min-h-full w-full min-w-0 whitespace-pre-wrap break-words px-6 py-5 ${TEXT_CARD_BODY_TEXT_CLASSNAME}`}'
+    ),
     true
   );
+});
+
+test('text card generated and manual content bodies stay selectable without triggering drag or edit shortcuts', () => {
+  const textCardBranchStart = pageSource.indexOf("{item.type === 'text' && item.textVariant === 'card' && (");
+  const textCardBranchEnd = pageSource.indexOf('{isItemSelected &&', textCardBranchStart);
+
+  assert.notEqual(textCardBranchStart, -1);
+  assert.notEqual(textCardBranchEnd, -1);
+  assert.ok(textCardBranchEnd > textCardBranchStart);
+
+  const textCardBranch = pageSource.slice(textCardBranchStart, textCardBranchEnd);
+  const textSelectionGestureIsolationSnippet =
+    'onPointerDown={(e) => {\n                            e.stopPropagation();\n                          }}\n                          onDoubleClick={(e) => {\n                            e.stopPropagation();\n                          }}';
+
+  assert.equal(textCardBranch.split('data-assistant-selectable="true"').length - 1, 2);
+  assert.equal(
+    textCardBranch.includes(
+      'className="assistant-selectable-node pointer-events-auto min-h-full w-full min-w-0 break-words px-6 py-5"'
+    ),
+    true
+  );
+  assert.equal(
+    textCardBranch.includes(
+      'className={`assistant-selectable-node pointer-events-auto min-h-full w-full min-w-0 whitespace-pre-wrap break-words px-6 py-5 ${TEXT_CARD_BODY_TEXT_CLASSNAME}`}'
+    ),
+    true
+  );
+  assert.equal(textCardBranch.split(textSelectionGestureIsolationSnippet).length - 1, 3);
 });
 
 test('text card markdown root explicitly fills the current frame width without a max-width cap', () => {
