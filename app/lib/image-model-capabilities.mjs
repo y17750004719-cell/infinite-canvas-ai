@@ -8,6 +8,10 @@ const GPT_IMAGE_2_SIZE_OPTIONS = [
   { id: '1024x1024', label: '1024×1024', imageSize: '1024x1024' },
   { id: '1536x1024', label: '1536×1024', imageSize: '1536x1024' },
   { id: '1024x1536', label: '1024×1536', imageSize: '1024x1536' },
+  { id: '2048x2048', label: '2048×2048', imageSize: '2048x2048' },
+  { id: '2048x1152', label: '2048×1152', imageSize: '2048x1152' },
+  { id: '3840x2160', label: '3840×2160', imageSize: '3840x2160' },
+  { id: '2160x3840', label: '2160×3840', imageSize: '2160x3840' },
 ];
 
 const DEFAULT_IMAGE_MODEL_CAPABILITY = {
@@ -52,6 +56,10 @@ export const IMAGE_MODEL_CAPABILITIES = {
       '1024x1024': 'gpt-image-2',
       '1536x1024': 'gpt-image-2',
       '1024x1536': 'gpt-image-2',
+      '2048x2048': 'gpt-image-2',
+      '2048x1152': 'gpt-image-2',
+      '3840x2160': 'gpt-image-2',
+      '2160x3840': 'gpt-image-2',
     },
     sizeOptions: GPT_IMAGE_2_SIZE_OPTIONS,
   },

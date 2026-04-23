@@ -234,14 +234,35 @@ function parseSizeAllowlist(raw?: string): string[] {
   );
 }
 
+function filterAllowlistByModelCapabilities(allowlist: string[], capabilityAllowlist: string[]): string[] {
+  if (!Array.isArray(allowlist) || allowlist.length === 0) {
+    return [];
+  }
+  if (!Array.isArray(capabilityAllowlist) || capabilityAllowlist.length === 0) {
+    return allowlist;
+  }
+
+  const capabilitySizeSet = new Set(capabilityAllowlist);
+  return allowlist.filter((size) => capabilitySizeSet.has(size));
+}
+
 function resolveImageSize(requested: unknown, model: string): string {
   const modelEnvKey = `IMAGE_SIZE_ALLOWLIST_${sanitizeModelKey(model)}`;
-  const modelAllowlist = parseSizeAllowlist(process.env[modelEnvKey]);
-  const globalAllowlist = parseSizeAllowlist(process.env.IMAGE_SIZE_ALLOWLIST);
-  const capabilityAllowlist = getImageModelCapability(model).supportedSizes;
+  const capability = getImageModelCapability(model);
+  const capabilityAllowlist = capability.supportedSizes;
+  const modelAllowlist = filterAllowlistByModelCapabilities(
+    parseSizeAllowlist(process.env[modelEnvKey]),
+    capabilityAllowlist
+  );
+  const globalAllowlist = filterAllowlistByModelCapabilities(
+    parseSizeAllowlist(process.env.IMAGE_SIZE_ALLOWLIST),
+    capabilityAllowlist
+  );
   const allowlist = modelAllowlist.length > 0
     ? modelAllowlist
-    : globalAllowlist.length > 0
+    : !capability.supportsAspectRatio && capabilityAllowlist.length > 0
+      ? capabilityAllowlist
+      : globalAllowlist.length > 0
       ? globalAllowlist
       : capabilityAllowlist.length > 0
         ? capabilityAllowlist

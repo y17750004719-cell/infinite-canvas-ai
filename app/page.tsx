@@ -486,19 +486,58 @@ const getImageCardAspectRatioPreviewSize = (aspectRatioId: string) => {
 
 const getImageCardSizePresetLabel = (sizeId: string) => {
   const normalizedSizeId = typeof sizeId === 'string' ? sizeId.trim() : '';
-  if (normalizedSizeId === '1024x1024') return '方图';
-  if (normalizedSizeId === '1536x1024') return '横图';
-  if (normalizedSizeId === '1024x1536') return '竖图';
+  const match = normalizedSizeId.match(/^(\d+)x(\d+)$/i);
+  if (match) {
+    const width = Number(match[1]);
+    const height = Number(match[2]);
+    const gcd = (a: number, b: number): number => {
+      let x = Math.abs(a);
+      let y = Math.abs(b);
+      while (y > 0) {
+        const remainder = x % y;
+        x = y;
+        y = remainder;
+      }
+      return x || 1;
+    };
+    const divisor = gcd(width, height);
+    const ratioLabel = `${width / divisor}:${height / divisor}`;
+    const longestEdge = Math.max(width, height);
+    let resolutionLabel = '';
+    if (longestEdge >= 3840) resolutionLabel = '4K';
+    else if (longestEdge >= 2048) resolutionLabel = '2K';
+    else if (longestEdge >= 1536) resolutionLabel = '1.5K';
+    else if (longestEdge >= 1024) resolutionLabel = '1K';
+    return resolutionLabel ? `${ratioLabel} · ${resolutionLabel}` : ratioLabel;
+  }
   return normalizedSizeId;
 };
 
+const getImageCardSizePresetLabelLines = (sizeId: string) =>
+  getImageCardSizePresetLabel(sizeId)
+    .split(' · ')
+    .map((part) => part.trim())
+    .filter(Boolean);
+
 const getImageCardSizePreviewSize = (sizeId: string) => {
   const normalizedSizeId = typeof sizeId === 'string' ? sizeId.trim() : '';
-  if (normalizedSizeId === '1536x1024') {
-    return { width: 18, height: 12 };
-  }
-  if (normalizedSizeId === '1024x1536') {
-    return { width: 12, height: 18 };
+  const match = normalizedSizeId.match(/^(\d+)x(\d+)$/i);
+  if (match) {
+    const width = Number(match[1]);
+    const height = Number(match[2]);
+    if (Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0) {
+      const maxPreviewEdge = 18;
+      if (width >= height) {
+        return {
+          width: maxPreviewEdge,
+          height: Math.max(7, (height / width) * maxPreviewEdge),
+        };
+      }
+      return {
+        width: Math.max(7, (width / height) * maxPreviewEdge),
+        height: maxPreviewEdge,
+      };
+    }
   }
   return { width: 18, height: 18 };
 };
@@ -2480,31 +2519,52 @@ const CanvasViewport = memo(function CanvasViewport({
                           : getImageCardSizePresetLabel(selectedImageCardPanelSize)}
                       </span>
                     </div>
-                    <div className="inline-flex w-full items-center rounded-[14px] border border-white/[0.06] bg-[rgba(255,255,255,0.03)] p-1">
-                      {selectedImageCardSizeOptions.map((option) => {
-                        const isSelected = option.id === selectedImageCardPanelSize;
-                        const previewSize = getImageCardSizePreviewSize(option.id);
-                        return (
-                          <button
-                            key={option.id}
-                            type="button"
-                            onClick={() => {
-                              onSelectImageCardSize(option.id);
-                            }}
-                            className={`flex-1 rounded-[11px] px-2.5 py-1.5 text-[12px] font-semibold tracking-[-0.02em] transition-colors ${
-                              isSelected
-                                ? 'bg-[#f5f7fb] text-black shadow-[0_8px_20px_rgba(0,0,0,0.18)]'
-                                : 'text-zinc-300 hover:bg-white/[0.05]'
-                            }`}
-                          >
-                            {selectedImageCardSupportsAspectRatio ? (
-                              option.label
-                            ) : (
+                    {selectedImageCardSupportsAspectRatio ? (
+                      <div className="inline-flex w-full items-center rounded-[14px] border border-white/[0.06] bg-[rgba(255,255,255,0.03)] p-1">
+                        {selectedImageCardSizeOptions.map((option) => {
+                          const isSelected = option.id === selectedImageCardPanelSize;
+                          return (
+                            <button
+                              key={option.id}
+                              type="button"
+                              onClick={() => {
+                                onSelectImageCardSize(option.id);
+                              }}
+                              className={`flex-1 rounded-[11px] px-2.5 py-1.5 text-[12px] font-semibold tracking-[-0.02em] transition-colors ${
+                                isSelected
+                                  ? 'bg-[#f5f7fb] text-black shadow-[0_8px_20px_rgba(0,0,0,0.18)]'
+                                  : 'text-zinc-300 hover:bg-white/[0.05]'
+                              }`}
+                            >
+                              {option.label}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    ) : (
+                      <div className="grid grid-cols-4 gap-1.5">
+                        {selectedImageCardSizeOptions.map((option) => {
+                          const isSelected = option.id === selectedImageCardPanelSize;
+                          const previewSize = getImageCardSizePreviewSize(option.id);
+                          const presetLabelLines = getImageCardSizePresetLabelLines(option.id);
+                          return (
+                            <button
+                              key={option.id}
+                              type="button"
+                              onClick={() => {
+                                onSelectImageCardSize(option.id);
+                              }}
+                              className={`flex min-h-[58px] flex-col items-center justify-center gap-1.5 rounded-[14px] border px-1.5 py-2 text-center text-[12px] font-semibold tracking-[-0.02em] transition-colors ${
+                                isSelected
+                                  ? 'border-white/[0.14] bg-white/[0.09] text-zinc-50 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]'
+                                  : 'border-white/[0.06] bg-[rgba(255,255,255,0.02)] text-zinc-300 hover:border-white/[0.12] hover:bg-white/[0.05]'
+                              }`}
+                            >
                               <span className="flex flex-col items-center justify-center gap-1.5">
                                 <span className="flex h-7 w-7 items-center justify-center rounded-[10px] border border-white/[0.08] bg-[rgba(7,8,10,0.28)]">
                                   <span
                                     className={`rounded-[6px] border ${
-                                      isSelected ? 'border-black/70 bg-black/10' : 'border-zinc-400/60 bg-white/[0.03]'
+                                      isSelected ? 'border-zinc-100/80 bg-zinc-100/10' : 'border-zinc-400/60 bg-white/[0.03]'
                                     }`}
                                     style={{
                                       width: `${previewSize.width}px`,
@@ -2512,13 +2572,17 @@ const CanvasViewport = memo(function CanvasViewport({
                                     }}
                                   />
                                 </span>
-                                <span>{getImageCardSizePresetLabel(option.id)}</span>
+                                <span className="flex flex-col items-center leading-[1.05]">
+                                  {presetLabelLines.map((line) => (
+                                    <span key={`${option.id}-${line}`}>{line}</span>
+                                  ))}
+                                </span>
                               </span>
-                            )}
-                          </button>
-                        );
-                      })}
-                    </div>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
                   </div>
                   {!selectedImageCardSupportsAspectRatio && (
                     <div className="mt-3.5 border-t border-white/[0.06] pt-3.5">

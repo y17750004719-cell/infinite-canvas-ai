@@ -203,9 +203,30 @@ export function getImageCardQualitySummary({ modelId, aspectRatio, size, quality
 
   if (!capability.supportsAspectRatio) {
     let presetLabel = sizeLabel;
-    if (normalizedSize === '1024x1024') presetLabel = '方图';
-    if (normalizedSize === '1536x1024') presetLabel = '横图';
-    if (normalizedSize === '1024x1536') presetLabel = '竖图';
+    const match = normalizedSize.match(/^(\d+)x(\d+)$/i);
+    if (match) {
+      const width = Number(match[1]);
+      const height = Number(match[2]);
+      const gcd = (a, b) => {
+        let x = Math.abs(a);
+        let y = Math.abs(b);
+        while (y > 0) {
+          const remainder = x % y;
+          x = y;
+          y = remainder;
+        }
+        return x || 1;
+      };
+      const divisor = gcd(width, height);
+      const ratioLabel = `${width / divisor}:${height / divisor}`;
+      const longestEdge = Math.max(width, height);
+      let resolutionLabel = '';
+      if (longestEdge >= 3840) resolutionLabel = '4K';
+      else if (longestEdge >= 2048) resolutionLabel = '2K';
+      else if (longestEdge >= 1536) resolutionLabel = '1.5K';
+      else if (longestEdge >= 1024) resolutionLabel = '1K';
+      presetLabel = resolutionLabel ? `${ratioLabel} · ${resolutionLabel}` : ratioLabel;
+    }
     if (normalizedQuality) {
       return `${presetLabel} · ${normalizedQuality}`;
     }

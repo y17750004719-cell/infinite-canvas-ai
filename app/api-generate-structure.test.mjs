@@ -85,11 +85,35 @@ test('generate route uses model capability size allowlists for gpt-image-2 and s
     true
   );
   assert.equal(
+    routeSource.includes('function filterAllowlistByModelCapabilities(allowlist: string[], capabilityAllowlist: string[]): string[] {'),
+    true
+  );
+  assert.equal(
     routeSource.includes('const capabilityAllowlist = getImageModelCapability(model).supportedSizes;'),
+    false
+  );
+  assert.equal(
+    routeSource.includes('const capability = getImageModelCapability(model);'),
+    true
+  );
+  assert.equal(
+    routeSource.includes('const capabilityAllowlist = capability.supportedSizes;'),
+    true
+  );
+  assert.equal(
+    routeSource.includes('const modelAllowlist = filterAllowlistByModelCapabilities('),
+    true
+  );
+  assert.equal(
+    routeSource.includes('const globalAllowlist = filterAllowlistByModelCapabilities('),
     true
   );
   assert.equal(
     routeSource.includes(': capabilityAllowlist.length > 0'),
+    true
+  );
+  assert.equal(
+    routeSource.includes(': !capability.supportsAspectRatio && capabilityAllowlist.length > 0'),
     true
   );
   assert.equal(
