@@ -97,6 +97,37 @@ test('api-client also supports gpt-image-2 through the OpenAI compatible image p
   );
 });
 
+test('api-client restores async submit and task polling for gpt-image-2 on the OpenAI compatible path', () => {
+  assert.equal(
+    apiClientSource.includes('const executionMode = request.executionMode === "async" ? "async" : "sync";'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('? `${getOpenAiCompatibleImageApiBaseUrl(providerTargets)}/images/generations?async=true`'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes(': `${getOpenAiCompatibleImageApiBaseUrl(providerTargets)}/images/generations`;'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('async function pollOpenAiCompatibleImageTask('),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('const endpoint = `${getOpenAiCompatibleImageApiBaseUrl(providerTargets)}/images/tasks/${taskId}`;'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('const taskId = extractTaskId(payload as AsyncImageTaskSubmitResponse);'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('return pollOpenAiCompatibleImageTask({'),
+    true
+  );
+});
+
 test('api-client keeps official Gemini image request formatting for 1K 2K and 4K outputs', () => {
   assert.equal(apiClientSource.includes('resolveGeminiOfficialImageSize'), true);
   assert.equal(apiClientSource.includes('imageSize'), true);
@@ -346,7 +377,11 @@ test('api-client exposes 4Z documented image request models in the available mod
 
 test('api-client builds an OpenAI compatible image request body with image references for gpt-image-2', () => {
   assert.equal(
-    apiClientSource.includes('const endpoint = `${getOpenAiCompatibleImageApiBaseUrl(providerTargets)}/images/generations`;'),
+    apiClientSource.includes('? `${getOpenAiCompatibleImageApiBaseUrl(providerTargets)}/images/generations?async=true`'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes(': `${getOpenAiCompatibleImageApiBaseUrl(providerTargets)}/images/generations`;'),
     true
   );
   assert.equal(

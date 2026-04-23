@@ -301,6 +301,8 @@ test('text card generated and manual content bodies stay selectable without trig
   const textCardBranch = pageSource.slice(textCardBranchStart, textCardBranchEnd);
   const textSelectionGestureIsolationSnippet =
     'onPointerDown={(e) => {\n                            e.stopPropagation();\n                          }}\n                          onDoubleClick={(e) => {\n                            e.stopPropagation();\n                          }}';
+  const manualContentReeditSnippet =
+    'onPointerDown={(e) => {\n                            e.stopPropagation();\n                          }}\n                          onDoubleClick={(e) => {\n                            e.stopPropagation();\n                            onItemDoubleClick(item.id);\n                          }}';
 
   assert.equal(textCardBranch.split('data-assistant-selectable="true"').length - 1, 2);
   assert.equal(
@@ -315,7 +317,8 @@ test('text card generated and manual content bodies stay selectable without trig
     ),
     true
   );
-  assert.equal(textCardBranch.split(textSelectionGestureIsolationSnippet).length - 1, 3);
+  assert.equal(textCardBranch.split(textSelectionGestureIsolationSnippet).length - 1, 2);
+  assert.equal(textCardBranch.includes(manualContentReeditSnippet), true);
 });
 
 test('text card markdown root explicitly fills the current frame width without a max-width cap', () => {

@@ -178,16 +178,34 @@ export interface GenerationResponse {
 interface AsyncImageTaskSubmitResponse {
   task_id?: string;
   id?: string;
+  status?: string;
+  message?: string;
+  error?: { message?: string } | string;
+  last_error?: { message?: string } | string;
+  data?: Array<{ url: string; revised_prompt?: string }> | { status?: string };
+  result?: {
+    status?: string;
+    data?: Array<{ url: string; revised_prompt?: string }>;
+  };
+  output?: {
+    status?: string;
+    data?: Array<{ url: string; revised_prompt?: string }>;
+  };
 }
 
 interface AsyncImageTaskResultResponse {
   status?: string;
-  data?: Array<{ url: string; revised_prompt?: string }> | { status?: string };
+  message?: string;
+  error?: { message?: string } | string;
+  last_error?: { message?: string } | string;
+  data?: Array<{ url: string; revised_prompt?: string }> | { status?: string; data?: Array<{ url: string; revised_prompt?: string }> };
   result?: {
     status?: string;
+    data?: Array<{ url: string; revised_prompt?: string }>;
   };
   output?: {
     status?: string;
+    data?: Array<{ url: string; revised_prompt?: string }>;
   };
 }
 
@@ -372,17 +390,6 @@ function resolveGeminiOfficialImageSize(size?: string): "1K" | "2K" | "4K" {
   return "1K";
 }
 
-function resolveSupplierExecutionMode(
-  requestedMode: "sync" | "async" | undefined,
-  model?: string
-): "sync" | "async" {
-  if (requestedMode === "sync" || requestedMode === "async") {
-    return requestedMode;
-  }
-
-  return "sync";
-}
-
 function classifyGeminiImageTransportFailure(error: unknown): {
   failureClass: "transport" | "timeout" | "upstream_http" | "payload" | "unknown";
   isRetryable: boolean;
@@ -459,6 +466,8 @@ function parsePositiveInt(input: string | undefined, fallback: number): number {
 }
 
 const asyncImageSubmitTimeoutMs = parsePositiveInt(process.env.COMFLY_ASYNC_IMAGE_SUBMIT_TIMEOUT_MS, 600000);
+const asyncImagePollTimeoutMs = parsePositiveInt(process.env.COMFLY_ASYNC_POLL_TIMEOUT_MS, 600000);
+const asyncImagePollIntervalMs = parsePositiveInt(process.env.COMFLY_ASYNC_POLL_INTERVAL_MS, 2000);
 
 function extractTaskStatus(payload: AsyncImageTaskResultResponse): string {
   const rootStatus = typeof payload.status === "string" ? payload.status : "";
@@ -484,6 +493,23 @@ function extractTaskId(payload: AsyncImageTaskSubmitResponse): string {
     throw new ImageGenerationError("Missing task_id from async image response", 502);
   }
   return taskId;
+}
+
+function extractTaskErrorMessage(payload: AsyncImageTaskResultResponse | AsyncImageTaskSubmitResponse): string | undefined {
+  const directError =
+    typeof payload.error === "object" && payload.error && "message" in payload.error
+      ? (payload.error as { message?: string }).message
+      : typeof payload.error === "string"
+        ? payload.error
+        : undefined;
+  const lastError =
+    typeof payload.last_error === "object" && payload.last_error && "message" in payload.last_error
+      ? (payload.last_error as { message?: string }).message
+      : typeof payload.last_error === "string"
+        ? payload.last_error
+        : undefined;
+
+  return directError || lastError || payload.message || undefined;
 }
 
 function toImageEntries(input: unknown, depth = 0): Array<{ url: string; revised_prompt?: string }> {
@@ -925,7 +951,10 @@ async function generateOpenAiCompatibleImage(request: UnifiedImageRequest): Prom
     throw new ImageGenerationError(`OpenAI compatible image request failed: model "${request.model}" is not supported`, 400);
   }
 
-  const endpoint = `${getOpenAiCompatibleImageApiBaseUrl(providerTargets)}/images/generations`;
+  const executionMode = request.executionMode === "async" ? "async" : "sync";
+  const endpoint = executionMode === "async"
+    ? `${getOpenAiCompatibleImageApiBaseUrl(providerTargets)}/images/generations?async=true`
+    : `${getOpenAiCompatibleImageApiBaseUrl(providerTargets)}/images/generations`;
   const prompt = typeof request.prompt === "string" ? request.prompt : "";
   const referenceImages = Array.isArray(request.images) ? request.images.filter(Boolean) : [];
   const supportsAspectRatio = getImageModelCapability(model).supportsAspectRatio;
@@ -960,6 +989,7 @@ async function generateOpenAiCompatibleImage(request: UnifiedImageRequest): Prom
       host: getEndpointHost(endpoint),
       mode: "openai_compatible_image",
       model,
+      executionMode,
       imageSize: typeof requestBody.size === "string" ? requestBody.size : null,
       aspectRatio,
       referenceCount: referenceImages.length,
@@ -1004,18 +1034,56 @@ async function generateOpenAiCompatibleImage(request: UnifiedImageRequest): Prom
     const outputs = toImageEntries(payload);
 
     basicLog("[SUPPLIER][PARSE]", {
-      endpoint: "/images/generations",
+      endpoint: executionMode === "async" ? "/images/generations?async=true" : "/images/generations",
       mode: "openai_compatible_image",
+      executionMode,
       imageCount: outputs.length,
       imageSize: typeof requestBody.size === "string" ? requestBody.size : null,
       aspectRatio,
       referenceCount: referenceImages.length,
     });
 
+    if (outputs.length > 0) {
+      return {
+        created: Math.floor(Date.now() / 1000),
+        data: outputs,
+      };
+    }
+
+    if (executionMode === "async") {
+      const taskStatus = extractTaskStatus(payload as AsyncImageTaskResultResponse);
+      const taskErrorMessage = extractTaskErrorMessage(payload as AsyncImageTaskResultResponse);
+      if (taskStatus && ["FAILURE", "FAILED", "ERROR", "CANCELLED", "CANCELED", "TIMEOUT", "TIMED_OUT"].includes(taskStatus)) {
+        throw new ImageGenerationError(
+          taskErrorMessage || "OpenAI compatible async image task failed on submit",
+          502,
+          {
+            failureClass: "upstream_http",
+            isRetryable: false,
+            retryAttempt: attempt,
+          }
+        );
+      }
+
+      const taskId = extractTaskId(payload as AsyncImageTaskSubmitResponse);
+      return pollOpenAiCompatibleImageTask({
+        taskId,
+        providerTargets,
+        apiKey,
+        signal: request.signal,
+        requestModel: request.model,
+        normalizedModel: model,
+        imageSize: typeof requestBody.size === "string" ? requestBody.size : null,
+        aspectRatio,
+        referenceCount: referenceImages.length,
+      });
+    }
+
     if (outputs.length === 0) {
       basicLog("[SUPPLIER][PARSE_EMPTY]", {
         endpoint: "/images/generations",
         mode: "openai_compatible_image",
+        executionMode,
         imageSize: typeof requestBody.size === "string" ? requestBody.size : null,
         aspectRatio,
         referenceCount: referenceImages.length,
@@ -1028,18 +1096,15 @@ async function generateOpenAiCompatibleImage(request: UnifiedImageRequest): Prom
       });
     }
 
-    return {
-      created: Math.floor(Date.now() / 1000),
-      data: outputs,
-    };
   } catch (error) {
     const failureState = classifyGeminiImageTransportFailure(error);
 
     basicLog("[SUPPLIER][ERR]", {
-      endpoint: "/images/generations",
+      endpoint: executionMode === "async" ? "/images/generations?async=true" : "/images/generations",
       mode: "openai_compatible_image",
       requestedModel: request.model,
       normalizedModel: model,
+      executionMode,
       imageSize: typeof requestBody.size === "string" ? requestBody.size : null,
       aspectRatio,
       referenceCount: referenceImages.length,
@@ -1079,6 +1144,156 @@ async function generateOpenAiCompatibleImage(request: UnifiedImageRequest): Prom
       }
     );
   }
+}
+
+async function pollOpenAiCompatibleImageTask({
+  taskId,
+  providerTargets,
+  apiKey,
+  signal,
+  requestModel,
+  normalizedModel,
+  imageSize,
+  aspectRatio,
+  referenceCount,
+}: {
+  taskId: string;
+  providerTargets: ReturnType<typeof resolveProviderRequestTargets>;
+  apiKey: string;
+  signal?: AbortSignal;
+  requestModel: string;
+  normalizedModel: string;
+  imageSize: string | null;
+  aspectRatio: string;
+  referenceCount: number;
+}): Promise<GenerationResponse> {
+  const endpoint = `${getOpenAiCompatibleImageApiBaseUrl(providerTargets)}/images/tasks/${taskId}`;
+  const startAt = Date.now();
+  const successStatuses = new Set(["SUCCESS", "SUCCEEDED", "COMPLETED", "DONE", "FINISHED"]);
+  const failureStatuses = new Set(["FAILURE", "FAILED", "ERROR", "CANCELLED", "CANCELED", "TIMEOUT", "TIMED_OUT"]);
+  let pollCount = 0;
+  let lastLoggedStatus = "";
+
+  while (Date.now() - startAt < asyncImagePollTimeoutMs) {
+    if (signal?.aborted) {
+      throw new ImageGenerationError("Request cancelled by user", 499);
+    }
+
+    pollCount += 1;
+    const pollStartedAt = Date.now();
+
+    basicLog("[SUPPLIER][REQ]", {
+      method: "GET",
+      endpoint,
+      host: getEndpointHost(endpoint),
+      mode: "openai_compatible_image_task",
+      taskId,
+      pollCount,
+    });
+
+    const response = await fetch(endpoint, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+      },
+      signal,
+    });
+
+    basicLog("[SUPPLIER][RES]", {
+      method: "GET",
+      endpoint,
+      mode: "openai_compatible_image_task",
+      taskId,
+      pollCount,
+      status: response.status,
+      statusText: response.statusText,
+      durationMs: Date.now() - pollStartedAt,
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      throw new ImageGenerationError(
+        `OpenAI compatible image task query failed: ${errorText || response.statusText}`,
+        response.status,
+        {
+          failureClass: "upstream_http",
+          isRetryable: false,
+          retryAttempt: pollCount,
+        }
+      );
+    }
+
+    const payload = await response.json() as AsyncImageTaskResultResponse;
+    const status = extractTaskStatus(payload);
+    const outputs = toImageEntries(payload);
+
+    if (status !== lastLoggedStatus) {
+      basicLog("[SUPPLIER][TASK]", {
+        mode: "openai_compatible_image_task",
+        taskId,
+        pollCount,
+        status: status || "UNKNOWN",
+        requestedModel: requestModel,
+        normalizedModel,
+        imageSize,
+        aspectRatio,
+        referenceCount,
+        elapsedMs: Date.now() - startAt,
+      });
+      lastLoggedStatus = status;
+    }
+
+    if (!status && outputs.length > 0) {
+      return {
+        created: Math.floor(Date.now() / 1000),
+        data: outputs,
+      };
+    }
+
+    if (successStatuses.has(status)) {
+      if (outputs.length === 0) {
+        basicLog("[SUPPLIER][PARSE_EMPTY]", {
+          endpoint: "/images/tasks/{taskId}",
+          mode: "openai_compatible_image_task",
+          taskId,
+          pollCount,
+          imageSize,
+          aspectRatio,
+          referenceCount,
+          ...summarizeImagePayloadCounts(payload),
+        });
+        throw new ImageGenerationError("OpenAI compatible image task succeeded but returned no images", 502, {
+          failureClass: "payload",
+          isRetryable: false,
+          retryAttempt: pollCount,
+        });
+      }
+
+      return {
+        created: Math.floor(Date.now() / 1000),
+        data: outputs,
+      };
+    }
+
+    if (failureStatuses.has(status)) {
+      throw new ImageGenerationError(
+        extractTaskErrorMessage(payload) || "OpenAI compatible image task failed",
+        502,
+        {
+          failureClass: "upstream_http",
+          isRetryable: false,
+          retryAttempt: pollCount,
+        }
+      );
+    }
+
+    await sleepWithAbort(asyncImagePollIntervalMs, signal);
+  }
+
+  throw new ImageGenerationError("OpenAI compatible image task polling timed out", 504, {
+    failureClass: "timeout",
+    isRetryable: false,
+  });
 }
 
 export async function runImageTask(request: UnifiedImageRequest): Promise<GenerationResponse> {

@@ -1557,6 +1557,7 @@ const CanvasNodesLayer = memo(function CanvasNodesLayer({
                           }}
                           onDoubleClick={(e) => {
                             e.stopPropagation();
+                            onItemDoubleClick(item.id);
                           }}
                         >
                           {item.text || ''}
