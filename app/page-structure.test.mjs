@@ -116,6 +116,7 @@ test('image card quality controls use model-driven size options without renderin
   assert.equal(pageSource.includes("else if (longestEdge >= 1536) resolutionLabel = '1.5K';"), true);
   assert.equal(pageSource.includes("if (longestEdge >= 3840) resolutionLabel = '4K';"), true);
   assert.equal(pageSource.includes("const getImageCardSizePresetLabelLines = (sizeId: string) =>"), true);
+  assert.equal(pageSource.includes("const getAspectRatioFromImageSize = (sizeId: string): string =>"), true);
   assert.equal(pageSource.includes('const getImageCardSizePreviewSize = (sizeId: string) =>'), true);
   assert.equal(pageSource.includes('height: Math.max(7, (height / width) * maxPreviewEdge),'), true);
   assert.equal(pageSource.includes('width: Math.max(7, (width / height) * maxPreviewEdge),'), true);
@@ -369,6 +370,12 @@ test('canvas viewport no longer keeps a legacy in-canvas image card floating pan
 
 test('image card aspect ratio selection still routes through resizeImageCardItemToAspectRatio', () => {
   assert.equal(pageSource.includes('? resizeImageCardItemToAspectRatio(item, normalizedAspectRatio)'), true);
+});
+
+test('fixed-size image card size selection also routes through resizeImageCardItemToAspectRatio using the derived ratio', () => {
+  assert.equal(pageSource.includes('const resolvedSizeId = resolveImageCardSize(selectedImageCardPanelModelId, sizeId);'), true);
+  assert.equal(pageSource.includes('const normalizedAspectRatio = getAspectRatioFromImageSize(resolvedSizeId);'), true);
+  assert.equal(pageSource.includes('[selectedImageCardPanelItem.id]: normalizedAspectRatio,'), true);
 });
 
 test('image card generation always uses async task requests instead of keeping a single-image sync branch', () => {

@@ -519,6 +519,34 @@ const getImageCardSizePresetLabelLines = (sizeId: string) =>
     .map((part) => part.trim())
     .filter(Boolean);
 
+const getAspectRatioFromImageSize = (sizeId: string): string => {
+  const normalizedSizeId = typeof sizeId === 'string' ? sizeId.trim() : '';
+  const match = normalizedSizeId.match(/^(\d+)x(\d+)$/i);
+  if (!match) {
+    return '1:1';
+  }
+
+  const width = Number(match[1]);
+  const height = Number(match[2]);
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+    return '1:1';
+  }
+
+  const gcd = (a: number, b: number): number => {
+    let x = Math.abs(a);
+    let y = Math.abs(b);
+    while (y > 0) {
+      const remainder = x % y;
+      x = y;
+      y = remainder;
+    }
+    return x || 1;
+  };
+
+  const divisor = gcd(width, height);
+  return `${width / divisor}:${height / divisor}`;
+};
+
 const getImageCardSizePreviewSize = (sizeId: string) => {
   const normalizedSizeId = typeof sizeId === 'string' ? sizeId.trim() : '';
   const match = normalizedSizeId.match(/^(\d+)x(\d+)$/i);
@@ -9545,11 +9573,26 @@ export default function AIWorkspace() {
         }}
         onSelectImageCardSize={(sizeId) => {
           if (!selectedImageCardPanelItem) return;
+          const resolvedSizeId = resolveImageCardSize(selectedImageCardPanelModelId, sizeId);
           recordCurrentCanvasUndoSnapshot();
           setImageCardSizeById((prev) => ({
             ...prev,
-            [selectedImageCardPanelItem.id]: resolveImageCardSize(selectedImageCardPanelModelId, sizeId),
+            [selectedImageCardPanelItem.id]: resolvedSizeId,
           }));
+          if (!selectedImageCardSupportsAspectRatio) {
+            const normalizedAspectRatio = getAspectRatioFromImageSize(resolvedSizeId);
+            setImageCardAspectRatioById((prev) => ({
+              ...prev,
+              [selectedImageCardPanelItem.id]: normalizedAspectRatio,
+            }));
+            setItems((prev) =>
+              prev.map((item) =>
+                item.id === selectedImageCardPanelItem.id && isImageCardItem(item)
+                  ? resizeImageCardItemToAspectRatio(item, normalizedAspectRatio)
+                  : item
+              )
+            );
+          }
           setShowImageCardQualityMenu(false);
         }}
         onSelectImageCardQuality={(qualityId) => {
