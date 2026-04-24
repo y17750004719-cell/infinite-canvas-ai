@@ -27,13 +27,25 @@ test('image card floating menus are not rendered inside the pending connection m
   );
 });
 
-test('image card model menu uses a dedicated fixed popover outside the clipped panel footer', () => {
+test('image card model menu uses a dedicated fixed popover that drops below the panel footer', () => {
   assert.equal(pageSource.includes('const [selectedImageCardModelPopoverOffset, setSelectedImageCardModelPopoverOffset] = useState<{ left: number; top: number } | null>(null);'), true);
   assert.equal(pageSource.includes('imageCardModelPopoverRef: React.RefObject<HTMLDivElement | null>;'), true);
   assert.equal(pageSource.includes('{showImageCardModelMenu && selectedImageCardModelPopoverOffset && ('), true);
   assert.equal(pageSource.includes('ref={imageCardModelPopoverRef}'), true);
   assert.equal(pageSource.includes('className="pointer-events-auto fixed z-[116] min-w-[248px] overflow-hidden rounded-[18px] border border-white/[0.1] bg-[rgba(24,24,27,0.985)] p-1.5 shadow-[0_24px_64px_rgba(0,0,0,0.42)] backdrop-blur-xl"'), true);
-  assert.equal(pageSource.includes("transform: `translateY(-100%) scale(${viewport.scale})`"), true);
+  assert.equal(pageSource.includes("transform: `translateY(-100%) scale(${viewport.scale})`"), false);
+  assert.equal(pageSource.includes("transform: `scale(${viewport.scale})`"), true);
+  assert.equal(pageSource.includes("placement: 'below-panel',"), true);
+});
+
+test('image card count menu also uses a fixed below-panel dropdown instead of the legacy upward popover', () => {
+  assert.equal(pageSource.includes('const [selectedImageCardCountPopoverOffset, setSelectedImageCardCountPopoverOffset] = useState<{ left: number; top: number } | null>(null);'), true);
+  assert.equal(pageSource.includes('imageCardCountPopoverRef: React.RefObject<HTMLDivElement | null>;'), true);
+  assert.equal(pageSource.includes('{showImageCardCountMenu && selectedImageCardCountPopoverOffset && ('), true);
+  assert.equal(pageSource.includes('ref={imageCardCountPopoverRef}'), true);
+  assert.equal(pageSource.includes('className="pointer-events-auto fixed z-[116] min-w-[124px] overflow-hidden rounded-[18px] border border-white/[0.1] bg-[rgba(24,24,27,0.985)] p-1.5 shadow-[0_24px_64px_rgba(0,0,0,0.42)] backdrop-blur-xl"'), true);
+  assert.equal(pageSource.includes('top: selectedImageCardPanelViewportOrigin.top + selectedImageCardCountPopoverOffset.top * viewport.scale,'), true);
+  assert.equal(pageSource.includes('top: selectedImageCardPanelViewportOrigin.top + selectedImageCardCountPopoverOffset.top * viewport.scale - 8,'), false);
 });
 
 test('canvas image preview metadata retries local asset loading before falling back to default dimensions', () => {
@@ -376,6 +388,28 @@ test('fixed-size image card size selection also routes through resizeImageCardIt
   assert.equal(pageSource.includes('const resolvedSizeId = resolveImageCardSize(selectedImageCardPanelModelId, sizeId);'), true);
   assert.equal(pageSource.includes('const normalizedAspectRatio = getAspectRatioFromImageSize(resolvedSizeId);'), true);
   assert.equal(pageSource.includes('[selectedImageCardPanelItem.id]: normalizedAspectRatio,'), true);
+});
+
+test('image card quality menu stays open after size and ratio picks until an outside click closes it', () => {
+  const sizeSelectStart = pageSource.indexOf('onSelectImageCardSize={(sizeId) => {');
+  const sizeSelectEnd = pageSource.indexOf('        onSelectImageCardQuality={(qualityId) => {', sizeSelectStart);
+  const aspectSelectStart = pageSource.indexOf('onSelectImageCardAspectRatio={(aspectRatioId) => {');
+  const aspectSelectEnd = pageSource.indexOf('        onSelectedImageCardPanelInputChange={handleSelectedImageCardPanelInputChange}', aspectSelectStart);
+
+  assert.notEqual(sizeSelectStart, -1);
+  assert.notEqual(sizeSelectEnd, -1);
+  assert.ok(sizeSelectEnd > sizeSelectStart);
+  assert.notEqual(aspectSelectStart, -1);
+  assert.notEqual(aspectSelectEnd, -1);
+  assert.ok(aspectSelectEnd > aspectSelectStart);
+
+  const sizeSelectBlock = pageSource.slice(sizeSelectStart, sizeSelectEnd);
+  const aspectSelectBlock = pageSource.slice(aspectSelectStart, aspectSelectEnd);
+
+  assert.equal(sizeSelectBlock.includes('setShowImageCardQualityMenu(false);'), false);
+  assert.equal(aspectSelectBlock.includes('setShowImageCardQualityMenu(false);'), false);
+  assert.equal(pageSource.includes('const isInsideImageCardQualityMenu ='), true);
+  assert.equal(pageSource.includes('if (!isInsideImageCardQualityMenu) {\n        setShowImageCardQualityMenu(false);\n      }'), true);
 });
 
 test('image card generation always uses async task requests instead of keeping a single-image sync branch', () => {

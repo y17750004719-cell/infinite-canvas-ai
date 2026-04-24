@@ -2075,6 +2075,8 @@ const CanvasViewport = memo(function CanvasViewport({
         panelRect,
         anchorRect,
         scale: viewport.scale,
+        placement: 'below-panel',
+        gap: 12,
       })
     );
   }, [imageCardModelMenuRef, selectedImageCardPanelItem, showImageCardModelMenu, viewport.scale]);
@@ -2123,6 +2125,8 @@ const CanvasViewport = memo(function CanvasViewport({
         panelRect,
         anchorRect,
         scale: viewport.scale,
+        placement: 'below-panel',
+        gap: 12,
       })
     );
   }, [imageCardCountMenuRef, selectedImageCardPanelItem, showImageCardCountMenu, viewport.scale]);
@@ -2443,8 +2447,8 @@ const CanvasViewport = memo(function CanvasViewport({
                 className="pointer-events-auto fixed z-[116] min-w-[248px] overflow-hidden rounded-[18px] border border-white/[0.1] bg-[rgba(24,24,27,0.985)] p-1.5 shadow-[0_24px_64px_rgba(0,0,0,0.42)] backdrop-blur-xl"
                 style={{
                   left: selectedImageCardPanelViewportOrigin.left + selectedImageCardModelPopoverOffset.left * viewport.scale,
-                  top: selectedImageCardPanelViewportOrigin.top + selectedImageCardModelPopoverOffset.top * viewport.scale - 8,
-                  transform: `translateY(-100%) scale(${viewport.scale})`,
+                  top: selectedImageCardPanelViewportOrigin.top + selectedImageCardModelPopoverOffset.top * viewport.scale,
+                  transform: `scale(${viewport.scale})`,
                   transformOrigin: 'top left',
                 }}
                 onPointerDown={(e) => {
@@ -2653,8 +2657,8 @@ const CanvasViewport = memo(function CanvasViewport({
                 className="pointer-events-auto fixed z-[116] min-w-[124px] overflow-hidden rounded-[18px] border border-white/[0.1] bg-[rgba(24,24,27,0.985)] p-1.5 shadow-[0_24px_64px_rgba(0,0,0,0.42)] backdrop-blur-xl"
                 style={{
                   left: selectedImageCardPanelViewportOrigin.left + selectedImageCardCountPopoverOffset.left * viewport.scale,
-                  top: selectedImageCardPanelViewportOrigin.top + selectedImageCardCountPopoverOffset.top * viewport.scale - 8,
-                  transform: `translateY(-100%) scale(${viewport.scale})`,
+                  top: selectedImageCardPanelViewportOrigin.top + selectedImageCardCountPopoverOffset.top * viewport.scale,
+                  transform: `scale(${viewport.scale})`,
                   transformOrigin: 'top left',
                 }}
                 onPointerDown={(e) => {
@@ -9593,7 +9597,6 @@ export default function AIWorkspace() {
               )
             );
           }
-          setShowImageCardQualityMenu(false);
         }}
         onSelectImageCardQuality={(qualityId) => {
           if (!selectedImageCardPanelItem) return;
@@ -9632,7 +9635,6 @@ export default function AIWorkspace() {
                 : item
             )
           );
-          setShowImageCardQualityMenu(false);
         }}
         onSelectedImageCardPanelInputChange={handleSelectedImageCardPanelInputChange}
         onSelectedImageCardPanelBlur={commitPendingCanvasUndoSnapshot}
