@@ -103,11 +103,15 @@ test('api-client restores async submit and task polling for gpt-image-2 on the O
     true
   );
   assert.equal(
-    apiClientSource.includes('? `${getOpenAiCompatibleImageApiBaseUrl(providerTargets)}/images/generations?async=true`'),
+    apiClientSource.includes('const endpointPath = usesImageEditsApi ? "/images/edits" : "/images/generations";'),
     true
   );
   assert.equal(
-    apiClientSource.includes(': `${getOpenAiCompatibleImageApiBaseUrl(providerTargets)}/images/generations`;'),
+    apiClientSource.includes('? `${getOpenAiCompatibleImageApiBaseUrl(providerTargets)}${endpointPath}?async=true`'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes(': `${getOpenAiCompatibleImageApiBaseUrl(providerTargets)}${endpointPath}`;'),
     true
   );
   assert.equal(
@@ -124,6 +128,14 @@ test('api-client restores async submit and task polling for gpt-image-2 on the O
   );
   assert.equal(
     apiClientSource.includes('return pollOpenAiCompatibleImageTask({'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('export function shouldUseImageEditsApi(model?: string, referenceImageCount = 0): boolean {'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('referenceImageCount > 0'),
     true
   );
 });
@@ -377,15 +389,23 @@ test('api-client exposes 4Z documented image request models in the available mod
 
 test('api-client builds an OpenAI compatible image request body with image references for gpt-image-2', () => {
   assert.equal(
-    apiClientSource.includes('? `${getOpenAiCompatibleImageApiBaseUrl(providerTargets)}/images/generations?async=true`'),
+    apiClientSource.includes('const usesImageEditsApi = shouldUseImageEditsApi(model, referenceImages.length);'),
     true
   );
   assert.equal(
-    apiClientSource.includes(': `${getOpenAiCompatibleImageApiBaseUrl(providerTargets)}/images/generations`;'),
+    apiClientSource.includes('const formData = new FormData();'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('formData.append("image", blob, `reference-${index + 1}.${mimeTypeToFileExtension(mimeType)}`);'),
     true
   );
   assert.equal(
     apiClientSource.includes('mode: "openai_compatible_image"'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('if (!usesImageEditsApi && referenceImages.length > 0) {'),
     true
   );
   assert.equal(
@@ -397,11 +417,19 @@ test('api-client builds an OpenAI compatible image request body with image refer
     true
   );
   assert.equal(
-    apiClientSource.includes('requestBody.quality = request.quality.trim();'),
+    apiClientSource.includes('formData.set("quality", imageQuality);'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('requestBody.quality = imageQuality;'),
     true
   );
   assert.equal(
     apiClientSource.includes('if (supportsAspectRatio && aspectRatio) {'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('formData.set("aspect_ratio", aspectRatio);'),
     true
   );
   assert.equal(

@@ -364,7 +364,12 @@ function supportsGeminiImageSizeConfig(model?: string): boolean {
 }
 
 export function shouldUseImageEditsApi(model?: string, referenceImageCount = 0): boolean {
-  return false;
+  const normalizedModel = normalizeImageRequestModel(model);
+  return (
+    normalizedModel.length > 0 &&
+    referenceImageCount > 0 &&
+    SUPPORTED_OPENAI_COMPATIBLE_IMAGE_MODELS.has(normalizedModel)
+  );
 }
 
 function resolveGeminiOfficialImageSize(size?: string): "1K" | "2K" | "4K" {
@@ -630,6 +635,14 @@ function dataUrlToBlob(dataUrl: string): { blob: Blob; mimeType: string } {
     blob: new Blob([byteArray], { type: mimeType }),
     mimeType,
   };
+}
+
+function mimeTypeToFileExtension(mimeType?: string): string {
+  const normalizedMimeType = typeof mimeType === "string" ? mimeType.toLowerCase().trim() : "";
+  if (normalizedMimeType.includes("jpeg")) return "jpg";
+  if (normalizedMimeType.includes("webp")) return "webp";
+  if (normalizedMimeType.includes("gif")) return "gif";
+  return "png";
 }
 
 async function referenceToBlob(input: string, signal?: AbortSignal): Promise<{ blob: Blob; mimeType: string }> {
@@ -952,29 +965,68 @@ async function generateOpenAiCompatibleImage(request: UnifiedImageRequest): Prom
   }
 
   const executionMode = request.executionMode === "async" ? "async" : "sync";
-  const endpoint = executionMode === "async"
-    ? `${getOpenAiCompatibleImageApiBaseUrl(providerTargets)}/images/generations?async=true`
-    : `${getOpenAiCompatibleImageApiBaseUrl(providerTargets)}/images/generations`;
   const prompt = typeof request.prompt === "string" ? request.prompt : "";
   const referenceImages = Array.isArray(request.images) ? request.images.filter(Boolean) : [];
+  const usesImageEditsApi = shouldUseImageEditsApi(model, referenceImages.length);
+  const endpointPath = usesImageEditsApi ? "/images/edits" : "/images/generations";
+  const endpoint = executionMode === "async"
+    ? `${getOpenAiCompatibleImageApiBaseUrl(providerTargets)}${endpointPath}?async=true`
+    : `${getOpenAiCompatibleImageApiBaseUrl(providerTargets)}${endpointPath}`;
   const supportsAspectRatio = getImageModelCapability(model).supportsAspectRatio;
   const aspectRatio = supportsAspectRatio ? (normalizeAspectRatio(request.aspect_ratio) || toAspectRatio(request.size)) : "";
+  const imageSize = typeof request.size === "string" && request.size.trim() ? request.size.trim() : null;
+  const imageQuality = typeof request.quality === "string" && request.quality.trim() ? request.quality.trim() : null;
   const requestBody: Record<string, unknown> = {
     model,
     prompt,
   };
 
-  if (typeof request.size === "string" && request.size.trim()) {
-    requestBody.size = request.size.trim();
+  if (imageSize) {
+    requestBody.size = imageSize;
   }
-  if (typeof request.quality === "string" && request.quality.trim()) {
-    requestBody.quality = request.quality.trim();
+  if (imageQuality) {
+    requestBody.quality = imageQuality;
   }
   if (supportsAspectRatio && aspectRatio) {
     requestBody.aspect_ratio = aspectRatio;
   }
-  if (referenceImages.length > 0) {
+  if (!usesImageEditsApi && referenceImages.length > 0) {
     requestBody.image = referenceImages;
+  }
+
+  let requestPayload: string | FormData;
+  let requestHeaders: Record<string, string>;
+  if (usesImageEditsApi) {
+    const formData = new FormData();
+    formData.set("model", model);
+    if (prompt) {
+      formData.set("prompt", prompt);
+    }
+    if (imageSize) {
+      formData.set("size", imageSize);
+    }
+    if (imageQuality) {
+      formData.set("quality", imageQuality);
+    }
+    if (supportsAspectRatio && aspectRatio) {
+      formData.set("aspect_ratio", aspectRatio);
+    }
+
+    const referenceBlobs = await Promise.all(referenceImages.map((image) => referenceToBlob(image, request.signal)));
+    referenceBlobs.forEach(({ blob, mimeType }, index) => {
+      formData.append("image", blob, `reference-${index + 1}.${mimeTypeToFileExtension(mimeType)}`);
+    });
+
+    requestPayload = formData;
+    requestHeaders = {
+      Authorization: `Bearer ${apiKey}`,
+    };
+  } else {
+    requestPayload = JSON.stringify(requestBody);
+    requestHeaders = {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    };
   }
 
   const attempt = 1;
@@ -990,9 +1042,10 @@ async function generateOpenAiCompatibleImage(request: UnifiedImageRequest): Prom
       mode: "openai_compatible_image",
       model,
       executionMode,
-      imageSize: typeof requestBody.size === "string" ? requestBody.size : null,
+      imageSize,
       aspectRatio,
       referenceCount: referenceImages.length,
+      usesImageEditsApi,
       providerId: providerConfig.config.providerId,
       attempt,
       maxAttempts,
@@ -1000,11 +1053,8 @@ async function generateOpenAiCompatibleImage(request: UnifiedImageRequest): Prom
 
     const response = await fetch(endpoint, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
-      body: JSON.stringify(requestBody),
+      headers: requestHeaders,
+      body: requestPayload,
       signal: request.signal,
     });
 
@@ -1034,13 +1084,14 @@ async function generateOpenAiCompatibleImage(request: UnifiedImageRequest): Prom
     const outputs = toImageEntries(payload);
 
     basicLog("[SUPPLIER][PARSE]", {
-      endpoint: executionMode === "async" ? "/images/generations?async=true" : "/images/generations",
+      endpoint: executionMode === "async" ? `${endpointPath}?async=true` : endpointPath,
       mode: "openai_compatible_image",
       executionMode,
       imageCount: outputs.length,
-      imageSize: typeof requestBody.size === "string" ? requestBody.size : null,
+      imageSize,
       aspectRatio,
       referenceCount: referenceImages.length,
+      usesImageEditsApi,
     });
 
     if (outputs.length > 0) {
@@ -1073,7 +1124,7 @@ async function generateOpenAiCompatibleImage(request: UnifiedImageRequest): Prom
         signal: request.signal,
         requestModel: request.model,
         normalizedModel: model,
-        imageSize: typeof requestBody.size === "string" ? requestBody.size : null,
+        imageSize,
         aspectRatio,
         referenceCount: referenceImages.length,
       });
@@ -1081,12 +1132,13 @@ async function generateOpenAiCompatibleImage(request: UnifiedImageRequest): Prom
 
     if (outputs.length === 0) {
       basicLog("[SUPPLIER][PARSE_EMPTY]", {
-        endpoint: "/images/generations",
+        endpoint: endpointPath,
         mode: "openai_compatible_image",
         executionMode,
-        imageSize: typeof requestBody.size === "string" ? requestBody.size : null,
+        imageSize,
         aspectRatio,
         referenceCount: referenceImages.length,
+        usesImageEditsApi,
         ...summarizeImagePayloadCounts(payload),
       });
       throw new ImageGenerationError("OpenAI compatible image request returned no images", 502, {
@@ -1100,14 +1152,15 @@ async function generateOpenAiCompatibleImage(request: UnifiedImageRequest): Prom
     const failureState = classifyGeminiImageTransportFailure(error);
 
     basicLog("[SUPPLIER][ERR]", {
-      endpoint: executionMode === "async" ? "/images/generations?async=true" : "/images/generations",
+      endpoint: executionMode === "async" ? `${endpointPath}?async=true` : endpointPath,
       mode: "openai_compatible_image",
       requestedModel: request.model,
       normalizedModel: model,
       executionMode,
-      imageSize: typeof requestBody.size === "string" ? requestBody.size : null,
+      imageSize,
       aspectRatio,
       referenceCount: referenceImages.length,
+      usesImageEditsApi,
       failureClass: failureState.failureClass,
       isRetryable: failureState.isRetryable,
       retryAttempt: attempt,
