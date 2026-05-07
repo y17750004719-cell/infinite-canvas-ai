@@ -89,6 +89,51 @@ test('canvas clipboard wiring adds app-level copy helpers and keyboard shortcuts
   assert.equal(pageSource.includes("if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'v') {"), true);
 });
 
+test('alt-drag copy wiring materializes a temporary copy without mutating the regular clipboard ref', () => {
+  const refStart = pageSource.indexOf('const suppressNextItemClickRef = useRef<string | null>(null);');
+  const helperStart = pageSource.indexOf('const beginAltDragCopiedItems = React.useCallback(');
+  const helperEnd = pageSource.indexOf('  const handleCanvasPointerDown =', helperStart);
+  const selectionGroupStart = pageSource.indexOf('const handleSelectionGroupPointerDown = useCallback(');
+  const selectionGroupEnd = pageSource.indexOf('  const handleItemMouseEnter = useCallback(', selectionGroupStart);
+  const itemClickStart = pageSource.indexOf('const handleItemClick = useCallback(');
+  const itemClickEnd = pageSource.indexOf('  const handleItemPointerDown = useCallback(', itemClickStart);
+  const itemPointerStart = pageSource.indexOf('const handleItemPointerDown = useCallback(');
+  const itemPointerEnd = pageSource.indexOf('  const handleCornerResizePointerDown = useCallback(', itemPointerStart);
+
+  assert.notEqual(refStart, -1);
+  assert.notEqual(helperStart, -1);
+  assert.notEqual(helperEnd, -1);
+  assert.ok(helperEnd > helperStart);
+  assert.notEqual(selectionGroupStart, -1);
+  assert.notEqual(selectionGroupEnd, -1);
+  assert.ok(selectionGroupEnd > selectionGroupStart);
+  assert.notEqual(itemClickStart, -1);
+  assert.notEqual(itemClickEnd, -1);
+  assert.ok(itemClickEnd > itemClickStart);
+  assert.notEqual(itemPointerStart, -1);
+  assert.notEqual(itemPointerEnd, -1);
+  assert.ok(itemPointerEnd > itemPointerStart);
+
+  const helperBlock = pageSource.slice(helperStart, helperEnd);
+  const selectionGroupBlock = pageSource.slice(selectionGroupStart, selectionGroupEnd);
+  const itemClickBlock = pageSource.slice(itemClickStart, itemClickEnd);
+  const itemPointerBlock = pageSource.slice(itemPointerStart, itemPointerEnd);
+
+  assert.equal(helperBlock.includes('createCanvasClipboardSnapshot({'), true);
+  assert.equal(helperBlock.includes('materializeCanvasClipboardPaste({'), true);
+  assert.equal(helperBlock.includes('offsetStep: { x: 0, y: 0 },'), true);
+  assert.equal(helperBlock.includes('canvasClipboardRef.current'), false);
+  assert.equal(helperBlock.includes('draggingItemIdsRef.current = copiedItems.selectedIds;'), true);
+  assert.equal(helperBlock.includes('suppressNextItemClickRef.current = primaryId;'), true);
+  assert.equal(itemClickBlock.includes('const suppressedItemClickId = suppressNextItemClickRef.current;'), true);
+  assert.equal(itemClickBlock.includes('suppressNextItemClickRef.current = null;'), true);
+  assert.equal(itemClickBlock.includes('if (suppressedItemClickId === itemId) {'), true);
+  assert.equal(selectionGroupBlock.includes('if (e.altKey) {'), true);
+  assert.equal(selectionGroupBlock.includes('beginAltDragCopiedItems('), true);
+  assert.equal(itemPointerBlock.includes('if (e.altKey) {'), true);
+  assert.equal(itemPointerBlock.includes('beginAltDragCopiedItems('), true);
+});
+
 test('canvas copy shortcuts avoid hijacking text selection and paste falls back after image clipboard handling', () => {
   const panelPasteStopPropagationSnippet =
     'onPaste={(e) => {\n                      e.stopPropagation();\n                    }}\n                    onWheel={stopCanvasWheelFromScrollableRegion}';

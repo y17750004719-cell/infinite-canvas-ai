@@ -1158,6 +1158,95 @@ test('materializeCanvasClipboardPaste remaps ids, offsets items, and carries car
   });
 });
 
+test('materializeCanvasClipboardPaste can remap ids without offsetting positions for alt-drag copies', () => {
+  const result = workspaceSessionView.materializeCanvasClipboardPaste({
+    clipboard: {
+      items: [
+        {
+          id: 'text-card-1',
+          type: 'text',
+          x: 240,
+          y: 100,
+          width: 320,
+          height: 220,
+          rotation: 0,
+          textVariant: 'card',
+          textMode: 'manual',
+          text: '品牌主张',
+          visible: true,
+          locked: false,
+        },
+        {
+          id: 'image-card-1',
+          type: 'image',
+          x: 620,
+          y: 180,
+          width: 384,
+          height: 384,
+          rotation: 0,
+          imageVariant: 'card',
+          visible: true,
+          locked: false,
+        },
+      ],
+      textCardPanelDrafts: {
+        'text-card-1': '给我一句简短品牌口号',
+      },
+      imageCardPanelDrafts: {
+        'image-card-1': '做一张主视觉海报',
+      },
+      imageCardModelById: {
+        'image-card-1': 'flux-dev',
+      },
+      imageCardSizeById: {
+        'image-card-1': '1024x1024',
+      },
+      imageCardQualityById: {
+        'image-card-1': 'high',
+      },
+      imageCardCountById: {
+        'image-card-1': 3,
+      },
+      imageCardAspectRatioById: {
+        'image-card-1': '16:9',
+      },
+    },
+    pasteCount: 0,
+    offsetStep: { x: 0, y: 0 },
+    createId: (sourceId, index) => `alt-copy-${index + 1}-${sourceId}`,
+  });
+
+  assert.deepEqual(
+    result.items.map((item) => ({ id: item.id, x: item.x, y: item.y })),
+    [
+      { id: 'alt-copy-1-text-card-1', x: 240, y: 100 },
+      { id: 'alt-copy-2-image-card-1', x: 620, y: 180 },
+    ]
+  );
+  assert.deepEqual(result.selectedIds, ['alt-copy-1-text-card-1', 'alt-copy-2-image-card-1']);
+  assert.deepEqual(result.textCardPanelDrafts, {
+    'alt-copy-1-text-card-1': '给我一句简短品牌口号',
+  });
+  assert.deepEqual(result.imageCardPanelDrafts, {
+    'alt-copy-2-image-card-1': '做一张主视觉海报',
+  });
+  assert.deepEqual(result.imageCardModelById, {
+    'alt-copy-2-image-card-1': 'flux-dev',
+  });
+  assert.deepEqual(result.imageCardSizeById, {
+    'alt-copy-2-image-card-1': '1024x1024',
+  });
+  assert.deepEqual(result.imageCardQualityById, {
+    'alt-copy-2-image-card-1': 'high',
+  });
+  assert.deepEqual(result.imageCardCountById, {
+    'alt-copy-2-image-card-1': 3,
+  });
+  assert.deepEqual(result.imageCardAspectRatioById, {
+    'alt-copy-2-image-card-1': '16:9',
+  });
+});
+
 test('resolveCanvasImagePasteTarget returns replace for a single selected image asset item', () => {
   const result = resolveCanvasImagePasteTarget({
     selectedId: 'image-1',
