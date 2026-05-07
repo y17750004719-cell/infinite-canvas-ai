@@ -147,6 +147,33 @@ test('canvas copy shortcuts avoid hijacking text selection and paste falls back 
   assert.equal(pageSource.includes('canvasClipboardRef.current?.snapshot'), true);
 });
 
+test('canvas paste centers the pasted clipboard items and preserves paste accounting', () => {
+  const pasteStart = pageSource.indexOf('const handleCanvasPaste = useCallback(');
+  const pasteEnd = pageSource.indexOf('  const handleChatImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {', pasteStart);
+
+  assert.notEqual(pasteStart, -1);
+  assert.notEqual(pasteEnd, -1);
+  assert.ok(pasteEnd > pasteStart);
+
+  const pasteBlock = pageSource.slice(pasteStart, pasteEnd);
+
+  assert.equal(pasteBlock.includes('if (imageFiles.length > 0) {'), true);
+  assert.equal(pasteBlock.includes('await uploadImageFilesToCanvas(imageFiles, \'pasted\');'), true);
+  assert.equal(pasteBlock.includes('const pastedCanvasClipboard = materializeCanvasClipboardPaste({'), true);
+  assert.equal(pasteBlock.includes('animateViewportTo(centerViewportOnPastedCanvasItems(viewportRef.current, pastedCanvasClipboard.items));'), true);
+  assert.equal(pasteBlock.includes('canvasClipboardRef.current = {'), true);
+  assert.equal(pasteBlock.includes('pasteCount: pastedCanvasClipboard.nextPasteCount,'), true);
+});
+
+test('canvas paste viewport centering uses requestAnimationFrame smoothing', () => {
+  assert.equal(pageSource.includes('const CANVAS_VIEWPORT_PASTE_ANIMATION_MS = 240;'), true);
+  assert.equal(pageSource.includes('const viewportAnimationFrameRef = useRef<number | null>(null);'), true);
+  assert.equal(pageSource.includes('function animateViewportTo(nextViewport: { x: number; y: number; scale: number }) {'), true);
+  assert.equal(pageSource.includes('viewportAnimationFrameRef.current = requestAnimationFrame(flushViewportAnimation);'), true);
+  assert.equal(pageSource.includes('if (reducedMotionRef.current || hasNoMovement) {'), true);
+  assert.equal(pageSource.includes('const cancelViewportAnimation = useCallback('), true);
+});
+
 test('left rail generated image history panel uses a wider layout than the original 320px menu', () => {
   assert.equal(pageSource.includes('w-[320px]'), false);
   assert.equal(pageSource.includes('w-[384px]'), true);

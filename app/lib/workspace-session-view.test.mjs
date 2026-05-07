@@ -66,6 +66,7 @@ import {
   settleCanvasImageGenerationRequests,
   shouldHandleCanvasImagePaste,
   shouldPreventScrollableRegionWheelDefault,
+  getViewportCenteredOnBounds,
 } from './workspace-session-view.mjs';
 
 test('getSessionConversationCount sums topic messages before falling back to legacy messages', () => {
@@ -2255,6 +2256,49 @@ test('resolveFloatingPopoverOffset can position a popover below the panel with a
     left: 45,
     top: 206,
   });
+});
+
+test('getViewportCenteredOnBounds keeps the selected bounds centered at scale one', () => {
+  const viewport = {
+    x: 120,
+    y: 80,
+    scale: 1,
+  };
+
+  const result = getViewportCenteredOnBounds(viewport, { left: 200, top: 140, width: 300, height: 120 }, 1200, 900);
+
+  assert.deepEqual(result, {
+    x: 250,
+    y: 250,
+    scale: 1,
+  });
+});
+
+test('getViewportCenteredOnBounds keeps scale and only recenters x and y', () => {
+  const viewport = {
+    x: -40,
+    y: 20,
+    scale: 2,
+  };
+
+  const result = getViewportCenteredOnBounds(viewport, { left: 50, top: 75, width: 200, height: 100 }, 1000, 800);
+
+  assert.deepEqual(result, {
+    x: 200,
+    y: 150,
+    scale: 2,
+  });
+});
+
+test('getViewportCenteredOnBounds returns the original viewport for invalid sizes or bounds', () => {
+  const viewport = {
+    x: 1,
+    y: 2,
+    scale: 1.5,
+  };
+
+  assert.equal(getViewportCenteredOnBounds(viewport, null, 1000, 800), viewport);
+  assert.equal(getViewportCenteredOnBounds(viewport, { left: 0, top: 0, width: 10, height: 10 }, 0, 800), viewport);
 });
 
 test('resolveImageGenerationFallbackSizes returns the 4K to 2K to 1K fallback chain', () => {

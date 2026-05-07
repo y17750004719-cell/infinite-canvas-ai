@@ -839,6 +839,30 @@ export function resolveFloatingPopoverOffset({
   };
 }
 
+export function getViewportCenteredOnBounds(currentViewport, bounds, viewportWidth, viewportHeight) {
+  if (
+    !currentViewport ||
+    !bounds ||
+    !Number.isFinite(currentViewport.scale) ||
+    currentViewport.scale <= 0 ||
+    !Number.isFinite(viewportWidth) ||
+    viewportWidth <= 0 ||
+    !Number.isFinite(viewportHeight) ||
+    viewportHeight <= 0
+  ) {
+    return currentViewport;
+  }
+
+  const centerX = bounds.left + bounds.width / 2;
+  const centerY = bounds.top + bounds.height / 2;
+
+  return {
+    ...currentViewport,
+    x: viewportWidth / 2 - centerX * currentViewport.scale,
+    y: viewportHeight / 2 - centerY * currentViewport.scale,
+  };
+}
+
 export function getTextCardVisualState({
   item,
   items,

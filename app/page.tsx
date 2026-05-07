@@ -76,6 +76,7 @@ import {
   reorderIncomingImageConnections,
   resolveCanvasImagePasteTarget,
   shouldHandleCanvasImagePaste,
+  getViewportCenteredOnBounds,
   shouldSubmitTextCardPanelEnter,
   shouldFocusTextCardPanelInputOnPointerDown,
   getTextCardPanelPlaceholder,
@@ -100,6 +101,7 @@ const CANVAS_OVERLAY_Z = 120;
 const CHAT_PANEL_Z = 180;
 const GLOBAL_NOTICE_Z = 220;
 const CANVAS_CLIPBOARD_PASTE_OFFSET = { x: 32, y: 32 };
+const CANVAS_VIEWPORT_PASTE_ANIMATION_MS = 240;
 
 const extractPlainText = (value: React.ReactNode): string =>
   React.Children.toArray(value)
@@ -955,6 +957,27 @@ const getTextCardFrameBounds = (item: CanvasItem) => ({
   width: Math.max(0, item.width - TEXT_CARD_FRAME_INSET_X * 2),
   height: Math.max(0, item.height - TEXT_CARD_FRAME_TOP - TEXT_CARD_FRAME_BOTTOM),
 });
+
+const getCanvasItemsVisualBounds = (items: CanvasItem[]) => {
+  if (!Array.isArray(items) || items.length === 0) {
+    return null;
+  }
+
+  const visualBounds = items.map(getItemVisualBounds);
+  const left = Math.min(...visualBounds.map((bounds) => bounds.left));
+  const top = Math.min(...visualBounds.map((bounds) => bounds.top));
+  const right = Math.max(...visualBounds.map((bounds) => bounds.left + bounds.width));
+  const bottom = Math.max(...visualBounds.map((bounds) => bounds.top + bounds.height));
+
+  return {
+    left,
+    top,
+    width: right - left,
+    height: bottom - top,
+  };
+};
+
+const easeOutCubic = (t: number) => 1 - Math.pow(1 - t, 3);
 
 interface ViewportState {
   x: number;
@@ -3499,12 +3522,19 @@ export default function AIWorkspace() {
   const latestInteractionPointerRef = useRef<{ x: number; y: number } | null>(null);
   const interactionFrameRef = useRef<number | null>(null);
   const zoomAnimationFrameRef = useRef<number | null>(null);
+  const viewportAnimationFrameRef = useRef<number | null>(null);
   const viewportRef = useRef({ x: 0, y: 0, scale: 1 });
   const itemsRef = useRef<CanvasItem[]>([]);
   const selectedIdRef = useRef<string | null>(null);
   const reducedMotionRef = useRef(false);
   const dragItemStartPositionsRef = useRef<Record<string, { x: number; y: number }>>({});
   const wheelZoomTargetRef = useRef<{ scale: number; anchor: { x: number; y: number } | undefined } | null>(null);
+  const viewportAnimationTargetRef = useRef<{
+    from: { x: number; y: number; scale: number };
+    to: { x: number; y: number; scale: number };
+    startedAt: number;
+    duration: number;
+  } | null>(null);
   const marqueeStartRef = useRef<{ x: number; y: number } | null>(null);
   const draggingItemIdsRef = useRef<string[]>([]);
   const magneticPortResetTimerRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
@@ -3772,20 +3802,7 @@ export default function AIWorkspace() {
   const multiSelectionBounds = React.useMemo(() => {
     if (selectedIds.length <= 1) return null;
     const selectedItems = items.filter((item) => selectedIds.includes(item.id));
-    if (selectedItems.length <= 1) return null;
-
-    const visualBounds = selectedItems.map(getItemVisualBounds);
-    const left = Math.min(...visualBounds.map((bounds) => bounds.left));
-    const top = Math.min(...visualBounds.map((bounds) => bounds.top));
-    const right = Math.max(...visualBounds.map((bounds) => bounds.left + bounds.width));
-    const bottom = Math.max(...visualBounds.map((bounds) => bounds.top + bounds.height));
-
-    return {
-      left,
-      top,
-      width: right - left,
-      height: bottom - top,
-    };
+    return selectedItems.length <= 1 ? null : getCanvasItemsVisualBounds(selectedItems);
   }, [items, selectedIds]);
   const itemById = React.useMemo(
     () => Object.fromEntries(items.map((item) => [item.id, item] as const)),
@@ -4792,6 +4809,24 @@ export default function AIWorkspace() {
 
   const getPrimarySelectedId = useCallback((ids: string[]) => ids[0] || null, []);
 
+  const centerViewportOnPastedCanvasItems = useCallback(
+    (currentViewport: { x: number; y: number; scale: number }, items: CanvasItem[]) => {
+      const canvasElement = canvasRef.current;
+      const pastedItemsBounds = getCanvasItemsVisualBounds(items);
+      if (!canvasElement || !pastedItemsBounds) {
+        return currentViewport;
+      }
+
+      return getViewportCenteredOnBounds(
+        currentViewport,
+        pastedItemsBounds,
+        canvasElement.clientWidth,
+        canvasElement.clientHeight
+      );
+    },
+    []
+  );
+
   const handleCanvasPaste = useCallback(
     async (e: React.ClipboardEvent<HTMLDivElement> | ClipboardEvent) => {
       if (!shouldHandleCanvasImagePaste(e.target)) {
@@ -4839,6 +4874,7 @@ export default function AIWorkspace() {
       setSelectedConnectionIds([]);
       setSelectedIds(pastedCanvasClipboard.selectedIds);
       setSelectedId(getPrimarySelectedId(pastedCanvasClipboard.selectedIds));
+      animateViewportTo(centerViewportOnPastedCanvasItems(viewportRef.current, pastedCanvasClipboard.items));
 
       canvasClipboardRef.current = {
         snapshot: canvasClipboardRef.current?.snapshot ?? null,
@@ -4854,6 +4890,8 @@ export default function AIWorkspace() {
       selectedIds,
       selectedImageAssetItem?.id,
       uploadImageFilesToCanvas,
+      centerViewportOnPastedCanvasItems,
+      animateViewportTo,
     ]
   );
 
@@ -5858,6 +5896,67 @@ export default function AIWorkspace() {
     wheelZoomTargetRef.current = null;
   }, []);
 
+  const cancelViewportAnimation = useCallback(() => {
+    if (viewportAnimationFrameRef.current !== null) {
+      cancelAnimationFrame(viewportAnimationFrameRef.current);
+      viewportAnimationFrameRef.current = null;
+    }
+    viewportAnimationTargetRef.current = null;
+  }, []);
+
+  const flushViewportAnimation = useCallback(
+    (now: number) => {
+      viewportAnimationFrameRef.current = null;
+      const target = viewportAnimationTargetRef.current;
+      if (!target) return;
+
+      const elapsed = Math.max(0, now - target.startedAt);
+      const progress = Math.min(1, elapsed / target.duration);
+      const easedProgress = easeOutCubic(progress);
+      const nextViewport = {
+        ...target.from,
+        x: target.from.x + (target.to.x - target.from.x) * easedProgress,
+        y: target.from.y + (target.to.y - target.from.y) * easedProgress,
+      };
+
+      setViewport(nextViewport);
+      if (progress >= 1) {
+        viewportAnimationTargetRef.current = null;
+        return;
+      }
+
+      viewportAnimationFrameRef.current = requestAnimationFrame(flushViewportAnimation);
+    },
+    [setViewport]
+  );
+
+  function animateViewportTo(nextViewport: { x: number; y: number; scale: number }) {
+    const currentViewport = viewportRef.current;
+    const fromViewport = {
+      ...currentViewport,
+    };
+
+    const hasNoMovement =
+      fromViewport.x === nextViewport.x &&
+      fromViewport.y === nextViewport.y &&
+      fromViewport.scale === nextViewport.scale;
+
+    cancelViewportAnimation();
+
+    if (reducedMotionRef.current || hasNoMovement) {
+      setViewport(nextViewport);
+      return;
+    }
+
+    viewportAnimationTargetRef.current = {
+      from: fromViewport,
+      to: nextViewport,
+      startedAt: performance.now(),
+      duration: CANVAS_VIEWPORT_PASTE_ANIMATION_MS,
+    };
+    viewportAnimationFrameRef.current = requestAnimationFrame(flushViewportAnimation);
+  }
+
   const getScaledViewportAtAnchor = useCallback(
     (
       currentViewport: { x: number; y: number; scale: number },
@@ -6006,6 +6105,7 @@ export default function AIWorkspace() {
       if (itemIds.length === 0 || !primaryId) return;
       pendingCanvasHistorySnapshotRef.current = createCurrentCanvasUndoSnapshot();
       cancelZoomAnimation();
+      cancelViewportAnimation();
       clearPendingConnectionMenu();
       setSelectedConnectionIds([]);
       setIsDragging(true);
@@ -6020,7 +6120,7 @@ export default function AIWorkspace() {
           .map((item) => [item.id, { x: item.x, y: item.y }])
       );
     },
-    [cancelZoomAnimation, clearPendingConnectionMenu, createCurrentCanvasUndoSnapshot]
+    [cancelViewportAnimation, cancelZoomAnimation, clearPendingConnectionMenu, createCurrentCanvasUndoSnapshot]
   );
 
   const beginAltDragCopiedItems = React.useCallback(
@@ -6055,6 +6155,7 @@ export default function AIWorkspace() {
 
       pendingCanvasHistorySnapshotRef.current = createCurrentCanvasUndoSnapshot();
       cancelZoomAnimation();
+      cancelViewportAnimation();
       clearPendingConnectionMenu();
       setSelectedConnectionIds([]);
       setIsDragging(true);
@@ -6084,6 +6185,7 @@ export default function AIWorkspace() {
     },
     [
       cancelZoomAnimation,
+      cancelViewportAnimation,
       clearPendingConnectionMenu,
       createCurrentCanvasUndoSnapshot,
       getPrimarySelectedId,
@@ -6107,6 +6209,7 @@ export default function AIWorkspace() {
 
   const handleCanvasPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     const target = e.target as HTMLElement;
+    cancelViewportAnimation();
     Object.values(magneticPorts).forEach((port) => {
       if (port.isTracking) releaseMagneticPort(port);
     });
@@ -6139,6 +6242,7 @@ export default function AIWorkspace() {
 
     if (e.button === 0 && isSpacePressed) {
       cancelZoomAnimation();
+      cancelViewportAnimation();
       clearPendingConnectionMenu();
       e.preventDefault();
       setIsPanning(true);
@@ -6149,6 +6253,7 @@ export default function AIWorkspace() {
 
     if (e.button === 1) {
       cancelZoomAnimation();
+      cancelViewportAnimation();
       clearPendingConnectionMenu();
       e.preventDefault();
       setIsPanning(true);
@@ -6316,10 +6421,11 @@ export default function AIWorkspace() {
 
   const handleWheel = (e: React.WheelEvent) => {
     e.preventDefault();
-    
+    cancelViewportAnimation();
+
     const canvas = canvasRef.current;
     if (!canvas) return;
-    
+
     const rect = canvas.getBoundingClientRect();
     const pointerX = e.clientX - rect.left;
     const pointerY = e.clientY - rect.top;
@@ -6530,6 +6636,9 @@ export default function AIWorkspace() {
       }
       if (zoomAnimationFrameRef.current !== null) {
         cancelAnimationFrame(zoomAnimationFrameRef.current);
+      }
+      if (viewportAnimationFrameRef.current !== null) {
+        cancelAnimationFrame(viewportAnimationFrameRef.current);
       }
     };
   }, []);
