@@ -3615,6 +3615,8 @@ export default function AIWorkspace() {
   const currentSessionIdRef = useRef<string | null>(null);
   const canvasHistoryBySessionRef = useRef<Record<string, SessionCanvasHistoryState>>({});
   const pendingCanvasHistorySnapshotRef = useRef<CanvasUndoSnapshot | null>(null);
+  const suppressNextItemClickRef = useRef<string | null>(null);
+  const suppressNextItemClickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const latestChatInputRef = useRef('');
   const isHydratingSessionRef = useRef(false);
   const imageToolbarNoticeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -6021,6 +6023,88 @@ export default function AIWorkspace() {
     [cancelZoomAnimation, clearPendingConnectionMenu, createCurrentCanvasUndoSnapshot]
   );
 
+  const beginAltDragCopiedItems = React.useCallback(
+    (clientX: number, clientY: number, sourceIds: string[], primaryId: string | null) => {
+      if (sourceIds.length === 0 || !primaryId) return;
+
+      const snapshot = createCanvasClipboardSnapshot({
+        items: itemsRef.current,
+        selectedIds: sourceIds,
+        textCardPanelDrafts,
+        imageCardPanelDrafts,
+        imageCardModelById,
+        imageCardSizeById,
+        imageCardQualityById,
+        imageCardCountById,
+        imageCardAspectRatioById,
+      }) as CanvasClipboardSnapshot | null;
+      if (!snapshot) return;
+
+      const copiedItems = materializeCanvasClipboardPaste({
+        clipboard: snapshot,
+        pasteCount: 0,
+        offsetStep: { x: 0, y: 0 },
+        createId: (sourceId: string, index: number) =>
+          `${sourceId}-alt-copy-${Date.now()}-${index + 1}-${Math.random().toString(36).slice(2, 7)}`,
+      }) as MaterializedCanvasClipboardPaste | null;
+      if (!copiedItems) return;
+
+      const primarySourceIndex = snapshot.items.findIndex((item) => item.id === primaryId);
+      const copiedPrimaryId = copiedItems.items[Math.max(0, primarySourceIndex)]?.id ?? getPrimarySelectedId(copiedItems.selectedIds);
+      if (!copiedPrimaryId) return;
+
+      pendingCanvasHistorySnapshotRef.current = createCurrentCanvasUndoSnapshot();
+      cancelZoomAnimation();
+      clearPendingConnectionMenu();
+      setSelectedConnectionIds([]);
+      setIsDragging(true);
+      draggingItemIdsRef.current = copiedItems.selectedIds;
+      if (suppressNextItemClickTimerRef.current) {
+        clearTimeout(suppressNextItemClickTimerRef.current);
+      }
+      suppressNextItemClickRef.current = primaryId;
+      suppressNextItemClickTimerRef.current = setTimeout(() => {
+        suppressNextItemClickRef.current = null;
+        suppressNextItemClickTimerRef.current = null;
+      }, 350);
+      setSelectedId(copiedPrimaryId);
+      setSelectedIds(copiedItems.selectedIds);
+      setTextCardPanelDrafts((prev) => ({ ...prev, ...copiedItems.textCardPanelDrafts }));
+      setImageCardPanelDrafts((prev) => ({ ...prev, ...copiedItems.imageCardPanelDrafts }));
+      setImageCardModelById((prev) => ({ ...prev, ...copiedItems.imageCardModelById }));
+      setImageCardSizeById((prev) => ({ ...prev, ...copiedItems.imageCardSizeById }));
+      setImageCardQualityById((prev) => ({ ...prev, ...copiedItems.imageCardQualityById }));
+      setImageCardCountById((prev) => ({ ...prev, ...copiedItems.imageCardCountById }));
+      setImageCardAspectRatioById((prev) => ({ ...prev, ...copiedItems.imageCardAspectRatioById }));
+      setItems((prev) => [...prev, ...copiedItems.items]);
+      dragStart.current = { x: clientX, y: clientY };
+      dragItemStartPositionsRef.current = Object.fromEntries(
+        copiedItems.items.map((item) => [item.id, { x: item.x, y: item.y }])
+      );
+    },
+    [
+      cancelZoomAnimation,
+      clearPendingConnectionMenu,
+      createCurrentCanvasUndoSnapshot,
+      getPrimarySelectedId,
+      imageCardAspectRatioById,
+      imageCardCountById,
+      imageCardModelById,
+      imageCardPanelDrafts,
+      imageCardQualityById,
+      imageCardSizeById,
+      setImageCardAspectRatioById,
+      setImageCardCountById,
+      setImageCardModelById,
+      setImageCardPanelDrafts,
+      setImageCardQualityById,
+      setImageCardSizeById,
+      setItems,
+      setTextCardPanelDrafts,
+      textCardPanelDrafts,
+    ]
+  );
+
   const handleCanvasPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     const target = e.target as HTMLElement;
     Object.values(magneticPorts).forEach((port) => {
@@ -6307,6 +6391,15 @@ export default function AIWorkspace() {
       if (isSpacePressed) return;
       e.preventDefault();
       e.stopPropagation();
+      if (e.altKey) {
+        beginAltDragCopiedItems(
+          e.clientX,
+          e.clientY,
+          selectedIds,
+          getPrimarySelectedId(selectedIds)
+        );
+        return;
+      }
       beginDraggingSelectedItems(
         e.clientX,
         e.clientY,
@@ -6314,7 +6407,7 @@ export default function AIWorkspace() {
         getPrimarySelectedId(selectedIds)
       );
     },
-    [beginDraggingSelectedItems, getPrimarySelectedId, isSpacePressed, selectedIds]
+    [beginAltDragCopiedItems, beginDraggingSelectedItems, getPrimarySelectedId, isSpacePressed, selectedIds]
   );
 
   const handleItemMouseEnter = useCallback((itemId: string) => {
@@ -6328,6 +6421,17 @@ export default function AIWorkspace() {
 
   const handleItemClick = useCallback((e: React.MouseEvent<HTMLDivElement>, itemId: string) => {
     e.stopPropagation();
+    const suppressedItemClickId = suppressNextItemClickRef.current;
+    if (suppressedItemClickId) {
+      suppressNextItemClickRef.current = null;
+      if (suppressNextItemClickTimerRef.current) {
+        clearTimeout(suppressNextItemClickTimerRef.current);
+        suppressNextItemClickTimerRef.current = null;
+      }
+      if (suppressedItemClickId === itemId) {
+        return;
+      }
+    }
     if (e.shiftKey) {
       setSelectedIds((prev) => {
         const next = toggleSelectionId(prev, itemId);
@@ -6357,9 +6461,13 @@ export default function AIWorkspace() {
       e.preventDefault();
       e.stopPropagation();
       const draggingIds = selectedIds.includes(itemId) ? selectedIds : [itemId];
+      if (e.altKey) {
+        beginAltDragCopiedItems(e.clientX, e.clientY, draggingIds, itemId);
+        return;
+      }
       beginDraggingSelectedItems(e.clientX, e.clientY, draggingIds, itemId);
     },
-    [beginDraggingSelectedItems, editingTextCardId, finalizeManualTextCardEditing, isSpacePressed, selectedIds]
+    [beginAltDragCopiedItems, beginDraggingSelectedItems, editingTextCardId, finalizeManualTextCardEditing, isSpacePressed, selectedIds]
   );
 
   const handleCornerResizePointerDown = useCallback(
