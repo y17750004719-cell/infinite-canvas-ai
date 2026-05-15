@@ -48,8 +48,17 @@ if not exist "%NPM_CLI%" (
   exit /b 1
 )
 
+set "NEXT_CLI=%CD%\node_modules\next\dist\bin\next"
+if not exist "%NEXT_CLI%" (
+  echo [ERROR] Next.js CLI not found.
+  echo Your dependencies look incomplete for Windows.
+  echo Please run "npm install" in this folder, then run this file again.
+  pause
+  exit /b 1
+)
+
 echo Starting development server...
-start "Infinite Canvas AI Dev" "%ComSpec%" /k ""%NODE_EXE%" "%NPM_CLI%" run dev"
+start "Infinite Canvas AI Dev" "%ComSpec%" /k ""%NODE_EXE%" "%NEXT_CLI%" dev"
 
 timeout /t 5 /nobreak >nul
 start "" "http://localhost:3000"
