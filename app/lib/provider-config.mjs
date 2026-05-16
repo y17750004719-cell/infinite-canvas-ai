@@ -3,7 +3,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 
 const DEFAULT_PROVIDER_ID = 'comfly';
 const PROVIDER_PRESET_BASE_URLS = {
-  comfly: 'https://ai.comfly.chat/v1',
+  comfly: 'https://ai.comfly.org/v1',
   'gpt-best': 'https://gpt-best.cn',
   custom: 'https://api.openai.com/v1',
 };

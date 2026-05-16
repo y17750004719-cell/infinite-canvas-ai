@@ -55,7 +55,7 @@ cp .env.local.example .env.local
 
 ```env
 COMFLY_API_KEY=your_api_key_here
-COMFLY_API_URL=https://ai.comfly.chat/v1
+COMFLY_API_URL=https://ai.comfly.org/v1
 LOG_LEVEL=basic
 LOG_ALL_REQUESTS=1
 ```
@@ -75,7 +75,7 @@ IMAGE_SIZE_ALLOWLIST_GPT_IMAGE_2=1024x1024,1536x1024,1024x1536,2048x2048,2048x11
 说明：
 
 - `COMFLY_API_KEY` 是主要使用的接口密钥
-- `COMFLY_API_URL` 不填写时会默认使用 `https://ai.comfly.chat/v1`
+- `COMFLY_API_URL` 不填写时会默认使用 `https://ai.comfly.org/v1`
 - `GPT_BEST_API_KEY` / `GPT_BEST_BASE_URL` 可作为兼容备用配置
 - `COMFLY_ASYNC_IMAGE_SUBMIT_TIMEOUT_MS` 控制统一生图接口异步提交阶段的超时时间，默认 `600000ms`
 - `COMFLY_ASYNC_POLL_TIMEOUT_MS` / `COMFLY_ASYNC_POLL_INTERVAL_MS` 控制异步任务轮询超时与轮询间隔

@@ -112,12 +112,12 @@ test('createRecraftBackgroundRemovalRequest sends file uploads with fixed respon
 
 test('resolveBackgroundRemovalEndpoints keeps the documented runtime path and exposes a versioned COMFLY candidate', () => {
   assert.deepEqual(
-    resolveBackgroundRemovalEndpoints('https://ai.comfly.chat/v1'),
+    resolveBackgroundRemovalEndpoints('https://ai.comfly.org/v1'),
     {
-      runtimeEndpoint: 'https://ai.comfly.chat/recraft/v1/images/removeBackground',
+      runtimeEndpoint: 'https://ai.comfly.org/recraft/v1/images/removeBackground',
       candidateEndpoints: [
-        'https://ai.comfly.chat/recraft/v1/images/removeBackground',
-        'https://ai.comfly.chat/v1/recraft/v1/images/removeBackground',
+        'https://ai.comfly.org/recraft/v1/images/removeBackground',
+        'https://ai.comfly.org/v1/recraft/v1/images/removeBackground',
       ],
     }
   );
@@ -130,7 +130,7 @@ test('createRecraftBackgroundRemovalRequest marks remote uploads with source met
     publicDir: path.join(process.cwd(), 'public'),
     requestOrigin: 'http://localhost:3000',
     apiKey: 'test-key',
-    baseUrl: 'https://ai.comfly.chat/v1',
+    baseUrl: 'https://ai.comfly.org/v1',
     fetchImpl: async () =>
       new Response(PNG_1X1, {
         status: 200,
@@ -141,7 +141,7 @@ test('createRecraftBackgroundRemovalRequest marks remote uploads with source met
       }),
   });
 
-  assert.equal(request.endpoint, 'https://ai.comfly.chat/recraft/v1/images/removeBackground');
+  assert.equal(request.endpoint, 'https://ai.comfly.org/recraft/v1/images/removeBackground');
   assert.deepEqual(request.sourceMeta, {
     sourceKind: 'remote',
     sourceFileName: 'remote-input.png',

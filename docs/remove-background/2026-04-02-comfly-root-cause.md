@@ -5,7 +5,7 @@
 - Baseline failure time: `2026-04-02 10:43` Asia/Shanghai
 - Baseline log: `/Volumes/ZO/ZO.DESIGN/logs/2026-04-02/02-43-44-0v270m.app.log`
 - Requested path: `POST /recraft/v1/images/removeBackground`
-- Runtime endpoint actually used: `https://ai.comfly.chat/recraft/v1/images/removeBackground`
+- Runtime endpoint actually used: `https://ai.comfly.org/recraft/v1/images/removeBackground`
 - Upstream result: `500 Internal Server Error`
 - Upstream body: `{"code":"custom_router_error","message":"unknown error","data":null}`
 
@@ -21,7 +21,7 @@ This image is within the public Recraft remove-background constraints and is not
 ## Baseline Evidence
 
 1. UI request reached the local route and created a `request.start` log entry at `2026-04-02T02:43:44.228Z`.
-2. The local route created a `supplier.dispatch` log entry with endpoint `https://ai.comfly.chat/recraft/v1/images/removeBackground`.
+2. The local route created a `supplier.dispatch` log entry with endpoint `https://ai.comfly.org/recraft/v1/images/removeBackground`.
 3. The COMFLY upstream returned `500 Internal Server Error` with `content-type: application/json; charset=utf-8`.
 4. The returned payload body preview was `{"code":"custom_router_error","message":"unknown error","data":null}`.
 5. The local route classified the failure as `supplier.error`, not `supplier.parse_error`, `supplier.payload_invalid`, or `download_result`.
@@ -30,16 +30,16 @@ This image is within the public Recraft remove-background constraints and is not
 
 | Entry | Target | Result | Key Evidence |
 | --- | --- | --- | --- |
-| Canvas UI -> local route -> COMFLY | `https://ai.comfly.chat/recraft/v1/images/removeBackground` | `500` | Local route logs `supplier.error` with `custom_router_error` |
-| Smoke script documented path | `https://ai.comfly.chat/recraft/v1/images/removeBackground` | `500` | Same upstream body preview as UI path |
-| Smoke script wrong candidate | `https://ai.comfly.chat/v1/recraft/v1/images/removeBackground` | `404` | Upstream says `Invalid URL` and points back to `POST /recraft/v1/images/removeBackground` |
+| Canvas UI -> local route -> COMFLY | `https://ai.comfly.org/recraft/v1/images/removeBackground` | `500` | Local route logs `supplier.error` with `custom_router_error` |
+| Smoke script documented path | `https://ai.comfly.org/recraft/v1/images/removeBackground` | `500` | Same upstream body preview as UI path |
+| Smoke script wrong candidate | `https://ai.comfly.org/v1/recraft/v1/images/removeBackground` | `404` | Upstream says `Invalid URL` and points back to `POST /recraft/v1/images/removeBackground` |
 
 ## Minimal Reproduction Curl
 
 Correct documented path:
 
 ```bash
-curl -X POST "https://ai.comfly.chat/recraft/v1/images/removeBackground" \
+curl -X POST "https://ai.comfly.org/recraft/v1/images/removeBackground" \
   -H "Authorization: Bearer $COMFLY_API_KEY" \
   -F "file=@/Volumes/ZO/ZO.DESIGN/public/uploads/img-1774411429431-ft8hyt.png;type=image/png" \
   -F "response_format=url"
@@ -48,7 +48,7 @@ curl -X POST "https://ai.comfly.chat/recraft/v1/images/removeBackground" \
 Known incorrect candidate for contrast:
 
 ```bash
-curl -X POST "https://ai.comfly.chat/v1/recraft/v1/images/removeBackground" \
+curl -X POST "https://ai.comfly.org/v1/recraft/v1/images/removeBackground" \
   -H "Authorization: Bearer $COMFLY_API_KEY" \
   -F "file=@/Volumes/ZO/ZO.DESIGN/public/uploads/img-1774411429431-ft8hyt.png;type=image/png" \
   -F "response_format=url"

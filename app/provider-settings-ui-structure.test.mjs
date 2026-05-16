@@ -37,6 +37,10 @@ test('provider settings modal loads and saves runtime config through the setting
   assert.equal(pageSource.includes('自定义'), true);
 });
 
+test('provider settings modal uses the new Comfly preset base url', () => {
+  assert.equal(pageSource.includes("{ id: 'comfly', label: 'Comfly', baseUrl: 'https://ai.comfly.org/v1' }"), true);
+});
+
 test('provider settings modal replaces the preset cards with a summary card and select control', () => {
   assert.equal(pageSource.includes("grid grid-cols-3 gap-2"), false);
   assert.equal(pageSource.includes('getProviderSettingsProviderLabel(providerSettingsCurrentProviderId)'), true);

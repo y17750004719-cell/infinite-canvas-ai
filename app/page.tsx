@@ -356,7 +356,7 @@ const quickActions = [
 ];
 
 const PROVIDER_SETTINGS_PRESET_OPTIONS = [
-  { id: 'comfly', label: 'Comfly', baseUrl: 'https://ai.comfly.chat/v1' },
+  { id: 'comfly', label: 'Comfly', baseUrl: 'https://ai.comfly.org/v1' },
   { id: 'gpt-best', label: 'GPT-Best', baseUrl: 'https://gpt-best.cn' },
   { id: 'custom', label: '自定义', baseUrl: 'https://api.openai.com/v1' },
 ] as const;

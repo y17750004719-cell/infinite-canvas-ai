@@ -17,15 +17,33 @@ test('readProviderConfig falls back to env defaults when no runtime config exist
     const result = await readProviderConfig({
       runtimeDir,
       env: {
-        COMFLY_API_URL: 'https://ai.comfly.chat/v1',
+        COMFLY_API_URL: 'https://ai.comfly.org/v1',
         COMFLY_API_KEY: 'env-test-key',
       },
     });
 
     assert.equal(result.source, 'env');
     assert.equal(result.config.providerId, 'comfly');
-    assert.equal(result.config.baseUrl, 'https://ai.comfly.chat/v1');
+    assert.equal(result.config.baseUrl, 'https://ai.comfly.org/v1');
     assert.equal(result.config.apiKey, 'env-test-key');
+  } finally {
+    await rm(runtimeDir, { recursive: true, force: true });
+  }
+});
+
+test('readProviderConfig uses the new Comfly default base url when no env override exists', async () => {
+  const runtimeDir = await mkdtemp(path.join(os.tmpdir(), 'provider-config-default-'));
+
+  try {
+    const result = await readProviderConfig({
+      runtimeDir,
+      env: {},
+    });
+
+    assert.equal(result.source, 'env');
+    assert.equal(result.config.providerId, 'comfly');
+    assert.equal(result.config.baseUrl, 'https://ai.comfly.org/v1');
+    assert.equal(result.config.apiKey, '');
   } finally {
     await rm(runtimeDir, { recursive: true, force: true });
   }
@@ -37,6 +55,15 @@ test('resolveProviderRequestTargets keeps OpenAI compatibility and trims /v1 for
     openAiBaseUrl: 'https://example.com/v1',
     geminiBaseUrl: 'https://example.com',
     recraftBaseUrl: 'https://example.com',
+  });
+});
+
+test('resolveProviderRequestTargets preserves the new Comfly /v1 base while trimming route-specific roots', () => {
+  assert.deepEqual(resolveProviderRequestTargets('https://ai.comfly.org/v1'), {
+    baseUrl: 'https://ai.comfly.org/v1',
+    openAiBaseUrl: 'https://ai.comfly.org/v1',
+    geminiBaseUrl: 'https://ai.comfly.org',
+    recraftBaseUrl: 'https://ai.comfly.org',
   });
 });
 

@@ -1,9 +1,9 @@
 {
-  "baseUrl": "https://ai.comfly.chat/v1",
-  "runtimeEndpoint": "https://ai.comfly.chat/recraft/v1/images/removeBackground",
+  "baseUrl": "https://ai.comfly.org/v1",
+  "runtimeEndpoint": "https://ai.comfly.org/recraft/v1/images/removeBackground",
   "candidateEndpoints": [
-    "https://ai.comfly.chat/recraft/v1/images/removeBackground",
-    "https://ai.comfly.chat/v1/recraft/v1/images/removeBackground"
+    "https://ai.comfly.org/recraft/v1/images/removeBackground",
+    "https://ai.comfly.org/v1/recraft/v1/images/removeBackground"
   ],
   "filePath": "/Volumes/ZO/ZO.DESIGN/public/uploads/img-1774411429431-ft8hyt.png",
   "sourceImage": {
@@ -15,7 +15,7 @@
   "baselineLog": "/Volumes/ZO/ZO.DESIGN/logs/2026-04-02/02-43-44-0v270m.app.log",
   "results": [
     {
-      "endpoint": "https://ai.comfly.chat/recraft/v1/images/removeBackground",
+      "endpoint": "https://ai.comfly.org/recraft/v1/images/removeBackground",
       "status": 500,
       "statusText": "Internal Server Error",
       "contentType": "application/json; charset=utf-8",
@@ -24,7 +24,7 @@
       "imageUrl": null
     },
     {
-      "endpoint": "https://ai.comfly.chat/v1/recraft/v1/images/removeBackground",
+      "endpoint": "https://ai.comfly.org/v1/recraft/v1/images/removeBackground",
       "status": 404,
       "statusText": "Not Found",
       "contentType": "application/json; charset=utf-8",

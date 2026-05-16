@@ -15,7 +15,7 @@ test('remove-background investigation bundle includes a markdown report with the
   assert.equal(report.includes('1024x1024'), true);
   assert.equal(report.includes('1224000'), true);
   assert.equal(report.includes('curl'), true);
-  assert.equal(report.includes('https://ai.comfly.chat/v1/recraft/v1/images/removeBackground'), true);
+  assert.equal(report.includes('https://ai.comfly.org/v1/recraft/v1/images/removeBackground'), true);
   assert.equal(report.includes('404'), true);
   assert.equal(report.includes('2026-04-02 10:43'), true);
 });
@@ -24,10 +24,10 @@ test('remove-background investigation bundle includes captured smoke results for
   assert.equal(fs.existsSync(smokePath), true);
 
   const smokePayload = JSON.parse(fs.readFileSync(smokePath, 'utf8'));
-  assert.equal(smokePayload.runtimeEndpoint, 'https://ai.comfly.chat/recraft/v1/images/removeBackground');
+  assert.equal(smokePayload.runtimeEndpoint, 'https://ai.comfly.org/recraft/v1/images/removeBackground');
   assert.deepEqual(smokePayload.candidateEndpoints, [
-    'https://ai.comfly.chat/recraft/v1/images/removeBackground',
-    'https://ai.comfly.chat/v1/recraft/v1/images/removeBackground',
+    'https://ai.comfly.org/recraft/v1/images/removeBackground',
+    'https://ai.comfly.org/v1/recraft/v1/images/removeBackground',
   ]);
   assert.equal(smokePayload.results[0].status, 500);
   assert.equal(smokePayload.results[0].bodyPreview.includes('custom_router_error'), true);

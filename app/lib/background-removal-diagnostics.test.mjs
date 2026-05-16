@@ -113,7 +113,7 @@ test('createDownloadFailureDiagnostics marks download_result failures with respo
 test('createSupplierProxyErrorMessage exposes COMFLY stage, host, code and upstream message', () => {
   assert.equal(
     createSupplierProxyErrorMessage({
-      host: 'ai.comfly.chat',
+      host: 'ai.comfly.org',
       failedStage: 'supplier.error',
       payload: {
         code: 'custom_router_error',
@@ -121,6 +121,6 @@ test('createSupplierProxyErrorMessage exposes COMFLY stage, host, code and upstr
       },
       fallbackMessage: 'Internal Server Error',
     }),
-    'COMFLY 抠图代理错误（supplier.error @ ai.comfly.chat）：custom_router_error - unknown error'
+    'COMFLY 抠图代理错误（supplier.error @ ai.comfly.org）：custom_router_error - unknown error'
   );
 });
