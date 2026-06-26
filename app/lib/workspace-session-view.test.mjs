@@ -54,6 +54,8 @@ import {
   resolveTextPanelChatModel,
   resolveSessionPresentationState,
   resolveImageCardModel,
+  resolveImageCardSize,
+  resolveImageCardSizeForAspectRatio,
   normalizeImageCardAspectRatio,
   resolveCanvasImageTaskExecutionMode,
   resolveFloatingPopoverOffset,
@@ -924,6 +926,10 @@ test('createCanvasClipboardSnapshot keeps selected items in canvas order and cop
       'image-card-1': '做一张主视觉海报',
       'other-image': 'ignore',
     },
+    imageCardProviderById: {
+      'image-card-1': 'comfly',
+      'other-image': 'ignore',
+    },
     imageCardModelById: {
       'image-card-1': 'flux-dev',
       'other-image': 'ignore',
@@ -997,6 +1003,9 @@ test('createCanvasClipboardSnapshot keeps selected items in canvas order and cop
     },
     imageCardPanelDrafts: {
       'image-card-1': '做一张主视觉海报',
+    },
+    imageCardProviderById: {
+      'image-card-1': 'comfly',
     },
     imageCardModelById: {
       'image-card-1': 'flux-dev',
@@ -1072,6 +1081,9 @@ test('materializeCanvasClipboardPaste remaps ids, offsets items, and carries car
       imageCardPanelDrafts: {
         'image-card-1': '做一张主视觉海报',
       },
+      imageCardProviderById: {
+        'image-card-1': 'comfly',
+      },
       imageCardModelById: {
         'image-card-1': 'flux-dev',
       },
@@ -1140,6 +1152,9 @@ test('materializeCanvasClipboardPaste remaps ids, offsets items, and carries car
     imageCardPanelDrafts: {
       'copy-2-image-card-1': '做一张主视觉海报',
     },
+    imageCardProviderById: {
+      'copy-2-image-card-1': 'comfly',
+    },
     imageCardModelById: {
       'copy-2-image-card-1': 'flux-dev',
     },
@@ -1196,6 +1211,9 @@ test('materializeCanvasClipboardPaste can remap ids without offsetting positions
       imageCardPanelDrafts: {
         'image-card-1': '做一张主视觉海报',
       },
+      imageCardProviderById: {
+        'image-card-1': 'comfly',
+      },
       imageCardModelById: {
         'image-card-1': 'flux-dev',
       },
@@ -1230,6 +1248,9 @@ test('materializeCanvasClipboardPaste can remap ids without offsetting positions
   });
   assert.deepEqual(result.imageCardPanelDrafts, {
     'alt-copy-2-image-card-1': '做一张主视觉海报',
+  });
+  assert.deepEqual(result.imageCardProviderById, {
+    'alt-copy-2-image-card-1': 'comfly',
   });
   assert.deepEqual(result.imageCardModelById, {
     'alt-copy-2-image-card-1': 'flux-dev',
@@ -1947,6 +1968,7 @@ test('buildCanvasImageGenerationRequest only uses current prompt, direct image p
     model: 'gemini-3.1-flash-image-preview',
     size: '2048x2048',
     n: 4,
+    quality: 'auto',
     aspect_ratio: '16:9',
     reference_images: ['/b.png', '/a.png'],
     reference_labels: ['image1', 'image2'],
@@ -1970,6 +1992,7 @@ test('buildCanvasImageGenerationRequest preserves 4K size requests for image car
     model: 'gemini-3.1-flash-image-preview',
     size: '4096x4096',
     n: 1,
+    quality: 'auto',
     aspect_ratio: '1:1',
     executionMode: 'async',
   });
@@ -1994,6 +2017,7 @@ test('buildCanvasImageGenerationRequest preserves requested multi-image counts f
     model: 'gemini-3.1-flash-image-preview',
     size: '2048x2048',
     n: 2,
+    quality: 'auto',
     aspect_ratio: '3:4',
     reference_images: ['/b.png', '/a.png'],
     reference_labels: ['image1', 'image2'],
@@ -2017,6 +2041,7 @@ test('buildCanvasImageGenerationRequest defaults to async execution mode for ima
     model: 'gemini-3.1-flash-image-preview',
     size: '2048x2048',
     n: 1,
+    quality: 'auto',
     aspect_ratio: '1:1',
     executionMode: 'async',
   });
@@ -2042,6 +2067,7 @@ test('buildAsyncImageTaskRequests expands multi-image generation into async sing
     model: 'gemini-3.1-flash-image-preview',
     size: '2048x2048',
     n: 1,
+    quality: 'auto',
     aspect_ratio: '3:4',
     reference_images: ['/b.png', '/a.png'],
     reference_labels: ['image1', 'image2'],
@@ -2067,6 +2093,7 @@ test('buildAsyncImageTaskRequests expands 4K multi-image generation into four ex
     model: 'gemini-3.1-flash-image-preview',
     size: '4096x4096',
     n: 1,
+    quality: 'auto',
     aspect_ratio: '1:1',
     executionMode: 'async',
   });
@@ -2392,6 +2419,7 @@ test('buildCanvasImageGenerationRequest falls back to the default image model fo
     model: 'gemini-3.1-flash-image-preview',
     size: '1024x1024',
     n: 2,
+    quality: 'auto',
     executionMode: 'async',
   });
 });
@@ -2454,8 +2482,20 @@ test('resolveImageCardModel accepts gpt-image-2 as a supported image model', () 
 test('getSupportedImageCardSizeOptions returns official gpt-image-2 size choices', () => {
   assert.deepEqual(
     getSupportedImageCardSizeOptions('gpt-image-2').map((option) => option.id),
-    ['1024x1024', '1536x1024', '1024x1536', '2048x2048', '2048x1152', '3840x2160', '2160x3840']
+    ['1024x1024', '2048x2048', '4096x4096']
   );
+});
+
+test('gpt-image-2 provider variants reuse resolution tier choices and resolve 2K by aspect ratio', () => {
+  assert.deepEqual(
+    getSupportedImageCardSizeOptions('gpt-image-2-2k').map((option) => option.id),
+    ['1024x1024', '2048x2048', '4096x4096']
+  );
+  assert.equal(resolveImageCardSizeForAspectRatio('gpt-image-2-2k', '2048x2048', '1:1'), '2048x2048');
+  assert.equal(resolveImageCardSizeForAspectRatio('gpt-image-2-2k', '2048x2048', '16:9'), '2048x1152');
+  assert.equal(resolveImageCardSizeForAspectRatio('gpt-image-2-2k', '2048x2048', '9:16'), '1152x2048');
+  assert.equal(resolveImageCardSizeForAspectRatio('gpt-image-2-2k', '2048x2048', '3:2'), '2048x1360');
+  assert.equal(resolveImageCardSizeForAspectRatio('gpt-image-2-2k', '2048x2048', '2:3'), '1360x2048');
 });
 
 test('resolveImageCardModel falls back to default when removed nano-banana ids are requested', () => {
@@ -2507,11 +2547,103 @@ test('buildCanvasImageGenerationRequest omits aspect_ratio for gpt-image-2 and p
     messages: [{ role: 'user', content: '生成一张封面' }],
     intent: 'image',
     model: 'gpt-image-2',
-    size: '2048x2048',
+    size: '1152x2048',
     quality: 'high',
     n: 1,
     executionMode: 'async',
   });
+});
+
+test('buildCanvasImageGenerationRequest keeps quality for aspect-ratio-capable image models too', () => {
+  const result = buildCanvasImageGenerationRequest({
+    input: '生成一张横版海报',
+    linkedImagePreviews: [],
+    modelId: 'gemini-3.1-flash-image-preview',
+    size: '2048x2048',
+    quality: 'medium',
+    count: 1,
+    aspectRatio: '16:9',
+  });
+
+  assert.deepEqual(result, {
+    messages: [{ role: 'user', content: '生成一张横版海报' }],
+    intent: 'image',
+    model: 'gemini-3.1-flash-image-preview',
+    size: '2048x2048',
+    quality: 'medium',
+    n: 1,
+    aspect_ratio: '16:9',
+    executionMode: 'async',
+  });
+});
+
+test('buildCanvasImageGenerationRequest resolves provider variant gpt-image-2 2K requests by aspect ratio', () => {
+  const result = buildCanvasImageGenerationRequest({
+    input: '生成一张封面',
+    linkedImagePreviews: [],
+    modelId: 'gpt-image-2-2k',
+    allowedModelIds: ['gpt-image-2-2k'],
+    fallbackModel: 'gpt-image-2-2k',
+    size: '2048x2048',
+    quality: 'high',
+    count: 1,
+    aspectRatio: '16:9',
+  });
+
+  assert.deepEqual(result, {
+    messages: [{ role: 'user', content: '生成一张封面' }],
+    intent: 'image',
+    model: 'gpt-image-2-2k',
+    size: '2048x1152',
+    quality: 'high',
+    n: 1,
+    executionMode: 'async',
+  });
+});
+
+test('buildCanvasImageGenerationRequest preserves a provider-saved Gemini variant model id', () => {
+  const result = buildCanvasImageGenerationRequest({
+    input: '生成一张横版海报',
+    linkedImagePreviews: [],
+    modelId: 'gemini-3.1-flash-image-preview-2k',
+    allowedModelIds: ['gemini-3.1-flash-image-preview-2k'],
+    fallbackModel: 'gemini-3.1-flash-image-preview-2k',
+    size: '2048x2048',
+    quality: 'auto',
+    count: 1,
+    aspectRatio: '16:9',
+  });
+
+  assert.deepEqual(result, {
+    messages: [{ role: 'user', content: '生成一张横版海报' }],
+    intent: 'image',
+    model: 'gemini-3.1-flash-image-preview-2k',
+    size: '2048x2048',
+    quality: 'auto',
+    n: 1,
+    aspect_ratio: '16:9',
+    executionMode: 'async',
+  });
+});
+
+test('buildAsyncImageTaskRequests keeps gpt-image-2 2K aspect ratio resolved size for every task', () => {
+  const result = buildAsyncImageTaskRequests({
+    input: '生成一张横版封面',
+    linkedImagePreviews: [],
+    modelId: 'gpt-image-2-4k',
+    allowedModelIds: ['gpt-image-2-4k'],
+    fallbackModel: 'gpt-image-2-4k',
+    size: '2048x2048',
+    quality: 'high',
+    count: 2,
+    aspectRatio: '9:16',
+  });
+
+  assert.equal(result.length, 2);
+  assert.deepEqual(
+    result.map((request) => request.size),
+    ['1152x2048', '1152x2048']
+  );
 });
 
 test('getImageCardResolutionStatus returns a warning when the actual output is below the requested 2K target', () => {

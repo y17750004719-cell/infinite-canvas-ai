@@ -6,6 +6,10 @@ import {
   resolveImageRequestModel,
   getSupportedImageSizeOptions,
   resolveSupportedImageSize,
+  getGptImage2SizeValidationError,
+  isValidGptImage2Size,
+  normalizeImageModelCapabilityId,
+  supportsImageModelRequestedSize,
   supportsImageModelImageSizeConfig,
 } from './image-model-capabilities.mjs';
 
@@ -24,7 +28,7 @@ test('getSupportedImageSizeOptions returns the fixed 1K 2K 4K options for suppor
   );
   assert.deepEqual(
     getSupportedImageSizeOptions('gpt-image-2').map((option) => option.id),
-    ['1024x1024', '1536x1024', '1024x1536', '2048x2048', '2048x1152', '3840x2160', '2160x3840']
+    ['1024x1024', '2048x2048', '4096x4096']
   );
 });
 
@@ -46,10 +50,49 @@ test('resolveImageRequestModel keeps the base gemini 3.1 flash image preview mod
   );
 });
 
-test('resolveSupportedImageSize falls back to the nearest supported square preset when gpt-image-2 receives an unsupported old size', () => {
-  assert.equal(resolveSupportedImageSize('gpt-image-2', '4096x4096'), '2048x2048');
-  assert.equal(resolveSupportedImageSize('gpt-image-2', '1536x1024'), '1536x1024');
-  assert.equal(resolveSupportedImageSize('gpt-image-2', '3840x2160'), '3840x2160');
+test('gemini provider variants normalize to the base capability model while preserving the selected request model', () => {
+  assert.equal(
+    normalizeImageModelCapabilityId('gemini-3.1-flash-image-preview-2k'),
+    'gemini-3.1-flash-image-preview'
+  );
+  assert.equal(
+    normalizeImageModelCapabilityId('gemini-3.1-flash-image-preview-4k'),
+    'gemini-3.1-flash-image-preview'
+  );
+  assert.equal(
+    resolveImageRequestModel('gemini-3.1-flash-image-preview-2k', '2048x2048'),
+    'gemini-3.1-flash-image-preview-2k'
+  );
+  assert.equal(
+    resolveImageRequestModel('gemini-3.1-flash-image-preview-4k', '4096x4096'),
+    'gemini-3.1-flash-image-preview-4k'
+  );
+  assert.equal(getImageModelCapability('gemini-3.1-flash-image-preview-2k').supportsAspectRatio, true);
+  assert.deepEqual(
+    getImageModelCapability('gemini-3.1-flash-image-preview-2k').supportedSizes,
+    ['1024x1024', '2048x2048', '4096x4096']
+  );
+});
+
+test('resolveSupportedImageSize keeps gpt-image-2 on tiered presets when legacy explicit sizes are provided', () => {
+  assert.equal(resolveSupportedImageSize('gpt-image-2', '4096x4096'), '4096x4096');
+  assert.equal(resolveSupportedImageSize('gpt-image-2', '1536x1024'), '2048x2048');
+  assert.equal(resolveSupportedImageSize('gpt-image-2', '3840x2160'), '2048x2048');
+});
+
+test('supportsImageModelRequestedSize accepts resolved non-square exact sizes for gpt-image-2 variants', () => {
+  assert.equal(supportsImageModelRequestedSize('gpt-image-2', '2048x1152'), true);
+  assert.equal(supportsImageModelRequestedSize('gpt-image-2', '1152x2048'), true);
+  assert.equal(supportsImageModelRequestedSize('gpt-image-2-2k', '2048x1360'), true);
+});
+
+test('gpt-image-2 size validation accepts legal exact sizes and rejects invalid ones', () => {
+  assert.equal(isValidGptImage2Size('2048x1152'), true);
+  assert.equal(isValidGptImage2Size('1152x2048'), true);
+  assert.equal(isValidGptImage2Size('2048x1360'), true);
+  assert.equal(getGptImage2SizeValidationError('1254x1254'), '尺寸宽高必须都是 16 的倍数');
+  assert.equal(getGptImage2SizeValidationError('4096x4096'), '尺寸最大边不能超过 3840px');
+  assert.equal(getGptImage2SizeValidationError('3840x1200'), '尺寸长短边比例不能超过 3:1');
 });
 
 test('resolveImageRequestModel keeps gpt-image-2 unchanged for exact-size requests', () => {

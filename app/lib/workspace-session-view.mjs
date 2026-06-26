@@ -7,6 +7,8 @@ import {
   getImageModelCapability,
   getImageSizeLabel,
   getSupportedImageSizeOptions,
+  imageModelSupportsAspectRatioRequest,
+  resolveImageSizeForAspectRatio,
   resolveSupportedImageSize,
 } from './image-model-capabilities.mjs';
 
@@ -74,6 +76,15 @@ export function resolveTextPanelChatModel(requestedModel, fallbackModel = getDef
   return fallbackModel;
 }
 
+export function resolveWorkspaceTextPanelChatModel(requestedModel, allowedModelIds, fallbackModel = getDefaultTextPanelModelOption()?.id) {
+  const normalizedRequestedModel = typeof requestedModel === 'string' ? requestedModel.trim() : '';
+  const allowedIds = new Set(Array.isArray(allowedModelIds) ? allowedModelIds.filter(Boolean) : []);
+  if (normalizedRequestedModel && allowedIds.has(normalizedRequestedModel)) {
+    return normalizedRequestedModel;
+  }
+  return resolveTextPanelChatModel(requestedModel, fallbackModel);
+}
+
 export function resolveImageCardModel(requestedModel, fallbackModel = getDefaultImageCardModelOption()?.id) {
   const normalizedRequestedModel = typeof requestedModel === 'string' ? requestedModel.trim() : '';
   const allowedModelIds = new Set(IMAGE_CARD_MODEL_OPTIONS.map((option) => option.id));
@@ -85,12 +96,28 @@ export function resolveImageCardModel(requestedModel, fallbackModel = getDefault
   return fallbackModel;
 }
 
+export function resolveWorkspaceImageCardModel(requestedModel, allowedModelIds, fallbackModel = getDefaultImageCardModelOption()?.id) {
+  const normalizedRequestedModel = typeof requestedModel === 'string' ? requestedModel.trim() : '';
+  const allowedIds = new Set(Array.isArray(allowedModelIds) ? allowedModelIds.filter(Boolean) : []);
+  if (normalizedRequestedModel && allowedIds.has(normalizedRequestedModel)) {
+    return normalizedRequestedModel;
+  }
+  return resolveImageCardModel(requestedModel, fallbackModel);
+}
+
 export function getSupportedImageCardSizeOptions(modelId, fallbackModel = getDefaultImageCardModelOption()?.id) {
-  return getSupportedImageSizeOptions(resolveImageCardModel(modelId, fallbackModel));
+  const normalizedModelId = typeof modelId === 'string' && modelId.trim() ? modelId.trim() : fallbackModel;
+  return getSupportedImageSizeOptions(normalizedModelId);
 }
 
 export function resolveImageCardSize(modelId, requestedSize, fallbackSize = IMAGE_CARD_SIZE_OPTIONS[0]?.id) {
-  return resolveSupportedImageSize(resolveImageCardModel(modelId), requestedSize, fallbackSize);
+  const normalizedModelId = typeof modelId === 'string' && modelId.trim() ? modelId.trim() : getDefaultImageCardModelOption()?.id;
+  return resolveSupportedImageSize(normalizedModelId, requestedSize, fallbackSize);
+}
+
+export function resolveImageCardSizeForAspectRatio(modelId, requestedSize, aspectRatio, fallbackSize = IMAGE_CARD_SIZE_OPTIONS[0]?.id) {
+  const resolvedSize = resolveImageCardSize(modelId, requestedSize, fallbackSize);
+  return resolveImageSizeForAspectRatio(modelId, resolvedSize, aspectRatio);
 }
 
 export function normalizeImageCardAspectRatio(value, fallbackValue = '1:1') {
@@ -558,6 +585,7 @@ export function createCanvasClipboardSnapshot({
   selectedIds,
   textCardPanelDrafts = {},
   imageCardPanelDrafts = {},
+  imageCardProviderById = {},
   imageCardModelById = {},
   imageCardSizeById = {},
   imageCardQualityById = {},
@@ -606,6 +634,7 @@ export function createCanvasClipboardSnapshot({
     bounds,
     textCardPanelDrafts: pickClipboardStateByIds(textCardPanelDrafts, idMap),
     imageCardPanelDrafts: pickClipboardStateByIds(imageCardPanelDrafts, idMap),
+    imageCardProviderById: pickClipboardStateByIds(imageCardProviderById, idMap),
     imageCardModelById: pickClipboardStateByIds(imageCardModelById, idMap),
     imageCardSizeById: pickClipboardStateByIds(imageCardSizeById, idMap),
     imageCardQualityById: pickClipboardStateByIds(imageCardQualityById, idMap),
@@ -649,6 +678,7 @@ export function materializeCanvasClipboardPaste({
     selectedIds: nextItems.map((item) => item.id),
     textCardPanelDrafts: pickClipboardStateByIds(clipboard?.textCardPanelDrafts, remappedIds),
     imageCardPanelDrafts: pickClipboardStateByIds(clipboard?.imageCardPanelDrafts, remappedIds),
+    imageCardProviderById: pickClipboardStateByIds(clipboard?.imageCardProviderById, remappedIds),
     imageCardModelById: pickClipboardStateByIds(clipboard?.imageCardModelById, remappedIds),
     imageCardSizeById: pickClipboardStateByIds(clipboard?.imageCardSizeById, remappedIds),
     imageCardQualityById: pickClipboardStateByIds(clipboard?.imageCardQualityById, remappedIds),
@@ -1224,9 +1254,12 @@ export function buildCanvasTextGenerationRequest({
   input,
   linkedImagePreviews = [],
   modelId,
+  allowedModelIds = TEXT_PANEL_MODEL_OPTIONS.map((option) => option.id),
+  fallbackModel = getDefaultTextPanelModelOption()?.id,
+  chatProviderId = '',
 }) {
   const trimmedInput = typeof input === 'string' ? input.trim() : '';
-  const resolvedModel = resolveTextPanelChatModel(modelId);
+  const resolvedModel = resolveWorkspaceTextPanelChatModel(modelId, allowedModelIds, fallbackModel);
   const references = buildReferenceImageRequestPayload(linkedImagePreviews);
 
   const request = {
@@ -1236,6 +1269,10 @@ export function buildCanvasTextGenerationRequest({
 
   if (resolvedModel) {
     request.model = resolvedModel;
+  }
+
+  if (typeof chatProviderId === 'string' && chatProviderId.trim()) {
+    request.chatProviderId = chatProviderId.trim();
   }
 
   if (references.referenceImages.length > 0) {
@@ -1250,6 +1287,9 @@ export function buildCanvasImageGenerationRequest({
   input,
   linkedImagePreviews = [],
   modelId,
+  allowedModelIds = IMAGE_CARD_MODEL_OPTIONS.map((option) => option.id),
+  fallbackModel = getDefaultImageCardModelOption()?.id,
+  imageProviderId = '',
   size,
   quality = 'auto',
   count,
@@ -1258,9 +1298,9 @@ export function buildCanvasImageGenerationRequest({
 }) {
   const trimmedInput = typeof input === 'string' ? input.trim() : '';
   const references = buildReferenceImageRequestPayload(linkedImagePreviews);
-  const resolvedModel = resolveImageCardModel(modelId);
-  const resolvedSize = resolveImageCardSize(resolvedModel, size);
-  const supportsAspectRatio = getImageModelCapability(resolvedModel).supportsAspectRatio;
+  const resolvedModel = resolveWorkspaceImageCardModel(modelId, allowedModelIds, fallbackModel);
+  const resolvedSize = resolveImageCardSizeForAspectRatio(resolvedModel, size, aspectRatio);
+  const supportsAspectRatio = imageModelSupportsAspectRatioRequest(resolvedModel);
 
   const request = {
     messages: [{ role: 'user', content: trimmedInput }],
@@ -1271,6 +1311,10 @@ export function buildCanvasImageGenerationRequest({
     request.model = resolvedModel;
   }
 
+  if (typeof imageProviderId === 'string' && imageProviderId.trim()) {
+    request.imageProviderId = imageProviderId.trim();
+  }
+
   if (typeof resolvedSize === 'string' && resolvedSize.trim()) {
     request.size = resolvedSize.trim();
   }
@@ -1279,7 +1323,7 @@ export function buildCanvasImageGenerationRequest({
     request.n = count;
   }
 
-  if (!supportsAspectRatio && typeof quality === 'string' && quality.trim()) {
+  if (typeof quality === 'string' && quality.trim()) {
     request.quality = quality.trim();
   }
 
@@ -1303,6 +1347,9 @@ export function buildAsyncImageTaskRequests({
   input,
   linkedImagePreviews = [],
   modelId,
+  allowedModelIds = IMAGE_CARD_MODEL_OPTIONS.map((option) => option.id),
+  fallbackModel = getDefaultImageCardModelOption()?.id,
+  imageProviderId = '',
   size,
   quality = 'auto',
   count,
@@ -1318,6 +1365,9 @@ export function buildAsyncImageTaskRequests({
       input,
       linkedImagePreviews,
       modelId,
+      allowedModelIds,
+      fallbackModel,
+      imageProviderId,
       size,
       quality,
       count: 1,

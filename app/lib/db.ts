@@ -74,6 +74,7 @@ export interface ProjectSession {
   items: CanvasItem[];
   textCardPanelDrafts?: Record<string, string>;
   imageCardPanelDrafts?: Record<string, string>;
+  imageCardProviderById?: Record<string, string>;
   imageCardModelById?: Record<string, string>;
   imageCardSizeById?: Record<string, string>;
   imageCardQualityById?: Record<string, string>;

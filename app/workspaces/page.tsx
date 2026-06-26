@@ -230,7 +230,7 @@ export default function WorkspacesPage() {
                 <div
                   key={session.id}
                   onClick={() => handleOpen(session.id)}
-                  className="workspace-surface-card break-inside-avoid group cursor-pointer overflow-hidden rounded-2xl transition-all hover:shadow-md"
+                  className="workspace-surface-card break-inside-avoid group cursor-pointer overflow-hidden rounded-2xl transition-all"
                 >
                   {/* Preview Area */}
                   <div className="relative aspect-[4/3] bg-gray-100 overflow-hidden">

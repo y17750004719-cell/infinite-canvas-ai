@@ -4,9 +4,17 @@ import fs from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createStoredImageName } from "../../lib/api-security.mjs";
+import { getImageDimensionsFromBuffer } from "../../lib/image-metadata.mjs";
 import { buildRuntimeAssetUrl, LOCAL_ASSET_ALLOWED_EXTENSIONS, resolveLocalAssetPath } from "../../lib/local-assets.mjs";
-import { getImageModelCapability } from "../../lib/image-model-capabilities.mjs";
-import { resolveImageCardModel, resolveImageGenerationFallbackSizes, resolveTextPanelChatModel } from "../../lib/workspace-session-view.mjs";
+import { getImageModelCapability, normalizeImageModelCapabilityId, supportsImageModelExactSize } from "../../lib/image-model-capabilities.mjs";
+import { readProviderRegistry } from "../../lib/provider-config.mjs";
+import {
+  getResolutionFailureReason,
+  isOutputResolutionSufficient,
+  resolveImageCardModel,
+  resolveImageGenerationFallbackSizes,
+  resolveTextPanelChatModel,
+} from "../../lib/workspace-session-view.mjs";
 import { createLogger, createRequestId, serializeError } from "../../lib/logger";
 
 const DEBUG_API_LOGS = process.env.LOG_ALL_REQUESTS !== "0";
@@ -72,7 +80,12 @@ function getErrorDiagnostics(error: unknown) {
   };
 }
 
-async function saveImageToLocal(imageUrl: string): Promise<{ filename: string; localUrl: string }> {
+async function saveImageToLocal(imageUrl: string): Promise<{
+  filename: string;
+  localUrl: string;
+  naturalWidth: number | null;
+  naturalHeight: number | null;
+}> {
   if (imageUrl.startsWith("data:image/")) {
     const match = imageUrl.match(/^data:(image\/[a-z0-9.+-]+);base64,(.+)$/i);
     if (!match) {
@@ -98,6 +111,7 @@ async function saveImageToLocal(imageUrl: string): Promise<{ filename: string; l
           : "png";
     const filename = createStoredImageName(extension);
     const filepath = path.join(GENERATED_UPLOADS_DIR, filename);
+    const dimensions = getImageDimensionsFromBuffer(buffer);
 
     await mkdir(GENERATED_UPLOADS_DIR, { recursive: true });
     await writeFile(filepath, buffer);
@@ -112,6 +126,8 @@ async function saveImageToLocal(imageUrl: string): Promise<{ filename: string; l
     return {
       filename,
       localUrl: buildRuntimeAssetUrl(`uploads/generated/${filename}`),
+      naturalWidth: dimensions?.naturalWidth ?? null,
+      naturalHeight: dimensions?.naturalHeight ?? null,
     };
   }
 
@@ -155,6 +171,7 @@ async function saveImageToLocal(imageUrl: string): Promise<{ filename: string; l
           : "png";
     const filename = createStoredImageName(extension);
     const filepath = path.join(GENERATED_UPLOADS_DIR, filename);
+    const dimensions = getImageDimensionsFromBuffer(buffer);
 
     await mkdir(GENERATED_UPLOADS_DIR, { recursive: true });
     await writeFile(filepath, buffer);
@@ -168,6 +185,8 @@ async function saveImageToLocal(imageUrl: string): Promise<{ filename: string; l
     return {
       filename,
       localUrl: buildRuntimeAssetUrl(`uploads/generated/${filename}`),
+      naturalWidth: dimensions?.naturalWidth ?? null,
+      naturalHeight: dimensions?.naturalHeight ?? null,
     };
   } catch (error) {
     void generateLogger.error("save_image.error", "Error saving generated image", {
@@ -178,7 +197,12 @@ async function saveImageToLocal(imageUrl: string): Promise<{ filename: string; l
   }
 }
 
-async function saveImagesToLocal(imageUrls: string[]): Promise<Array<{ filename: string; localUrl: string }>> {
+async function saveImagesToLocal(imageUrls: string[]): Promise<Array<{
+  filename: string;
+  localUrl: string;
+  naturalWidth: number | null;
+  naturalHeight: number | null;
+}>> {
   const validUrls = Array.isArray(imageUrls) ? imageUrls.filter((url) => typeof url === "string" && url.length > 0) : [];
   if (validUrls.length === 0) {
     return [];
@@ -270,6 +294,7 @@ function resolveImageSize(requested: unknown, model: string): string {
 
   const requestedSize = typeof requested === "string" ? requested.trim() : "";
   if (!requestedSize) return allowlist[0] || capabilityAllowlist[0] || DEFAULT_IMAGE_SIZES[0];
+  if (supportsImageModelExactSize(model, requestedSize)) return requestedSize;
   if (allowlist.includes(requestedSize)) return requestedSize;
 
   debugWarn("Unsupported image size for current allowlist, fallback to default", {
@@ -278,6 +303,25 @@ function resolveImageSize(requested: unknown, model: string): string {
     model,
   });
   return allowlist[0] || capabilityAllowlist[0] || DEFAULT_IMAGE_SIZES[0];
+}
+
+function resolveGenerateImageModel(requestedModel: unknown): string {
+  const normalizedModel = typeof requestedModel === "string" ? requestedModel.trim() : "";
+  if (normalizeImageModelCapabilityId(normalizedModel) === "gpt-image-2") {
+    return normalizedModel;
+  }
+  return resolveImageCardModel(requestedModel, IMAGE_MODEL);
+}
+
+function resolveGenerateImageModelFromAllowedModels(
+  requestedModel: unknown,
+  allowedProviderModelIds: Set<string>
+): string {
+  const normalizedModel = typeof requestedModel === "string" ? requestedModel.trim() : "";
+  if (normalizedModel && allowedProviderModelIds.has(normalizedModel)) {
+    return normalizedModel;
+  }
+  return resolveGenerateImageModel(requestedModel);
 }
 
 function gcd(a: number, b: number): number {
@@ -310,6 +354,31 @@ function aspectRatioFromSize(size?: string): string {
   const divisor = gcd(width, height);
   const ratio = `${width / divisor}:${height / divisor}`;
   return ALLOWED_ASPECT_RATIOS.has(ratio) ? ratio : "1:1";
+}
+
+function isGptImage2Model(model?: string): boolean {
+  return normalizeImageModelCapabilityId(model || "") === "gpt-image-2";
+}
+
+function buildSupplierImageSizeMismatchError({
+  requestedSize,
+  requestedAspectRatio,
+  actualWidth,
+  actualHeight,
+}: {
+  requestedSize: string;
+  requestedAspectRatio: string;
+  actualWidth: number;
+  actualHeight: number;
+}): string {
+  const failureReason =
+    getResolutionFailureReason({
+      requestedSize,
+      aspectRatio: requestedAspectRatio || aspectRatioFromSize(requestedSize),
+      naturalWidth: actualWidth,
+      naturalHeight: actualHeight,
+    }) || "供应商未按请求尺寸返回图片";
+  return `供应商未按请求尺寸返回图片：请求 ${requestedSize}，实际 ${actualWidth}x${actualHeight}。${failureReason}`;
 }
 
 const IMAGE_HINTS = ["画", "生图", "生成图片", "海报", "logo", "封面", "插画", "渲染", "视觉稿"];
@@ -500,7 +569,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ status: "error", error: "Invalid JSON body" }, { status: 400 });
     }
 
-    const { messages: incomingMessages, size, quality, aspect_ratio, n, reference_images, reference_labels, skill, intent, model, executionMode } = body as {
+    const { messages: incomingMessages, size, quality, aspect_ratio, n, reference_images, reference_labels, skill, intent, model, executionMode, providerId, imageProviderId, chatProviderId } = body as {
       messages: Array<{ role: "user" | "assistant" | "system"; content: string }>;
       size?: string;
       quality?: string;
@@ -512,6 +581,9 @@ export async function POST(request: NextRequest) {
       intent?: GenerateIntent;
       model?: string;
       executionMode?: "sync" | "async";
+      providerId?: string;
+      imageProviderId?: string;
+      chatProviderId?: string;
       stream?: boolean;
     };
 
@@ -524,6 +596,9 @@ export async function POST(request: NextRequest) {
         intent: intent || "auto",
         model: typeof model === "string" ? model : null,
         executionMode: executionMode === "async" ? "async" : "sync",
+        providerId: typeof providerId === "string" ? providerId : null,
+        imageProviderId: typeof imageProviderId === "string" ? imageProviderId : null,
+        chatProviderId: typeof chatProviderId === "string" ? chatProviderId : null,
       });
     }
 
@@ -611,6 +686,13 @@ export async function POST(request: NextRequest) {
     });
 
     const resolvedExecutionMode = executionMode === "async" ? "async" : "sync";
+    const providerRegistry = await readProviderRegistry();
+    const enabledProviders = providerRegistry.providers.filter((provider) => provider.enabled !== false);
+    const allowedProviderModelIds = new Set<string>(
+      enabledProviders.flatMap((provider) =>
+        Array.isArray(provider.imageModels) ? provider.imageModels.filter((model): model is string => typeof model === "string") : []
+      )
+    );
 
     if (resolved.intent === "chat" && hasReferenceImages) {
       const normalizedChatImages = reference_images
@@ -628,7 +710,7 @@ export async function POST(request: NextRequest) {
     }
 
     if (resolved.intent === "image" && hasReferenceImages) {
-      const resolvedImageModel = resolveImageCardModel(model, IMAGE_MODEL);
+      const resolvedImageModel = resolveGenerateImageModelFromAllowedModels(model, allowedProviderModelIds);
       const imageSize = resolveImageSize(size, resolvedImageModel);
       const supportsAspectRatio = getImageModelCapability(resolvedImageModel).supportsAspectRatio;
       const requestedAspectRatio = normalizeAspectRatio(aspect_ratio);
@@ -678,6 +760,7 @@ export async function POST(request: NextRequest) {
       let imageResult;
       try {
         imageResult = await runImageTask({
+          providerId: imageProviderId || providerId,
           model: resolvedImageModel,
           prompt: resolved.prompt,
           images: normalizedReferenceImages,
@@ -763,7 +846,7 @@ export async function POST(request: NextRequest) {
     }
 
     if (resolved.intent === "image") {
-      const resolvedImageModel = resolveImageCardModel(model, IMAGE_MODEL);
+      const resolvedImageModel = resolveGenerateImageModelFromAllowedModels(model, allowedProviderModelIds);
       const requestedSize = typeof size === "string" ? size : "";
       const imageSize = resolveImageSize(size, resolvedImageModel);
       const supportsAspectRatio = getImageModelCapability(resolvedImageModel).supportsAspectRatio;
@@ -795,6 +878,7 @@ export async function POST(request: NextRequest) {
 
         try {
           imageResult = await runImageTask({
+            providerId: imageProviderId || providerId,
             model: resolvedImageModel,
             prompt: resolved.prompt,
             size: candidateSize,
@@ -845,6 +929,42 @@ export async function POST(request: NextRequest) {
 
       const savedImages = await saveImagesToLocal(imageResult.data.map((entry) => entry.url));
       const primarySavedImage = savedImages[0];
+      if (
+        isGptImage2Model(resolvedImageModel) &&
+        primarySavedImage &&
+        Number.isFinite(primarySavedImage.naturalWidth) &&
+        Number.isFinite(primarySavedImage.naturalHeight)
+      ) {
+        const actualWidth = Number(primarySavedImage.naturalWidth);
+        const actualHeight = Number(primarySavedImage.naturalHeight);
+        const targetAspectRatio = resolvedAspectRatio || aspectRatioFromSize(imageSize);
+        const meetsRequestedResolution = isOutputResolutionSufficient({
+          requestedSize: imageSize,
+          aspectRatio: targetAspectRatio,
+          naturalWidth: actualWidth,
+          naturalHeight: actualHeight,
+        });
+
+        if (!meetsRequestedResolution) {
+          const mismatchMessage = buildSupplierImageSizeMismatchError({
+            requestedSize: imageSize,
+            requestedAspectRatio: targetAspectRatio,
+            actualWidth,
+            actualHeight,
+          });
+          await requestLogger.warn("SUPPLIER_IMAGE_SIZE_MISMATCH", "供应商未按请求尺寸返回图片", {
+            reqId,
+            taskId: null,
+            requestedSize: imageSize,
+            requestedAspectRatio: targetAspectRatio,
+            actualWidth,
+            actualHeight,
+            actualSize: `${actualWidth}x${actualHeight}`,
+            model: resolvedImageModel,
+            warning: mismatchMessage,
+          });
+        }
+      }
       debugLog("Saved image generate outputs locally", {
         reqId,
         savedCount: savedImages.length,
@@ -877,6 +997,7 @@ export async function POST(request: NextRequest) {
         async start(controller) {
           try {
             for await (const event of chatStream({
+              providerId: chatProviderId || providerId,
               model: resolvedChatModel,
               messages,
               signal: request.signal,
@@ -906,6 +1027,7 @@ export async function POST(request: NextRequest) {
 
     const resolvedChatModel = resolveTextPanelChatModel(model, AGENT_MODEL);
     const chatResult = await chat({
+      providerId: chatProviderId || providerId,
       model: resolvedChatModel,
       messages,
       signal: request.signal,

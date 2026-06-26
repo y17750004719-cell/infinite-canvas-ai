@@ -48,6 +48,16 @@ test('generate route saves and returns every successful generated image output i
   );
 });
 
+test('generate route accepts request-level provider routing fields and forwards them to supplier calls', () => {
+  assert.equal(routeSource.includes('providerId?: string;'), true);
+  assert.equal(routeSource.includes('imageProviderId?: string;'), true);
+  assert.equal(routeSource.includes('chatProviderId?: string;'), true);
+  assert.equal(routeSource.includes('providerId: imageProviderId || providerId,'), true);
+  assert.equal(routeSource.includes('providerId: chatProviderId || providerId,'), true);
+  assert.equal(routeSource.includes('imageProviderId: typeof imageProviderId === "string" ? imageProviderId : null,'), true);
+  assert.equal(routeSource.includes('chatProviderId: typeof chatProviderId === "string" ? chatProviderId : null,'), true);
+});
+
 test('generate route decouples image supplier calls from the incoming request signal and returns failure classification metadata', () => {
   assert.equal(
     routeSource.includes('executionMode: resolvedExecutionMode,\n          signal: request.signal,'),
@@ -81,7 +91,11 @@ test('generate route decouples image supplier calls from the incoming request si
 
 test('generate route uses model capability size allowlists for gpt-image-2 and skips derived aspect ratios for size-only models', () => {
   assert.equal(
-    routeSource.includes('import { getImageModelCapability } from "../../lib/image-model-capabilities.mjs";'),
+    routeSource.includes('getImageModelCapability'),
+    true
+  );
+  assert.equal(
+    routeSource.includes('from "../../lib/image-model-capabilities.mjs";'),
     true
   );
   assert.equal(
@@ -101,6 +115,10 @@ test('generate route uses model capability size allowlists for gpt-image-2 and s
     true
   );
   assert.equal(
+    routeSource.includes('supportsImageModelExactSize'),
+    true
+  );
+  assert.equal(
     routeSource.includes('const modelAllowlist = filterAllowlistByModelCapabilities('),
     true
   );
@@ -113,7 +131,7 @@ test('generate route uses model capability size allowlists for gpt-image-2 and s
     true
   );
   assert.equal(
-    routeSource.includes(': !capability.supportsAspectRatio && capabilityAllowlist.length > 0'),
+    routeSource.includes('if (supportsImageModelExactSize(model, requestedSize)) return requestedSize;'),
     true
   );
   assert.equal(
@@ -130,6 +148,90 @@ test('generate route uses model capability size allowlists for gpt-image-2 and s
   );
   assert.equal(
     routeSource.includes('quality: typeof quality === "string" ? quality : undefined,'),
+    true
+  );
+});
+
+test('generate route preserves resolved non-square gpt-image-2 sizes instead of downgrading them to square tiers', () => {
+  assert.equal(
+    routeSource.includes('if (supportsImageModelExactSize(model, requestedSize)) return requestedSize;'),
+    true
+  );
+  assert.equal(
+    routeSource.includes('debugWarn("Unsupported image size for current allowlist, fallback to default"'),
+    true
+  );
+});
+
+test('generate route keeps provider-returned gpt-image-2 variants on the gpt-image-2 capability path', () => {
+  assert.equal(
+    routeSource.includes('normalizeImageModelCapabilityId'),
+    true
+  );
+  assert.equal(
+    routeSource.includes('function resolveGenerateImageModel(requestedModel: unknown): string {'),
+    true
+  );
+  assert.equal(
+    routeSource.includes('if (normalizeImageModelCapabilityId(normalizedModel) === "gpt-image-2") {'),
+    true
+  );
+  assert.equal(
+    routeSource.includes('return resolveGenerateImageModel(requestedModel);'),
+    true
+  );
+  assert.equal(
+    routeSource.includes('const resolvedImageModel = resolveGenerateImageModelFromAllowedModels(model, allowedProviderModelIds);'),
+    true
+  );
+});
+
+test('generate route preserves provider-saved Gemini image variants instead of falling back to the static default model', () => {
+  assert.equal(
+    routeSource.includes('const allowedProviderModelIds = new Set<string>('),
+    true
+  );
+  assert.equal(
+    routeSource.includes('enabledProviders.flatMap((provider) =>'),
+    true
+  );
+  assert.equal(
+    routeSource.includes('provider.imageModels'),
+    true
+  );
+  assert.equal(
+    routeSource.includes('if (normalizedModel && allowedProviderModelIds.has(normalizedModel)) {'),
+    true
+  );
+  assert.equal(
+    routeSource.includes('return normalizedModel;'),
+    true
+  );
+});
+
+test('generate route validates returned image dimensions against the requested gpt-image-2 size before returning success', () => {
+  assert.equal(
+    routeSource.includes('getImageDimensionsFromBuffer'),
+    true
+  );
+  assert.equal(
+    routeSource.includes('SUPPLIER_IMAGE_SIZE_MISMATCH'),
+    true
+  );
+  assert.equal(
+    routeSource.includes('供应商未按请求尺寸返回图片'),
+    true
+  );
+  assert.equal(
+    routeSource.includes('requestedSize'),
+    true
+  );
+  assert.equal(
+    routeSource.includes('actualWidth'),
+    true
+  );
+  assert.equal(
+    routeSource.includes('actualHeight'),
     true
   );
 });

@@ -6,6 +6,14 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const pageSource = fs.readFileSync(path.join(__dirname, 'page.tsx'), 'utf8');
+const appSourceFilesWithoutShadows = [
+  'globals.css',
+  'page.tsx',
+  'components/workspace/GalleryView.tsx',
+  'workspaces/page.tsx',
+  'workspaces/[id]/page.tsx',
+  'debug/logs/page.tsx',
+];
 
 test('image card floating menus are not rendered inside the pending connection menu block', () => {
   const pendingMenuStart = pageSource.indexOf('{pendingConnectionMenu && (');
@@ -32,7 +40,7 @@ test('image card model menu uses a dedicated fixed popover that drops below the 
   assert.equal(pageSource.includes('imageCardModelPopoverRef: React.RefObject<HTMLDivElement | null>;'), true);
   assert.equal(pageSource.includes('{showImageCardModelMenu && selectedImageCardModelPopoverOffset && ('), true);
   assert.equal(pageSource.includes('ref={imageCardModelPopoverRef}'), true);
-  assert.equal(pageSource.includes('className="pointer-events-auto fixed z-[116] min-w-[248px] overflow-hidden rounded-[18px] border border-white/[0.1] bg-[rgba(24,24,27,0.985)] p-1.5 shadow-[0_24px_64px_rgba(0,0,0,0.42)] backdrop-blur-xl"'), true);
+  assert.equal(pageSource.includes('className="workspace-menu-panel pointer-events-auto fixed z-[116] min-w-[248px] overflow-hidden rounded-[18px] p-1.5"'), true);
   assert.equal(pageSource.includes("transform: `translateY(-100%) scale(${viewport.scale})`"), false);
   assert.equal(pageSource.includes("transform: `scale(${viewport.scale})`"), true);
   assert.equal(pageSource.includes("placement: 'below-panel',"), true);
@@ -43,7 +51,7 @@ test('image card count menu also uses a fixed below-panel dropdown instead of th
   assert.equal(pageSource.includes('imageCardCountPopoverRef: React.RefObject<HTMLDivElement | null>;'), true);
   assert.equal(pageSource.includes('{showImageCardCountMenu && selectedImageCardCountPopoverOffset && ('), true);
   assert.equal(pageSource.includes('ref={imageCardCountPopoverRef}'), true);
-  assert.equal(pageSource.includes('className="pointer-events-auto fixed z-[116] min-w-[124px] overflow-hidden rounded-[18px] border border-white/[0.1] bg-[rgba(24,24,27,0.985)] p-1.5 shadow-[0_24px_64px_rgba(0,0,0,0.42)] backdrop-blur-xl"'), true);
+  assert.equal(pageSource.includes('className="workspace-menu-panel pointer-events-auto fixed z-[116] min-w-[124px] overflow-hidden rounded-[18px] p-1.5"'), true);
   assert.equal(pageSource.includes('top: selectedImageCardPanelViewportOrigin.top + selectedImageCardCountPopoverOffset.top * viewport.scale,'), true);
   assert.equal(pageSource.includes('top: selectedImageCardPanelViewportOrigin.top + selectedImageCardCountPopoverOffset.top * viewport.scale - 8,'), false);
 });
@@ -79,6 +87,103 @@ test('left rail history uses a dedicated generated image history panel state', (
   assert.equal(pageSource.includes("if (itemId === 'history') {"), true);
   assert.equal(pageSource.includes('setShowGeneratedImageHistoryPanel((prev) => !prev);'), true);
   assert.equal(pageSource.includes('{showGeneratedImageHistoryPanel && ('), true);
+});
+
+test('workspace theme defaults to light and syncs root theme state', () => {
+  assert.equal(pageSource.includes("type WorkspaceTheme = 'light' | 'dark';"), true);
+  assert.equal(pageSource.includes("const WORKSPACE_THEME_STORAGE_KEY = 'zo-design-workspace-theme';"), true);
+  assert.equal(pageSource.includes("const DEFAULT_WORKSPACE_THEME: WorkspaceTheme = 'light';"), true);
+  assert.equal(pageSource.includes('function useWorkspaceTheme()'), true);
+  assert.equal(pageSource.includes("document.documentElement.dataset.workspaceTheme = theme;"), true);
+  assert.equal(pageSource.includes("document.documentElement.classList.toggle('dark', theme === 'dark');"), true);
+  assert.equal(pageSource.includes('window.localStorage.setItem(WORKSPACE_THEME_STORAGE_KEY, theme);'), true);
+});
+
+test('left rail places the theme toggle between history and settings', () => {
+  const railStart = pageSource.indexOf('const LEFT_RAIL_ITEMS = [');
+  const railEnd = pageSource.indexOf('] as const;', railStart);
+
+  assert.notEqual(railStart, -1);
+  assert.notEqual(railEnd, -1);
+
+  const railBlock = pageSource.slice(railStart, railEnd);
+  const historyIndex = railBlock.indexOf("{ id: 'history', label: '历史', icon: Clock3 }");
+  const themeIndex = railBlock.indexOf("{ id: 'theme', label: '黑夜', icon: Moon }");
+  const settingsIndex = railBlock.indexOf("{ id: 'settings', label: '设置', icon: Settings }");
+
+  assert.ok(historyIndex > -1);
+  assert.ok(themeIndex > historyIndex);
+  assert.ok(settingsIndex > themeIndex);
+  assert.equal(pageSource.includes('<WorkspaceThemeToggle'), true);
+  assert.equal(pageSource.includes("aria-label={theme === 'dark' ? '切换到白天模式' : '切换到黑夜模式'}"), true);
+});
+
+test('workspace menus and chips use shared theme classes instead of hardcoded dark colors', () => {
+  assert.equal(pageSource.includes('workspace-menu-panel'), true);
+  assert.equal(pageSource.includes('workspace-menu-item'), true);
+  assert.equal(pageSource.includes('workspace-control-chip'), true);
+  assert.equal(pageSource.includes('workspace-panel-surface'), true);
+  assert.equal(pageSource.includes('workspace-panel-input'), true);
+  assert.equal(pageSource.includes('workspace-panel-footer'), true);
+  assert.equal(pageSource.includes('workspace-status-pill'), true);
+  assert.equal(pageSource.includes("isActive ? 'is-active' : ''"), true);
+  assert.equal(pageSource.includes("isSelected ? 'is-selected' : ''"), true);
+  assert.equal(pageSource.includes("disabled ? 'is-disabled' : ''"), true);
+});
+
+test('workspace controls no longer keep the legacy dark-only menu palette', () => {
+  const forbiddenDarkSnippets = [
+    'bg-[#171b21]',
+    'bg-[#181d24]',
+    'bg-[#1f242c]',
+    'border-[#2a3038]',
+    'bg-[rgba(26,26,28,0.985)]',
+    'bg-[rgba(28,28,31,0.98)]',
+    'bg-[rgba(24,24,27,0.985)]',
+    'bg-[rgba(14,15,18,0.92)]',
+  ];
+
+  for (const snippet of forbiddenDarkSnippets) {
+    assert.equal(pageSource.includes(snippet), false, `${snippet} should be replaced with theme tokens`);
+  }
+});
+
+test('workspace app sources do not use component shadow styles', () => {
+  const forbiddenShadowPatterns = [
+    /\bshadow-/,
+    /shadow-\[/,
+    /box-shadow/,
+    /drop-shadow/,
+    /boxShadow/,
+    /--workspace-shadow/,
+  ];
+
+  for (const sourceFile of appSourceFilesWithoutShadows) {
+    const source = fs.readFileSync(path.join(__dirname, sourceFile), 'utf8');
+    for (const pattern of forbiddenShadowPatterns) {
+      assert.equal(pattern.test(source), false, `${sourceFile} should not include ${pattern}`);
+    }
+  }
+});
+
+test('workspace model menus read provider-saved model lists instead of static constants only', () => {
+  assert.equal(pageSource.includes('workspaceImageModelOptions'), true);
+  assert.equal(pageSource.includes('workspaceTextModelOptions'), true);
+  assert.equal(pageSource.includes('imageCardProviderById'), true);
+  assert.equal(pageSource.includes('selectedTextPanelProviderId'), true);
+  assert.equal(pageSource.includes('providerSettingsProviders.filter((provider) => provider.enabled !== false)'), true);
+  assert.equal(pageSource.includes('imageCardModelOptions={workspaceImageModelOptions}'), true);
+  assert.equal(pageSource.includes('textPanelModelOptions={workspaceTextModelOptions}'), true);
+  assert.equal(pageSource.includes('imageProviderId:'), true);
+  assert.equal(pageSource.includes('chatProviderId:'), true);
+  assert.equal(pageSource.includes('IMAGE_CARD_MODEL_OPTIONS.find((option)'), false);
+  assert.equal(pageSource.includes('TEXT_PANEL_MODEL_OPTIONS.find((option)'), false);
+});
+
+test('image card submit keeps resolution-tier UI state and lets request builders resolve the final exact size once', () => {
+  assert.equal(pageSource.includes('size: selectedImageCardPanelSize,'), true);
+  assert.equal(pageSource.includes('size: selectedImageCardPanelResolvedSize,'), false);
+  assert.equal(pageSource.includes('const selectedImageCardPanelResolvedSize = selectedImageCardPanelItem'), false);
 });
 
 test('canvas clipboard wiring adds app-level copy helpers and keyboard shortcuts', () => {
@@ -180,38 +285,31 @@ test('left rail generated image history panel uses a wider layout than the origi
   assert.equal(pageSource.includes('className="min-w-0 flex-1"'), true);
 });
 
-test('image card quality controls use model-driven size options without rendering actual resolution helper text', () => {
+test('image card generation controls render as five independent model ratio resolution quality and count menus', () => {
   assert.equal(pageSource.includes('const selectedImageCardSizeOptions = React.useMemo('), true);
   assert.equal(pageSource.includes('getSupportedImageCardSizeOptions(selectedImageCardPanelModelId)'), true);
-  assert.equal(pageSource.includes('const selectedImageCardSupportsAspectRatio = React.useMemo('), true);
-  assert.equal(pageSource.includes('() => getImageModelCapability(selectedImageCardPanelModelId).supportsAspectRatio,'), true);
   assert.equal(pageSource.includes('const IMAGE_CARD_QUALITY_OPTIONS = ['), true);
   assert.equal(pageSource.includes("label: 'Auto'"), true);
   assert.equal(pageSource.includes("label: 'High'"), true);
   assert.equal(pageSource.includes("label: 'Medium'"), true);
   assert.equal(pageSource.includes("label: 'Low'"), true);
-  assert.equal(pageSource.includes('selectedImageCardPanelQuality={selectedImageCardPanelQuality}'), true);
-  assert.equal(pageSource.includes('onSelectImageCardQuality={(qualityId) => {'), true);
-  assert.equal(pageSource.includes('{selectedImageCardSupportsAspectRatio && ('), true);
-  assert.equal(pageSource.includes("getImageCardQualitySummary({\n                          modelId: selectedImageCardModel.id,"), true);
-  assert.equal(pageSource.includes('const getImageCardSizePresetLabel = (sizeId: string) =>'), true);
-  assert.equal(pageSource.includes('const divisor = gcd(width, height);'), true);
-  assert.equal(pageSource.includes('const ratioLabel = `${width / divisor}:${height / divisor}`;'), true);
-  assert.equal(pageSource.includes("else if (longestEdge >= 1536) resolutionLabel = '1.5K';"), true);
-  assert.equal(pageSource.includes("if (longestEdge >= 3840) resolutionLabel = '4K';"), true);
-  assert.equal(pageSource.includes("const getImageCardSizePresetLabelLines = (sizeId: string) =>"), true);
-  assert.equal(pageSource.includes("const getAspectRatioFromImageSize = (sizeId: string): string =>"), true);
-  assert.equal(pageSource.includes('const getImageCardSizePreviewSize = (sizeId: string) =>'), true);
-  assert.equal(pageSource.includes('height: Math.max(7, (height / width) * maxPreviewEdge),'), true);
-  assert.equal(pageSource.includes('width: Math.max(7, (width / height) * maxPreviewEdge),'), true);
+  assert.equal(pageSource.includes('className="grid min-w-0 flex-1 grid-cols-5 gap-2"'), true);
+  assert.equal(pageSource.includes('<span className="workspace-text-muted text-[11px] font-medium">模型</span>'), true);
+  assert.equal(pageSource.includes('<span className="workspace-text-muted text-[11px] font-medium">比例</span>'), true);
+  assert.equal(pageSource.includes('<span className="workspace-text-muted text-[11px] font-medium">清晰度</span>'), true);
+  assert.equal(pageSource.includes('<span className="workspace-text-muted text-[11px] font-medium">质量</span>'), true);
+  assert.equal(pageSource.includes('<span className="workspace-text-muted text-[11px] font-medium">张数</span>'), true);
+  assert.equal(pageSource.includes('{showImageCardAspectRatioMenu && selectedImageCardAspectRatioPopoverOffset && ('), true);
+  assert.equal(pageSource.includes('{showImageCardResolutionMenu && selectedImageCardResolutionPopoverOffset && ('), true);
+  assert.equal(pageSource.includes('{showImageCardQualityMenu && selectedImageCardQualityPopoverOffset && ('), true);
+  assert.equal(pageSource.includes('{showImageCardCountMenu && selectedImageCardCountPopoverOffset && ('), true);
   assert.equal(pageSource.includes('width: 292,'), true);
-  assert.equal(pageSource.includes('className="inline-flex w-full items-center rounded-[14px] border border-white/[0.06] bg-[rgba(255,255,255,0.03)] p-1"'), true);
+  assert.equal(pageSource.includes('className="workspace-panel-input inline-flex w-full items-center rounded-[14px] p-1"'), true);
   assert.equal(pageSource.includes('className="grid grid-cols-4 gap-1.5"'), true);
-  assert.equal(pageSource.includes("flex min-h-[58px] flex-col items-center justify-center gap-1.5 rounded-[14px] border px-1.5 py-2 text-center text-[12px]"), true);
-  assert.equal(pageSource.includes("border-white/[0.14] bg-white/[0.09] text-zinc-50 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]"), true);
-  assert.equal(pageSource.includes("className=\"flex flex-col items-center leading-[1.05]\""), true);
-  assert.equal(pageSource.includes("!selectedImageCardSupportsAspectRatio && ("), true);
-  assert.equal(pageSource.includes(">{getImageCardQualityLabel(selectedImageCardPanelQuality)}<"), false);
+  assert.equal(pageSource.includes("workspace-control-chip flex min-h-[58px] flex-col items-center justify-center gap-1.5 rounded-[14px] px-1.5 py-2 text-center"), true);
+  assert.equal(pageSource.includes("isSelected ? 'is-active' : ''"), true);
+  assert.equal(pageSource.includes('1:1 · 2K · Auto'), false);
+  assert.equal(pageSource.includes('const getAspectRatioFromImageSize = (sizeId: string): string =>'), false);
   assert.equal(pageSource.includes('const selectedImageCardResolutionStatus = React.useMemo('), false);
   assert.equal(pageSource.includes('实际尺寸'), false);
   assert.equal(pageSource.includes('selectedImageCardResolutionStatus.warning'), false);
@@ -292,6 +390,12 @@ test('image toolbar positioning no longer clamps against canvas width and uses a
   assert.equal(pageSource.includes('className="pointer-events-none fixed inset-0 z-[114]"'), true);
 });
 
+test('image toolbar scales with the current viewport zoom', () => {
+  assert.equal(pageSource.includes('transform: `translate(-50%, -100%) scale(${viewport.scale})`'), true);
+  assert.equal(pageSource.includes('top: selectedImageToolbarTop - 12 * viewport.scale,'), true);
+  assert.equal(pageSource.includes("transform: 'translate(-50%, calc(-100% - 12px))'"), false);
+});
+
 test('image toolbar keeps its natural width and does not clamp back into the viewport shell', () => {
   assert.equal(pageSource.includes('max-w-[calc(100vw-40px)]'), false);
   assert.equal(pageSource.includes('clampFloatingToolbarToViewport({'), false);
@@ -319,13 +423,17 @@ test('image cards use image-specific default dimensions instead of aliasing text
   assert.equal(pageSource.includes('const IMAGE_CARD_DIMENSIONS = {'), true);
 });
 
-test('selected image card panel keeps a fixed 480px canvas width', () => {
+test('selected image card panel keeps a fixed 720px canvas width', () => {
   assert.equal(
-    pageSource.includes('const selectedImageCardPanelCanvasWidth = TEXT_CARD_GENERATION_PANEL_DEFAULT_WIDTH;'),
+    pageSource.includes('const IMAGE_CARD_GENERATION_PANEL_DEFAULT_WIDTH = 720;'),
     true
   );
   assert.equal(
-    pageSource.includes('? Math.max(TEXT_CARD_GENERATION_PANEL_DEFAULT_WIDTH, selectedImageCardPanelFrameBounds.width)'),
+    pageSource.includes('const selectedImageCardPanelCanvasWidth = IMAGE_CARD_GENERATION_PANEL_DEFAULT_WIDTH;'),
+    true
+  );
+  assert.equal(
+    pageSource.includes('? Math.max(IMAGE_CARD_GENERATION_PANEL_DEFAULT_WIDTH, selectedImageCardPanelFrameBounds.width)'),
     false
   );
 });
@@ -452,17 +560,34 @@ test('canvas viewport no longer keeps a legacy in-canvas image card floating pan
   assert.equal(pageSource.includes('left: selectedImageCardPanelLeft + selectedImageCardCountPopoverOffset.left * viewport.scale,'), false);
 });
 
+test('pending connection create menu scales with viewport zoom instead of staying at a fixed screen size', () => {
+  assert.equal(pageSource.includes('const scaledConnectionMenuWidth = connectionMenuWidth * viewport.scale;'), true);
+  assert.equal(pageSource.includes('const scaledConnectionMenuHeight = connectionMenuHeight * viewport.scale;'), true);
+  assert.equal(pageSource.includes('left: pendingMenuLeft,'), true);
+  assert.equal(pageSource.includes('top: pendingMenuTop,'), true);
+  assert.equal(pageSource.includes('transform: `scale(${viewport.scale})`,'), true);
+  assert.equal(pageSource.includes("transformOrigin: 'top left',"), true);
+});
+
+test('image nodes are not excluded from corner-resize handles or resize interaction logic', () => {
+  assert.equal(pageSource.includes("const showCornerResizeHandle = isHoveredItem && item.type !== 'image';"), false);
+  assert.equal(pageSource.includes("if (item.type === 'image') return;"), false);
+  assert.equal(pageSource.includes("if (!resizingItem || resizingItem.type === 'image') {"), false);
+  assert.equal(pageSource.includes('const showCornerResizeHandle = isHoveredItem;'), true);
+});
+
 test('image card aspect ratio selection still routes through resizeImageCardItemToAspectRatio', () => {
   assert.equal(pageSource.includes('? resizeImageCardItemToAspectRatio(item, normalizedAspectRatio)'), true);
 });
 
-test('fixed-size image card size selection also routes through resizeImageCardItemToAspectRatio using the derived ratio', () => {
+test('image card resolution selection only updates the saved resolution tier and closes the resolution menu', () => {
   assert.equal(pageSource.includes('const resolvedSizeId = resolveImageCardSize(selectedImageCardPanelModelId, sizeId);'), true);
-  assert.equal(pageSource.includes('const normalizedAspectRatio = getAspectRatioFromImageSize(resolvedSizeId);'), true);
-  assert.equal(pageSource.includes('[selectedImageCardPanelItem.id]: normalizedAspectRatio,'), true);
+  assert.equal(pageSource.includes('[selectedImageCardPanelItem.id]: resolvedSizeId,'), true);
+  assert.equal(pageSource.includes('const normalizedAspectRatio = getAspectRatioFromImageSize(resolvedSizeId);'), false);
+  assert.equal(pageSource.includes('setShowImageCardResolutionMenu(false);'), true);
 });
 
-test('image card quality menu stays open after size and ratio picks until an outside click closes it', () => {
+test('image card aspect ratio resolution and quality menus close independently on selection and outside clicks', () => {
   const sizeSelectStart = pageSource.indexOf('onSelectImageCardSize={(sizeId) => {');
   const sizeSelectEnd = pageSource.indexOf('        onSelectImageCardQuality={(qualityId) => {', sizeSelectStart);
   const aspectSelectStart = pageSource.indexOf('onSelectImageCardAspectRatio={(aspectRatioId) => {');
@@ -478,10 +603,15 @@ test('image card quality menu stays open after size and ratio picks until an out
   const sizeSelectBlock = pageSource.slice(sizeSelectStart, sizeSelectEnd);
   const aspectSelectBlock = pageSource.slice(aspectSelectStart, aspectSelectEnd);
 
-  assert.equal(sizeSelectBlock.includes('setShowImageCardQualityMenu(false);'), false);
+  assert.equal(sizeSelectBlock.includes('setShowImageCardResolutionMenu(false);'), true);
+  assert.equal(aspectSelectBlock.includes('setShowImageCardAspectRatioMenu(false);'), true);
   assert.equal(aspectSelectBlock.includes('setShowImageCardQualityMenu(false);'), false);
   assert.equal(pageSource.includes('const isInsideImageCardQualityMenu ='), true);
   assert.equal(pageSource.includes('if (!isInsideImageCardQualityMenu) {\n        setShowImageCardQualityMenu(false);\n      }'), true);
+  assert.equal(pageSource.includes('const isInsideImageCardAspectRatioMenu ='), true);
+  assert.equal(pageSource.includes('if (!isInsideImageCardAspectRatioMenu) {\n        setShowImageCardAspectRatioMenu(false);\n      }'), true);
+  assert.equal(pageSource.includes('const isInsideImageCardResolutionMenu ='), true);
+  assert.equal(pageSource.includes('if (!isInsideImageCardResolutionMenu) {\n        setShowImageCardResolutionMenu(false);\n      }'), true);
 });
 
 test('image card generation always uses async task requests instead of keeping a single-image sync branch', () => {
@@ -538,8 +668,8 @@ test('right chat panel renders through a page-level portal above canvas overlays
   assert.equal(pageSource.includes('createPortal('), true);
   assert.equal(pageSource.includes('document.body'), true);
   assert.equal(pageSource.includes('style={{ zIndex: CHAT_PANEL_Z }}'), true);
-  assert.equal(pageSource.includes("className=\"fixed right-4 top-4 isolate"), true);
-  assert.equal(pageSource.includes("className=\"fixed inset-y-4 left-4 right-4 isolate"), true);
+  assert.equal(pageSource.includes("className=\"workspace-floating-control fixed right-4 top-4 isolate"), true);
+  assert.equal(pageSource.includes("className=\"workspace-chat-panel fixed inset-y-4 left-4 right-4 isolate"), true);
 });
 
 test('page wires session-scoped canvas undo history through a dedicated snapshot helper module', () => {

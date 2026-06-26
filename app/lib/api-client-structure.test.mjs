@@ -7,15 +7,27 @@ import { fileURLToPath } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const apiClientSource = fs.readFileSync(path.join(__dirname, 'api-client.ts'), 'utf8');
 
-test('api-client resolves supplier endpoints from the runtime provider config instead of module-scoped env constants', () => {
+test('api-client resolves supplier endpoints from the multi-provider runtime registry instead of module-scoped env constants', () => {
   assert.equal(
-    apiClientSource.includes('import { readProviderConfig, resolveProviderRequestTargets } from "./provider-config.mjs";'),
+    apiClientSource.includes('import { getProviderById, providerEndpointUrl, readProviderRegistry, resolveProviderRequestTargets } from "./provider-config.mjs";'),
     true
   );
   assert.equal(apiClientSource.includes('const API_URL ='), false);
   assert.equal(apiClientSource.includes('const API_KEY ='), false);
-  assert.equal(apiClientSource.includes('const providerConfig = await readProviderConfig();'), true);
-  assert.equal(apiClientSource.includes('const providerTargets = resolveProviderRequestTargets(providerConfig.config.baseUrl);'), true);
+  assert.equal(apiClientSource.includes('const providerRegistry = await readProviderRegistry();'), true);
+  assert.equal(apiClientSource.includes('const provider = getProviderById(providerRegistry.providers, providerId);'), true);
+  assert.equal(apiClientSource.includes('const providerTargets = resolveProviderRequestTargets(provider.baseUrl);'), true);
+  assert.equal(apiClientSource.includes('providerEndpointUrl(provider, "imageGenerationEndpoint", "/v1/images/generations")'), true);
+  assert.equal(apiClientSource.includes('providerEndpointUrl(provider, "imageEditEndpoint", "/v1/images/edits")'), true);
+});
+
+test('api-client uses protocol-specific auth headers and accepts request-level provider ids', () => {
+  assert.equal(apiClientSource.includes('providerId?: string;'), true);
+  assert.equal(apiClientSource.includes('"x-goog-api-key": apiKey'), true);
+  assert.equal(apiClientSource.includes('Authorization: bearerAuthorizationHeader(apiKey)'), true);
+  assert.equal(apiClientSource.includes('providerId: request.providerId,'), true);
+  assert.equal(apiClientSource.includes('provider.imageRequestMode === "openai-json"'), true);
+  assert.equal(apiClientSource.includes('response_format: "url"'), true);
 });
 
 test('api-client keeps the Gemini official image helper available as a non-default path', () => {
@@ -97,6 +109,17 @@ test('api-client also supports gpt-image-2 through the OpenAI compatible image p
   );
 });
 
+test('api-client normalizes provider-returned gpt-image-2 variants before routing image requests', () => {
+  assert.equal(
+    apiClientSource.includes('normalizeImageModelCapabilityId(model)'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('import { getGeminiImageSizeEnum, getImageModelCapability, normalizeImageModelCapabilityId, resolveImageRequestModel'),
+    true
+  );
+});
+
 test('api-client restores async submit and task polling for gpt-image-2 on the OpenAI compatible path', () => {
   assert.equal(
     apiClientSource.includes('const executionMode = request.executionMode === "async" ? "async" : "sync";'),
@@ -107,11 +130,11 @@ test('api-client restores async submit and task polling for gpt-image-2 on the O
     true
   );
   assert.equal(
-    apiClientSource.includes('? `${getOpenAiCompatibleImageApiBaseUrl(providerTargets)}${endpointPath}?async=true`'),
+    apiClientSource.includes('const baseEndpoint = usesImageEditsApi ? imageEditUrl : imageGenerationUrl;'),
     true
   );
   assert.equal(
-    apiClientSource.includes(': `${getOpenAiCompatibleImageApiBaseUrl(providerTargets)}${endpointPath}`;'),
+    apiClientSource.includes('const endpoint = executionMode === "async" ? `${baseEndpoint}?async=true` : baseEndpoint;'),
     true
   );
   assert.equal(
@@ -119,7 +142,7 @@ test('api-client restores async submit and task polling for gpt-image-2 on the O
     true
   );
   assert.equal(
-    apiClientSource.includes('const endpoint = `${getOpenAiCompatibleImageApiBaseUrl(providerTargets)}/images/tasks/${taskId}`;'),
+    apiClientSource.includes('const endpoint = `${taskBaseUrl}/images/tasks/${taskId}`;'),
     true
   );
   assert.equal(
@@ -136,6 +159,75 @@ test('api-client restores async submit and task polling for gpt-image-2 on the O
   );
   assert.equal(
     apiClientSource.includes('referenceImageCount > 0'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('const shouldSendTopLevelResponseFormat = !usesImageEditsApi && provider.imageRequestMode !== "openai-json";'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('requestBody.response_format = request.response_format || "url";'),
+    true
+  );
+});
+
+test('api-client keeps gpt-image-2 text-to-image on generations JSON with top-level response_format and quality', () => {
+  assert.equal(
+    apiClientSource.includes('if (imageQuality) {\n    requestBody.quality = imageQuality;\n  }'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('requestBody.response_format = request.response_format || "url";'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('const endpointPath = usesImageEditsApi ? "/images/edits" : "/images/generations";'),
+    true
+  );
+});
+
+test('api-client keeps openai-json mode on generations and sends response_format inside extra_body only', () => {
+  assert.equal(
+    apiClientSource.includes('if (provider.imageRequestMode === "openai-json") {'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('requestBody.extra_body = {'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('response_format: request.response_format || "url",'),
+    true
+  );
+});
+
+test('api-client parses common OpenAI compatible image2 task output field names', () => {
+  assert.equal(apiClientSource.includes('const IMAGE_ENTRY_URL_KEYS = ['), true);
+  for (const fieldName of [
+    '"url"',
+    '"image_url"',
+    '"imageUrl"',
+    '"file_url"',
+    '"fileUrl"',
+    '"output_url"',
+    '"outputUrl"',
+    '"result_url"',
+    '"resultUrl"',
+  ]) {
+    assert.equal(apiClientSource.includes(fieldName), true, `${fieldName} should be accepted as an image URL field`);
+  }
+  assert.equal(apiClientSource.includes('const IMAGE_ENTRY_NESTED_KEYS = ['), true);
+  assert.equal(apiClientSource.includes('"urls"'), true);
+  assert.equal(apiClientSource.includes('normalizeImageEntryUrl'), true);
+  assert.equal(apiClientSource.includes('data:image/png;base64,'), true);
+  assert.equal(apiClientSource.includes('data:image/jpeg;base64,'), true);
+  assert.equal(apiClientSource.includes('typeof obj.b64_json === "string"'), true);
+});
+
+test('api-client logs payload key summaries when async image2 tasks succeed without parsed images', () => {
+  assert.equal(apiClientSource.includes('summarizePayloadKeys(payload)'), true);
+  assert.equal(
+    apiClientSource.includes('"供应商任务成功，但返回体未识别到图片地址"'),
     true
   );
 });
@@ -389,7 +481,7 @@ test('api-client exposes 4Z documented image request models in the available mod
 
 test('api-client builds an OpenAI compatible image request body with image references for gpt-image-2', () => {
   assert.equal(
-    apiClientSource.includes('const usesImageEditsApi = shouldUseImageEditsApi(model, referenceImages.length);'),
+    apiClientSource.includes('const usesImageEditsApi = provider.imageRequestMode === "openai-json"'),
     true
   );
   assert.equal(
@@ -409,7 +501,8 @@ test('api-client builds an OpenAI compatible image request body with image refer
     true
   );
   assert.equal(
-    apiClientSource.includes('requestBody.image = referenceImages;'),
+    apiClientSource.includes('requestBody.image = referenceImages;') ||
+      apiClientSource.includes('image: referenceImages,'),
     true
   );
   assert.equal(

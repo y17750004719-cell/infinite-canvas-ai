@@ -32,7 +32,7 @@ export default async function DebugLogsPage({
   if (!isLocalLogAccessAllowed()) {
     return (
       <main className="min-h-screen bg-neutral-950 px-6 py-10 text-neutral-100">
-        <div className="mx-auto max-w-3xl rounded-3xl border border-neutral-800 bg-neutral-900/70 p-8 shadow-2xl shadow-black/30">
+        <div className="mx-auto max-w-3xl rounded-3xl border border-neutral-800 bg-neutral-900/70 p-8">
           <h1 className="text-2xl font-semibold">本地日志</h1>
           <p className="mt-3 text-sm text-neutral-300">日志查看仅在本地开发环境开放</p>
         </div>
@@ -57,7 +57,7 @@ export default async function DebugLogsPage({
   return (
     <main className="min-h-screen bg-[#0b1020] px-4 py-8 text-white sm:px-6">
       <div className="mx-auto max-w-6xl space-y-6">
-        <section className="overflow-hidden rounded-[28px] border border-white/10 bg-white/5 shadow-[0_24px_80px_rgba(0,0,0,0.35)] backdrop-blur">
+        <section className="overflow-hidden rounded-[28px] border border-white/10 bg-white/5 backdrop-blur">
           <div className="border-b border-white/10 px-6 py-5">
             <p className="text-xs uppercase tracking-[0.35em] text-cyan-300/80">Local Debug Logs</p>
             <h1 className="mt-3 text-3xl font-semibold">项目本地错误日志</h1>
@@ -117,7 +117,7 @@ export default async function DebugLogsPage({
           </form>
         </section>
 
-        <section className="rounded-[28px] border border-white/10 bg-white/5 p-6 shadow-[0_20px_60px_rgba(0,0,0,0.25)]">
+        <section className="rounded-[28px] border border-white/10 bg-white/5 p-6">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div>
               <h2 className="text-lg font-medium">结果</h2>

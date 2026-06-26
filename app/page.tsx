@@ -8,7 +8,7 @@ import remarkGfm from 'remark-gfm';
 import { 
   MousePointer2, Type, Image as ImageIcon,
   Share2, History, Settings, Paperclip,
-  Send, Sparkles, X, ChevronDown, Trash2, Edit3, ArrowLeft, Plus, SlidersHorizontal, Copy, Check, Video, Pencil, Package2, Workflow, Clock3, Eye, EyeOff
+  Send, Sparkles, X, ChevronDown, Trash2, Edit3, ArrowLeft, Plus, SlidersHorizontal, Copy, Check, Video, Pencil, Package2, Workflow, Clock3, Eye, EyeOff, Moon, Sun
 } from 'lucide-react';
 import { GeneratedImageHistoryEntry, ProjectSession } from './lib/db';
 import { ASPECT_RATIOS } from './lib/aspect-ratios';
@@ -23,7 +23,6 @@ import {
   normalizeTextCardPanelDrafts,
   normalizeProjectSession,
 } from './lib/session-persistence.mjs';
-import { getImageModelCapability } from './lib/image-model-capabilities.mjs';
 import { resolveStateUpdate } from './lib/state-update.mjs';
 import {
   areCanvasUndoSnapshotsEqual,
@@ -88,6 +87,9 @@ import {
   resolveFloatingPopoverOffset,
   resolveImageCardModel,
   resolveImageCardSize,
+  resolveImageCardSizeForAspectRatio,
+  resolveWorkspaceImageCardModel,
+  resolveWorkspaceTextPanelChatModel,
   resolveSessionPresentationState,
   settleCanvasImageGenerationRequests,
   shouldPreventScrollableRegionWheelDefault,
@@ -190,6 +192,7 @@ interface CanvasUndoSnapshot {
   connections: Connection[];
   textCardPanelDrafts: Record<string, string>;
   imageCardPanelDrafts: Record<string, string>;
+  imageCardProviderById: Record<string, string>;
   imageCardModelById: Record<string, string>;
   imageCardSizeById: Record<string, string>;
   imageCardQualityById: Record<string, string>;
@@ -282,6 +285,7 @@ interface CanvasClipboardSnapshot {
   };
   textCardPanelDrafts: Record<string, string>;
   imageCardPanelDrafts: Record<string, string>;
+  imageCardProviderById: Record<string, string>;
   imageCardModelById: Record<string, string>;
   imageCardSizeById: Record<string, string>;
   imageCardQualityById: Record<string, string>;
@@ -294,6 +298,7 @@ interface MaterializedCanvasClipboardPaste {
   selectedIds: string[];
   textCardPanelDrafts: Record<string, string>;
   imageCardPanelDrafts: Record<string, string>;
+  imageCardProviderById: Record<string, string>;
   imageCardModelById: Record<string, string>;
   imageCardSizeById: Record<string, string>;
   imageCardQualityById: Record<string, string>;
@@ -316,6 +321,7 @@ interface SessionLiveState {
   connections: Connection[];
   textCardPanelDrafts: Record<string, string>;
   imageCardPanelDrafts: Record<string, string>;
+  imageCardProviderById: Record<string, string>;
   imageCardModelById: Record<string, string>;
   imageCardSizeById: Record<string, string>;
   imageCardQualityById: Record<string, string>;
@@ -329,16 +335,65 @@ interface SessionLiveState {
 
 type Tool = 'select' | 'text' | 'image';
 type GenerationMode = 'auto' | 'image' | 'chat';
-type ProviderSettingsProviderId = 'comfly' | 'gpt-best' | 'custom';
+type ProviderSettingsProviderId = string;
 type ProviderSettingsSource = 'runtime' | 'env';
+type ProviderProtocol = 'openai' | 'gemini';
+type ProviderImageRequestMode = 'openai' | 'openai-json';
 
-interface ProviderSettingsResponse {
+interface ProviderSettingsCompatibilityResponse {
   providerId: ProviderSettingsProviderId;
   baseUrl: string;
+  apiKey?: string;
   hasApiKey: boolean;
   maskedApiKey: string;
   source: ProviderSettingsSource;
   updatedAt?: string;
+}
+
+interface ProviderSettingsItem {
+  id: string;
+  name: string;
+  baseUrl: string;
+  protocol: ProviderProtocol;
+  imageRequestMode: ProviderImageRequestMode;
+  imageGenerationEndpoint: string;
+  imageEditEndpoint: string;
+  enabled: boolean;
+  primary: boolean;
+  imageModels: string[];
+  chatModels: string[];
+  apiKey: string;
+  hasApiKey: boolean;
+  maskedApiKey: string;
+  source: ProviderSettingsSource;
+  updatedAt?: string;
+}
+
+interface ProviderSettingsResponse {
+  providers: ProviderSettingsItem[];
+}
+
+interface ProviderConnectionTestResult {
+  ok: boolean;
+  status: number;
+  message: string;
+  modelCount: number;
+  imageModels: string[];
+  chatModels: string[];
+  imageRequestMode: ProviderImageRequestMode;
+}
+
+interface ProviderFetchedModelsResult extends ProviderConnectionTestResult {
+  allModels: string[];
+}
+
+type ProviderSettingsModelPickerCategory = 'all' | 'image' | 'chat';
+
+interface WorkspaceModelOption {
+  id: string;
+  label: string;
+  providerId: string;
+  providerName: string;
 }
 
 const tools = [
@@ -356,13 +411,112 @@ const quickActions = [
 ];
 
 const PROVIDER_SETTINGS_PRESET_OPTIONS = [
-  { id: 'comfly', label: 'Comfly', baseUrl: 'https://ai.comfly.org/v1' },
-  { id: 'gpt-best', label: 'GPT-Best', baseUrl: 'https://gpt-best.cn' },
-  { id: 'custom', label: '自定义', baseUrl: 'https://api.openai.com/v1' },
+  { id: 'comfly', name: 'Comfly', baseUrl: 'https://ai.comfly.org/v1', protocol: 'openai', imageRequestMode: 'openai' },
+  { id: 'gpt-best', name: 'GPT-Best', baseUrl: 'https://gpt-best.cn', protocol: 'openai', imageRequestMode: 'openai' },
+  { id: 'custom', name: '自定义', baseUrl: 'https://api.openai.com/v1', protocol: 'openai', imageRequestMode: 'openai' },
 ] as const;
 
 const getProviderSettingsProviderLabel = (providerId: ProviderSettingsProviderId) =>
-  PROVIDER_SETTINGS_PRESET_OPTIONS.find((option) => option.id === providerId)?.label || '自定义';
+  PROVIDER_SETTINGS_PRESET_OPTIONS.find((option) => option.id === providerId)?.name || providerId || '自定义';
+
+const PROVIDER_PROTOCOL_OPTIONS = [
+  { id: 'openai', label: 'OpenAI Compatible' },
+  { id: 'gemini', label: 'Gemini' },
+] as const;
+
+const PROVIDER_IMAGE_REQUEST_MODE_OPTIONS = [
+  { id: 'openai', label: 'openai' },
+  { id: 'openai-json', label: 'openai-json' },
+] as const;
+
+const PROVIDER_SETTINGS_MODEL_PICKER_CATEGORIES = ['all', 'image', 'chat'] as const;
+const PROVIDER_SETTINGS_MODEL_PICKER_LABELS: Record<ProviderSettingsModelPickerCategory, string> = {
+  all: '全部',
+  image: '图片',
+  chat: '聊天',
+};
+
+const uniqueModelIds = (models: string[]) =>
+  Array.from(new Set(models.map((model) => model.trim()).filter(Boolean)));
+
+const createFallbackWorkspaceModelOptions = (
+  fallbackOptions: Array<{ id: string; label: string }>,
+  provider: ProviderSettingsItem | null
+): WorkspaceModelOption[] =>
+  fallbackOptions.map((option) => ({
+    ...option,
+    providerId: provider?.id || 'comfly',
+    providerName: provider?.name || '主供应商',
+  }));
+
+const createWorkspaceModelOptions = (
+  providers: ProviderSettingsItem[],
+  kind: 'image' | 'chat',
+  fallbackOptions: Array<{ id: string; label: string }>
+): WorkspaceModelOption[] => {
+  const enabledProviders = providers.filter((provider) => provider.enabled !== false);
+  const options = enabledProviders.flatMap((provider) => {
+    const models = kind === 'image' ? provider.imageModels : provider.chatModels;
+    return uniqueModelIds(models).map((model) => ({
+      id: model,
+      label: model,
+      providerId: provider.id,
+      providerName: provider.name || getProviderSettingsProviderLabel(provider.id),
+    }));
+  });
+
+  if (options.length > 0) return options;
+  return createFallbackWorkspaceModelOptions(
+    fallbackOptions,
+    enabledProviders.find((provider) => provider.primary) || enabledProviders[0] || null
+  );
+};
+
+const findWorkspaceModelOption = (
+  options: WorkspaceModelOption[],
+  modelId: string,
+  providerId?: string
+): WorkspaceModelOption | null => {
+  const normalizedModelId = modelId.trim();
+  const normalizedProviderId = providerId?.trim();
+  if (normalizedModelId && normalizedProviderId) {
+    const exact = options.find((option) => option.id === normalizedModelId && option.providerId === normalizedProviderId);
+    if (exact) return exact;
+  }
+  if (normalizedModelId) {
+    const byModel = options.find((option) => option.id === normalizedModelId);
+    if (byModel) return byModel;
+  }
+  if (normalizedProviderId) {
+    const byProvider = options.find((option) => option.providerId === normalizedProviderId);
+    if (byProvider) return byProvider;
+  }
+  return options[0] || null;
+};
+
+const getFetchedModelCategory = (
+  modelId: string,
+  fetchedModels: ProviderFetchedModelsResult | null,
+  categoryById: Record<string, 'image' | 'chat'>
+): 'image' | 'chat' => {
+  const normalizedModelId = modelId.trim();
+  if (categoryById[normalizedModelId]) {
+    return categoryById[normalizedModelId];
+  }
+  if (fetchedModels?.imageModels.includes(normalizedModelId)) {
+    return 'image';
+  }
+  return 'chat';
+};
+
+const maskProviderSettingsApiKeyForDisplay = (apiKey: string) => {
+  if (!apiKey) return '';
+  if (apiKey.length <= 4) return '*'.repeat(apiKey.length);
+  if (apiKey.length <= 8) {
+    return `${apiKey.slice(0, 2)}${'*'.repeat(apiKey.length - 4)}${apiKey.slice(-2)}`;
+  }
+  return `${apiKey.slice(0, 4)}${'*'.repeat(apiKey.length - 8)}${apiKey.slice(-4)}`;
+};
 
 type SkillSelectSource = 'center_quick_action' | 'bottom_skill_bar';
 
@@ -406,6 +560,7 @@ const IMAGE_CARD_DIMENSIONS = {
   height: IMAGE_CARD_MIN_EDGE + TEXT_CARD_FRAME_TOP + TEXT_CARD_FRAME_BOTTOM,
 } as const;
 const TEXT_CARD_GENERATION_PANEL_DEFAULT_WIDTH = 480;
+const IMAGE_CARD_GENERATION_PANEL_DEFAULT_WIDTH = 720;
 const TEXT_CARD_GENERATION_PANEL_BASE_HEIGHT = 156;
 const TEXT_CARD_GENERATION_PANEL_PREVIEW_HEIGHT = 92;
 const TEXT_CARD_PANEL_INPUT_MIN_ROWS = 2;
@@ -436,6 +591,58 @@ const IMAGE_CARD_COUNT_OPTIONS = [
 const NODE_SELECTED_OUTLINE_COLOR = 'rgba(226, 232, 240, 0.76)';
 const NODE_SELECTED_OUTLINE_WIDTH = 2;
 const VIEWPORT_ZOOM_DURATION_MS = 140;
+type WorkspaceTheme = 'light' | 'dark';
+const WORKSPACE_THEME_STORAGE_KEY = 'zo-design-workspace-theme';
+const DEFAULT_WORKSPACE_THEME: WorkspaceTheme = 'light';
+
+const applyWorkspaceTheme = (theme: WorkspaceTheme) => {
+  if (typeof document === 'undefined') return;
+  document.documentElement.dataset.workspaceTheme = theme;
+  document.documentElement.classList.toggle('dark', theme === 'dark');
+};
+
+function useWorkspaceTheme() {
+  const [theme, setTheme] = useState<WorkspaceTheme>(DEFAULT_WORKSPACE_THEME);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const storedTheme = window.localStorage.getItem(WORKSPACE_THEME_STORAGE_KEY);
+    const nextTheme: WorkspaceTheme = storedTheme === 'dark' ? 'dark' : DEFAULT_WORKSPACE_THEME;
+    setTheme(nextTheme);
+    applyWorkspaceTheme(nextTheme);
+  }, []);
+
+  useEffect(() => {
+    applyWorkspaceTheme(theme);
+    if (typeof window === 'undefined') return;
+    window.localStorage.setItem(WORKSPACE_THEME_STORAGE_KEY, theme);
+  }, [theme]);
+
+  const toggleTheme = useCallback(() => {
+    setTheme((currentTheme) => (currentTheme === 'dark' ? 'light' : 'dark'));
+  }, []);
+
+  return { theme, toggleTheme };
+}
+
+const LIGHT_THEME = {
+  appBg: '#eef1f5',
+  panel: 'rgba(255, 255, 255, 0.84)',
+  panelElevated: 'rgba(255, 255, 255, 0.94)',
+  panelSoft: 'rgba(248, 250, 252, 0.78)',
+  border: 'rgba(15, 23, 42, 0.1)',
+  borderStrong: 'rgba(15, 23, 42, 0.18)',
+  textPrimary: '#111827',
+  textMuted: '#667085',
+  textSoft: '#98a2b3',
+  accent: '#0f172a',
+  accentSurface: 'rgba(15, 23, 42, 0.06)',
+  accentSurfaceStrong: 'rgba(15, 23, 42, 0.1)',
+  canvasDot: 'rgba(100, 116, 139, 0.3)',
+  canvasLine: 'rgba(71, 85, 105, 0.58)',
+  portFill: '#f8fafc',
+  portStroke: 'rgba(51, 65, 85, 0.58)',
+};
 const DARK_THEME = {
   appBg: '#050608',
   panel: 'rgba(16, 18, 22, 0.88)',
@@ -454,6 +661,10 @@ const DARK_THEME = {
   portFill: '#090b0f',
   portStroke: 'rgba(229, 231, 235, 0.78)',
 };
+const WORKSPACE_THEME_PALETTES = {
+  light: LIGHT_THEME,
+  dark: DARK_THEME,
+} as const;
 
 const getImageCardAspectRatioShortLabel = (aspectRatioId: string) =>
   normalizeImageCardAspectRatio(aspectRatioId);
@@ -484,92 +695,6 @@ const getImageCardAspectRatioPreviewSize = (aspectRatioId: string) => {
     width: Math.max(7, (widthRatio / heightRatio) * maxPreviewEdge),
     height: maxPreviewEdge,
   };
-};
-
-const getImageCardSizePresetLabel = (sizeId: string) => {
-  const normalizedSizeId = typeof sizeId === 'string' ? sizeId.trim() : '';
-  const match = normalizedSizeId.match(/^(\d+)x(\d+)$/i);
-  if (match) {
-    const width = Number(match[1]);
-    const height = Number(match[2]);
-    const gcd = (a: number, b: number): number => {
-      let x = Math.abs(a);
-      let y = Math.abs(b);
-      while (y > 0) {
-        const remainder = x % y;
-        x = y;
-        y = remainder;
-      }
-      return x || 1;
-    };
-    const divisor = gcd(width, height);
-    const ratioLabel = `${width / divisor}:${height / divisor}`;
-    const longestEdge = Math.max(width, height);
-    let resolutionLabel = '';
-    if (longestEdge >= 3840) resolutionLabel = '4K';
-    else if (longestEdge >= 2048) resolutionLabel = '2K';
-    else if (longestEdge >= 1536) resolutionLabel = '1.5K';
-    else if (longestEdge >= 1024) resolutionLabel = '1K';
-    return resolutionLabel ? `${ratioLabel} · ${resolutionLabel}` : ratioLabel;
-  }
-  return normalizedSizeId;
-};
-
-const getImageCardSizePresetLabelLines = (sizeId: string) =>
-  getImageCardSizePresetLabel(sizeId)
-    .split(' · ')
-    .map((part) => part.trim())
-    .filter(Boolean);
-
-const getAspectRatioFromImageSize = (sizeId: string): string => {
-  const normalizedSizeId = typeof sizeId === 'string' ? sizeId.trim() : '';
-  const match = normalizedSizeId.match(/^(\d+)x(\d+)$/i);
-  if (!match) {
-    return '1:1';
-  }
-
-  const width = Number(match[1]);
-  const height = Number(match[2]);
-  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
-    return '1:1';
-  }
-
-  const gcd = (a: number, b: number): number => {
-    let x = Math.abs(a);
-    let y = Math.abs(b);
-    while (y > 0) {
-      const remainder = x % y;
-      x = y;
-      y = remainder;
-    }
-    return x || 1;
-  };
-
-  const divisor = gcd(width, height);
-  return `${width / divisor}:${height / divisor}`;
-};
-
-const getImageCardSizePreviewSize = (sizeId: string) => {
-  const normalizedSizeId = typeof sizeId === 'string' ? sizeId.trim() : '';
-  const match = normalizedSizeId.match(/^(\d+)x(\d+)$/i);
-  if (match) {
-    const width = Number(match[1]);
-    const height = Number(match[2]);
-    if (Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0) {
-      const maxPreviewEdge = 18;
-      if (width >= height) {
-        return {
-          width: maxPreviewEdge,
-          height: Math.max(7, (height / width) * maxPreviewEdge),
-        };
-      }
-      return {
-        width: Math.max(7, (width / height) * maxPreviewEdge),
-        height: maxPreviewEdge,
-      };
-    }
-  }
-  return { width: 18, height: 18 };
 };
 
 const IMAGE_CARD_QUALITY_OPTIONS = [
@@ -991,8 +1116,10 @@ interface CanvasSize {
 }
 
 const CanvasBackgroundLayer = memo(function CanvasBackgroundLayer({
+  theme,
   viewport,
 }: {
+  theme: typeof DARK_THEME;
   viewport: ViewportState;
 }) {
   const dotGap = resolveCanvasBackgroundDotGap(viewport.scale);
@@ -1001,8 +1128,8 @@ const CanvasBackgroundLayer = memo(function CanvasBackgroundLayer({
     <div
       className="pointer-events-none absolute inset-0"
       style={{
-        backgroundColor: DARK_THEME.appBg,
-        backgroundImage: `radial-gradient(${DARK_THEME.canvasDot} 0.9px, transparent 0.9px)`,
+        backgroundColor: theme.appBg,
+        backgroundImage: `radial-gradient(${theme.canvasDot} 0.9px, transparent 0.9px)`,
         backgroundSize: `${dotGap}px ${dotGap}px`,
         backgroundPosition: `${viewport.x}px ${viewport.y}px`,
       }}
@@ -1013,6 +1140,7 @@ const CanvasBackgroundLayer = memo(function CanvasBackgroundLayer({
 const CanvasConnectionsLayer = memo(function CanvasConnectionsLayer({
   canvasSize,
   connections,
+  theme,
   itemById,
   selectedConnectionIds,
   viewport,
@@ -1026,6 +1154,7 @@ const CanvasConnectionsLayer = memo(function CanvasConnectionsLayer({
 }: {
   canvasSize: CanvasSize;
   connections: Connection[];
+  theme: typeof DARK_THEME;
   itemById: Record<string, CanvasItem>;
   selectedConnectionIds: string[];
   viewport: ViewportState;
@@ -1076,7 +1205,7 @@ const CanvasConnectionsLayer = memo(function CanvasConnectionsLayer({
             key={`visual-${connection.id}`}
             d={path}
             fill="none"
-            stroke={DARK_THEME.canvasLine}
+            stroke={theme.canvasLine}
             strokeOpacity={isSelectedConnection ? 0.98 : 0.9}
             strokeWidth={isSelectedConnection ? scaledSelectedConnectionStrokeWidth : scaledConnectionStrokeWidth}
             strokeLinecap="round"
@@ -1099,7 +1228,7 @@ const CanvasConnectionsLayer = memo(function CanvasConnectionsLayer({
           <path
             d={buildConnectionPath(previewFrom, previewTo)}
             fill="none"
-            stroke={DARK_THEME.canvasLine}
+            stroke={theme.canvasLine}
             strokeOpacity="0.9"
             strokeWidth={scaledConnectionStrokeWidth}
             strokeLinecap="round"
@@ -1110,7 +1239,7 @@ const CanvasConnectionsLayer = memo(function CanvasConnectionsLayer({
           <path
             d={buildConnectionPath(frozenPreviewConnection.from, frozenPreviewConnection.to)}
             fill="none"
-            stroke={DARK_THEME.canvasLine}
+            stroke={theme.canvasLine}
             strokeOpacity="0.5"
             strokeWidth={scaledConnectionStrokeWidth}
             strokeLinecap="round"
@@ -1360,7 +1489,7 @@ const CanvasNodesLayer = memo(function CanvasNodesLayer({
       {multiSelectionBounds && (
         <div
           data-selection-group="true"
-          className="absolute rounded-[28px] border border-white/20 bg-white/[0.06] shadow-[0_18px_40px_rgba(0,0,0,0.16)]"
+          className="absolute rounded-[28px] border border-white/20 bg-white/[0.06]"
           style={{
             left: multiSelectionBounds.left - 10,
             top: multiSelectionBounds.top - 10,
@@ -1374,7 +1503,7 @@ const CanvasNodesLayer = memo(function CanvasNodesLayer({
         const isItemSelected = selectedIds.includes(item.id) || selectedId === item.id;
         const showMultiSelectionGroup = selectedIds.length > 1;
         const isHoveredItem = hoveredCanvasItemId === item.id;
-        const showCornerResizeHandle = isHoveredItem && item.type !== 'image';
+        const showCornerResizeHandle = isHoveredItem;
         const isTextCard = item.type === 'text' && item.textVariant === 'card';
         const isImageCard = isImageCardItem(item);
         const textCardFrameBounds = isTextCard || isImageCard ? getTextCardFrameBounds(item) : null;
@@ -1436,7 +1565,7 @@ const CanvasNodesLayer = memo(function CanvasNodesLayer({
                   <span>Image</span>
                 </div>
                 <div
-                  className="absolute overflow-hidden rounded-[22px] bg-[#1f1f22]"
+                  className="workspace-panel-surface absolute overflow-hidden rounded-[22px]"
                   style={{
                     left: `${TEXT_CARD_FRAME_INSET_X}px`,
                     top: `${TEXT_CARD_FRAME_TOP}px`,
@@ -1448,7 +1577,7 @@ const CanvasNodesLayer = memo(function CanvasNodesLayer({
                     {imageCardVisualState === 'idle' && (
                       <div className="w-full max-w-[560px] px-8 py-10 text-left">
                         <div className="flex flex-col gap-4">
-                          <div className="px-2 text-sm text-zinc-500">尝试：</div>
+                          <div className="workspace-text-muted px-2 text-sm">尝试：</div>
                           <div className="flex w-full flex-col items-start gap-2">
                             {IMAGE_CARD_MENU_OPTIONS.map((option) => {
                               const Icon = option.icon;
@@ -1459,13 +1588,13 @@ const CanvasNodesLayer = memo(function CanvasNodesLayer({
                                   onPointerDown={(e) => {
                                     e.stopPropagation();
                                   }}
-                                  className="group/row flex w-full items-center justify-start gap-2.5 rounded-[14px] bg-transparent px-3 py-2 text-left transition-colors duration-150 ease-out hover:bg-[rgba(255,255,255,0.038)]"
+                                  className="workspace-menu-item group/row flex w-full items-center justify-start gap-2.5 rounded-[14px] border border-transparent px-3 py-2 text-left"
                                 >
                                   <Icon
                                     size={16}
-                                    className="shrink-0 text-zinc-400 transition-colors duration-150 group-hover/row:text-zinc-100"
+                                    className="shrink-0"
                                   />
-                                  <span className="text-[15px] font-medium tracking-[-0.02em] text-zinc-400 transition-colors duration-150 group-hover/row:text-zinc-100">
+                                  <span className="text-[15px] font-medium tracking-[-0.02em]">
                                     {option.label}
                                   </span>
                                 </button>
@@ -1545,7 +1674,7 @@ const CanvasNodesLayer = memo(function CanvasNodesLayer({
                   <span>Text</span>
                 </div>
                 <div
-                  className="absolute overflow-hidden rounded-[22px] bg-[#1f1f22]"
+                  className="workspace-panel-surface absolute overflow-hidden rounded-[22px]"
                   style={{
                     left: `${TEXT_CARD_FRAME_INSET_X}px`,
                     top: `${TEXT_CARD_FRAME_TOP}px`,
@@ -1557,7 +1686,7 @@ const CanvasNodesLayer = memo(function CanvasNodesLayer({
                     {textCardVisualState === 'idle' && (
                       <div className="w-full max-w-[560px] px-8 py-10 text-left">
                         <div className="flex flex-col gap-4">
-                          <div className="px-2 text-sm text-zinc-500">尝试：</div>
+                          <div className="workspace-text-muted px-2 text-sm">尝试：</div>
                           <div className="flex w-full flex-col items-start gap-2">
                             {[
                               { icon: Pencil, label: '自己编写内容' },
@@ -1572,13 +1701,13 @@ const CanvasNodesLayer = memo(function CanvasNodesLayer({
                                   onPointerDown={(e) => {
                                     e.stopPropagation();
                                   }}
-                                  className="group/row flex w-full items-center justify-start gap-2.5 rounded-[14px] bg-transparent px-3 py-2 text-left transition-colors duration-150 ease-out hover:bg-[rgba(255,255,255,0.038)]"
+                                  className="workspace-menu-item group/row flex w-full items-center justify-start gap-2.5 rounded-[14px] border border-transparent px-3 py-2 text-left"
                                 >
                                   <Icon
                                     size={16}
-                                    className="shrink-0 text-zinc-400 transition-colors duration-150 group-hover/row:text-zinc-100"
+                                    className="shrink-0"
                                   />
-                                  <span className="text-[15px] font-medium tracking-[-0.02em] text-zinc-400 transition-colors duration-150 group-hover/row:text-zinc-100">
+                                  <span className="text-[15px] font-medium tracking-[-0.02em]">
                                     {option.label}
                                   </span>
                                 </button>
@@ -1732,6 +1861,7 @@ const CanvasViewport = memo(function CanvasViewport({
   isSpacePressed,
   isPanning,
   viewport,
+  themePalette,
   items,
   connections,
   itemById,
@@ -1801,11 +1931,16 @@ const CanvasViewport = memo(function CanvasViewport({
   selectedImageCardPanelQuality,
   selectedImageCardPanelCount,
   selectedImageCardPanelAspectRatio,
-  selectedImageCardSupportsAspectRatio,
   isSelectedImageCardGenerating,
   showImageCardModelMenu,
   imageCardModelMenuRef,
   imageCardModelPopoverRef,
+  showImageCardAspectRatioMenu,
+  imageCardAspectRatioMenuRef,
+  imageCardAspectRatioPopoverRef,
+  showImageCardResolutionMenu,
+  imageCardResolutionMenuRef,
+  imageCardResolutionPopoverRef,
   showImageCardQualityMenu,
   imageCardQualityMenuRef,
   imageCardQualityPopoverRef,
@@ -1822,6 +1957,8 @@ const CanvasViewport = memo(function CanvasViewport({
   onSelectedTextCardPanelCancel,
   onToggleImageCardModelMenu,
   onSelectImageCardModel,
+  onToggleImageCardAspectRatioMenu,
+  onToggleImageCardResolutionMenu,
   onToggleImageCardQualityMenu,
   onSelectImageCardSize,
   onSelectImageCardQuality,
@@ -1848,6 +1985,7 @@ const CanvasViewport = memo(function CanvasViewport({
   isSpacePressed: boolean;
   isPanning: boolean;
   viewport: ViewportState;
+  themePalette: typeof DARK_THEME;
   items: CanvasItem[];
   connections: Connection[];
   itemById: Record<string, CanvasItem>;
@@ -1921,11 +2059,16 @@ const CanvasViewport = memo(function CanvasViewport({
   selectedImageCardPanelQuality: string;
   selectedImageCardPanelCount: number;
   selectedImageCardPanelAspectRatio: string;
-  selectedImageCardSupportsAspectRatio: boolean;
   isSelectedImageCardGenerating: boolean;
   showImageCardModelMenu: boolean;
   imageCardModelMenuRef: React.RefObject<HTMLDivElement | null>;
   imageCardModelPopoverRef: React.RefObject<HTMLDivElement | null>;
+  showImageCardAspectRatioMenu: boolean;
+  imageCardAspectRatioMenuRef: React.RefObject<HTMLDivElement | null>;
+  imageCardAspectRatioPopoverRef: React.RefObject<HTMLDivElement | null>;
+  showImageCardResolutionMenu: boolean;
+  imageCardResolutionMenuRef: React.RefObject<HTMLDivElement | null>;
+  imageCardResolutionPopoverRef: React.RefObject<HTMLDivElement | null>;
   showImageCardQualityMenu: boolean;
   imageCardQualityMenuRef: React.RefObject<HTMLDivElement | null>;
   imageCardQualityPopoverRef: React.RefObject<HTMLDivElement | null>;
@@ -1942,6 +2085,8 @@ const CanvasViewport = memo(function CanvasViewport({
   onSelectedTextCardPanelCancel: () => void;
   onToggleImageCardModelMenu: () => void;
   onSelectImageCardModel: (modelId: string) => void;
+  onToggleImageCardAspectRatioMenu: () => void;
+  onToggleImageCardResolutionMenu: () => void;
   onToggleImageCardQualityMenu: () => void;
   onSelectImageCardSize: (sizeId: string) => void;
   onSelectImageCardQuality: (qualityId: string) => void;
@@ -1980,6 +2125,8 @@ const CanvasViewport = memo(function CanvasViewport({
   const selectedImageCardPanelTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const selectedImageCardPanelRootRef = useRef<HTMLDivElement | null>(null);
   const [selectedImageCardModelPopoverOffset, setSelectedImageCardModelPopoverOffset] = useState<{ left: number; top: number } | null>(null);
+  const [selectedImageCardAspectRatioPopoverOffset, setSelectedImageCardAspectRatioPopoverOffset] = useState<{ left: number; top: number } | null>(null);
+  const [selectedImageCardResolutionPopoverOffset, setSelectedImageCardResolutionPopoverOffset] = useState<{ left: number; top: number } | null>(null);
   const [selectedImageCardQualityPopoverOffset, setSelectedImageCardQualityPopoverOffset] = useState<{ left: number; top: number } | null>(null);
   const [selectedImageCardCountPopoverOffset, setSelectedImageCardCountPopoverOffset] = useState<{ left: number; top: number } | null>(null);
   const [selectedTextCardPanelInputMetrics, setSelectedTextCardPanelInputMetrics] = useState(() => ({
@@ -1998,16 +2145,18 @@ const CanvasViewport = memo(function CanvasViewport({
   const connectionMenuWidth = 360;
   const connectionMenuHeight = 292;
   const connectionMenuPadding = 24;
+  const scaledConnectionMenuWidth = connectionMenuWidth * viewport.scale;
+  const scaledConnectionMenuHeight = connectionMenuHeight * viewport.scale;
   const pendingMenuLeft = pendingConnectionMenu
     ? Math.min(
         Math.max(pendingConnectionMenu.position.x + 18, connectionMenuPadding),
-        Math.max(connectionMenuPadding, canvasSize.width - connectionMenuWidth - connectionMenuPadding)
+        Math.max(connectionMenuPadding, canvasSize.width - scaledConnectionMenuWidth - connectionMenuPadding)
       )
     : 0;
   const pendingMenuTop = pendingConnectionMenu
     ? Math.min(
         Math.max(pendingConnectionMenu.position.y - 40, connectionMenuPadding),
-        Math.max(connectionMenuPadding, canvasSize.height - connectionMenuHeight - connectionMenuPadding)
+        Math.max(connectionMenuPadding, canvasSize.height - scaledConnectionMenuHeight - connectionMenuPadding)
       )
     : 0;
   const selectedTextCardPanelFrameBounds = selectedTextCardPanelItem
@@ -2019,7 +2168,7 @@ const CanvasViewport = memo(function CanvasViewport({
   const selectedTextCardPanelCanvasWidth = selectedTextCardPanelFrameBounds
     ? Math.max(TEXT_CARD_GENERATION_PANEL_DEFAULT_WIDTH, selectedTextCardPanelFrameBounds.width)
     : 0;
-  const selectedImageCardPanelCanvasWidth = TEXT_CARD_GENERATION_PANEL_DEFAULT_WIDTH;
+  const selectedImageCardPanelCanvasWidth = IMAGE_CARD_GENERATION_PANEL_DEFAULT_WIDTH;
   const selectedTextCardPanelDisplayInput = getDisplayableTextCardPanelDraft(selectedTextCardPanelInput);
   const selectedImageCardPanelDisplayInput = getDisplayableTextCardPanelDraft(selectedImageCardPanelInput);
   const focusSelectedTextCardPanelInput = useCallback(() => {
@@ -2103,6 +2252,56 @@ const CanvasViewport = memo(function CanvasViewport({
       })
     );
   }, [imageCardModelMenuRef, selectedImageCardPanelItem, showImageCardModelMenu, viewport.scale]);
+  useLayoutEffect(() => {
+    if (!showImageCardAspectRatioMenu || !selectedImageCardPanelItem) {
+      setSelectedImageCardAspectRatioPopoverOffset(null);
+      return;
+    }
+
+    const panelElement = selectedImageCardPanelRootRef.current;
+    const anchorElement = imageCardAspectRatioMenuRef.current;
+    if (!panelElement || !anchorElement || viewport.scale <= 0) {
+      return;
+    }
+
+    const panelRect = panelElement.getBoundingClientRect();
+    const anchorRect = anchorElement.getBoundingClientRect();
+
+    setSelectedImageCardAspectRatioPopoverOffset(
+      resolveFloatingPopoverOffset({
+        panelRect,
+        anchorRect,
+        scale: viewport.scale,
+        placement: 'below-panel',
+        gap: 12,
+      })
+    );
+  }, [imageCardAspectRatioMenuRef, selectedImageCardPanelItem, showImageCardAspectRatioMenu, viewport.scale]);
+  useLayoutEffect(() => {
+    if (!showImageCardResolutionMenu || !selectedImageCardPanelItem) {
+      setSelectedImageCardResolutionPopoverOffset(null);
+      return;
+    }
+
+    const panelElement = selectedImageCardPanelRootRef.current;
+    const anchorElement = imageCardResolutionMenuRef.current;
+    if (!panelElement || !anchorElement || viewport.scale <= 0) {
+      return;
+    }
+
+    const panelRect = panelElement.getBoundingClientRect();
+    const anchorRect = anchorElement.getBoundingClientRect();
+
+    setSelectedImageCardResolutionPopoverOffset(
+      resolveFloatingPopoverOffset({
+        panelRect,
+        anchorRect,
+        scale: viewport.scale,
+        placement: 'below-panel',
+        gap: 12,
+      })
+    );
+  }, [imageCardResolutionMenuRef, selectedImageCardPanelItem, showImageCardResolutionMenu, viewport.scale]);
   useLayoutEffect(() => {
     if (!showImageCardQualityMenu || !selectedImageCardPanelItem) {
       setSelectedImageCardQualityPopoverOffset(null);
@@ -2234,7 +2433,7 @@ const CanvasViewport = memo(function CanvasViewport({
               <div
               data-text-card-panel="true"
               ref={selectedImageCardPanelRootRef}
-              className="pointer-events-auto fixed overflow-hidden rounded-[26px] border border-white/[0.11] bg-[rgba(28,28,31,0.98)] shadow-[0_34px_90px_rgba(0,0,0,0.46),inset_0_1px_0_rgba(255,255,255,0.025)] backdrop-blur-xl"
+              className="workspace-panel-surface pointer-events-auto fixed overflow-hidden rounded-[26px]"
               style={{
                 left: selectedImageCardPanelViewportOrigin.left,
                 top: selectedImageCardPanelViewportOrigin.top,
@@ -2248,7 +2447,7 @@ const CanvasViewport = memo(function CanvasViewport({
             >
               <div className="px-5 py-3">
                 {selectedImageCardPanelLinkedImagePreviews.length > 0 && (
-                  <div className="mb-3 rounded-[18px] border border-white/[0.08] bg-[rgba(255,255,255,0.025)] p-2.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.025)]">
+                  <div className="workspace-panel-input mb-3 rounded-[18px] p-2.5">
                     <div
                       className="panel-scrollbar flex gap-2 overflow-x-auto pb-1"
                       onWheel={stopCanvasWheelFromScrollableRegion}
@@ -2296,7 +2495,7 @@ const CanvasViewport = memo(function CanvasViewport({
                 )}
                 <div
                   data-text-card-panel-input-shell="true"
-                  className="rounded-[20px] border border-white/[0.09] bg-[rgba(7,8,10,0.34)] px-4 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] transition-colors duration-150 hover:border-white/[0.14] focus-within:border-white/[0.18] focus-within:bg-[rgba(9,10,13,0.42)]"
+                  className="workspace-panel-input rounded-[20px] px-4 py-3"
                   onPointerDown={(e) => {
                     e.stopPropagation();
                     if (!shouldFocusTextCardPanelInputOnPointerDown(e.target as HTMLElement | null)) {
@@ -2345,7 +2544,7 @@ const CanvasViewport = memo(function CanvasViewport({
                     readOnly={false}
                     disabled={false}
                     spellCheck={false}
-                    className="panel-scrollbar w-full resize-none bg-transparent text-[14px] leading-6 text-zinc-100 caret-zinc-100 outline-none placeholder:text-zinc-500 [user-select:text] [-webkit-user-select:text] cursor-text"
+                    className="panel-scrollbar workspace-text-primary w-full resize-none bg-transparent text-[14px] leading-6 caret-[var(--workspace-text-primary)] outline-none placeholder:text-[var(--workspace-text-soft)] [user-select:text] [-webkit-user-select:text] cursor-text"
                     placeholder={IMAGE_CARD_PANEL_PROMPT_PLACEHOLDER}
                     rows={TEXT_CARD_PANEL_INPUT_MIN_ROWS}
                     style={{
@@ -2362,9 +2561,9 @@ const CanvasViewport = memo(function CanvasViewport({
               </div>
               <div
                 data-text-card-panel-control="true"
-                className="flex items-center justify-between border-t border-white/[0.08] bg-[rgba(255,255,255,0.02)] px-5 py-3"
+                className="workspace-panel-footer flex items-end justify-between gap-4 px-5 py-3"
               >
-                <div className="flex min-w-0 items-center gap-5">
+                <div className="grid min-w-0 flex-1 grid-cols-5 gap-2">
                   <div className="relative" ref={imageCardModelMenuRef}>
                     <button
                       data-text-card-panel-control="true"
@@ -2375,16 +2574,67 @@ const CanvasViewport = memo(function CanvasViewport({
                       onClick={() => {
                         onToggleImageCardModelMenu();
                       }}
-                      className="inline-flex max-w-[220px] items-center gap-2 text-[13px] font-semibold tracking-[-0.02em] text-zinc-100"
+                      className={`workspace-control-chip flex min-h-[52px] w-full flex-col items-start justify-center rounded-[14px] px-3 py-2 text-left ${showImageCardModelMenu ? 'is-active' : ''}`}
                       aria-haspopup="menu"
                       aria-expanded={showImageCardModelMenu}
                     >
-                      <Sparkles size={15} className="shrink-0 text-zinc-100" />
-                      <span className="truncate">{selectedImageCardModel.label}</span>
-                      <ChevronDown size={14} className={`shrink-0 text-zinc-500 transition-transform ${showImageCardModelMenu ? 'rotate-180' : ''}`} />
+                      <span className="flex w-full items-center justify-between gap-2">
+                        <span className="workspace-text-muted text-[11px] font-medium">模型</span>
+                        <ChevronDown size={14} className={`shrink-0 transition-transform ${showImageCardModelMenu ? 'rotate-180' : ''}`} />
+                      </span>
+                      <span className="mt-1 flex w-full items-center gap-2 text-[13px] font-semibold tracking-[-0.02em]">
+                        <Sparkles size={14} className="shrink-0" />
+                        <span className="truncate">{selectedImageCardModel.label}</span>
+                      </span>
                     </button>
                   </div>
-                  <div className="relative flex items-center gap-5" ref={imageCardQualityMenuRef}>
+                  <div className="relative" ref={imageCardAspectRatioMenuRef}>
+                    <button
+                      data-text-card-panel-control="true"
+                      type="button"
+                      onPointerDown={(e) => {
+                        e.stopPropagation();
+                      }}
+                      onClick={() => {
+                        onToggleImageCardAspectRatioMenu();
+                      }}
+                      className={`workspace-control-chip flex min-h-[52px] w-full flex-col items-start justify-center rounded-[14px] px-3 py-2 text-left ${showImageCardAspectRatioMenu ? 'is-active' : ''}`}
+                      aria-haspopup="menu"
+                      aria-expanded={showImageCardAspectRatioMenu}
+                    >
+                      <span className="flex w-full items-center justify-between gap-2">
+                        <span className="workspace-text-muted text-[11px] font-medium">比例</span>
+                        <ChevronDown size={14} className={`shrink-0 transition-transform ${showImageCardAspectRatioMenu ? 'rotate-180' : ''}`} />
+                      </span>
+                      <span className="mt-1 text-[13px] font-semibold tracking-[-0.02em]">
+                        {getImageCardAspectRatioShortLabel(selectedImageCardPanelAspectRatio)}
+                      </span>
+                    </button>
+                  </div>
+                  <div className="relative" ref={imageCardResolutionMenuRef}>
+                    <button
+                      data-text-card-panel-control="true"
+                      type="button"
+                      onPointerDown={(e) => {
+                        e.stopPropagation();
+                      }}
+                      onClick={() => {
+                        onToggleImageCardResolutionMenu();
+                      }}
+                      className={`workspace-control-chip flex min-h-[52px] w-full flex-col items-start justify-center rounded-[14px] px-3 py-2 text-left ${showImageCardResolutionMenu ? 'is-active' : ''}`}
+                      aria-haspopup="menu"
+                      aria-expanded={showImageCardResolutionMenu}
+                    >
+                      <span className="flex w-full items-center justify-between gap-2">
+                        <span className="workspace-text-muted text-[11px] font-medium">清晰度</span>
+                        <ChevronDown size={14} className={`shrink-0 transition-transform ${showImageCardResolutionMenu ? 'rotate-180' : ''}`} />
+                      </span>
+                      <span className="mt-1 text-[13px] font-semibold tracking-[-0.02em]">
+                        {selectedImageCardSizeOptions.find((item) => item.id === selectedImageCardPanelSize)?.label || selectedImageCardPanelSize}
+                      </span>
+                    </button>
+                  </div>
+                  <div className="relative" ref={imageCardQualityMenuRef}>
                     <button
                       data-text-card-panel-control="true"
                       type="button"
@@ -2394,38 +2644,41 @@ const CanvasViewport = memo(function CanvasViewport({
                       onClick={() => {
                         onToggleImageCardQualityMenu();
                       }}
-                      className="inline-flex items-center gap-2 text-[13px] font-semibold tracking-[-0.02em] text-zinc-100"
+                      className={`workspace-control-chip flex min-h-[52px] w-full flex-col items-start justify-center rounded-[14px] px-3 py-2 text-left ${showImageCardQualityMenu ? 'is-active' : ''}`}
                       aria-haspopup="menu"
                       aria-expanded={showImageCardQualityMenu}
                     >
-                      <span>
-                        {getImageCardQualitySummary({
-                          modelId: selectedImageCardModel.id,
-                          aspectRatio: selectedImageCardPanelAspectRatio,
-                          size: selectedImageCardPanelSize,
-                          quality: selectedImageCardSupportsAspectRatio ? '' : getImageCardQualityLabel(selectedImageCardPanelQuality),
-                        })}
+                      <span className="flex w-full items-center justify-between gap-2">
+                        <span className="workspace-text-muted text-[11px] font-medium">质量</span>
+                        <ChevronDown size={14} className={`shrink-0 transition-transform ${showImageCardQualityMenu ? 'rotate-180' : ''}`} />
                       </span>
-                      <ChevronDown size={14} className={`text-zinc-500 transition-transform ${showImageCardQualityMenu ? 'rotate-180' : ''}`} />
+                      <span className="mt-1 text-[13px] font-semibold tracking-[-0.02em]">
+                        {getImageCardQualityLabel(selectedImageCardPanelQuality)}
+                      </span>
                     </button>
-                    <div className="relative" ref={imageCardCountMenuRef}>
-                      <button
-                        data-text-card-panel-control="true"
-                        type="button"
-                        onPointerDown={(e) => {
-                          e.stopPropagation();
-                        }}
-                        onClick={() => {
-                          onToggleImageCardCountMenu();
-                        }}
-                        className="inline-flex items-center gap-2 text-[13px] font-semibold tracking-[-0.02em] text-zinc-100"
-                        aria-haspopup="menu"
-                        aria-expanded={showImageCardCountMenu}
-                      >
-                        <span>{IMAGE_CARD_COUNT_OPTIONS.find((item) => item.id === selectedImageCardPanelCount)?.label || `X${selectedImageCardPanelCount}`}</span>
-                        <ChevronDown size={14} className={`text-zinc-500 transition-transform ${showImageCardCountMenu ? 'rotate-180' : ''}`} />
-                      </button>
-                    </div>
+                  </div>
+                  <div className="relative" ref={imageCardCountMenuRef}>
+                    <button
+                      data-text-card-panel-control="true"
+                      type="button"
+                      onPointerDown={(e) => {
+                        e.stopPropagation();
+                      }}
+                      onClick={() => {
+                        onToggleImageCardCountMenu();
+                      }}
+                      className={`workspace-control-chip flex min-h-[52px] w-full flex-col items-start justify-center rounded-[14px] px-3 py-2 text-left ${showImageCardCountMenu ? 'is-active' : ''}`}
+                      aria-haspopup="menu"
+                      aria-expanded={showImageCardCountMenu}
+                    >
+                      <span className="flex w-full items-center justify-between gap-2">
+                        <span className="workspace-text-muted text-[11px] font-medium">张数</span>
+                        <ChevronDown size={14} className={`shrink-0 transition-transform ${showImageCardCountMenu ? 'rotate-180' : ''}`} />
+                      </span>
+                      <span className="mt-1 text-[13px] font-semibold tracking-[-0.02em]">
+                        {IMAGE_CARD_COUNT_OPTIONS.find((item) => item.id === selectedImageCardPanelCount)?.label || `X${selectedImageCardPanelCount}`}
+                      </span>
+                    </button>
                   </div>
                 </div>
                 <div className="flex items-center gap-2.5">
@@ -2443,7 +2696,7 @@ const CanvasViewport = memo(function CanvasViewport({
                       }
                     }}
                     disabled={!isSelectedImageCardGenerating && !selectedImageCardPanelCanSubmit}
-                    className="inline-flex h-11 w-11 items-center justify-center rounded-full border border-black/5 bg-[#f5f7fb] text-black shadow-[0_10px_24px_rgba(0,0,0,0.22),inset_0_1px_0_rgba(255,255,255,0.7)] transition-colors hover:bg-white disabled:cursor-not-allowed disabled:opacity-50"
+                    className="workspace-add-button inline-flex h-11 w-11 items-center justify-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-50"
                     aria-label={isSelectedImageCardGenerating ? '终止生成' : '开始生图'}
                     title={isSelectedImageCardGenerating ? '终止生成' : '开始生图'}
                   >
@@ -2467,7 +2720,7 @@ const CanvasViewport = memo(function CanvasViewport({
               <div
                 ref={imageCardModelPopoverRef}
                 data-text-card-panel-control="true"
-                className="pointer-events-auto fixed z-[116] min-w-[248px] overflow-hidden rounded-[18px] border border-white/[0.1] bg-[rgba(24,24,27,0.985)] p-1.5 shadow-[0_24px_64px_rgba(0,0,0,0.42)] backdrop-blur-xl"
+                className="workspace-menu-panel pointer-events-auto fixed z-[116] min-w-[248px] overflow-hidden rounded-[18px] p-1.5"
                 style={{
                   left: selectedImageCardPanelViewportOrigin.left + selectedImageCardModelPopoverOffset.left * viewport.scale,
                   top: selectedImageCardPanelViewportOrigin.top + selectedImageCardModelPopoverOffset.top * viewport.scale,
@@ -2487,25 +2740,123 @@ const CanvasViewport = memo(function CanvasViewport({
                       onClick={() => {
                         onSelectImageCardModel(option.id);
                       }}
-                      className={`flex w-full items-center justify-between rounded-[14px] px-3 py-2.5 text-left transition-colors ${
-                        isSelected ? 'bg-white/[0.08] text-zinc-50' : 'text-zinc-300 hover:bg-white/[0.05]'
-                      }`}
+                      className={`workspace-menu-item flex w-full items-center justify-between rounded-[14px] border border-transparent px-3 py-2.5 text-left ${isSelected ? 'is-selected' : ''}`}
                     >
                       <div className="min-w-0">
                         <div className="truncate text-[13px] font-semibold tracking-[-0.02em]">{option.label}</div>
-                        <div className="truncate text-[11px] text-zinc-500">{option.id}</div>
+                        <div className="workspace-text-muted truncate text-[11px]">{option.id}</div>
                       </div>
-                      {isSelected && <Check size={15} className="ml-3 shrink-0 text-zinc-100" />}
+                      {isSelected && <Check size={15} className="ml-3 shrink-0" />}
                     </button>
                   );
                 })}
+              </div>
+            )}
+            {showImageCardAspectRatioMenu && selectedImageCardAspectRatioPopoverOffset && (
+              <div
+                ref={imageCardAspectRatioPopoverRef}
+                data-text-card-panel-control="true"
+                className="workspace-menu-panel pointer-events-auto fixed z-[116] overflow-hidden rounded-[22px] p-3"
+                style={{
+                  left: selectedImageCardPanelViewportOrigin.left + selectedImageCardAspectRatioPopoverOffset.left * viewport.scale,
+                  top: selectedImageCardPanelViewportOrigin.top + selectedImageCardAspectRatioPopoverOffset.top * viewport.scale,
+                  width: 292,
+                  transform: `scale(${viewport.scale})`,
+                  transformOrigin: 'top left',
+                }}
+                onPointerDown={(e) => {
+                  e.stopPropagation();
+                }}
+              >
+                <div className="workspace-panel-input rounded-[18px] p-3">
+                  <div className="mb-2.5 flex items-center justify-between">
+                    <span className="text-[11px] font-medium tracking-[0.04em] text-zinc-500">比例</span>
+                    <span className="text-[11px] font-medium text-zinc-400">
+                      {getImageCardAspectRatioShortLabel(selectedImageCardPanelAspectRatio)}
+                    </span>
+                  </div>
+                  <div className="grid grid-cols-4 gap-1.5">
+                    {ASPECT_RATIOS.filter((option) => option.id !== 'auto').map((option) => {
+                      const isSelected = option.id === selectedImageCardPanelAspectRatio;
+                      const previewSize = getImageCardAspectRatioPreviewSize(option.id);
+                      return (
+                        <button
+                          key={option.id}
+                          type="button"
+                          onClick={() => {
+                            onSelectImageCardAspectRatio(option.id);
+                          }}
+                          className={`workspace-control-chip flex min-h-[58px] flex-col items-center justify-center gap-1.5 rounded-[14px] px-1.5 py-2 text-center ${isSelected ? 'is-active' : ''}`}
+                        >
+                          <span className="workspace-panel-input flex h-7 w-7 items-center justify-center rounded-[10px]">
+                            <span
+                              className={`rounded-[6px] border ${
+                                isSelected ? 'border-[var(--workspace-text-primary)] bg-[var(--workspace-control-active)]' : 'border-[var(--workspace-text-muted)] bg-[var(--workspace-surface-soft)]'
+                              }`}
+                              style={{
+                                width: `${previewSize.width}px`,
+                                height: `${previewSize.height}px`,
+                              }}
+                            />
+                          </span>
+                          <span className="text-[11px] font-semibold tracking-[-0.02em]">
+                            {option.id}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+            )}
+            {showImageCardResolutionMenu && selectedImageCardResolutionPopoverOffset && (
+              <div
+                ref={imageCardResolutionPopoverRef}
+                data-text-card-panel-control="true"
+                className="workspace-menu-panel pointer-events-auto fixed z-[116] overflow-hidden rounded-[22px] p-3"
+                style={{
+                  left: selectedImageCardPanelViewportOrigin.left + selectedImageCardResolutionPopoverOffset.left * viewport.scale,
+                  top: selectedImageCardPanelViewportOrigin.top + selectedImageCardResolutionPopoverOffset.top * viewport.scale,
+                  width: 292,
+                  transform: `scale(${viewport.scale})`,
+                  transformOrigin: 'top left',
+                }}
+                onPointerDown={(e) => {
+                  e.stopPropagation();
+                }}
+              >
+                <div className="workspace-panel-input rounded-[18px] p-3">
+                  <div className="mb-2.5 flex items-center justify-between">
+                    <span className="text-[11px] font-medium tracking-[0.04em] text-zinc-500">清晰度</span>
+                    <span className="text-[11px] font-medium text-zinc-400">
+                      {selectedImageCardSizeOptions.find((item) => item.id === selectedImageCardPanelSize)?.label || selectedImageCardPanelSize}
+                    </span>
+                  </div>
+                  <div className="workspace-panel-input inline-flex w-full items-center rounded-[14px] p-1">
+                    {selectedImageCardSizeOptions.map((option) => {
+                      const isSelected = option.id === selectedImageCardPanelSize;
+                      return (
+                        <button
+                          key={option.id}
+                          type="button"
+                          onClick={() => {
+                            onSelectImageCardSize(option.id);
+                          }}
+                          className={`workspace-control-chip flex-1 rounded-[11px] px-2.5 py-1.5 text-[12px] font-semibold tracking-[-0.02em] ${isSelected ? 'is-active' : ''}`}
+                        >
+                          {option.label}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
               </div>
             )}
             {showImageCardQualityMenu && selectedImageCardQualityPopoverOffset && (
               <div
                 ref={imageCardQualityPopoverRef}
                 data-text-card-panel-control="true"
-                className="pointer-events-auto fixed z-[116] overflow-hidden rounded-[22px] border border-white/[0.1] bg-[rgba(24,24,27,0.985)] p-3 shadow-[0_24px_64px_rgba(0,0,0,0.42)] backdrop-blur-xl"
+                className="workspace-menu-panel pointer-events-auto fixed z-[116] overflow-hidden rounded-[22px] p-3"
                 style={{
                   left: selectedImageCardPanelViewportOrigin.left + selectedImageCardQualityPopoverOffset.left * viewport.scale,
                   top: selectedImageCardPanelViewportOrigin.top + selectedImageCardQualityPopoverOffset.top * viewport.scale,
@@ -2517,159 +2868,30 @@ const CanvasViewport = memo(function CanvasViewport({
                   e.stopPropagation();
                 }}
               >
-                <div className="rounded-[18px] border border-white/[0.06] bg-[rgba(255,255,255,0.025)] p-3">
-                  {selectedImageCardSupportsAspectRatio && (
-                    <>
-                      <div className="mb-2.5 flex items-center justify-between">
-                        <span className="text-[11px] font-medium tracking-[0.04em] text-zinc-500">比例</span>
-                        <span className="text-[11px] font-medium text-zinc-400">
-                          {getImageCardAspectRatioShortLabel(selectedImageCardPanelAspectRatio)}
-                        </span>
-                      </div>
-                      <div className="grid grid-cols-4 gap-1.5">
-                        {ASPECT_RATIOS.filter((option) => option.id !== 'auto').map((option) => {
-                          const isSelected = option.id === selectedImageCardPanelAspectRatio;
-                          const previewSize = getImageCardAspectRatioPreviewSize(option.id);
-                          return (
-                            <button
-                              key={option.id}
-                              type="button"
-                              onClick={() => {
-                                onSelectImageCardAspectRatio(option.id);
-                              }}
-                              className={`flex min-h-[58px] flex-col items-center justify-center gap-1.5 rounded-[14px] border px-1.5 py-2 text-center transition-colors ${
-                                isSelected
-                                  ? 'border-white/[0.14] bg-white/[0.09] text-zinc-50 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]'
-                                  : 'border-white/[0.06] bg-[rgba(255,255,255,0.02)] text-zinc-300 hover:border-white/[0.12] hover:bg-white/[0.05]'
-                              }`}
-                            >
-                              <span className="flex h-7 w-7 items-center justify-center rounded-[10px] border border-white/[0.08] bg-[rgba(7,8,10,0.28)]">
-                                <span
-                                  className={`rounded-[6px] border ${
-                                    isSelected ? 'border-zinc-100/80 bg-zinc-100/10' : 'border-zinc-400/60 bg-white/[0.03]'
-                                  }`}
-                                  style={{
-                                    width: `${previewSize.width}px`,
-                                    height: `${previewSize.height}px`,
-                                  }}
-                                />
-                              </span>
-                              <span className="text-[11px] font-semibold tracking-[-0.02em]">
-                                {option.id}
-                              </span>
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </>
-                  )}
-                  <div className={`${selectedImageCardSupportsAspectRatio ? 'mt-3.5 border-t border-white/[0.06] pt-3.5' : ''}`}>
-                    <div className="mb-2.5 flex items-center justify-between">
-                      <span className="text-[11px] font-medium tracking-[0.04em] text-zinc-500">
-                        {selectedImageCardSupportsAspectRatio ? '清晰度' : '尺寸'}
-                      </span>
-                      <span className="text-[11px] font-medium text-zinc-400">
-                        {selectedImageCardSupportsAspectRatio
-                          ? selectedImageCardSizeOptions.find((item) => item.id === selectedImageCardPanelSize)?.label || selectedImageCardPanelSize
-                          : getImageCardSizePresetLabel(selectedImageCardPanelSize)}
-                      </span>
-                    </div>
-                    {selectedImageCardSupportsAspectRatio ? (
-                      <div className="inline-flex w-full items-center rounded-[14px] border border-white/[0.06] bg-[rgba(255,255,255,0.03)] p-1">
-                        {selectedImageCardSizeOptions.map((option) => {
-                          const isSelected = option.id === selectedImageCardPanelSize;
-                          return (
-                            <button
-                              key={option.id}
-                              type="button"
-                              onClick={() => {
-                                onSelectImageCardSize(option.id);
-                              }}
-                              className={`flex-1 rounded-[11px] px-2.5 py-1.5 text-[12px] font-semibold tracking-[-0.02em] transition-colors ${
-                                isSelected
-                                  ? 'bg-[#f5f7fb] text-black shadow-[0_8px_20px_rgba(0,0,0,0.18)]'
-                                  : 'text-zinc-300 hover:bg-white/[0.05]'
-                              }`}
-                            >
-                              {option.label}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    ) : (
-                      <div className="grid grid-cols-4 gap-1.5">
-                        {selectedImageCardSizeOptions.map((option) => {
-                          const isSelected = option.id === selectedImageCardPanelSize;
-                          const previewSize = getImageCardSizePreviewSize(option.id);
-                          const presetLabelLines = getImageCardSizePresetLabelLines(option.id);
-                          return (
-                            <button
-                              key={option.id}
-                              type="button"
-                              onClick={() => {
-                                onSelectImageCardSize(option.id);
-                              }}
-                              className={`flex min-h-[58px] flex-col items-center justify-center gap-1.5 rounded-[14px] border px-1.5 py-2 text-center text-[12px] font-semibold tracking-[-0.02em] transition-colors ${
-                                isSelected
-                                  ? 'border-white/[0.14] bg-white/[0.09] text-zinc-50 shadow-[inset_0_1px_0_rgba(255,255,255,0.08)]'
-                                  : 'border-white/[0.06] bg-[rgba(255,255,255,0.02)] text-zinc-300 hover:border-white/[0.12] hover:bg-white/[0.05]'
-                              }`}
-                            >
-                              <span className="flex flex-col items-center justify-center gap-1.5">
-                                <span className="flex h-7 w-7 items-center justify-center rounded-[10px] border border-white/[0.08] bg-[rgba(7,8,10,0.28)]">
-                                  <span
-                                    className={`rounded-[6px] border ${
-                                      isSelected ? 'border-zinc-100/80 bg-zinc-100/10' : 'border-zinc-400/60 bg-white/[0.03]'
-                                    }`}
-                                    style={{
-                                      width: `${previewSize.width}px`,
-                                      height: `${previewSize.height}px`,
-                                    }}
-                                  />
-                                </span>
-                                <span className="flex flex-col items-center leading-[1.05]">
-                                  {presetLabelLines.map((line) => (
-                                    <span key={`${option.id}-${line}`}>{line}</span>
-                                  ))}
-                                </span>
-                              </span>
-                            </button>
-                          );
-                        })}
-                      </div>
-                    )}
+                <div className="workspace-panel-input rounded-[18px] p-3">
+                  <div className="mb-2.5 flex items-center justify-between">
+                    <span className="text-[11px] font-medium tracking-[0.04em] text-zinc-500">质量</span>
+                    <span className="text-[11px] font-medium text-zinc-400">
+                      {getImageCardQualityLabel(selectedImageCardPanelQuality)}
+                    </span>
                   </div>
-                  {!selectedImageCardSupportsAspectRatio && (
-                    <div className="mt-3.5 border-t border-white/[0.06] pt-3.5">
-                      <div className="mb-2.5 flex items-center justify-between">
-                        <span className="text-[11px] font-medium tracking-[0.04em] text-zinc-500">质量</span>
-                        <span className="text-[11px] font-medium text-zinc-400">
-                          {getImageCardQualityLabel(selectedImageCardPanelQuality)}
-                        </span>
-                      </div>
-                      <div className="inline-flex w-full items-center rounded-[14px] border border-white/[0.06] bg-[rgba(255,255,255,0.03)] p-1">
-                        {IMAGE_CARD_QUALITY_OPTIONS.map((option) => {
-                          const isSelected = option.id === selectedImageCardPanelQuality;
-                          return (
-                            <button
-                              key={option.id}
-                              type="button"
-                              onClick={() => {
-                                onSelectImageCardQuality(option.id);
-                              }}
-                              className={`flex-1 rounded-[11px] px-2.5 py-1.5 text-[12px] font-semibold tracking-[-0.02em] transition-colors ${
-                                isSelected
-                                  ? 'bg-[#f5f7fb] text-black shadow-[0_8px_20px_rgba(0,0,0,0.18)]'
-                                  : 'text-zinc-300 hover:bg-white/[0.05]'
-                              }`}
-                            >
-                              {option.label}
-                            </button>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  )}
+                  <div className="workspace-panel-input inline-flex w-full items-center rounded-[14px] p-1">
+                    {IMAGE_CARD_QUALITY_OPTIONS.map((option) => {
+                      const isSelected = option.id === selectedImageCardPanelQuality;
+                      return (
+                        <button
+                          key={option.id}
+                          type="button"
+                          onClick={() => {
+                            onSelectImageCardQuality(option.id);
+                          }}
+                          className={`workspace-control-chip flex-1 rounded-[11px] px-2.5 py-1.5 text-[12px] font-semibold tracking-[-0.02em] ${isSelected ? 'is-active' : ''}`}
+                        >
+                          {option.label}
+                        </button>
+                      );
+                    })}
+                  </div>
                 </div>
               </div>
             )}
@@ -2677,7 +2899,7 @@ const CanvasViewport = memo(function CanvasViewport({
               <div
                 ref={imageCardCountPopoverRef}
                 data-text-card-panel-control="true"
-                className="pointer-events-auto fixed z-[116] min-w-[124px] overflow-hidden rounded-[18px] border border-white/[0.1] bg-[rgba(24,24,27,0.985)] p-1.5 shadow-[0_24px_64px_rgba(0,0,0,0.42)] backdrop-blur-xl"
+                className="workspace-menu-panel pointer-events-auto fixed z-[116] min-w-[124px] overflow-hidden rounded-[18px] p-1.5"
                 style={{
                   left: selectedImageCardPanelViewportOrigin.left + selectedImageCardCountPopoverOffset.left * viewport.scale,
                   top: selectedImageCardPanelViewportOrigin.top + selectedImageCardCountPopoverOffset.top * viewport.scale,
@@ -2697,12 +2919,10 @@ const CanvasViewport = memo(function CanvasViewport({
                       onClick={() => {
                         onSelectImageCardCount(option.id);
                       }}
-                      className={`flex w-full items-center justify-between rounded-[14px] px-3 py-2.5 text-left transition-colors ${
-                        isSelected ? 'bg-white/[0.08] text-zinc-50' : 'text-zinc-300 hover:bg-white/[0.05]'
-                      }`}
+                      className={`workspace-menu-item flex w-full items-center justify-between rounded-[14px] border border-transparent px-3 py-2.5 text-left ${isSelected ? 'is-selected' : ''}`}
                     >
                       <span className="text-[13px] font-semibold tracking-[-0.02em]">{option.label}</span>
-                      {isSelected && <Check size={15} className="ml-3 shrink-0 text-zinc-100" />}
+                      {isSelected && <Check size={15} className="ml-3 shrink-0" />}
                     </button>
                   );
                 })}
@@ -2722,7 +2942,7 @@ const CanvasViewport = memo(function CanvasViewport({
           <div className="pointer-events-none fixed inset-0 z-[115]">
             <div
               data-text-card-panel="true"
-              className="pointer-events-auto fixed overflow-hidden rounded-[26px] border border-white/[0.11] bg-[rgba(28,28,31,0.98)] shadow-[0_34px_90px_rgba(0,0,0,0.46),inset_0_1px_0_rgba(255,255,255,0.025)] backdrop-blur-xl"
+              className="workspace-panel-surface pointer-events-auto fixed overflow-hidden rounded-[26px]"
               style={{
                 left: selectedTextCardPanelViewportOrigin.left,
                 top: selectedTextCardPanelViewportOrigin.top,
@@ -2736,7 +2956,7 @@ const CanvasViewport = memo(function CanvasViewport({
             >
               <div className="px-5 py-3">
                 {linkedImagePreviews.length > 0 && (
-                  <div className="mb-3 rounded-[18px] border border-white/[0.08] bg-[rgba(255,255,255,0.025)] p-2.5 shadow-[inset_0_1px_0_rgba(255,255,255,0.025)]">
+                  <div className="workspace-panel-input mb-3 rounded-[18px] p-2.5">
                     <div
                       className="panel-scrollbar flex gap-2 overflow-x-auto pb-1"
                       onWheel={stopCanvasWheelFromScrollableRegion}
@@ -2784,7 +3004,7 @@ const CanvasViewport = memo(function CanvasViewport({
                 )}
                 <div
                   data-text-card-panel-input-shell="true"
-                  className="rounded-[20px] border border-white/[0.09] bg-[rgba(7,8,10,0.34)] px-4 py-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)] transition-colors duration-150 hover:border-white/[0.14] focus-within:border-white/[0.18] focus-within:bg-[rgba(9,10,13,0.42)]"
+                  className="workspace-panel-input rounded-[20px] px-4 py-3"
                   onPointerDown={(e) => {
                     e.stopPropagation();
                     if (!shouldFocusTextCardPanelInputOnPointerDown(e.target as HTMLElement | null)) {
@@ -2833,7 +3053,7 @@ const CanvasViewport = memo(function CanvasViewport({
                     readOnly={false}
                     disabled={false}
                     spellCheck={false}
-                    className="panel-scrollbar w-full resize-none bg-transparent text-[14px] leading-6 text-zinc-100 caret-zinc-100 outline-none placeholder:text-zinc-500 [user-select:text] [-webkit-user-select:text] cursor-text"
+                    className="panel-scrollbar workspace-text-primary w-full resize-none bg-transparent text-[14px] leading-6 caret-[var(--workspace-text-primary)] outline-none placeholder:text-[var(--workspace-text-soft)] [user-select:text] [-webkit-user-select:text] cursor-text"
                     placeholder={selectedTextCardPanelPlaceholder}
                     rows={TEXT_CARD_PANEL_INPUT_MIN_ROWS}
                     style={{
@@ -2850,13 +3070,13 @@ const CanvasViewport = memo(function CanvasViewport({
               </div>
               <div
                 data-text-card-panel-control="true"
-                className="flex items-center justify-between border-t border-white/[0.08] bg-[rgba(255,255,255,0.02)] px-5 py-3"
+                className="workspace-panel-footer flex items-center justify-between px-5 py-3"
               >
                 <div className="relative" ref={textPanelModelMenuRef}>
                   {showTextPanelModelMenu && (
                     <div
                       data-text-card-panel-control="true"
-                      className="absolute bottom-full left-0 mb-2 min-w-[248px] overflow-hidden rounded-[18px] border border-white/[0.1] bg-[rgba(24,24,27,0.985)] p-1.5 shadow-[0_24px_64px_rgba(0,0,0,0.42)] backdrop-blur-xl"
+                      className="workspace-menu-panel absolute bottom-full left-0 mb-2 min-w-[248px] overflow-hidden rounded-[18px] p-1.5"
                       onPointerDown={(e) => {
                         e.stopPropagation();
                       }}
@@ -2870,15 +3090,13 @@ const CanvasViewport = memo(function CanvasViewport({
                             onClick={() => {
                               onSelectTextPanelModel(option.id);
                             }}
-                            className={`flex w-full items-center justify-between rounded-[14px] px-3 py-2.5 text-left transition-colors ${
-                              isSelected ? 'bg-white/[0.08] text-zinc-50' : 'text-zinc-300 hover:bg-white/[0.05]'
-                            }`}
+                            className={`workspace-menu-item flex w-full items-center justify-between rounded-[14px] border border-transparent px-3 py-2.5 text-left ${isSelected ? 'is-selected' : ''}`}
                           >
                             <div className="min-w-0">
                               <div className="truncate text-[13px] font-semibold tracking-[-0.02em]">{option.label}</div>
-                              <div className="truncate text-[11px] text-zinc-500">{option.id}</div>
+                              <div className="workspace-text-muted truncate text-[11px]">{option.id}</div>
                             </div>
-                            {isSelected && <Check size={15} className="ml-3 shrink-0 text-zinc-100" />}
+                            {isSelected && <Check size={15} className="ml-3 shrink-0" />}
                           </button>
                         );
                       })}
@@ -2893,13 +3111,13 @@ const CanvasViewport = memo(function CanvasViewport({
                     onClick={() => {
                       onToggleTextPanelModelMenu();
                     }}
-                    className="inline-flex items-center gap-2 text-[13px] font-semibold tracking-[-0.02em] text-zinc-100"
+                    className={`workspace-control-chip inline-flex items-center gap-2 rounded-full px-2.5 py-1.5 text-[13px] font-semibold tracking-[-0.02em] ${showTextPanelModelMenu ? 'is-active' : ''}`}
                     aria-haspopup="menu"
                     aria-expanded={showTextPanelModelMenu}
                   >
-                    <Sparkles size={15} className="text-zinc-100" />
+                    <Sparkles size={15} />
                     <span>{selectedTextPanelModel.label}</span>
-                    <ChevronDown size={14} className={`text-zinc-500 transition-transform ${showTextPanelModelMenu ? 'rotate-180' : ''}`} />
+                    <ChevronDown size={14} className={`transition-transform ${showTextPanelModelMenu ? 'rotate-180' : ''}`} />
                   </button>
                 </div>
                 <div className="flex items-center gap-2.5">
@@ -2917,7 +3135,7 @@ const CanvasViewport = memo(function CanvasViewport({
                       }
                     }}
                     disabled={!isSelectedTextCardGenerating && !selectedTextCardPanelCanSubmit}
-                    className="inline-flex h-11 w-11 items-center justify-center rounded-full border border-black/5 bg-[#f5f7fb] text-black shadow-[0_10px_24px_rgba(0,0,0,0.22),inset_0_1px_0_rgba(255,255,255,0.7)] transition-colors hover:bg-white disabled:cursor-not-allowed disabled:opacity-50"
+                    className="workspace-add-button inline-flex h-11 w-11 items-center justify-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-50"
                     aria-label={isSelectedTextCardGenerating ? '终止生成' : '开始生成'}
                     title={isSelectedTextCardGenerating ? '终止生成' : '开始生成'}
                   >
@@ -2956,10 +3174,11 @@ const CanvasViewport = memo(function CanvasViewport({
       onWheel={onWheel}
       onPaste={onPaste}
     >
-      <CanvasBackgroundLayer viewport={viewport} />
+      <CanvasBackgroundLayer theme={themePalette} viewport={viewport} />
       <CanvasConnectionsLayer
         canvasSize={canvasSize}
         connections={connections}
+        theme={themePalette}
         itemById={itemById}
         selectedConnectionIds={selectedConnectionIds}
         viewport={viewport}
@@ -2993,12 +3212,14 @@ const CanvasViewport = memo(function CanvasViewport({
         <div className="pointer-events-none absolute inset-0 z-[110]">
           <div
             data-connection-create-menu="true"
-            className="pointer-events-auto absolute overflow-hidden rounded-[26px] border border-white/[0.1] bg-[rgba(26,26,28,0.985)] shadow-[0_26px_72px_rgba(0,0,0,0.5)] backdrop-blur-xl"
+            className="workspace-menu-panel pointer-events-auto absolute overflow-hidden rounded-[26px]"
             style={{
               left: pendingMenuLeft,
               top: pendingMenuTop,
               width: 320,
               minHeight: 198,
+              transform: `scale(${viewport.scale})`,
+              transformOrigin: 'top left',
             }}
             onPointerDown={onPendingMenuPointerDown}
           >
@@ -3158,8 +3379,8 @@ const MarkdownMessage = memo(function MarkdownMessage({
           ul: ({ children }) => <ul {...getSelectableProps<HTMLUListElement>('mt-5 list-disc space-y-1.5 pl-5 text-sm leading-[1.7] text-zinc-200 first:mt-0')}>{children}</ul>,
           ol: ({ children }) => <ol {...getSelectableProps<HTMLOListElement>('mt-5 list-decimal space-y-1.5 pl-5 text-sm leading-[1.7] text-zinc-200 first:mt-0')}>{children}</ol>,
           li: ({ children }) => <li {...getSelectableProps<HTMLLIElement>('pl-1 marker:text-zinc-500')}>{children}</li>,
-          blockquote: ({ children }) => <blockquote {...getSelectableProps<HTMLQuoteElement>('mt-5 border-l border-[#343b45] pl-4 text-sm leading-[1.7] text-zinc-300 first:mt-0')}>{children}</blockquote>,
-          hr: () => <hr className="my-5 border-0 border-t border-[#2b313a]" />,
+          blockquote: ({ children }) => <blockquote {...getSelectableProps<HTMLQuoteElement>('workspace-text-muted mt-5 border-l border-[var(--workspace-border)] pl-4 text-sm leading-[1.7] first:mt-0')}>{children}</blockquote>,
+          hr: () => <hr className="my-5 border-0 border-t border-[var(--workspace-border)]" />,
           code(props) {
             const { children, node, className, ...rest } = props as React.HTMLAttributes<HTMLElement> & {
               node?: { position?: { start?: { line?: number }; end?: { line?: number } } };
@@ -3175,7 +3396,7 @@ const MarkdownMessage = memo(function MarkdownMessage({
                 <code
                   {...rest}
                   className={undefined}
-                  {...getSelectableProps<HTMLElement>('rounded-md border border-[#2b313a] bg-[#13181f] px-1.5 py-0.5 text-[0.9em] text-zinc-100', rest)}
+                  {...getSelectableProps<HTMLElement>('rounded-md border border-[var(--workspace-border)] bg-[var(--workspace-surface-soft)] px-1.5 py-0.5 text-[0.9em] text-[var(--workspace-text-primary)]', rest)}
                 >
                   {children}
                 </code>
@@ -3186,7 +3407,7 @@ const MarkdownMessage = memo(function MarkdownMessage({
               <code
                 {...rest}
                 className={className}
-                {...getSelectableProps<HTMLElement>('block overflow-x-auto rounded-[14px] border border-[#2b313a] bg-[#10151b] px-3 py-1.5 pr-16 text-[13px] leading-[1.5] text-zinc-200', rest)}
+                {...getSelectableProps<HTMLElement>('block overflow-x-auto rounded-[14px] border border-[var(--workspace-border)] bg-[var(--workspace-surface-soft)] px-3 py-1.5 pr-16 text-[13px] leading-[1.5] text-[var(--workspace-text-primary)]', rest)}
               >
                 {children}
               </code>
@@ -3211,7 +3432,7 @@ const MarkdownMessage = memo(function MarkdownMessage({
                     e.stopPropagation();
                     void handleCopyCodeBlock(codeBlockId, codeText);
                   }}
-                  className="absolute right-3 top-1/2 z-[2] inline-flex h-7 -translate-y-1/2 items-center gap-1 rounded-lg border border-white/10 bg-[rgba(19,24,31,0.94)] px-2 text-[11px] text-zinc-300 opacity-70 shadow-[0_10px_22px_rgba(0,0,0,0.22)] transition-all duration-200 hover:border-white/15 hover:bg-[rgba(28,33,41,0.96)] hover:text-zinc-100 hover:opacity-100 group-hover:opacity-100"
+                  className="workspace-control-chip absolute right-3 top-1/2 z-[2] inline-flex h-7 -translate-y-1/2 items-center gap-1 rounded-lg px-2 text-[11px] opacity-70 transition-opacity duration-200 hover:opacity-100 group-hover:opacity-100"
                   aria-label="复制代码块"
                   title="复制代码块"
                 >
@@ -3242,9 +3463,9 @@ const MarkdownMessage = memo(function MarkdownMessage({
             </a>
           ),
           table: ({ children }) => <div {...getSelectableProps<HTMLDivElement>('mt-5 overflow-x-auto first:mt-0')}><table {...getSelectableProps<HTMLTableElement>('min-w-full border-collapse text-left text-[13px] text-zinc-200')}>{children}</table></div>,
-          thead: ({ children }) => <thead {...getSelectableProps<HTMLTableSectionElement>('border-b border-[#343b45] text-zinc-100')}>{children}</thead>,
+          thead: ({ children }) => <thead {...getSelectableProps<HTMLTableSectionElement>('border-b border-[var(--workspace-border)] text-[var(--workspace-text-primary)]')}>{children}</thead>,
           tbody: ({ children }) => <tbody {...getSelectableProps<HTMLTableSectionElement>('')}>{children}</tbody>,
-          tr: ({ children }) => <tr {...getSelectableProps<HTMLTableRowElement>('border-b border-[#252b34] last:border-b-0')}>{children}</tr>,
+          tr: ({ children }) => <tr {...getSelectableProps<HTMLTableRowElement>('border-b border-[var(--workspace-border)] last:border-b-0')}>{children}</tr>,
           th: ({ children }) => <th {...getSelectableProps<HTMLTableCellElement>('px-3 py-2 font-medium')}>{children}</th>,
           td: ({ children }) => <td {...getSelectableProps<HTMLTableCellElement>('px-3 py-2 text-zinc-300')}>{children}</td>,
         }}
@@ -3272,7 +3493,7 @@ const TextCardMarkdown = memo(function TextCardMarkdown({
           ul: ({ children }) => <ul className="mt-4 list-disc space-y-1.5 pl-5 first:mt-0">{children}</ul>,
           ol: ({ children }) => <ol className="mt-4 list-decimal space-y-1.5 pl-5 first:mt-0">{children}</ol>,
           li: ({ children }) => <li className="break-words pl-1 marker:text-zinc-500">{children}</li>,
-          blockquote: ({ children }) => <blockquote className="mt-4 break-words border-l border-white/10 pl-4 text-zinc-300 first:mt-0">{children}</blockquote>,
+          blockquote: ({ children }) => <blockquote className="workspace-text-muted mt-4 break-words border-l border-[var(--workspace-border)] pl-4 first:mt-0">{children}</blockquote>,
           strong: ({ children }) => <strong className="font-semibold text-zinc-50">{children}</strong>,
           em: ({ children }) => <em className="italic text-zinc-100">{children}</em>,
           code(props) {
@@ -3285,7 +3506,7 @@ const TextCardMarkdown = memo(function TextCardMarkdown({
               return (
                 <code
                   {...rest}
-                  className="rounded-md border border-white/10 bg-black/20 px-1.5 py-0.5 text-[0.92em] text-zinc-100"
+                  className="rounded-md border border-[var(--workspace-border)] bg-[var(--workspace-surface-soft)] px-1.5 py-0.5 text-[0.92em] text-[var(--workspace-text-primary)]"
                 >
                   {children}
                 </code>
@@ -3305,7 +3526,7 @@ const TextCardMarkdown = memo(function TextCardMarkdown({
           },
           pre: ({ children }) => (
             <pre
-              className="panel-scrollbar mt-4 whitespace-pre-wrap break-words [overflow-wrap:anywhere] rounded-[14px] border border-white/[0.08] bg-black/20 px-3 py-2 text-[13px] leading-6 text-zinc-200 first:mt-0"
+              className="panel-scrollbar mt-4 whitespace-pre-wrap break-words [overflow-wrap:anywhere] rounded-[14px] border border-[var(--workspace-border)] bg-[var(--workspace-surface-soft)] px-3 py-2 text-[13px] leading-6 text-[var(--workspace-text-primary)] first:mt-0"
               onWheel={stopCanvasWheelFromScrollableRegion}
             >
               {children}
@@ -3326,9 +3547,9 @@ const TextCardMarkdown = memo(function TextCardMarkdown({
               <table className="min-w-full border-collapse text-left text-[13px] text-zinc-200">{children}</table>
             </div>
           ),
-          thead: ({ children }) => <thead className="border-b border-white/[0.08] text-zinc-100">{children}</thead>,
+          thead: ({ children }) => <thead className="border-b border-[var(--workspace-border)] text-[var(--workspace-text-primary)]">{children}</thead>,
           tbody: ({ children }) => <tbody>{children}</tbody>,
-          tr: ({ children }) => <tr className="border-b border-white/[0.06] last:border-b-0">{children}</tr>,
+          tr: ({ children }) => <tr className="border-b border-[var(--workspace-border)] last:border-b-0">{children}</tr>,
           th: ({ children }) => <th className="px-3 py-2 font-medium">{children}</th>,
           td: ({ children }) => <td className="px-3 py-2 text-zinc-300">{children}</td>,
         }}
@@ -3348,7 +3569,7 @@ function ConnectionPortIcon({
 }) {
   return (
     <span
-      className={`inline-flex items-center justify-center rounded-full border border-white/40 bg-[rgba(15,17,21,0.92)] shadow-[0_8px_18px_rgba(0,0,0,0.28)] ${className}`.trim()}
+      className={`workspace-control-chip inline-flex items-center justify-center rounded-full ${className}`.trim()}
     >
       <svg
         viewBox="0 0 24 24"
@@ -3358,7 +3579,7 @@ function ConnectionPortIcon({
         <path
           d="M12 4.6v14.8M4.6 12h14.8"
           fill="none"
-          stroke="rgba(229,231,235,0.92)"
+          stroke="currentColor"
           strokeWidth="2.5"
           strokeLinecap="round"
         />
@@ -3392,6 +3613,7 @@ const LEFT_RAIL_ITEMS = [
   { id: 'assets', label: '资产', icon: Package2 },
   { id: 'workflow', label: '工作流', icon: Workflow },
   { id: 'history', label: '历史', icon: Clock3 },
+  { id: 'theme', label: '黑夜', icon: Moon },
   { id: 'settings', label: '设置', icon: Settings },
 ] as const;
 
@@ -3450,18 +3672,10 @@ function CanvasActionMenuItem({
         e.stopPropagation();
       }}
       onClick={onClick}
-      className={`group flex min-h-[68px] w-full items-center gap-2.5 rounded-[20px] border border-transparent px-3 py-2.5 text-left shadow-[inset_0_1px_0_rgba(255,255,255,0.015)] transition-colors duration-200 ${
-        disabled
-          ? 'cursor-not-allowed bg-transparent opacity-55'
-          : 'bg-transparent hover:bg-[rgba(255,255,255,0.038)]'
-      }`}
+      className={`workspace-menu-item group flex min-h-[68px] w-full items-center gap-2.5 rounded-[20px] border border-transparent px-3 py-2.5 text-left duration-200 ${disabled ? 'is-disabled' : ''}`}
     >
       <div
-        className={`flex h-12 w-12 shrink-0 items-center justify-center rounded-[11px] shadow-[inset_0_1px_0_rgba(255,255,255,0.025)] transition-colors duration-200 ${
-          disabled
-            ? 'bg-[rgba(255,255,255,0.03)] text-zinc-500'
-            : 'bg-[rgba(255,255,255,0.055)] text-zinc-50 group-hover:bg-[rgba(255,255,255,0.07)]'
-        }`}
+        className="workspace-menu-icon flex h-12 w-12 shrink-0 items-center justify-center rounded-[11px] transition-colors duration-200"
       >
         <Icon size={21} strokeWidth={2} />
       </div>
@@ -3470,14 +3684,14 @@ function CanvasActionMenuItem({
           <div
             className={`min-w-0 text-[16px] font-medium tracking-[-0.03em] ${
               disabled
-                ? 'text-zinc-500'
-                : 'absolute left-0 top-1/2 -translate-y-1/2 text-zinc-50 transition-transform duration-200 ease-out group-hover:-translate-y-[18px]'
+                ? 'workspace-text-soft'
+                : 'workspace-text-primary absolute left-0 top-1/2 -translate-y-1/2 transition-transform duration-200 ease-out group-hover:-translate-y-[18px]'
             }`}
           >
             {title}
           </div>
           <div
-            className={`min-w-0 whitespace-normal break-words text-[11px] font-medium tracking-[-0.01em] text-zinc-500 ${
+            className={`workspace-text-muted min-w-0 whitespace-normal break-words text-[11px] font-medium tracking-[-0.01em] ${
               disabled
                 ? ''
                 : 'pointer-events-none absolute left-0 top-[22px] opacity-0 transition-[opacity,transform] duration-200 ease-out translate-y-1 group-hover:translate-y-0 group-hover:opacity-100'
@@ -3491,7 +3705,36 @@ function CanvasActionMenuItem({
   );
 }
 
+function WorkspaceThemeToggle({
+  theme,
+  onToggle,
+}: {
+  theme: WorkspaceTheme;
+  onToggle: () => void;
+}) {
+  const Icon = theme === 'dark' ? Sun : Moon;
+  const label = theme === 'dark' ? '白天' : '黑夜';
+
+  return (
+    <button
+      type="button"
+      onClick={(e) => {
+        e.stopPropagation();
+        onToggle();
+      }}
+      className="workspace-rail-item"
+      title={label}
+      aria-label={theme === 'dark' ? '切换到白天模式' : '切换到黑夜模式'}
+    >
+      <Icon size={19} strokeWidth={2.1} />
+      <span className="text-[10px] font-medium tracking-[-0.03em] leading-none">{label}</span>
+    </button>
+  );
+}
+
 export default function AIWorkspace() {
+  const { theme, toggleTheme } = useWorkspaceTheme();
+  const themePalette = WORKSPACE_THEME_PALETTES[theme];
   const [viewMode, setViewMode] = useState<'gallery' | 'editor'>('gallery');
   const [tool, setTool] = useState<Tool>('select');
   const [items, setItemsState] = useState<CanvasItem[]>([]);
@@ -3593,15 +3836,21 @@ export default function AIWorkspace() {
   const [showProviderSettingsModal, setShowProviderSettingsModal] = useState(false);
   const [providerSettingsLoading, setProviderSettingsLoading] = useState(false);
   const [providerSettingsSaving, setProviderSettingsSaving] = useState(false);
+  const [providerSettingsTesting, setProviderSettingsTesting] = useState(false);
+  const [providerSettingsFetchingModels, setProviderSettingsFetchingModels] = useState(false);
   const [providerSettingsError, setProviderSettingsError] = useState<string | null>(null);
-  const [providerSettingsProviderId, setProviderSettingsProviderId] = useState<ProviderSettingsProviderId>('comfly');
-  const [providerSettingsCurrentProviderId, setProviderSettingsCurrentProviderId] = useState<ProviderSettingsProviderId>('comfly');
-  const [providerSettingsBaseUrl, setProviderSettingsBaseUrl] = useState<string>(PROVIDER_SETTINGS_PRESET_OPTIONS[0].baseUrl);
+  const [providerSettingsProviders, setProviderSettingsProviders] = useState<ProviderSettingsItem[]>([]);
+  const [providerSettingsSelectedProviderId, setProviderSettingsSelectedProviderId] = useState<ProviderSettingsProviderId>('comfly');
   const [providerSettingsApiKey, setProviderSettingsApiKey] = useState('');
-  const [providerSettingsMaskedApiKey, setProviderSettingsMaskedApiKey] = useState('');
-  const [providerSettingsHasApiKey, setProviderSettingsHasApiKey] = useState(false);
-  const [providerSettingsSource, setProviderSettingsSource] = useState<ProviderSettingsSource>('env');
-  const [providerSettingsUrlManuallyEdited, setProviderSettingsUrlManuallyEdited] = useState(false);
+  const [providerSettingsTestResult, setProviderSettingsTestResult] = useState<ProviderConnectionTestResult | null>(null);
+  const [providerSettingsFetchedModels, setProviderSettingsFetchedModels] = useState<ProviderFetchedModelsResult | null>(null);
+  const [providerSettingsModelPickerOpen, setProviderSettingsModelPickerOpen] = useState(false);
+  const [providerSettingsModelPickerCategory, setProviderSettingsModelPickerCategory] =
+    useState<ProviderSettingsModelPickerCategory>('all');
+  const [providerSettingsModelPickerSearch, setProviderSettingsModelPickerSearch] = useState('');
+  const [providerSettingsSelectedFetchedModels, setProviderSettingsSelectedFetchedModels] = useState<Record<string, boolean>>({});
+  const [providerSettingsFetchedModelCategoryById, setProviderSettingsFetchedModelCategoryById] =
+    useState<Record<string, 'image' | 'chat'>>({});
   const [isProviderSettingsApiKeyVisible, setIsProviderSettingsApiKeyVisible] = useState(false);
   const [generatedImageHistoryBySession, setGeneratedImageHistoryBySessionState] = useState<Record<string, GeneratedImageHistoryEntry[]>>({});
   const [archiveGeneratedImageHistoryEntries, setArchiveGeneratedImageHistoryEntries] = useState<GeneratedImageHistoryEntry[]>([]);
@@ -3672,28 +3921,38 @@ export default function AIWorkspace() {
   const [editingTextCardId, setEditingTextCardId] = useState<string | null>(null);
   const [textCardPanelDrafts, setTextCardPanelDraftsState] = useState<Record<string, string>>({});
   const [imageCardPanelDrafts, setImageCardPanelDraftsState] = useState<Record<string, string>>({});
+  const [imageCardProviderById, setImageCardProviderByIdState] = useState<Record<string, string>>({});
   const [imageCardModelById, setImageCardModelByIdState] = useState<Record<string, string>>({});
   const [imageCardSizeById, setImageCardSizeByIdState] = useState<Record<string, string>>({});
   const [imageCardQualityById, setImageCardQualityByIdState] = useState<Record<string, string>>({});
   const [imageCardCountById, setImageCardCountByIdState] = useState<Record<string, number>>({});
   const [imageCardAspectRatioById, setImageCardAspectRatioByIdState] = useState<Record<string, string>>({});
+  const [selectedTextPanelProviderId, setSelectedTextPanelProviderId] = useState<ProviderSettingsProviderId>('comfly');
   const [selectedTextPanelModelId, setSelectedTextPanelModelId] = useState(getDefaultTextPanelModelOption().id);
   const [showTextPanelModelMenu, setShowTextPanelModelMenu] = useState(false);
   const [showImageCardModelMenu, setShowImageCardModelMenu] = useState(false);
+  const [showImageCardAspectRatioMenu, setShowImageCardAspectRatioMenu] = useState(false);
+  const [showImageCardResolutionMenu, setShowImageCardResolutionMenu] = useState(false);
   const [showImageCardQualityMenu, setShowImageCardQualityMenu] = useState(false);
   const [showImageCardCountMenu, setShowImageCardCountMenu] = useState(false);
   const editingTextCardTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const imageCardModelMenuRef = useRef<HTMLDivElement | null>(null);
   const imageCardModelPopoverRef = useRef<HTMLDivElement | null>(null);
+  const imageCardAspectRatioMenuRef = useRef<HTMLDivElement | null>(null);
+  const imageCardAspectRatioPopoverRef = useRef<HTMLDivElement | null>(null);
+  const imageCardResolutionMenuRef = useRef<HTMLDivElement | null>(null);
+  const imageCardResolutionPopoverRef = useRef<HTMLDivElement | null>(null);
   const imageCardQualityMenuRef = useRef<HTMLDivElement | null>(null);
   const imageCardQualityPopoverRef = useRef<HTMLDivElement | null>(null);
   const imageCardCountMenuRef = useRef<HTMLDivElement | null>(null);
   const imageCardCountPopoverRef = useRef<HTMLDivElement | null>(null);
+  const providerSettingsLoadRequestIdRef = useRef(0);
   const sessionLiveStateRef = useRef<SessionLiveState>({
     items,
     connections,
     textCardPanelDrafts,
     imageCardPanelDrafts,
+    imageCardProviderById,
     imageCardModelById,
     imageCardSizeById,
     imageCardQualityById,
@@ -3748,6 +4007,11 @@ export default function AIWorkspace() {
   const setImageCardPanelDrafts = useCallback(
     (value: React.SetStateAction<Record<string, string>>) =>
       applySessionLiveStateUpdate('imageCardPanelDrafts', value, setImageCardPanelDraftsState),
+    [applySessionLiveStateUpdate]
+  );
+  const setImageCardProviderById = useCallback(
+    (value: React.SetStateAction<Record<string, string>>) =>
+      applySessionLiveStateUpdate('imageCardProviderById', value, setImageCardProviderByIdState),
     [applySessionLiveStateUpdate]
   );
   const setImageCardModelById = useCallback(
@@ -3874,32 +4138,46 @@ export default function AIWorkspace() {
   const selectedImageCardPanelInput = selectedImageCardPanelItem
     ? imageCardPanelDrafts[selectedImageCardPanelItem.id] ?? ''
     : '';
+  const enabledProviderSettingsProviders = providerSettingsProviders.filter((provider) => provider.enabled !== false);
+  const workspaceImageModelOptions = React.useMemo(
+    () => createWorkspaceModelOptions(enabledProviderSettingsProviders, 'image', IMAGE_CARD_MODEL_OPTIONS),
+    [enabledProviderSettingsProviders]
+  );
+  const workspaceTextModelOptions = React.useMemo(
+    () => createWorkspaceModelOptions(enabledProviderSettingsProviders, 'chat', TEXT_PANEL_MODEL_OPTIONS),
+    [enabledProviderSettingsProviders]
+  );
+  const defaultWorkspaceImageModelOption = workspaceImageModelOptions[0] || createFallbackWorkspaceModelOptions(IMAGE_CARD_MODEL_OPTIONS, null)[0];
+  const defaultWorkspaceTextModelOption = workspaceTextModelOptions[0] || createFallbackWorkspaceModelOptions(TEXT_PANEL_MODEL_OPTIONS, null)[0];
+  const selectedImageCardProviderId = selectedImageCardPanelItem
+    ? imageCardProviderById[selectedImageCardPanelItem.id] || defaultWorkspaceImageModelOption.providerId
+    : defaultWorkspaceImageModelOption.providerId;
   const selectedImageCardPanelModelId = selectedImageCardPanelItem
-    ? resolveImageCardModel(imageCardModelById[selectedImageCardPanelItem.id], getDefaultImageCardModelOption().id)
-    : getDefaultImageCardModelOption().id;
+    ? resolveWorkspaceImageCardModel(
+        imageCardModelById[selectedImageCardPanelItem.id],
+        workspaceImageModelOptions.map((option) => option.id),
+        defaultWorkspaceImageModelOption.id
+      )
+    : defaultWorkspaceImageModelOption.id;
   const selectedImageCardSizeOptions = React.useMemo(
     () => getSupportedImageCardSizeOptions(selectedImageCardPanelModelId),
     [selectedImageCardPanelModelId]
   );
+  const selectedImageCardPanelAspectRatio = selectedImageCardPanelItem
+    ? normalizeImageCardAspectRatio(imageCardAspectRatioById[selectedImageCardPanelItem.id], '1:1')
+    : '1:1';
   const selectedImageCardPanelSize = selectedImageCardPanelItem
     ? resolveImageCardSize(
         selectedImageCardPanelModelId,
         imageCardSizeById[selectedImageCardPanelItem.id] ?? IMAGE_CARD_SIZE_OPTIONS[0].id
       )
     : IMAGE_CARD_SIZE_OPTIONS[0].id;
-  const selectedImageCardSupportsAspectRatio = React.useMemo(
-    () => getImageModelCapability(selectedImageCardPanelModelId).supportsAspectRatio,
-    [selectedImageCardPanelModelId]
-  );
   const selectedImageCardPanelQuality = selectedImageCardPanelItem
     ? imageCardQualityById[selectedImageCardPanelItem.id] ?? IMAGE_CARD_QUALITY_OPTIONS[0].id
     : IMAGE_CARD_QUALITY_OPTIONS[0].id;
   const selectedImageCardPanelCount = selectedImageCardPanelItem
     ? imageCardCountById[selectedImageCardPanelItem.id] ?? IMAGE_CARD_COUNT_OPTIONS[0].id
     : IMAGE_CARD_COUNT_OPTIONS[0].id;
-  const selectedImageCardPanelAspectRatio = selectedImageCardPanelItem
-    ? normalizeImageCardAspectRatio(imageCardAspectRatioById[selectedImageCardPanelItem.id], '1:1')
-    : '1:1';
   const selectedTextCardPanelSubmitInput = React.useMemo(
     () =>
       buildCanvasTextPanelSubmitInput({
@@ -3948,9 +4226,11 @@ export default function AIWorkspace() {
   const isSelectedImageCardGenerating =
     !!selectedImageCardPanelItem && !!activeCanvasImageGenerations[selectedImageCardPanelItem.id];
   const selectedImageCardModel =
-    IMAGE_CARD_MODEL_OPTIONS.find((option) => option.id === selectedImageCardPanelModelId) || getDefaultImageCardModelOption();
+    findWorkspaceModelOption(workspaceImageModelOptions, selectedImageCardPanelModelId, selectedImageCardProviderId) ||
+    defaultWorkspaceImageModelOption;
   const selectedTextPanelModel =
-    TEXT_PANEL_MODEL_OPTIONS.find((option) => option.id === selectedTextPanelModelId) || getDefaultTextPanelModelOption();
+    findWorkspaceModelOption(workspaceTextModelOptions, selectedTextPanelModelId, selectedTextPanelProviderId) ||
+    defaultWorkspaceTextModelOption;
   const SKILL_TOKEN_SELECTOR = '[data-skill-token="true"]';
   const copiedAssistantMessageTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   latestChatInputRef.current = chatInput;
@@ -3962,6 +4242,7 @@ export default function AIWorkspace() {
       connections: liveState.connections,
       textCardPanelDrafts: liveState.textCardPanelDrafts,
       imageCardPanelDrafts: liveState.imageCardPanelDrafts,
+      imageCardProviderById: liveState.imageCardProviderById,
       imageCardModelById: liveState.imageCardModelById,
       imageCardSizeById: liveState.imageCardSizeById,
       imageCardQualityById: liveState.imageCardQualityById,
@@ -4026,6 +4307,7 @@ export default function AIWorkspace() {
     setConnections(snapshot.connections);
     setTextCardPanelDrafts(snapshot.textCardPanelDrafts);
     setImageCardPanelDrafts(snapshot.imageCardPanelDrafts);
+    setImageCardProviderById(snapshot.imageCardProviderById);
     setImageCardModelById(snapshot.imageCardModelById);
     setImageCardSizeById(snapshot.imageCardSizeById);
     setImageCardQualityById(snapshot.imageCardQualityById);
@@ -4866,6 +5148,7 @@ export default function AIWorkspace() {
       setItems((prev) => [...prev, ...pastedCanvasClipboard.items]);
       setTextCardPanelDrafts((prev) => ({ ...prev, ...pastedCanvasClipboard.textCardPanelDrafts }));
       setImageCardPanelDrafts((prev) => ({ ...prev, ...pastedCanvasClipboard.imageCardPanelDrafts }));
+      setImageCardProviderById((prev) => ({ ...prev, ...pastedCanvasClipboard.imageCardProviderById }));
       setImageCardModelById((prev) => ({ ...prev, ...pastedCanvasClipboard.imageCardModelById }));
       setImageCardSizeById((prev) => ({ ...prev, ...pastedCanvasClipboard.imageCardSizeById }));
       setImageCardQualityById((prev) => ({ ...prev, ...pastedCanvasClipboard.imageCardQualityById }));
@@ -6006,7 +6289,7 @@ export default function AIWorkspace() {
       if (itemId !== selectedIdRef.current) return;
 
       const resizingItem = itemsRef.current.find((item) => item.id === itemId);
-      if (!resizingItem || resizingItem.type === 'image') {
+      if (!resizingItem) {
         setIsCornerResizing(false);
         cornerResizeStart.current = null;
         return;
@@ -6132,6 +6415,7 @@ export default function AIWorkspace() {
         selectedIds: sourceIds,
         textCardPanelDrafts,
         imageCardPanelDrafts,
+        imageCardProviderById,
         imageCardModelById,
         imageCardSizeById,
         imageCardQualityById,
@@ -6172,6 +6456,7 @@ export default function AIWorkspace() {
       setSelectedIds(copiedItems.selectedIds);
       setTextCardPanelDrafts((prev) => ({ ...prev, ...copiedItems.textCardPanelDrafts }));
       setImageCardPanelDrafts((prev) => ({ ...prev, ...copiedItems.imageCardPanelDrafts }));
+      setImageCardProviderById((prev) => ({ ...prev, ...copiedItems.imageCardProviderById }));
       setImageCardModelById((prev) => ({ ...prev, ...copiedItems.imageCardModelById }));
       setImageCardSizeById((prev) => ({ ...prev, ...copiedItems.imageCardSizeById }));
       setImageCardQualityById((prev) => ({ ...prev, ...copiedItems.imageCardQualityById }));
@@ -6191,12 +6476,14 @@ export default function AIWorkspace() {
       getPrimarySelectedId,
       imageCardAspectRatioById,
       imageCardCountById,
+      imageCardProviderById,
       imageCardModelById,
       imageCardPanelDrafts,
       imageCardQualityById,
       imageCardSizeById,
       setImageCardAspectRatioById,
       setImageCardCountById,
+      setImageCardProviderById,
       setImageCardModelById,
       setImageCardPanelDrafts,
       setImageCardQualityById,
@@ -6578,7 +6865,6 @@ export default function AIWorkspace() {
 
   const handleCornerResizePointerDown = useCallback(
     (e: React.PointerEvent<HTMLButtonElement>, item: CanvasItem) => {
-      if (item.type === 'image') return;
       pendingCanvasHistorySnapshotRef.current = createCurrentCanvasUndoSnapshot();
       cancelZoomAnimation();
       e.preventDefault();
@@ -6702,6 +6988,9 @@ export default function AIWorkspace() {
               input: trimmedInput,
               linkedImagePreviews,
               modelId,
+              allowedModelIds: workspaceTextModelOptions.map((option) => option.id),
+              fallbackModel: defaultWorkspaceTextModelOption.id,
+              chatProviderId: selectedTextPanelModel.providerId,
             })
           ),
           signal: controller.signal,
@@ -6789,7 +7078,13 @@ export default function AIWorkspace() {
         );
       }
     },
-    [activeCanvasTextGenerations, recordCurrentCanvasUndoSnapshot]
+    [
+      activeCanvasTextGenerations,
+      defaultWorkspaceTextModelOption.id,
+      recordCurrentCanvasUndoSnapshot,
+      selectedTextPanelModel.providerId,
+      workspaceTextModelOptions,
+    ]
   );
 
   const handleCancelCanvasTextGenerate = useCallback((itemId?: string | null) => {
@@ -6959,6 +7254,12 @@ export default function AIWorkspace() {
           input: trimmedInput,
           linkedImagePreviews,
           modelId,
+          allowedModelIds: workspaceImageModelOptions.map((option) => option.id),
+          fallbackModel: defaultWorkspaceImageModelOption.id,
+          imageProviderId:
+            imageCardProviderById[itemId] ||
+            selectedImageCardModel.providerId ||
+            defaultWorkspaceImageModelOption.providerId,
           size,
           quality,
           count,
@@ -7183,7 +7484,17 @@ export default function AIWorkspace() {
         });
       }
     },
-    [activeCanvasImageGenerations, appendGeneratedImageHistoryForSession, materializeImageCardHistoryForSession, recordCurrentCanvasUndoSnapshot]
+    [
+      activeCanvasImageGenerations,
+      appendGeneratedImageHistoryForSession,
+      defaultWorkspaceImageModelOption.id,
+      defaultWorkspaceImageModelOption.providerId,
+      imageCardProviderById,
+      materializeImageCardHistoryForSession,
+      recordCurrentCanvasUndoSnapshot,
+      selectedImageCardModel.providerId,
+      workspaceImageModelOptions,
+    ]
   );
 
   const handleCancelCanvasImageGenerate = useCallback((itemId?: string | null) => {
@@ -8236,6 +8547,7 @@ export default function AIWorkspace() {
       items: liveState.items,
       textCardPanelDrafts: liveState.textCardPanelDrafts,
       imageCardPanelDrafts: liveState.imageCardPanelDrafts,
+      imageCardProviderById: liveState.imageCardProviderById,
       imageCardModelById: liveState.imageCardModelById,
       imageCardSizeById: liveState.imageCardSizeById,
       imageCardQualityById: liveState.imageCardQualityById,
@@ -8273,6 +8585,7 @@ export default function AIWorkspace() {
       activeSkill: resolvedState.activeSkill || null,
       textCardPanelDrafts: resolvedState.normalizedSession?.textCardPanelDrafts || {},
       imageCardPanelDrafts: resolvedState.normalizedSession?.imageCardPanelDrafts || {},
+      imageCardProviderById: resolvedState.normalizedSession?.imageCardProviderById || {},
       imageCardModelById: resolvedState.normalizedSession?.imageCardModelById || {},
       imageCardSizeById: resolvedState.normalizedSession?.imageCardSizeById || {},
       imageCardQualityById: resolvedState.normalizedSession?.imageCardQualityById || {},
@@ -8291,6 +8604,7 @@ export default function AIWorkspace() {
     setFrozenPreviewConnection(null);
     setTextCardPanelDraftsState(resolvedState.normalizedSession?.textCardPanelDrafts || {});
     setImageCardPanelDraftsState(resolvedState.normalizedSession?.imageCardPanelDrafts || {});
+    setImageCardProviderByIdState(resolvedState.normalizedSession?.imageCardProviderById || {});
     setImageCardModelByIdState(resolvedState.normalizedSession?.imageCardModelById || {});
     setImageCardSizeByIdState(resolvedState.normalizedSession?.imageCardSizeById || {});
     setImageCardQualityByIdState(resolvedState.normalizedSession?.imageCardQualityById || {});
@@ -8314,6 +8628,7 @@ export default function AIWorkspace() {
       items,
       textCardPanelDrafts,
       imageCardPanelDrafts,
+      imageCardProviderById,
       imageCardModelById,
       imageCardSizeById,
       imageCardCountById,
@@ -8325,7 +8640,7 @@ export default function AIWorkspace() {
       activeSkill,
       generatedImageHistoryBySession,
     }),
-    [activeSkill, chatMessages, connections, generatedImageHistoryBySession, imageCardAspectRatioById, imageCardCountById, imageCardModelById, imageCardPanelDrafts, imageCardQualityById, imageCardSizeById, imageCount, items, textCardPanelDrafts, viewport]
+    [activeSkill, chatMessages, connections, generatedImageHistoryBySession, imageCardAspectRatioById, imageCardCountById, imageCardModelById, imageCardPanelDrafts, imageCardProviderById, imageCardQualityById, imageCardSizeById, imageCount, items, textCardPanelDrafts, viewport]
   );
 
   const {
@@ -8633,28 +8948,86 @@ export default function AIWorkspace() {
   }, []);
 
   const applyProviderSettingsResponse = useCallback((data: ProviderSettingsResponse) => {
-    const nextProviderId = data.providerId || 'custom';
-    setProviderSettingsProviderId(nextProviderId);
-    setProviderSettingsCurrentProviderId(nextProviderId);
-    setProviderSettingsBaseUrl(data.baseUrl || '');
-    setProviderSettingsApiKey('');
-    setProviderSettingsHasApiKey(Boolean(data.hasApiKey));
-    setProviderSettingsMaskedApiKey(typeof data.maskedApiKey === 'string' ? data.maskedApiKey : '');
-    setProviderSettingsSource(data.source === 'runtime' ? 'runtime' : 'env');
-    setProviderSettingsUrlManuallyEdited(false);
+    const providers = Array.isArray(data.providers) ? data.providers : [];
+    const nextSelectedProviderId =
+      providers.find((provider) => provider.primary)?.id ||
+      providers[0]?.id ||
+      'comfly';
+    const nextSelectedProvider = providers.find((provider) => provider.id === nextSelectedProviderId) || providers[0] || null;
+    setProviderSettingsProviders(providers);
+    setProviderSettingsSelectedProviderId(nextSelectedProviderId);
+    setProviderSettingsApiKey(nextSelectedProvider?.apiKey || '');
+    setProviderSettingsError(null);
+    setProviderSettingsTestResult(null);
     setIsProviderSettingsApiKeyVisible(false);
   }, []);
 
+  const selectedProviderSettings = providerSettingsProviders.find(
+    (provider) => provider.id === providerSettingsSelectedProviderId
+  ) || providerSettingsProviders[0] || null;
+  const selectedProviderSettingsApiKey = selectedProviderSettings
+    ? providerSettingsApiKey || selectedProviderSettings.apiKey
+    : '';
+  const providerSettingsApiKeyInputValue = isProviderSettingsApiKeyVisible
+    ? selectedProviderSettingsApiKey
+    : maskProviderSettingsApiKeyForDisplay(selectedProviderSettingsApiKey);
+  const providerSettingsFetchedModelRows = React.useMemo(() => {
+    const models = uniqueModelIds(providerSettingsFetchedModels?.allModels || []);
+    const search = providerSettingsModelPickerSearch.trim().toLowerCase();
+
+    return models
+      .map((modelId) => ({
+        id: modelId,
+        category: getFetchedModelCategory(modelId, providerSettingsFetchedModels, providerSettingsFetchedModelCategoryById),
+      }))
+      .filter((model) => {
+        const matchesCategory =
+          providerSettingsModelPickerCategory === 'all' || model.category === providerSettingsModelPickerCategory;
+        const matchesSearch = !search || model.id.toLowerCase().includes(search);
+        return matchesCategory && matchesSearch;
+      });
+  }, [
+    providerSettingsFetchedModelCategoryById,
+    providerSettingsFetchedModels,
+    providerSettingsModelPickerCategory,
+    providerSettingsModelPickerSearch,
+  ]);
+  const providerSettingsFetchedModelTotals = React.useMemo(() => {
+    const totals = { all: 0, image: 0, chat: 0 };
+    for (const modelId of uniqueModelIds(providerSettingsFetchedModels?.allModels || [])) {
+      const category = getFetchedModelCategory(modelId, providerSettingsFetchedModels, providerSettingsFetchedModelCategoryById);
+      totals.all += 1;
+      totals[category] += 1;
+    }
+    return totals;
+  }, [providerSettingsFetchedModelCategoryById, providerSettingsFetchedModels]);
+  const providerSettingsSelectedFetchedModelTotals = React.useMemo(() => {
+    const totals = { all: 0, image: 0, chat: 0 };
+    for (const [modelId, isSelected] of Object.entries(providerSettingsSelectedFetchedModels)) {
+      if (!isSelected) continue;
+      const category = getFetchedModelCategory(modelId, providerSettingsFetchedModels, providerSettingsFetchedModelCategoryById);
+      totals.all += 1;
+      totals[category] += 1;
+    }
+    return totals;
+  }, [providerSettingsFetchedModelCategoryById, providerSettingsFetchedModels, providerSettingsSelectedFetchedModels]);
+  const providerSettingsSelectedModelRows = React.useMemo(() => ({
+    image: uniqueModelIds(selectedProviderSettings?.imageModels || []).map((modelId) => ({ id: modelId, category: 'image' as const })),
+    chat: uniqueModelIds(selectedProviderSettings?.chatModels || []).map((modelId) => ({ id: modelId, category: 'chat' as const })),
+  }), [selectedProviderSettings]);
+
   const loadProviderSettings = useCallback(async () => {
+    const requestId = providerSettingsLoadRequestIdRef.current + 1;
+    providerSettingsLoadRequestIdRef.current = requestId;
     setProviderSettingsLoading(true);
     setProviderSettingsError(null);
 
     try {
-      const response = await fetch('/api/settings/provider', {
+      const response = await fetch('/api/settings/providers', {
         cache: 'no-store',
       });
       const data = (await response.json().catch(() => null)) as ProviderSettingsResponse | { error?: string } | null;
-      if (!response.ok || !data || typeof data !== 'object' || !('providerId' in data)) {
+      if (!response.ok || !data || typeof data !== 'object' || !('providers' in data)) {
         throw new Error(
           data && typeof data === 'object' && 'error' in data && typeof data.error === 'string'
             ? data.error
@@ -8662,11 +9035,19 @@ export default function AIWorkspace() {
         );
       }
 
+      if (providerSettingsLoadRequestIdRef.current !== requestId) {
+        return;
+      }
       applyProviderSettingsResponse(data);
     } catch (error) {
+      if (providerSettingsLoadRequestIdRef.current !== requestId) {
+        return;
+      }
       setProviderSettingsError(error instanceof Error ? error.message : '加载供应商配置失败');
     } finally {
-      setProviderSettingsLoading(false);
+      if (providerSettingsLoadRequestIdRef.current === requestId) {
+        setProviderSettingsLoading(false);
+      }
     }
   }, [applyProviderSettingsResponse]);
 
@@ -8677,44 +9058,80 @@ export default function AIWorkspace() {
     void loadProviderSettings();
   }, [loadProviderSettings]);
 
+  useEffect(() => {
+    void loadProviderSettings();
+  }, [loadProviderSettings]);
+
   const closeProviderSettingsModal = useCallback(() => {
     setShowProviderSettingsModal(false);
     setProviderSettingsApiKey('');
     setProviderSettingsError(null);
     setProviderSettingsLoading(false);
     setProviderSettingsSaving(false);
-    setProviderSettingsUrlManuallyEdited(false);
+    setProviderSettingsTesting(false);
+    setProviderSettingsTestResult(null);
+    setProviderSettingsFetchedModels(null);
+    setProviderSettingsModelPickerOpen(false);
+    setProviderSettingsModelPickerCategory('all');
+    setProviderSettingsModelPickerSearch('');
+    setProviderSettingsSelectedFetchedModels({});
+    setProviderSettingsFetchedModelCategoryById({});
     setIsProviderSettingsApiKeyVisible(false);
   }, []);
 
   const handleProviderSettingsProviderChange = useCallback((nextProviderId: ProviderSettingsProviderId) => {
-    setProviderSettingsProviderId(nextProviderId);
+    const nextProvider = providerSettingsProviders.find((provider) => provider.id === nextProviderId);
+    setProviderSettingsSelectedProviderId(nextProviderId);
+    setProviderSettingsApiKey(nextProvider?.apiKey || '');
     setProviderSettingsError(null);
+    setProviderSettingsTestResult(null);
+    setProviderSettingsFetchedModels(null);
+    setProviderSettingsModelPickerOpen(false);
+    setProviderSettingsModelPickerCategory('all');
+    setProviderSettingsModelPickerSearch('');
+    setProviderSettingsSelectedFetchedModels({});
+    setProviderSettingsFetchedModelCategoryById({});
+    setIsProviderSettingsApiKeyVisible(false);
+  }, [providerSettingsProviders]);
 
-    if (!providerSettingsUrlManuallyEdited) {
-      const matchedPreset = PROVIDER_SETTINGS_PRESET_OPTIONS.find((option) => option.id === nextProviderId);
-      setProviderSettingsBaseUrl(matchedPreset?.baseUrl || '');
-    }
-  }, [providerSettingsUrlManuallyEdited]);
+  const updateSelectedProviderSettings = useCallback((updater: (provider: ProviderSettingsItem) => ProviderSettingsItem) => {
+    setProviderSettingsProviders((prev) =>
+      prev.map((provider) =>
+        provider.id === providerSettingsSelectedProviderId ? updater(provider) : provider
+      )
+    );
+  }, [providerSettingsSelectedProviderId]);
 
   const handleProviderSettingsSave = useCallback(async () => {
     setProviderSettingsSaving(true);
     setProviderSettingsError(null);
 
     try {
-      const response = await fetch('/api/settings/provider', {
+      const nextProviders = providerSettingsProviders.map((provider) => ({
+        id: provider.id,
+        name: provider.name,
+        baseUrl: provider.baseUrl,
+        protocol: provider.protocol,
+        imageRequestMode: provider.imageRequestMode,
+        imageGenerationEndpoint: provider.imageGenerationEndpoint,
+        imageEditEndpoint: provider.imageEditEndpoint,
+        enabled: provider.enabled,
+        primary: provider.primary,
+        imageModels: provider.imageModels,
+        chatModels: provider.chatModels,
+        apiKey: provider.id === providerSettingsSelectedProviderId ? providerSettingsApiKey : provider.apiKey,
+      }));
+      const response = await fetch('/api/settings/providers', {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify({
-          providerId: providerSettingsProviderId,
-          baseUrl: providerSettingsBaseUrl,
-          apiKey: providerSettingsApiKey,
+          providers: nextProviders,
         }),
       });
       const data = (await response.json().catch(() => null)) as ProviderSettingsResponse | { error?: string } | null;
-      if (!response.ok || !data || typeof data !== 'object' || !('providerId' in data)) {
+      if (!response.ok || !data || typeof data !== 'object' || !('providers' in data)) {
         throw new Error(
           data && typeof data === 'object' && 'error' in data && typeof data.error === 'string'
             ? data.error
@@ -8733,10 +9150,232 @@ export default function AIWorkspace() {
   }, [
     applyProviderSettingsResponse,
     providerSettingsApiKey,
-    providerSettingsBaseUrl,
-    providerSettingsProviderId,
+    providerSettingsProviders,
+    providerSettingsSelectedProviderId,
     showImageToolbarNoticeWithTimeout,
   ]);
+
+  const handleProviderSettingsTestConnection = useCallback(async () => {
+    if (!selectedProviderSettings) return;
+    if (!selectedProviderSettings.hasApiKey && providerSettingsApiKey.trim().length === 0) {
+      setProviderSettingsError('请先填写或保存 API Key');
+      setProviderSettingsTestResult({
+        ok: false,
+        status: 400,
+        message: '连接失败：请先填写或保存 API Key',
+        modelCount: 0,
+        imageModels: [],
+        chatModels: [],
+        imageRequestMode: selectedProviderSettings.imageRequestMode,
+      });
+      return;
+    }
+
+    setProviderSettingsTesting(true);
+    setProviderSettingsError(null);
+    setProviderSettingsTestResult(null);
+
+    try {
+      const response = await fetch('/api/settings/providers/test-connection', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          providerId: selectedProviderSettings.id,
+          baseUrl: selectedProviderSettings.baseUrl,
+          protocol: selectedProviderSettings.protocol,
+          imageRequestMode: selectedProviderSettings.imageRequestMode,
+          apiKey: providerSettingsApiKey,
+        }),
+      });
+      const data = (await response.json().catch(() => null)) as ProviderConnectionTestResult | { error?: string } | null;
+      if (!response.ok || !data || typeof data !== 'object' || !('ok' in data)) {
+        throw new Error(
+          data && typeof data === 'object' && 'error' in data && typeof data.error === 'string'
+            ? data.error
+            : '连接测试失败'
+        );
+      }
+
+      setProviderSettingsTestResult(data);
+      if (data.ok) {
+        updateSelectedProviderSettings((provider) => ({
+          ...provider,
+          apiKey: providerSettingsApiKey,
+          hasApiKey: providerSettingsApiKey.trim().length > 0 || provider.hasApiKey,
+          maskedApiKey: maskProviderSettingsApiKeyForDisplay(providerSettingsApiKey) || provider.maskedApiKey,
+          imageRequestMode: data.imageRequestMode,
+        }));
+      }
+    } catch (error) {
+      setProviderSettingsError(error instanceof Error ? error.message : '连接测试失败');
+    } finally {
+      setProviderSettingsTesting(false);
+    }
+  }, [providerSettingsApiKey, selectedProviderSettings, updateSelectedProviderSettings]);
+
+  const handleProviderSettingsFetchModels = useCallback(async () => {
+    if (!selectedProviderSettings) return;
+    if (!selectedProviderSettings.hasApiKey && providerSettingsApiKey.trim().length === 0) {
+      setProviderSettingsError('请先填写或保存 API Key');
+      setProviderSettingsTestResult({
+        ok: false,
+        status: 400,
+        message: '连接失败：请先填写或保存 API Key',
+        modelCount: 0,
+        imageModels: [],
+        chatModels: [],
+        imageRequestMode: selectedProviderSettings.imageRequestMode,
+      });
+      return;
+    }
+
+    setProviderSettingsFetchingModels(true);
+    setProviderSettingsError(null);
+    setProviderSettingsModelPickerOpen(false);
+
+    try {
+      const response = await fetch('/api/settings/providers/fetch-models', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          providerId: selectedProviderSettings.id,
+          baseUrl: selectedProviderSettings.baseUrl,
+          protocol: selectedProviderSettings.protocol,
+          imageRequestMode: selectedProviderSettings.imageRequestMode,
+          apiKey: providerSettingsApiKey,
+        }),
+      });
+      const data = (await response.json().catch(() => null)) as ProviderFetchedModelsResult | { error?: string } | null;
+      if (!response.ok || !data || typeof data !== 'object' || !('ok' in data)) {
+        throw new Error(
+          data && typeof data === 'object' && 'error' in data && typeof data.error === 'string'
+            ? data.error
+            : '拉取模型失败'
+        );
+      }
+      if (!data.ok) {
+        throw new Error(data.message || '拉取模型失败');
+      }
+
+      const imageModels = uniqueModelIds(data.imageModels);
+      const chatModels = uniqueModelIds(data.chatModels);
+      const configuredImageModels = uniqueModelIds(selectedProviderSettings.imageModels);
+      const configuredChatModels = uniqueModelIds(selectedProviderSettings.chatModels);
+      const allModels = uniqueModelIds([
+        ...data.allModels,
+        ...configuredImageModels,
+        ...configuredChatModels,
+      ]);
+      const categoryById = allModels.reduce<Record<string, 'image' | 'chat'>>((result, modelId) => {
+        if (configuredImageModels.includes(modelId) || imageModels.includes(modelId)) {
+          result[modelId] = 'image';
+        } else {
+          result[modelId] = 'chat';
+        }
+        return result;
+      }, {});
+      const selectedById = allModels.reduce<Record<string, boolean>>((result, modelId) => {
+        result[modelId] = configuredImageModels.includes(modelId) || configuredChatModels.includes(modelId);
+        return result;
+      }, {});
+
+      setProviderSettingsFetchedModels({
+        ...data,
+        allModels,
+        imageModels,
+        chatModels,
+      });
+      setProviderSettingsFetchedModelCategoryById(categoryById);
+      setProviderSettingsSelectedFetchedModels(selectedById);
+      setProviderSettingsModelPickerCategory('all');
+      setProviderSettingsModelPickerSearch('');
+      setProviderSettingsModelPickerOpen(true);
+      setProviderSettingsTestResult({
+        ok: true,
+        status: data.status,
+        message: data.message || `拉取成功，找到 ${allModels.length} 个模型`,
+        modelCount: allModels.length,
+        imageModels,
+        chatModels,
+        imageRequestMode: data.imageRequestMode,
+      });
+      updateSelectedProviderSettings((provider) => ({
+        ...provider,
+        apiKey: providerSettingsApiKey,
+        hasApiKey: providerSettingsApiKey.trim().length > 0 || provider.hasApiKey,
+        maskedApiKey: maskProviderSettingsApiKeyForDisplay(providerSettingsApiKey) || provider.maskedApiKey,
+        imageRequestMode: data.imageRequestMode,
+      }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : '拉取模型失败';
+      setProviderSettingsError(message);
+      setProviderSettingsTestResult({
+        ok: false,
+        status: 0,
+        message,
+        modelCount: 0,
+        imageModels: [],
+        chatModels: [],
+        imageRequestMode: selectedProviderSettings.imageRequestMode,
+      });
+    } finally {
+      setProviderSettingsFetchingModels(false);
+    }
+  }, [providerSettingsApiKey, selectedProviderSettings, updateSelectedProviderSettings]);
+
+  const handleProviderSettingsApplyFetchedModels = useCallback(() => {
+    if (!selectedProviderSettings || !providerSettingsFetchedModels) return;
+    const selectedModels = Object.entries(providerSettingsSelectedFetchedModels)
+      .filter(([, isSelected]) => isSelected)
+      .map(([modelId]) => modelId);
+    const nextImageModels = selectedModels.filter(
+      (modelId) => getFetchedModelCategory(modelId, providerSettingsFetchedModels, providerSettingsFetchedModelCategoryById) === 'image'
+    );
+    const nextChatModels = selectedModels.filter(
+      (modelId) => getFetchedModelCategory(modelId, providerSettingsFetchedModels, providerSettingsFetchedModelCategoryById) === 'chat'
+    );
+
+    updateSelectedProviderSettings((provider) => ({
+      ...provider,
+      imageModels: nextImageModels,
+      chatModels: nextChatModels,
+    }));
+    setProviderSettingsModelPickerOpen(false);
+    setProviderSettingsTestResult({
+      ok: true,
+      status: 200,
+      message: `已应用选择：图片 ${nextImageModels.length} 个，聊天 ${nextChatModels.length} 个；点击保存后写入本地`,
+      modelCount: nextImageModels.length + nextChatModels.length,
+      imageModels: nextImageModels,
+      chatModels: nextChatModels,
+      imageRequestMode: selectedProviderSettings.imageRequestMode,
+    });
+  }, [
+    providerSettingsFetchedModelCategoryById,
+    providerSettingsFetchedModels,
+    providerSettingsSelectedFetchedModels,
+    selectedProviderSettings,
+    updateSelectedProviderSettings,
+  ]);
+
+  const handleProviderSettingsRemoveModel = useCallback((category: 'image' | 'chat', modelId: string) => {
+    updateSelectedProviderSettings((provider) => ({
+      ...provider,
+      imageModels: category === 'image' ? provider.imageModels.filter((id) => id !== modelId) : provider.imageModels,
+      chatModels: category === 'chat' ? provider.chatModels.filter((id) => id !== modelId) : provider.chatModels,
+    }));
+    setProviderSettingsSelectedFetchedModels((prev) => {
+      if (!(modelId in prev)) return prev;
+      return {
+        ...prev,
+        [modelId]: false,
+      };
+    });
+  }, [updateSelectedProviderSettings]);
 
   const handleImageToolbarAction = useCallback(async (actionId: (typeof IMAGE_NODE_TOOLBAR_ACTIONS)[number]['id']) => {
     if (!selectedImageToolbarTarget?.src) return;
@@ -8820,7 +9459,11 @@ export default function AIWorkspace() {
 
   const handleLeftRailItemClick = useCallback((itemId: (typeof LEFT_RAIL_ITEMS)[number]['id']) => {
     if (itemId === 'history') {
+      setShowProviderSettingsModal(false);
       setShowGeneratedImageHistoryPanel((prev) => !prev);
+      return;
+    }
+    if (itemId === 'theme') {
       return;
     }
     if (itemId === 'settings') {
@@ -9126,6 +9769,18 @@ export default function AIWorkspace() {
       if (!isInsideImageCardModelMenu) {
         setShowImageCardModelMenu(false);
       }
+      const isInsideImageCardAspectRatioMenu =
+        !!imageCardAspectRatioMenuRef.current?.contains(e.target as Node) ||
+        !!imageCardAspectRatioPopoverRef.current?.contains(e.target as Node);
+      if (!isInsideImageCardAspectRatioMenu) {
+        setShowImageCardAspectRatioMenu(false);
+      }
+      const isInsideImageCardResolutionMenu =
+        !!imageCardResolutionMenuRef.current?.contains(e.target as Node) ||
+        !!imageCardResolutionPopoverRef.current?.contains(e.target as Node);
+      if (!isInsideImageCardResolutionMenu) {
+        setShowImageCardResolutionMenu(false);
+      }
       const isInsideImageCardQualityMenu =
         !!imageCardQualityMenuRef.current?.contains(e.target as Node) ||
         !!imageCardQualityPopoverRef.current?.contains(e.target as Node);
@@ -9141,11 +9796,11 @@ export default function AIWorkspace() {
       setShowAvatarMenu(false);
       setShowHistoryPanel(false);
     };
-    if (showAvatarMenu || showProjectMenu || showAddNodeMenu || showGeneratedImageHistoryPanel || showHistoryPanel || showGenerationModeMenu || showSkillsMenu || showAspectRatioMenu || showImageCardModelMenu || showImageCardQualityMenu || showImageCardCountMenu || showTextPanelModelMenu) {
+    if (showAvatarMenu || showProjectMenu || showAddNodeMenu || showGeneratedImageHistoryPanel || showHistoryPanel || showGenerationModeMenu || showSkillsMenu || showAspectRatioMenu || showImageCardModelMenu || showImageCardAspectRatioMenu || showImageCardResolutionMenu || showImageCardQualityMenu || showImageCardCountMenu || showTextPanelModelMenu) {
       document.addEventListener('pointerdown', handlePointerDownOutside);
       return () => document.removeEventListener('pointerdown', handlePointerDownOutside);
     }
-  }, [showAvatarMenu, showProjectMenu, showAddNodeMenu, showGeneratedImageHistoryPanel, showHistoryPanel, showGenerationModeMenu, showSkillsMenu, showAspectRatioMenu, showImageCardModelMenu, showImageCardQualityMenu, showImageCardCountMenu, showTextPanelModelMenu, editingSessionId, hasActiveAssistantTextSelection, isNodeInsideAssistantSelectable]);
+  }, [showAvatarMenu, showProjectMenu, showAddNodeMenu, showGeneratedImageHistoryPanel, showHistoryPanel, showGenerationModeMenu, showSkillsMenu, showAspectRatioMenu, showImageCardModelMenu, showImageCardAspectRatioMenu, showImageCardResolutionMenu, showImageCardQualityMenu, showImageCardCountMenu, showTextPanelModelMenu, editingSessionId, hasActiveAssistantTextSelection, isNodeInsideAssistantSelectable]);
 
   useEffect(() => {
     const handleSelectionChange = () => {
@@ -9421,7 +10076,7 @@ export default function AIWorkspace() {
   }
 
   return (
-    <div className="relative isolate flex h-screen w-full overflow-hidden bg-[#050608] text-zinc-100">
+    <div className="workspace-editor-shell relative isolate flex h-screen w-full overflow-hidden">
       {sessionActionError && <SessionActionErrorBanner message={sessionActionError} />}
       <input
         ref={fileInputRef}
@@ -9438,7 +10093,7 @@ export default function AIWorkspace() {
           {showAddNodeMenu && (
             <div className="pointer-events-none absolute left-full top-0 z-[130] ml-4">
               <div
-                className="pointer-events-auto w-[min(320px,calc(100vw-7rem))] overflow-hidden rounded-[26px] border border-white/[0.1] bg-[rgba(26,26,28,0.985)] shadow-[0_26px_72px_rgba(0,0,0,0.5)] backdrop-blur-xl"
+                className="workspace-menu-panel pointer-events-auto w-[min(320px,calc(100vw-7rem))] overflow-hidden rounded-[26px]"
                 onPointerDown={(e) => {
                   e.stopPropagation();
                 }}
@@ -9466,7 +10121,7 @@ export default function AIWorkspace() {
             </div>
           )}
           <div ref={generatedImageHistoryPanelRef} className="relative">
-            <div className="flex w-[72px] flex-col items-center rounded-[36px] border border-white/10 bg-[rgba(16,18,22,0.9)] px-2 py-3 shadow-[0_24px_60px_rgba(0,0,0,0.38)] backdrop-blur-xl">
+            <div className="workspace-left-rail flex w-[72px] flex-col items-center rounded-[36px] px-2 py-3 backdrop-blur-xl">
               <button
                 type="button"
                 onClick={(e) => {
@@ -9474,44 +10129,49 @@ export default function AIWorkspace() {
                   clearPendingConnectionMenu();
                   setShowAddNodeMenu((prev) => !prev);
                 }}
-                className="mb-4 inline-flex h-12 w-12 items-center justify-center rounded-full border border-black/10 bg-[#f8fafc] text-black shadow-[0_10px_24px_rgba(0,0,0,0.24),inset_0_1px_0_rgba(255,255,255,0.7)] transition-colors hover:bg-white"
+                className="workspace-add-button mb-4 inline-flex h-12 w-12 items-center justify-center rounded-full transition-colors"
                 aria-label="添加节点"
                 title="添加节点"
               >
                 <Plus size={24} strokeWidth={2.5} />
               </button>
               <div className="flex w-full flex-col items-center gap-3">
-                {LEFT_RAIL_ITEMS.map((item) => (
-                  <button
-                    key={item.id}
-                    type="button"
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      handleLeftRailItemClick(item.id);
-                    }}
-                    className={`flex w-full flex-col items-center gap-0.5 rounded-[18px] px-1 py-1.5 transition-colors hover:bg-white/[0.04] ${
-                      ((item.id === 'history' && showGeneratedImageHistoryPanel) ||
-                        (item.id === 'settings' && showProviderSettingsModal))
-                        ? 'bg-white/[0.08] text-zinc-100'
-                        : 'text-zinc-500 hover:text-zinc-300'
-                    }`}
-                    title={item.label}
-                    aria-label={item.label}
-                  >
-                    <item.icon size={19} strokeWidth={2.1} />
-                    <span className="text-[10px] font-medium tracking-[-0.03em] leading-none">{item.label}</span>
-                  </button>
-                ))}
+                {LEFT_RAIL_ITEMS.map((item) => {
+                  if (item.id === 'theme') {
+                    return <WorkspaceThemeToggle key={item.id} theme={theme} onToggle={toggleTheme} />;
+                  }
+
+                  const isActive =
+                    (item.id === 'history' && showGeneratedImageHistoryPanel) ||
+                    (item.id === 'settings' && showProviderSettingsModal);
+
+                  return (
+                    <button
+                      key={item.id}
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleLeftRailItemClick(item.id);
+                      }}
+                      className={`workspace-rail-item ${isActive ? 'is-active' : ''}`}
+                      title={item.label}
+                      aria-label={item.label}
+                    >
+                      <item.icon size={19} strokeWidth={2.1} />
+                      <span className="text-[10px] font-medium tracking-[-0.03em] leading-none">{item.label}</span>
+                    </button>
+                  );
+                })}
               </div>
             </div>
             {showGeneratedImageHistoryPanel && (
-              <div className="absolute left-full top-0 z-[150] ml-3 w-[384px] overflow-hidden rounded-[28px] border border-white/10 bg-[rgba(12,14,18,0.92)] shadow-[0_28px_80px_rgba(0,0,0,0.42)] backdrop-blur-xl">
-                <div className="flex items-center justify-between border-b border-white/[0.08] px-5 py-4">
+              <div className="workspace-popover-panel absolute left-full top-0 z-[150] ml-3 w-[384px] overflow-hidden rounded-[28px] backdrop-blur-xl">
+                <div className="workspace-subtle-divider flex items-center justify-between border-b px-5 py-4">
                   <div className="min-w-0 flex-1">
-                    <div className="text-[13px] font-semibold tracking-[-0.02em] text-zinc-100">生成历史</div>
-                    <div className="mt-1 pr-4 text-[11px] leading-5 text-zinc-500">所有 session 的生成图片，最新添加优先</div>
+                    <div className="workspace-text-primary text-[13px] font-semibold tracking-[-0.02em]">生成历史</div>
+                    <div className="workspace-text-muted mt-1 pr-4 text-[11px] leading-5">所有 session 的生成图片，最新添加优先</div>
                   </div>
-                  <div className="ml-3 shrink-0 rounded-full border border-white/[0.08] bg-white/[0.04] px-2.5 py-1 text-[11px] font-medium text-zinc-300">
+                  <div className="workspace-count-pill ml-3 shrink-0 rounded-full px-2.5 py-1 text-[11px] font-medium">
                     {generatedImageHistoryEntries.length}
                   </div>
                 </div>
@@ -9525,9 +10185,9 @@ export default function AIWorkspace() {
                           onClick={() => {
                             void addGeneratedHistoryImageToCanvas(entry);
                           }}
-                          className="group overflow-hidden rounded-[20px] border border-white/[0.08] bg-white/[0.03] text-left transition-all hover:-translate-y-0.5 hover:border-white/[0.14] hover:bg-white/[0.05]"
+                          className="workspace-history-card group overflow-hidden rounded-[20px] text-left transition-all hover:-translate-y-0.5"
                         >
-                          <div className="relative aspect-square overflow-hidden bg-black/30">
+                          <div className="workspace-preview-tile relative aspect-square overflow-hidden">
                             <Image
                               src={entry.src}
                               alt="历史生成图"
@@ -9539,10 +10199,10 @@ export default function AIWorkspace() {
                             />
                           </div>
                           <div className="flex items-center justify-between gap-2 px-3 py-2.5">
-                            <span className="truncate text-[11px] font-medium text-zinc-200">
+                            <span className="workspace-text-primary truncate text-[11px] font-medium">
                               {GENERATED_HISTORY_SOURCE_LABELS[entry.source as GeneratedImageHistoryEntry['source']] || '本地生成'}
                             </span>
-                            <span className="shrink-0 text-[10px] uppercase tracking-[0.08em] text-zinc-500">
+                            <span className="workspace-text-muted shrink-0 text-[10px] uppercase tracking-[0.08em]">
                               Add
                             </span>
                           </div>
@@ -9551,7 +10211,7 @@ export default function AIWorkspace() {
                     </div>
                   </div>
                 ) : (
-                  <div className="px-5 py-10 text-center text-[12px] leading-6 text-zinc-500">
+                  <div className="workspace-text-muted px-5 py-10 text-center text-[12px] leading-6">
                     暂无生成图片历史
                   </div>
                 )}
@@ -9565,7 +10225,7 @@ export default function AIWorkspace() {
       <div className="absolute left-[34px] top-4 z-[120] flex items-center gap-2">
         <div className="relative">
           <button 
-            className="flex h-10 w-10 items-center justify-center rounded-full border border-white/10 bg-[rgba(18,20,24,0.94)] text-sm font-medium text-zinc-100 shadow-[0_12px_28px_rgba(0,0,0,0.28)] transition-colors hover:bg-[rgba(30,33,40,0.96)]"
+            className="workspace-floating-control flex h-10 w-10 items-center justify-center rounded-full text-sm font-medium transition-colors"
             onClick={(e) => { 
               e.stopPropagation(); 
               leaveEditor();
@@ -9575,11 +10235,11 @@ export default function AIWorkspace() {
             L
           </button>
           {showAvatarMenu && (
-            <div className="absolute left-0 top-12 z-[130] w-48 rounded-2xl border border-white/10 bg-[rgba(18,20,24,0.98)] py-2 shadow-[0_24px_70px_rgba(0,0,0,0.45)] backdrop-blur-xl">
-              <button className="w-full px-4 py-2 text-left text-sm text-zinc-300 hover:bg-white/8">个人资料</button>
-              <button className="w-full px-4 py-2 text-left text-sm text-zinc-300 hover:bg-white/8">设置</button>
+            <div className="workspace-popover-panel absolute left-0 top-12 z-[130] w-48 rounded-2xl py-2 backdrop-blur-xl">
+              <button className="w-full px-4 py-2 text-left text-sm hover:bg-[var(--workspace-control-hover)]">个人资料</button>
+              <button className="w-full px-4 py-2 text-left text-sm hover:bg-[var(--workspace-control-hover)]">设置</button>
               <hr className="my-2 workspace-divider-dark" />
-              <button className="w-full px-4 py-2 text-left text-sm text-zinc-300 hover:bg-white/8">退出登录</button>
+              <button className="w-full px-4 py-2 text-left text-sm hover:bg-[var(--workspace-control-hover)]">退出登录</button>
             </div>
           )}
         </div>
@@ -9588,20 +10248,20 @@ export default function AIWorkspace() {
         <div className="relative" ref={projectMenuRef}>
           <button 
             onClick={(e) => { e.stopPropagation(); setShowProjectMenu(!showProjectMenu); }}
-            className="flex items-center gap-1.5 rounded-xl border border-white/10 bg-[rgba(18,20,24,0.94)] px-3 py-2 text-zinc-100 shadow-[0_12px_30px_rgba(0,0,0,0.25)] transition-colors hover:bg-[rgba(31,34,41,0.98)]"
+            className="workspace-floating-control flex items-center gap-1.5 rounded-xl px-3 py-2 transition-colors"
             aria-label="打开画布列表"
           >
-            <span className="max-w-[120px] truncate text-sm font-medium text-zinc-100">{currentProjectName}</span>
-            <ChevronDown size={14} className="flex-shrink-0 text-zinc-500" />
+            <span className="max-w-[120px] truncate text-sm font-medium">{currentProjectName}</span>
+            <ChevronDown size={14} className="workspace-text-muted flex-shrink-0" />
           </button>
 
           {showProjectMenu && (
-            <div className="absolute left-0 top-12 z-[130] w-64 overflow-hidden rounded-2xl border border-white/10 bg-[rgba(18,20,24,0.98)] shadow-[0_30px_80px_rgba(0,0,0,0.45)] backdrop-blur-xl">
+            <div className="workspace-popover-panel absolute left-0 top-12 z-[130] w-64 overflow-hidden rounded-2xl backdrop-blur-xl">
               <div className="p-2">
                 <button 
                   disabled={pendingSessionAction !== null}
                   onClick={(e) => { e.stopPropagation(); createNewProject(); }}
-                  className="flex min-h-[44px] w-full items-center gap-2 rounded-xl px-3 py-2 text-sm text-zinc-200 transition-colors hover:bg-white/8 disabled:cursor-not-allowed disabled:opacity-50"
+                  className="flex min-h-[44px] w-full items-center gap-2 rounded-xl px-3 py-2 text-sm transition-colors hover:bg-[var(--workspace-control-hover)] disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   <span className="text-lg">+</span>
                   <span>{pendingSessionAction?.type === 'create' ? '新建中...' : '新建画布'}</span>
@@ -9612,8 +10272,8 @@ export default function AIWorkspace() {
                   <div 
                     key={session.id}
                     onClick={(e) => { e.stopPropagation(); loadSession(session.id); }}
-                    className={`group relative flex cursor-pointer items-center gap-2 px-4 py-3 transition-colors hover:bg-white/6 ${
-                      session.id === currentSessionId ? 'bg-white/8' : ''
+                    className={`workspace-menu-item group relative flex cursor-pointer items-center gap-2 border-l-2 border-transparent px-4 py-3 ${
+                      session.id === currentSessionId ? 'is-selected' : ''
                     }`}
                   >
                     {editingSessionId === session.id ? (
@@ -9625,13 +10285,13 @@ export default function AIWorkspace() {
                         onBlur={() => renameSession(session.id, editingName)}
                         onKeyDown={(e) => { if (e.key === 'Enter') renameSession(session.id, editingName); }}
                         onClick={(e) => e.stopPropagation()}
-                        className="flex-1 rounded-lg border border-white/10 bg-[rgba(10,12,16,0.92)] px-2 py-1 text-sm text-zinc-100 focus:outline-none focus:border-white/20"
+                        className="workspace-panel-input workspace-text-primary flex-1 rounded-lg px-2 py-1 text-sm focus:outline-none"
                       />
                     ) : (
                       <>
                         <div className="flex-1 min-w-0">
-                          <div className="truncate text-sm font-medium text-zinc-100">{session.name}</div>
-                          <div className="text-xs text-zinc-500">
+                          <div className="truncate text-sm font-medium">{session.name}</div>
+                          <div className="workspace-text-muted text-xs">
                             {session.messages.length} 条对话 · {new Date(session.updatedAt).toLocaleDateString()}
                           </div>
                         </div>
@@ -9665,12 +10325,13 @@ export default function AIWorkspace() {
         </div>
       </div>
 
-      <CanvasViewport
+        <CanvasViewport
         canvasRef={canvasRef}
         widthStyle={sidebarCollapsed ? '100%' : 'calc(100% - 500px)'}
         isSpacePressed={isSpacePressed}
         isPanning={isPanning}
         viewport={viewport}
+        themePalette={themePalette}
         items={items}
         connections={connections}
         itemById={itemById}
@@ -9725,7 +10386,7 @@ export default function AIWorkspace() {
         activeCanvasTextGenerationItemIds={activeCanvasTextGenerationItemIds}
         activeCanvasImageGenerationItemIds={activeCanvasImageGenerationItemIds}
         selectedTextPanelModel={selectedTextPanelModel}
-        textPanelModelOptions={TEXT_PANEL_MODEL_OPTIONS}
+        textPanelModelOptions={workspaceTextModelOptions}
         showTextPanelModelMenu={showTextPanelModelMenu}
         textPanelModelMenuRef={textPanelModelMenuRef}
         selectedTextCardPanelInput={selectedTextCardPanelInput}
@@ -9736,17 +10397,22 @@ export default function AIWorkspace() {
         selectedImageCardPanelCanSubmit={selectedImageCardPanelCanSubmit}
         selectedImageCardPanelError={selectedImageCardPanelError}
         selectedImageCardModel={selectedImageCardModel}
-        imageCardModelOptions={IMAGE_CARD_MODEL_OPTIONS}
+        imageCardModelOptions={workspaceImageModelOptions}
         selectedImageCardPanelSize={selectedImageCardPanelSize}
         selectedImageCardSizeOptions={selectedImageCardSizeOptions}
         selectedImageCardPanelQuality={selectedImageCardPanelQuality}
         selectedImageCardPanelCount={selectedImageCardPanelCount}
         selectedImageCardPanelAspectRatio={selectedImageCardPanelAspectRatio}
-        selectedImageCardSupportsAspectRatio={selectedImageCardSupportsAspectRatio}
         isSelectedImageCardGenerating={isSelectedImageCardGenerating}
         showImageCardModelMenu={showImageCardModelMenu}
         imageCardModelMenuRef={imageCardModelMenuRef}
         imageCardModelPopoverRef={imageCardModelPopoverRef}
+        showImageCardAspectRatioMenu={showImageCardAspectRatioMenu}
+        imageCardAspectRatioMenuRef={imageCardAspectRatioMenuRef}
+        imageCardAspectRatioPopoverRef={imageCardAspectRatioPopoverRef}
+        showImageCardResolutionMenu={showImageCardResolutionMenu}
+        imageCardResolutionMenuRef={imageCardResolutionMenuRef}
+        imageCardResolutionPopoverRef={imageCardResolutionPopoverRef}
         showImageCardQualityMenu={showImageCardQualityMenu}
         imageCardQualityMenuRef={imageCardQualityMenuRef}
         imageCardQualityPopoverRef={imageCardQualityPopoverRef}
@@ -9757,7 +10423,11 @@ export default function AIWorkspace() {
         editingTextCardTextareaRef={editingTextCardTextareaRef}
         onToggleTextPanelModelMenu={() => setShowTextPanelModelMenu((prev) => !prev)}
         onSelectTextPanelModel={(modelId) => {
-          setSelectedTextPanelModelId(modelId);
+          const nextModel = findWorkspaceModelOption(workspaceTextModelOptions, modelId, selectedTextPanelProviderId);
+          setSelectedTextPanelModelId(nextModel?.id || modelId);
+          if (nextModel?.providerId) {
+            setSelectedTextPanelProviderId(nextModel.providerId as ProviderSettingsProviderId);
+          }
           setShowTextPanelModelMenu(false);
         }}
         onSelectedTextCardPanelInputChange={handleSelectedTextCardPanelInputChange}
@@ -9765,18 +10435,29 @@ export default function AIWorkspace() {
         onSelectedTextCardPanelSubmit={handleSelectedTextCardPanelSubmit}
         onSelectedTextCardPanelCancel={() => handleCancelCanvasTextGenerate(selectedTextCardPanelItem?.id ?? null)}
         onToggleImageCardModelMenu={() => {
+          setShowImageCardAspectRatioMenu(false);
+          setShowImageCardResolutionMenu(false);
           setShowImageCardQualityMenu(false);
           setShowImageCardCountMenu(false);
           setShowImageCardModelMenu((prev) => !prev);
         }}
         onSelectImageCardModel={(modelId) => {
           if (!selectedImageCardPanelItem) return;
-          const resolvedModelId = resolveImageCardModel(modelId, getDefaultImageCardModelOption().id);
+          const nextModel = findWorkspaceModelOption(workspaceImageModelOptions, modelId, selectedImageCardProviderId);
+          const resolvedModelId = resolveWorkspaceImageCardModel(
+            nextModel?.id || modelId,
+            workspaceImageModelOptions.map((option) => option.id),
+            defaultWorkspaceImageModelOption.id
+          );
           const resolvedSizeId = resolveImageCardSize(
             resolvedModelId,
             imageCardSizeById[selectedImageCardPanelItem.id] ?? IMAGE_CARD_SIZE_OPTIONS[0].id
           );
           recordCurrentCanvasUndoSnapshot();
+          setImageCardProviderById((prev) => ({
+            ...prev,
+            [selectedImageCardPanelItem.id]: nextModel?.providerId || selectedImageCardProviderId,
+          }));
           setImageCardModelById((prev) => ({
             ...prev,
             [selectedImageCardPanelItem.id]: resolvedModelId,
@@ -9800,20 +10481,21 @@ export default function AIWorkspace() {
             ...prev,
             [selectedImageCardPanelItem.id]: resolvedSizeId,
           }));
-          if (!selectedImageCardSupportsAspectRatio) {
-            const normalizedAspectRatio = getAspectRatioFromImageSize(resolvedSizeId);
-            setImageCardAspectRatioById((prev) => ({
-              ...prev,
-              [selectedImageCardPanelItem.id]: normalizedAspectRatio,
-            }));
-            setItems((prev) =>
-              prev.map((item) =>
-                item.id === selectedImageCardPanelItem.id && isImageCardItem(item)
-                  ? resizeImageCardItemToAspectRatio(item, normalizedAspectRatio)
-                  : item
-              )
-            );
-          }
+          setShowImageCardResolutionMenu(false);
+        }}
+        onToggleImageCardAspectRatioMenu={() => {
+          setShowImageCardModelMenu(false);
+          setShowImageCardResolutionMenu(false);
+          setShowImageCardQualityMenu(false);
+          setShowImageCardCountMenu(false);
+          setShowImageCardAspectRatioMenu((prev) => !prev);
+        }}
+        onToggleImageCardResolutionMenu={() => {
+          setShowImageCardModelMenu(false);
+          setShowImageCardAspectRatioMenu(false);
+          setShowImageCardQualityMenu(false);
+          setShowImageCardCountMenu(false);
+          setShowImageCardResolutionMenu((prev) => !prev);
         }}
         onSelectImageCardQuality={(qualityId) => {
           if (!selectedImageCardPanelItem) return;
@@ -9822,9 +10504,12 @@ export default function AIWorkspace() {
             ...prev,
             [selectedImageCardPanelItem.id]: qualityId,
           }));
+          setShowImageCardQualityMenu(false);
         }}
         onToggleImageCardCountMenu={() => {
           setShowImageCardModelMenu(false);
+          setShowImageCardAspectRatioMenu(false);
+          setShowImageCardResolutionMenu(false);
           setShowImageCardQualityMenu(false);
           setShowImageCardCountMenu((prev) => !prev);
         }}
@@ -9852,6 +10537,7 @@ export default function AIWorkspace() {
                 : item
             )
           );
+          setShowImageCardAspectRatioMenu(false);
         }}
         onSelectedImageCardPanelInputChange={handleSelectedImageCardPanelInputChange}
         onSelectedImageCardPanelBlur={commitPendingCanvasUndoSnapshot}
@@ -9876,12 +10562,13 @@ export default function AIWorkspace() {
         createPortal(
           <div className="pointer-events-none fixed inset-0 z-[114]">
             <div
-              data-image-node-toolbar="true"
-              className="pointer-events-auto fixed flex items-center gap-1 rounded-full border border-white/[0.1] bg-[rgba(14,15,18,0.92)] px-2 py-1.5 shadow-[0_24px_56px_rgba(0,0,0,0.42),inset_0_1px_0_rgba(255,255,255,0.05)] backdrop-blur-xl"
-              style={{
+            data-image-node-toolbar="true"
+            className="workspace-menu-panel pointer-events-auto fixed flex items-center gap-1 rounded-full px-2 py-1.5"
+            style={{
                 left: selectedImageToolbarAnchor.x,
-                top: selectedImageToolbarTop,
-                transform: 'translate(-50%, calc(-100% - 12px))',
+                top: selectedImageToolbarTop - 12 * viewport.scale,
+                transform: `translate(-50%, -100%) scale(${viewport.scale})`,
+                transformOrigin: 'top center',
               }}
               onPointerDown={(e) => {
                 e.stopPropagation();
@@ -9903,10 +10590,10 @@ export default function AIWorkspace() {
                     onPointerDown={(e) => {
                       e.stopPropagation();
                     }}
-                    className={`inline-flex h-8 items-center gap-1.5 rounded-full px-3 text-[12px] font-medium tracking-[-0.02em] transition-all ${
+                    className={`workspace-control-chip inline-flex h-8 items-center gap-1.5 rounded-full px-3 text-[12px] font-medium tracking-[-0.02em] ${
                       action.enabled
-                        ? 'text-zinc-100 hover:bg-white/[0.08] hover:text-white'
-                        : 'cursor-default text-zinc-500/85'
+                        ? ''
+                        : 'is-disabled'
                     }`}
                     title={action.enabled ? action.label : action.disabledReason ?? `${action.label} 即将支持`}
                   >
@@ -9926,26 +10613,26 @@ export default function AIWorkspace() {
           <div className="fixed inset-0 z-[230] flex items-center justify-center p-4">
             <button
               type="button"
-              className="absolute inset-0 bg-black/70 backdrop-blur-sm"
+              className="absolute inset-0 bg-black/40 backdrop-blur-sm"
               aria-label="关闭供应商配置"
               onClick={closeProviderSettingsModal}
             />
             <div
-              className="relative z-[1] w-full max-w-[540px] overflow-hidden rounded-[28px] border border-white/[0.08] bg-[rgba(12,14,18,0.96)] shadow-[0_36px_110px_rgba(0,0,0,0.52)] backdrop-blur-xl"
+              className="workspace-popover-panel relative z-[1] flex max-h-[min(88vh,760px)] w-full max-w-[920px] flex-col overflow-hidden rounded-[28px] backdrop-blur-xl"
               onClick={(e) => {
                 e.stopPropagation();
               }}
             >
-              <div className="flex items-start justify-between border-b border-white/[0.08] px-6 py-5">
+              <div className="workspace-subtle-divider flex items-start justify-between border-b px-6 py-5">
                 <div>
-                  <div className="text-[18px] font-semibold tracking-[-0.03em] text-zinc-50">供应商配置</div>
-                  <div className="mt-1 text-[12px] leading-5 text-zinc-500">
-                    当前所有模型请求都会复用这份供应商 URL 与 API Key
+                  <div className="text-[18px] font-semibold tracking-[-0.03em]">供应商配置</div>
+                  <div className="workspace-text-muted mt-1 text-[12px] leading-5">
+                    管理多供应商、协议、端点和模型清单；未指定时使用主供应商
                   </div>
                 </div>
                 <button
                   type="button"
-                  className="rounded-full border border-white/[0.08] bg-white/[0.04] p-2 text-zinc-400 transition-colors hover:bg-white/[0.08] hover:text-zinc-100"
+                  className="rounded-full border border-[var(--workspace-border)] bg-[var(--workspace-surface-soft)] p-2 text-[var(--workspace-text-muted)] transition-colors hover:bg-[var(--workspace-control-hover)] hover:text-[var(--workspace-text-primary)]"
                   onClick={closeProviderSettingsModal}
                   aria-label="关闭供应商配置"
                 >
@@ -9953,112 +10640,496 @@ export default function AIWorkspace() {
                 </button>
               </div>
 
-              <div className="space-y-5 px-6 py-5">
+              <div className="flex min-h-0 flex-1 flex-col px-6 py-5">
                 {providerSettingsError && (
-                  <div className="rounded-2xl border border-red-500/20 bg-red-500/10 px-4 py-3 text-[12px] text-red-100">
+                  <div className="mb-4 rounded-2xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-[12px] font-medium text-red-700 dark:text-red-300">
                     {providerSettingsError}
                   </div>
                 )}
 
                 {providerSettingsLoading ? (
-                  <div className="rounded-[22px] border border-white/[0.08] bg-white/[0.03] px-4 py-6 text-center text-[13px] text-zinc-400">
+                  <div className="rounded-[22px] border border-[var(--workspace-border)] bg-[var(--workspace-surface-soft)] px-4 py-6 text-center text-[13px] text-[var(--workspace-text-muted)]">
                     加载供应商配置中…
                   </div>
-                ) : (
-                  <>
-                    <div>
-                      <div className="text-[11px] font-medium uppercase tracking-[0.18em] text-zinc-500">当前供应商</div>
-                      <div className="mt-3 rounded-2xl border border-white/[0.08] bg-white/[0.03] px-4 py-3">
-                        <div className="text-[14px] font-medium tracking-[-0.02em] text-zinc-100">
-                          {getProviderSettingsProviderLabel(providerSettingsCurrentProviderId)}
-                        </div>
-                        <div className="mt-1 text-[12px] leading-5 text-zinc-500">{providerSettingsBaseUrl}</div>
+                ) : selectedProviderSettings ? (
+                  <div className="grid min-h-0 flex-1 gap-5 md:grid-cols-[220px_minmax(0,1fr)]">
+                    <div className="space-y-2">
+                      <div className="workspace-text-muted text-[11px] font-medium uppercase tracking-[0.18em]">Providers</div>
+                      <div className="workspace-menu-panel rounded-[18px] p-1.5">
+                        {providerSettingsProviders.map((provider) => {
+                          const isSelected = provider.id === selectedProviderSettings.id;
+
+                          return (
+                            <button
+                              key={provider.id}
+                              type="button"
+                              className={`workspace-menu-item flex w-full flex-col items-start rounded-[14px] px-3 py-2.5 text-left ${
+                                isSelected ? 'is-selected' : ''
+                              }`}
+                              onClick={() => handleProviderSettingsProviderChange(provider.id)}
+                            >
+                              <span className="text-[13px] font-semibold tracking-[-0.02em]">{provider.name || getProviderSettingsProviderLabel(provider.id)}</span>
+                              <span className="workspace-text-muted mt-1 max-w-full truncate text-[11px]">{provider.protocol} · {provider.primary ? '主供应商' : '备用'}</span>
+                            </button>
+                          );
+                        })}
                       </div>
                     </div>
 
-                    <label className="block">
-                      <div className="mb-2 text-[12px] font-medium text-zinc-300">切换供应商</div>
-                      <div className="relative">
-                        <select
-                          value={providerSettingsProviderId}
-                          onChange={(e) => {
-                            handleProviderSettingsProviderChange(e.target.value as ProviderSettingsProviderId);
-                          }}
-                          className="w-full appearance-none rounded-2xl border border-white/[0.08] bg-white/[0.03] px-4 py-3 text-[14px] text-zinc-100 outline-none transition-colors focus:border-white/[0.16] focus:bg-white/[0.05]"
-                        >
-                          {PROVIDER_SETTINGS_PRESET_OPTIONS.map((option) => (
-                            <option key={option.id} value={option.id} className="bg-[#121418] text-zinc-100">
-                              {option.label}
-                            </option>
-                          ))}
-                        </select>
-                        <ChevronDown
-                          size={16}
-                          className="pointer-events-none absolute right-4 top-1/2 -translate-y-1/2 text-zinc-500"
-                        />
+                    <div className="panel-scrollbar min-h-0 space-y-4 overflow-y-auto pr-1">
+                      <div className="grid gap-3 sm:grid-cols-2">
+                        <label className="block">
+                          <div className="mb-2 text-[12px] font-medium">名称</div>
+                          <input
+                            value={selectedProviderSettings.name}
+                            onChange={(e) => {
+                              const nextName = e.target.value;
+                              updateSelectedProviderSettings((provider) => ({ ...provider, name: nextName }));
+                              setProviderSettingsError(null);
+                            }}
+                            className="w-full rounded-2xl border border-[var(--workspace-border)] bg-[var(--workspace-surface-soft)] px-4 py-3 text-[14px] text-[var(--workspace-text-primary)] outline-none transition-colors placeholder:text-[var(--workspace-text-soft)] focus:border-[var(--workspace-border-strong)] focus:bg-[var(--workspace-surface-elevated)]"
+                          />
+                        </label>
+                        <label className="block">
+                          <div className="mb-2 text-[12px] font-medium">ID</div>
+                          <input
+                            value={selectedProviderSettings.id}
+                            disabled
+                            className="w-full rounded-2xl border border-[var(--workspace-border)] bg-[var(--workspace-surface-soft)] px-4 py-3 text-[14px] text-[var(--workspace-text-muted)] outline-none"
+                          />
+                        </label>
                       </div>
-                    </label>
 
-                    <label className="block">
-                      <div className="mb-2 text-[12px] font-medium text-zinc-300">Base URL</div>
-                      <input
-                        value={providerSettingsBaseUrl}
-                        onChange={(e) => {
-                          setProviderSettingsBaseUrl(e.target.value);
-                          setProviderSettingsUrlManuallyEdited(true);
-                          setProviderSettingsError(null);
-                        }}
-                        placeholder="https://your-provider.example.com/v1"
-                        className="w-full rounded-2xl border border-white/[0.08] bg-white/[0.03] px-4 py-3 text-[14px] text-zinc-100 outline-none transition-colors placeholder:text-zinc-600 focus:border-white/[0.16] focus:bg-white/[0.05]"
-                      />
-                    </label>
-
-                    <label className="block">
-                      <div className="mb-2 flex items-center justify-between gap-3 text-[12px] font-medium text-zinc-300">
-                        <span>API Key</span>
-                        <span className="text-[11px] font-normal text-zinc-500">
-                          {providerSettingsHasApiKey
-                            ? `当前已保存 ${providerSettingsMaskedApiKey || '已配置'}`
-                            : '当前未保存 API Key'}
-                        </span>
-                      </div>
-                      <div className="relative">
+                      <label className="block">
+                        <div className="mb-2 text-[12px] font-medium">Base URL</div>
                         <input
-                          type={isProviderSettingsApiKeyVisible ? 'text' : 'password'}
-                          value={providerSettingsApiKey}
+                          value={selectedProviderSettings.baseUrl}
+                          id="provider-base-url-input"
+                          name="provider-base-url-input"
+                          autoComplete="off"
+                          autoCorrect="off"
+                          autoCapitalize="none"
+                          spellCheck={false}
                           onChange={(e) => {
-                            setProviderSettingsApiKey(e.target.value);
+                            const nextBaseUrl = e.target.value;
+                            updateSelectedProviderSettings((provider) => ({ ...provider, baseUrl: nextBaseUrl }));
                             setProviderSettingsError(null);
+                            setProviderSettingsTestResult(null);
                           }}
-                          placeholder={providerSettingsHasApiKey ? '留空则保留当前 API Key' : '输入新的 API Key'}
-                          className="w-full rounded-2xl border border-white/[0.08] bg-white/[0.03] px-4 py-3 pr-11 text-[14px] text-zinc-100 outline-none transition-colors placeholder:text-zinc-600 focus:border-white/[0.16] focus:bg-white/[0.05]"
+                          placeholder="https://your-provider.example.com/v1"
+                          className="w-full rounded-2xl border border-[var(--workspace-border)] bg-[var(--workspace-surface-soft)] px-4 py-3 text-[14px] text-[var(--workspace-text-primary)] outline-none transition-colors placeholder:text-[var(--workspace-text-soft)] focus:border-[var(--workspace-border-strong)] focus:bg-[var(--workspace-surface-elevated)]"
                         />
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setIsProviderSettingsApiKeyVisible((prev) => !prev);
-                          }}
-                          className="absolute right-3 top-1/2 inline-flex -translate-y-1/2 items-center justify-center rounded-full p-1.5 text-zinc-500 transition-colors hover:bg-white/[0.06] hover:text-zinc-200"
-                          aria-label={isProviderSettingsApiKeyVisible ? '隐藏 API Key' : '显示 API Key'}
-                          title={isProviderSettingsApiKeyVisible ? '隐藏 API Key' : '显示 API Key'}
-                        >
-                          {isProviderSettingsApiKeyVisible ? <EyeOff size={16} /> : <Eye size={16} />}
-                        </button>
-                      </div>
-                    </label>
+                      </label>
 
-                    <div className="rounded-2xl border border-white/[0.08] bg-white/[0.03] px-4 py-3 text-[12px] leading-5 text-zinc-400">
-                      当前配置来源：
-                      <span className="ml-1 text-zinc-200">{providerSettingsSource === 'runtime' ? '运行时配置' : '环境变量回退'}</span>
+                      <div className="grid gap-3 sm:grid-cols-2">
+                        <label className="block">
+                          <div className="mb-2 text-[12px] font-medium">协议</div>
+                          <div className="relative">
+                            <select
+                              value={selectedProviderSettings.protocol}
+                              onChange={(e) => {
+                                const nextProtocol = e.target.value as ProviderProtocol;
+                                updateSelectedProviderSettings((provider) => ({ ...provider, protocol: nextProtocol }));
+                                setProviderSettingsError(null);
+                              }}
+                              className="w-full appearance-none rounded-2xl border border-[var(--workspace-border)] bg-[var(--workspace-surface-soft)] px-4 py-3 text-[14px] text-[var(--workspace-text-primary)] outline-none transition-colors focus:border-[var(--workspace-border-strong)] focus:bg-[var(--workspace-surface-elevated)]"
+                            >
+                              {PROVIDER_PROTOCOL_OPTIONS.map((option) => (
+                                <option key={option.id} value={option.id}>
+                                  {option.label}
+                                </option>
+                              ))}
+                            </select>
+                            <ChevronDown size={16} className="workspace-text-muted pointer-events-none absolute right-4 top-1/2 -translate-y-1/2" />
+                          </div>
+                        </label>
+                        <label className="block">
+                          <div className="mb-2 text-[12px] font-medium">图片请求模式</div>
+                          <div className="relative">
+                            <select
+                              value={selectedProviderSettings.imageRequestMode}
+                              onChange={(e) => {
+                                const nextMode = e.target.value as ProviderImageRequestMode;
+                                updateSelectedProviderSettings((provider) => ({ ...provider, imageRequestMode: nextMode }));
+                                setProviderSettingsError(null);
+                              }}
+                              className="w-full appearance-none rounded-2xl border border-[var(--workspace-border)] bg-[var(--workspace-surface-soft)] px-4 py-3 text-[14px] text-[var(--workspace-text-primary)] outline-none transition-colors focus:border-[var(--workspace-border-strong)] focus:bg-[var(--workspace-surface-elevated)]"
+                            >
+                              {PROVIDER_IMAGE_REQUEST_MODE_OPTIONS.map((option) => (
+                                <option key={option.id} value={option.id}>
+                                  {option.label}
+                                </option>
+                              ))}
+                            </select>
+                            <ChevronDown size={16} className="workspace-text-muted pointer-events-none absolute right-4 top-1/2 -translate-y-1/2" />
+                          </div>
+                        </label>
+                      </div>
+
+                      <div className="grid gap-3 sm:grid-cols-2">
+                        <label className="block">
+                          <div className="mb-2 text-[12px] font-medium">文生图端点</div>
+                          <input
+                            value={selectedProviderSettings.imageGenerationEndpoint}
+                            name="provider-image-generation-endpoint"
+                            autoComplete="off"
+                            autoCorrect="off"
+                            autoCapitalize="none"
+                            spellCheck={false}
+                            onChange={(e) => {
+                              const nextEndpoint = e.target.value;
+                              updateSelectedProviderSettings((provider) => ({ ...provider, imageGenerationEndpoint: nextEndpoint }));
+                              setProviderSettingsError(null);
+                            }}
+                            placeholder="/v1/images/generations"
+                            className="w-full rounded-2xl border border-[var(--workspace-border)] bg-[var(--workspace-surface-soft)] px-4 py-3 text-[14px] text-[var(--workspace-text-primary)] outline-none transition-colors placeholder:text-[var(--workspace-text-soft)] focus:border-[var(--workspace-border-strong)] focus:bg-[var(--workspace-surface-elevated)]"
+                          />
+                        </label>
+                        <label className="block">
+                          <div className="mb-2 text-[12px] font-medium">图生图/编辑端点</div>
+                          <input
+                            value={selectedProviderSettings.imageEditEndpoint}
+                            name="provider-image-edit-endpoint"
+                            autoComplete="off"
+                            autoCorrect="off"
+                            autoCapitalize="none"
+                            spellCheck={false}
+                            onChange={(e) => {
+                              const nextEndpoint = e.target.value;
+                              updateSelectedProviderSettings((provider) => ({ ...provider, imageEditEndpoint: nextEndpoint }));
+                              setProviderSettingsError(null);
+                            }}
+                            placeholder="/v1/images/edits"
+                            className="w-full rounded-2xl border border-[var(--workspace-border)] bg-[var(--workspace-surface-soft)] px-4 py-3 text-[14px] text-[var(--workspace-text-primary)] outline-none transition-colors placeholder:text-[var(--workspace-text-soft)] focus:border-[var(--workspace-border-strong)] focus:bg-[var(--workspace-surface-elevated)]"
+                          />
+                        </label>
+                      </div>
+
+                      <label className="block">
+                        <div className="mb-2 flex items-center justify-between gap-3 text-[12px] font-medium">
+                          <span>API Key</span>
+                          <span className="workspace-text-muted text-[11px] font-normal">
+                            {selectedProviderSettings.hasApiKey
+                              ? `当前已保存 ${selectedProviderSettings.maskedApiKey || '已配置'}`
+                              : '当前未保存 API Key'}
+                          </span>
+                        </div>
+                        <div className="relative">
+                          <input
+                            type="text"
+                            id="provider-api-secret-input"
+                            name="provider-api-secret-input"
+                            autoComplete="new-password"
+                            autoCorrect="off"
+                            autoCapitalize="none"
+                            spellCheck={false}
+                            data-1p-ignore="true"
+                            data-lpignore="true"
+                            value={providerSettingsApiKeyInputValue}
+                            onChange={(e) => {
+                              const nextApiKey = isProviderSettingsApiKeyVisible
+                                ? e.target.value
+                                : e.target.value.replace(/\*/g, '');
+                              setProviderSettingsApiKey(nextApiKey);
+                              updateSelectedProviderSettings((provider) => ({
+                                ...provider,
+                                apiKey: nextApiKey,
+                                hasApiKey: nextApiKey.trim().length > 0,
+                                maskedApiKey: maskProviderSettingsApiKeyForDisplay(nextApiKey),
+                              }));
+                              setProviderSettingsError(null);
+                            }}
+                            placeholder="输入 API Key"
+                            className="w-full rounded-2xl border border-[var(--workspace-border)] bg-[var(--workspace-surface-soft)] px-4 py-3 pr-11 text-[14px] text-[var(--workspace-text-primary)] outline-none transition-colors placeholder:text-[var(--workspace-text-soft)] focus:border-[var(--workspace-border-strong)] focus:bg-[var(--workspace-surface-elevated)]"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setIsProviderSettingsApiKeyVisible((prev) => !prev);
+                            }}
+                            className="workspace-text-muted absolute right-3 top-1/2 inline-flex -translate-y-1/2 items-center justify-center rounded-full p-1.5 transition-colors hover:bg-[var(--workspace-control-hover)] hover:text-[var(--workspace-text-primary)]"
+                            aria-label={isProviderSettingsApiKeyVisible ? '隐藏 API Key' : '显示 API Key'}
+                            title={isProviderSettingsApiKeyVisible ? '隐藏 API Key' : '显示 API Key'}
+                          >
+                            {isProviderSettingsApiKeyVisible ? <EyeOff size={16} /> : <Eye size={16} />}
+                          </button>
+                        </div>
+                      </label>
+
+                      <div className="rounded-2xl border border-[var(--workspace-border)] bg-[var(--workspace-surface-soft)] p-4">
+                        <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
+                          <div>
+                            <div className="text-[12px] font-medium text-[var(--workspace-text-primary)]">模型列表</div>
+                            <div className="workspace-text-muted mt-1 text-[11px]">
+                              拉取模型后分类选择，应用并保存到当前供应商
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            className="rounded-full border border-[var(--workspace-border)] px-3 py-1.5 text-[12px] font-medium text-[var(--workspace-text-muted)] transition-colors hover:bg-[var(--workspace-control-hover)] hover:text-[var(--workspace-text-primary)] disabled:cursor-not-allowed disabled:opacity-50"
+                            onClick={() => {
+                              void handleProviderSettingsFetchModels();
+                            }}
+                            disabled={providerSettingsFetchingModels}
+                          >
+                            {providerSettingsFetchingModels ? '拉取中…' : '拉取模型'}
+                          </button>
+                        </div>
+
+                        <div className="grid gap-3 sm:grid-cols-2">
+                          <div className="rounded-[18px] border border-[var(--workspace-border)] bg-[var(--workspace-surface-elevated)] p-3">
+                            <div className="mb-2 flex items-center justify-between gap-2">
+                              <div className="text-[12px] font-medium">图片模型</div>
+                              <div className="workspace-text-muted text-[11px]">{selectedProviderSettings.imageModels.length} 个</div>
+                            </div>
+                            <div className="panel-scrollbar h-[156px] overflow-y-auto rounded-[16px] border border-[var(--workspace-border)]">
+                              {providerSettingsSelectedModelRows.image.length > 0 ? (
+                                providerSettingsSelectedModelRows.image.map((model) => (
+                                  <div
+                                    key={`image-${model.id}`}
+                                    className="flex items-center justify-between gap-3 border-b border-[var(--workspace-border)] px-3 py-2.5 last:border-b-0"
+                                  >
+                                    <div className="min-w-0">
+                                      <div className="truncate text-[13px] font-medium text-[var(--workspace-text-primary)]">{model.id}</div>
+                                      <div className="workspace-text-muted mt-0.5 text-[11px]">图片模型</div>
+                                    </div>
+                                    <button
+                                      type="button"
+                                      className="workspace-text-muted inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full transition-colors hover:bg-[var(--workspace-control-hover)] hover:text-red-500"
+                                      onClick={() => {
+                                        handleProviderSettingsRemoveModel('image', model.id);
+                                      }}
+                                      aria-label={`移除图片模型 ${model.id}`}
+                                      title={`移除图片模型 ${model.id}`}
+                                    >
+                                      <Trash2 size={13} />
+                                    </button>
+                                  </div>
+                                ))
+                              ) : (
+                                <div className="workspace-text-muted flex h-full items-center justify-center px-3 text-[12px]">尚未选择图片模型</div>
+                              )}
+                            </div>
+                          </div>
+                          <div className="rounded-[18px] border border-[var(--workspace-border)] bg-[var(--workspace-surface-elevated)] p-3">
+                            <div className="mb-2 flex items-center justify-between gap-2">
+                              <div className="text-[12px] font-medium">聊天模型</div>
+                              <div className="workspace-text-muted text-[11px]">{selectedProviderSettings.chatModels.length} 个</div>
+                            </div>
+                            <div className="panel-scrollbar h-[156px] overflow-y-auto rounded-[16px] border border-[var(--workspace-border)]">
+                              {providerSettingsSelectedModelRows.chat.length > 0 ? (
+                                providerSettingsSelectedModelRows.chat.map((model) => (
+                                  <div
+                                    key={`chat-${model.id}`}
+                                    className="flex items-center justify-between gap-3 border-b border-[var(--workspace-border)] px-3 py-2.5 last:border-b-0"
+                                  >
+                                    <div className="min-w-0">
+                                      <div className="truncate text-[13px] font-medium text-[var(--workspace-text-primary)]">{model.id}</div>
+                                      <div className="workspace-text-muted mt-0.5 text-[11px]">聊天模型</div>
+                                    </div>
+                                    <button
+                                      type="button"
+                                      className="workspace-text-muted inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full transition-colors hover:bg-[var(--workspace-control-hover)] hover:text-red-500"
+                                      onClick={() => {
+                                        handleProviderSettingsRemoveModel('chat', model.id);
+                                      }}
+                                      aria-label={`移除聊天模型 ${model.id}`}
+                                      title={`移除聊天模型 ${model.id}`}
+                                    >
+                                      <Trash2 size={13} />
+                                    </button>
+                                  </div>
+                                ))
+                              ) : (
+                                <div className="workspace-text-muted flex h-full items-center justify-center px-3 text-[12px]">尚未选择聊天模型</div>
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+
+                      <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-[var(--workspace-border)] bg-[var(--workspace-surface-soft)] px-4 py-3 text-[12px] leading-5 text-[var(--workspace-text-muted)]">
+                        <div>
+                          配置来源：
+                          <span className="ml-1 text-[var(--workspace-text-primary)]">{selectedProviderSettings.source === 'runtime' ? '运行时配置' : '环境变量回退'}</span>
+                          <span className="mx-2">·</span>
+                          {selectedProviderSettings.primary ? '当前主供应商' : '备用供应商'}
+                        </div>
+                        <div className="flex items-center gap-2">
+                          {providerSettingsTesting && (
+                            <span className="text-[12px] font-medium text-[var(--workspace-text-primary)]">测试中…</span>
+                          )}
+                          {!providerSettingsTesting && providerSettingsTestResult && (
+                            <span className={`text-[12px] font-medium ${
+                              providerSettingsTestResult.ok
+                                ? 'text-emerald-700 dark:text-emerald-300'
+                                : 'text-red-700 dark:text-red-300'
+                            }`}>
+                              {providerSettingsTestResult.ok
+                                ? `连接成功${providerSettingsTestResult.modelCount > 0 ? `，找到 ${providerSettingsTestResult.modelCount} 个模型` : ''}`
+                                : providerSettingsTestResult.message}
+                            </span>
+                          )}
+                          <button
+                            type="button"
+                            className="rounded-full border border-[var(--workspace-border)] px-3 py-1.5 text-[12px] font-medium text-[var(--workspace-text-muted)] transition-colors hover:bg-[var(--workspace-control-hover)] hover:text-[var(--workspace-text-primary)]"
+                            onClick={() => {
+                              setProviderSettingsProviders((prev) =>
+                                prev.map((provider) => ({
+                                  ...provider,
+                                  primary: provider.id === selectedProviderSettings.id,
+                                }))
+                              );
+                            }}
+                          >
+                            设为主供应商
+                          </button>
+                          <button
+                            type="button"
+                            className="rounded-full border border-[var(--workspace-border)] px-3 py-1.5 text-[12px] font-medium text-[var(--workspace-text-muted)] transition-colors hover:bg-[var(--workspace-control-hover)] hover:text-[var(--workspace-text-primary)] disabled:cursor-not-allowed disabled:opacity-50"
+                            onClick={() => {
+                              void handleProviderSettingsTestConnection();
+                            }}
+                            disabled={providerSettingsTesting}
+                          >
+                            {providerSettingsTesting ? '测试中…' : '测试连接'}
+                          </button>
+                        </div>
+                      </div>
+
+                      {providerSettingsTestResult && (
+                        <div className={`rounded-2xl border px-4 py-3 text-[12px] leading-5 ${
+                          providerSettingsTestResult.ok
+                            ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300'
+                            : 'border-red-500/30 bg-red-500/10 text-red-700 dark:text-red-300'
+                        }`}>
+                          {providerSettingsTestResult.ok ? providerSettingsTestResult.message : `连接失败：${providerSettingsTestResult.message.replace(/^连接失败：/, '')}`}
+                          {providerSettingsTestResult.ok && providerSettingsTestResult.modelCount > 0
+                            ? ` · 找到 ${providerSettingsTestResult.modelCount} 个模型`
+                            : ''}
+                        </div>
+                      )}
                     </div>
-                  </>
+                  </div>
+                ) : (
+                  <div className="rounded-[22px] border border-[var(--workspace-border)] bg-[var(--workspace-surface-soft)] px-4 py-6 text-center text-[13px] text-[var(--workspace-text-muted)]">
+                    暂无供应商配置
+                  </div>
                 )}
               </div>
 
-              <div className="flex items-center justify-end gap-3 border-t border-white/[0.08] px-6 py-4">
+              {providerSettingsModelPickerOpen && providerSettingsFetchedModels && selectedProviderSettings && (
+                <div className="absolute inset-0 z-[2]">
+                  <button
+                    type="button"
+                    className="absolute inset-0 bg-black/30 backdrop-blur-sm"
+                    aria-label="关闭模型选择"
+                    onClick={() => {
+                      setProviderSettingsModelPickerOpen(false);
+                    }}
+                  />
+                  <div className="relative z-[1] flex h-full items-center justify-center p-6">
+                    <div className="workspace-popover-panel flex h-[420px] max-h-[52vh] min-h-[320px] w-full max-w-[640px] flex-col rounded-[24px] p-4">
+                      <div className="mb-3 flex shrink-0 flex-wrap items-center justify-between gap-3">
+                        <div>
+                          <div className="text-[13px] font-semibold text-[var(--workspace-text-primary)]">模型选择</div>
+                          <div className="workspace-text-muted mt-1 text-[11px]">
+                            已选图片 {providerSettingsSelectedFetchedModelTotals.image} 个，聊天 {providerSettingsSelectedFetchedModelTotals.chat} 个
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          className="rounded-full border border-[var(--workspace-border)] px-3 py-1.5 text-[12px] font-medium text-[var(--workspace-text-muted)] transition-colors hover:bg-[var(--workspace-control-hover)] hover:text-[var(--workspace-text-primary)]"
+                          onClick={() => {
+                            setProviderSettingsModelPickerOpen(false);
+                          }}
+                        >
+                          收起
+                        </button>
+                      </div>
+                      <input
+                        value={providerSettingsModelPickerSearch}
+                        name="provider-model-picker-search"
+                        autoComplete="off"
+                        autoCorrect="off"
+                        autoCapitalize="none"
+                        spellCheck={false}
+                        onChange={(e) => {
+                          setProviderSettingsModelPickerSearch(e.target.value);
+                        }}
+                        placeholder="搜索模型"
+                        className="mb-3 w-full shrink-0 rounded-2xl border border-[var(--workspace-border)] bg-[var(--workspace-surface-soft)] px-4 py-2.5 text-[13px] text-[var(--workspace-text-primary)] outline-none transition-colors placeholder:text-[var(--workspace-text-soft)] focus:border-[var(--workspace-border-strong)] focus:bg-[var(--workspace-surface-elevated)]"
+                      />
+                      <div className="mb-3 flex shrink-0 flex-wrap gap-2">
+                        {PROVIDER_SETTINGS_MODEL_PICKER_CATEGORIES.map((category) => (
+                          <button
+                            key={category}
+                            type="button"
+                            className={`workspace-control-chip rounded-full px-3 py-1.5 text-[12px] font-medium ${providerSettingsModelPickerCategory === category ? 'is-active' : ''}`}
+                            onClick={() => {
+                              setProviderSettingsModelPickerCategory(category);
+                            }}
+                          >
+                            {PROVIDER_SETTINGS_MODEL_PICKER_LABELS[category]}
+                            <span className="ml-1 opacity-70">
+                              {providerSettingsSelectedFetchedModelTotals[category]}/{providerSettingsFetchedModelTotals[category]}
+                            </span>
+                          </button>
+                        ))}
+                      </div>
+                      <div className="panel-scrollbar min-h-0 flex-1 overflow-y-auto rounded-[16px] border border-[var(--workspace-border)]">
+                        {providerSettingsFetchedModelRows.length > 0 ? (
+                          providerSettingsFetchedModelRows.map((model) => {
+                            const isSelected = !!providerSettingsSelectedFetchedModels[model.id];
+                            return (
+                              <button
+                                key={model.id}
+                                type="button"
+                                className={`workspace-menu-item flex w-full items-center justify-between gap-3 border-b border-[var(--workspace-border)] px-3 py-2.5 text-left last:border-b-0 ${isSelected ? 'is-selected' : ''}`}
+                                onClick={() => {
+                                  setProviderSettingsSelectedFetchedModels((prev) => ({
+                                    ...prev,
+                                    [model.id]: !prev[model.id],
+                                  }));
+                                }}
+                              >
+                                <div className="min-w-0">
+                                  <div className="truncate text-[13px] font-medium text-[var(--workspace-text-primary)]">{model.id}</div>
+                                  <div className="workspace-text-muted mt-0.5 text-[11px]">
+                                    {model.category === 'image' ? '图片模型' : '聊天模型'}
+                                  </div>
+                                </div>
+                                <span className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full border ${isSelected ? 'border-[var(--workspace-border-strong)] bg-[var(--workspace-control-active)]' : 'border-[var(--workspace-border)]'}`}>
+                                  {isSelected && <Check size={13} />}
+                                </span>
+                              </button>
+                            );
+                          })
+                        ) : (
+                          <div className="workspace-text-muted px-3 py-6 text-center text-[12px]">没有匹配的模型</div>
+                        )}
+                      </div>
+                      <div className="mt-3 flex shrink-0 flex-wrap items-center justify-between gap-3">
+                        <div className="workspace-text-muted text-[11px]">
+                          共 {providerSettingsFetchedModelTotals.all} 个模型，已选 {providerSettingsSelectedFetchedModelTotals.all} 个
+                        </div>
+                        <button
+                          type="button"
+                          className="rounded-full bg-[var(--workspace-inverse-bg)] px-4 py-2 text-[13px] font-semibold text-[var(--workspace-inverse-fg)] transition-colors hover:opacity-90"
+                          onClick={handleProviderSettingsApplyFetchedModels}
+                        >
+                          应用选择
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              <div className="workspace-subtle-divider flex items-center justify-end gap-3 border-t px-6 py-4">
                 <button
                   type="button"
-                  className="rounded-full border border-white/[0.08] px-4 py-2 text-[13px] font-medium text-zinc-300 transition-colors hover:bg-white/[0.05] hover:text-zinc-100"
+                  className="rounded-full border border-[var(--workspace-border)] px-4 py-2 text-[13px] font-medium text-[var(--workspace-text-muted)] transition-colors hover:bg-[var(--workspace-control-hover)] hover:text-[var(--workspace-text-primary)]"
                   onClick={closeProviderSettingsModal}
                   disabled={providerSettingsSaving}
                 >
@@ -10066,7 +11137,7 @@ export default function AIWorkspace() {
                 </button>
                 <button
                   type="button"
-                  className="rounded-full bg-white px-4 py-2 text-[13px] font-semibold text-black transition-colors hover:bg-zinc-200 disabled:cursor-not-allowed disabled:bg-zinc-500 disabled:text-zinc-200"
+                  className="rounded-full bg-[var(--workspace-inverse-bg)] px-4 py-2 text-[13px] font-semibold text-[var(--workspace-inverse-fg)] transition-colors hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
                   onClick={() => {
                     void handleProviderSettingsSave();
                   }}
@@ -10085,27 +11156,27 @@ export default function AIWorkspace() {
           className="pointer-events-none fixed inset-x-0 top-4 flex justify-center px-4"
           style={{ zIndex: GLOBAL_NOTICE_Z }}
         >
-          <div className="rounded-full border border-white/[0.1] bg-[rgba(14,15,18,0.92)] px-4 py-2 text-[12px] font-medium tracking-[-0.02em] text-zinc-100 shadow-[0_18px_42px_rgba(0,0,0,0.34)] backdrop-blur-xl">
+          <div className="workspace-floating-control rounded-full px-4 py-2 text-[12px] font-medium tracking-[-0.02em] backdrop-blur-xl">
             {imageToolbarNotice}
           </div>
         </div>
       )}
 
       {/* Zoom Controller - Outside Canvas */}
-      <div className="absolute left-4 bottom-4 z-50 flex items-center gap-2 rounded-xl border border-white/10 bg-[rgba(16,18,22,0.88)] p-1.5 shadow-[0_18px_50px_rgba(0,0,0,0.35)] backdrop-blur-xl">
+      <div className="workspace-floating-control absolute left-4 bottom-4 z-50 flex items-center gap-2 rounded-xl p-1.5 backdrop-blur-xl">
         <button 
-          className="rounded-md p-1.5 text-zinc-400 hover:bg-white/8 hover:text-zinc-100"
+          className="workspace-text-muted rounded-md p-1.5 hover:bg-[var(--workspace-control-hover)] hover:text-[var(--workspace-text-primary)]"
           onClick={() => applyViewportScale(viewport.scale - 0.1)}
         >
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <line x1="5" y1="12" x2="19" y2="12" />
           </svg>
         </button>
-        <span className="min-w-[3rem] text-center text-xs font-medium text-zinc-300">
+        <span className="min-w-[3rem] text-center text-xs font-medium">
           {Math.round(viewport.scale * 100)}%
         </span>
         <button 
-          className="rounded-md p-1.5 text-zinc-400 hover:bg-white/8 hover:text-zinc-100"
+          className="workspace-text-muted rounded-md p-1.5 hover:bg-[var(--workspace-control-hover)] hover:text-[var(--workspace-text-primary)]"
           onClick={() => applyViewportScale(viewport.scale + 0.1)}
         >
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -10120,11 +11191,11 @@ export default function AIWorkspace() {
         createPortal(
           sidebarCollapsed ? (
             <div
-              className="fixed right-4 top-4 isolate flex h-9 w-9 items-center justify-center rounded-xl border border-white/10 bg-[rgba(16,18,22,0.92)] shadow-[0_18px_40px_rgba(0,0,0,0.32)] transition-all duration-300"
+              className="workspace-floating-control fixed right-4 top-4 isolate flex h-9 w-9 items-center justify-center rounded-xl transition-all duration-300"
               style={{ zIndex: CHAT_PANEL_Z }}
             >
               <button 
-                className="p-1 text-zinc-200 transition-colors hover:text-white"
+                className="p-1 transition-colors hover:text-[var(--workspace-text-primary)]"
                 onClick={() => setSidebarCollapsed(false)}
                 title="展开对话"
               >
@@ -10135,40 +11206,40 @@ export default function AIWorkspace() {
             </div>
           ) : (
             <div
-              className="fixed inset-y-4 left-4 right-4 isolate flex w-auto flex-col overflow-hidden rounded-[28px] border border-white/10 bg-[rgba(12,14,18,0.9)] shadow-[0_28px_80px_rgba(0,0,0,0.42)] backdrop-blur-xl transition-all duration-300 sm:left-auto sm:w-[480px]"
+              className="workspace-chat-panel fixed inset-y-4 left-4 right-4 isolate flex w-auto flex-col overflow-hidden rounded-[28px] backdrop-blur-xl transition-all duration-300 sm:left-auto sm:w-[480px]"
               style={{ zIndex: CHAT_PANEL_Z }}
             >
           {/* Header */}
-          <div className="flex flex-shrink-0 items-center justify-between border-b border-[#252b34] px-6 py-4">
+          <div className="workspace-subtle-divider flex flex-shrink-0 items-center justify-between border-b px-6 py-4">
             <div className="flex items-center gap-3">
-              <h1 className="text-base font-medium text-zinc-100">{currentProjectName}</h1>
+              <h1 className="text-base font-medium">{currentProjectName}</h1>
             </div>
             <div className="flex items-center gap-1">
-              <button className="rounded-lg p-2 transition-colors hover:bg-white/8" title="分享">
-                <Share2 size={18} className="text-zinc-500" />
+              <button className="rounded-lg p-2 transition-colors hover:bg-[var(--workspace-control-hover)]" title="分享">
+                <Share2 size={18} className="workspace-text-muted" />
               </button>
               <div className="relative">
                 <button 
-                  className={`rounded-lg p-2 transition-colors ${showHistoryPanel ? 'bg-white/10' : 'hover:bg-white/8'}`} 
+                  className={`rounded-lg p-2 transition-colors ${showHistoryPanel ? 'bg-[var(--workspace-control-active)]' : 'hover:bg-[var(--workspace-control-hover)]'}`} 
                   title="历史"
                   onClick={() => setShowHistoryPanel(!showHistoryPanel)}
                 >
-                  <History size={18} className={showHistoryPanel ? "text-zinc-100" : "text-zinc-500"} />
+                  <History size={18} className={showHistoryPanel ? "workspace-text-primary" : "workspace-text-muted"} />
                 </button>
               </div>
               <button
-                className="rounded-lg p-2 transition-colors hover:bg-white/8"
+                className="rounded-lg p-2 transition-colors hover:bg-[var(--workspace-control-hover)]"
                 title="设置"
                 onClick={openProviderSettingsModal}
               >
-                <Settings size={18} className="text-zinc-500" />
+                <Settings size={18} className="workspace-text-muted" />
               </button>
               <button 
-                className="rounded-lg p-2 transition-colors hover:bg-white/8" 
+                className="rounded-lg p-2 transition-colors hover:bg-[var(--workspace-control-hover)]" 
                 title="收缩"
                 onClick={() => setSidebarCollapsed(true)}
               >
-                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="text-zinc-500">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="workspace-text-muted">
                   <polyline points="9 18 15 12 9 6" />
                 </svg>
               </button>
@@ -10177,11 +11248,11 @@ export default function AIWorkspace() {
 
           {/* History Panel */}
           {showHistoryPanel && (
-            <div className="workspace-divider-dark border-b bg-white/[0.03]">
+            <div className="workspace-subtle-divider border-b bg-[var(--workspace-surface-soft)]">
               <div className="p-3">
                 <button 
                   onClick={(e) => { e.stopPropagation(); createNewTopic(); }}
-                  className="flex w-full items-center justify-center gap-2 rounded-xl border border-white/10 bg-white px-3 py-2 text-black transition-colors hover:bg-zinc-200"
+                  className="flex w-full items-center justify-center gap-2 rounded-xl border border-[var(--workspace-border)] bg-[var(--workspace-inverse-bg)] px-3 py-2 text-[var(--workspace-inverse-fg)] transition-colors hover:opacity-90"
                 >
                   <span className="text-lg">+</span>
                   <span className="text-sm font-medium">新建对话</span>
@@ -10192,13 +11263,13 @@ export default function AIWorkspace() {
                   <div 
                     key={topic.id}
                     onClick={(e) => { e.stopPropagation(); switchTopic(topic.id); }}
-                    className={`group flex cursor-pointer items-center gap-2 px-4 py-3 transition-colors hover:bg-white/6 ${
-                      topic.id === (getCurrentSession()?.activeTopicId) ? 'border-l-2 border-zinc-200 bg-white/8' : ''
+                    className={`workspace-menu-item group flex cursor-pointer items-center gap-2 border-l-2 border-transparent px-4 py-3 ${
+                      topic.id === (getCurrentSession()?.activeTopicId) ? 'is-selected' : ''
                     }`}
                   >
                     <div className="flex-1 min-w-0">
-                      <div className="truncate text-sm font-medium text-zinc-100">{topic.title || '无标题对话'}</div>
-                      <div className="text-xs text-zinc-500">
+                      <div className="truncate text-sm font-medium">{topic.title || '无标题对话'}</div>
+                      <div className="workspace-text-muted text-xs">
                         {topic.messages.length} 条消息 · {new Date(topic.updatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                       </div>
                     </div>
@@ -10228,8 +11299,8 @@ export default function AIWorkspace() {
               {!hideWelcomeByCenterSkillPick && (
                 <div>
                   <div className="text-center mb-8">
-                    <h2 className="mb-2 text-xl font-medium text-zinc-100">你好，我是 Levert Skills</h2>
-                    <p className="text-sm text-zinc-500">描述你的设计需求，我来帮你实现</p>
+                    <h2 className="mb-2 text-xl font-medium">你好，我是 Levert Skills</h2>
+                    <p className="workspace-text-muted text-sm">描述你的设计需求，我来帮你实现</p>
                   </div>
                   <div className="flex justify-center">
                     <div className="flex flex-col gap-1.5">
@@ -10238,9 +11309,9 @@ export default function AIWorkspace() {
                           <button
                             key={action.id}
                             onClick={() => handleQuickSkillSelect(action, 'center_quick_action')}
-                            className="flex items-center gap-1.5 rounded-full border border-white/10 bg-white/5 px-2 py-1.5 text-zinc-300 shadow-[0_12px_24px_rgba(0,0,0,0.18)] transition-colors hover:bg-white/8"
+                            className="workspace-token-chip flex items-center gap-1.5 rounded-full px-2 py-1.5 transition-colors"
                           >
-                            <Sparkles size={10} className="text-zinc-300" />
+                            <Sparkles size={10} />
                             <span className="text-xs font-medium whitespace-nowrap">{action.label}</span>
                           </button>
                         ))}
@@ -10250,9 +11321,9 @@ export default function AIWorkspace() {
                           <button
                             key={action.id}
                             onClick={() => handleQuickSkillSelect(action, 'center_quick_action')}
-                            className="flex items-center gap-1.5 rounded-full border border-white/10 bg-white/5 px-2 py-1.5 text-zinc-300 shadow-[0_12px_24px_rgba(0,0,0,0.18)] transition-colors hover:bg-white/8"
+                            className="workspace-token-chip flex items-center gap-1.5 rounded-full px-2 py-1.5 transition-colors"
                           >
-                            <Sparkles size={10} className="text-zinc-300" />
+                            <Sparkles size={10} />
                             <span className="text-xs font-medium whitespace-nowrap">{action.label}</span>
                           </button>
                         ))}
@@ -10273,9 +11344,9 @@ export default function AIWorkspace() {
                   {msg.role === 'user' ? (
                     <div className="flex flex-col items-end max-w-[90%]">
                       {msg.skill && (
-                        <div className="mb-[10px] flex w-fit items-center gap-0.5 rounded-md border border-[#262b33] bg-[#181c22] px-1 py-0.5 shadow-[0_10px_20px_rgba(0,0,0,0.18)]">
-                          <Sparkles size={8} className="text-zinc-300 flex-shrink-0" />
-                          <span className="text-[10px] font-bold leading-none text-zinc-300">{msg.skill.label}</span>
+                        <div className="workspace-token-chip mb-[10px] flex w-fit items-center gap-0.5 rounded-md px-1 py-0.5">
+                          <Sparkles size={8} className="flex-shrink-0" />
+                          <span className="text-[10px] font-bold leading-none">{msg.skill.label}</span>
                         </div>
                       )}
                       {msg.referenceImages && msg.referenceImages.length > 0 && (
@@ -10289,7 +11360,7 @@ export default function AIWorkspace() {
                                   fill
                                   unoptimized
                                   sizes="64px"
-                                  className="rounded-md border border-[#262b33] object-cover"
+                                  className="rounded-md border border-[var(--workspace-border)] object-cover"
                                 />
                                 <span className="absolute left-0 top-0 px-1 py-0.5 rounded-br-md rounded-tl-md bg-black/75 text-white text-[9px] leading-none">
                                   {`image${index + 1}`}
@@ -10300,16 +11371,16 @@ export default function AIWorkspace() {
                         </div>
                       )}
                       <div
-                        className="panel-scrollbar overflow-y-auto rounded-[22px] border border-[#353b45] bg-[#1a1f26] p-4 text-zinc-100 shadow-[0_18px_40px_rgba(0,0,0,0.22)]"
+                        className="workspace-message-user panel-scrollbar overflow-y-auto rounded-[22px] p-4"
                         style={{ maxHeight: '240px' }}
                       >
                         <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
                       </div>
                     </div>
                   ) : msg.role === 'skill' ? (
-                    <div className="group relative flex max-w-[90%] items-center gap-2 rounded-2xl border border-[#2a3038] bg-[#171b21] p-3 shadow-[0_18px_40px_rgba(0,0,0,0.18)]">
-                      <Sparkles size={14} className="text-zinc-100 flex-shrink-0" />
-                      <span className="text-sm font-medium text-zinc-100">{msg.skill?.label}</span>
+                    <div className="workspace-message-assistant group relative flex max-w-[90%] items-center gap-2 rounded-2xl p-3">
+                      <Sparkles size={14} className="flex-shrink-0" />
+                      <span className="text-sm font-medium">{msg.skill?.label}</span>
                       <button
                         onClick={() => {
                           const nextMessages = chatMessages.filter((m) => m.id !== msg.id);
@@ -10319,13 +11390,13 @@ export default function AIWorkspace() {
                           }
                           setActiveSkillForCurrentTopic(null);
                         }}
-                        className="absolute -right-2 -top-2 flex h-5 w-5 items-center justify-center rounded-full border border-[#2a3038] bg-[#171b21] text-xs text-zinc-100 opacity-0 transition-opacity group-hover:opacity-100 hover:bg-[#212730]"
+                        className="absolute -right-2 -top-2 flex h-5 w-5 items-center justify-center rounded-full border border-[var(--workspace-border)] bg-[var(--workspace-surface-elevated)] text-xs opacity-0 transition-opacity group-hover:opacity-100 hover:bg-[var(--workspace-control-hover)]"
                       >
                         ×
                       </button>
                     </div>
                   ) : (
-                    <div className="group relative max-w-[90%] rounded-[22px] border border-[#2b313a] bg-[#151a20] px-3.5 py-3 shadow-[0_18px_40px_rgba(0,0,0,0.2)]">
+                    <div className="workspace-message-assistant group relative max-w-[90%] rounded-[22px] px-3.5 py-3">
                       {msg.content && !(msg.content === '...' && msg.taskStatus === 'running') && (
                         <button
                           type="button"
@@ -10339,7 +11410,7 @@ export default function AIWorkspace() {
                             e.stopPropagation();
                             void handleCopyAssistantMessage(msg.id, msg.content);
                           }}
-                          className="absolute right-3 top-3 z-[2] inline-flex h-7 items-center gap-1 rounded-lg border border-white/10 bg-[rgba(19,24,31,0.92)] px-2 text-[11px] text-zinc-300 opacity-0 shadow-[0_10px_22px_rgba(0,0,0,0.22)] transition-all duration-200 hover:border-white/15 hover:bg-[rgba(28,33,41,0.96)] hover:text-zinc-100 group-hover:opacity-100"
+                          className="workspace-control-chip absolute right-3 top-3 z-[2] inline-flex h-7 items-center gap-1 rounded-lg px-2 text-[11px] opacity-0 transition-opacity duration-200 group-hover:opacity-100"
                           aria-label="复制正文"
                           title="复制正文"
                         >
@@ -10359,16 +11430,16 @@ export default function AIWorkspace() {
                       {msg.taskStatus && (
                         <div className="mb-1.5">
                           {msg.taskStatus === 'queued' && (
-                            <span className="inline-flex items-center gap-1 rounded-full bg-[#1d2229] px-2 py-0.5 text-[11px] text-zinc-300">排队中</span>
+                            <span className="workspace-status-pill inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px]">排队中</span>
                           )}
                           {msg.taskStatus === 'completed' && !msg.imageUrl && (
-                            <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/12 px-2 py-0.5 text-[11px] text-emerald-300">已完成</span>
+                            <span className="workspace-status-pill inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] text-emerald-700 dark:text-emerald-300">已完成</span>
                           )}
                           {msg.taskStatus === 'failed' && (
-                            <span className="inline-flex items-center gap-1 rounded-full bg-red-500/12 px-2 py-0.5 text-[11px] text-red-300">失败</span>
+                            <span className="workspace-status-pill inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] text-red-700 dark:text-red-300">失败</span>
                           )}
                           {msg.taskStatus === 'cancelled' && (
-                            <span className="inline-flex items-center gap-1 rounded-full bg-[#1d2229] px-2 py-0.5 text-[11px] text-zinc-300">已终止</span>
+                            <span className="workspace-status-pill inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px]">已终止</span>
                           )}
                         </div>
                       )}
@@ -10408,7 +11479,7 @@ export default function AIWorkspace() {
                         <div className="mt-2.5">
                           <button
                             onClick={() => openSkillChoiceModal(msg.skillChoice as SkillChoicePayload)}
-                            className="inline-flex items-center rounded-full border border-[#2a3038] px-3 py-1 text-xs text-zinc-300 hover:bg-[#1f242c]"
+                            className="workspace-control-chip inline-flex items-center rounded-full px-3 py-1 text-xs"
                           >
                             重新选择
                           </button>
@@ -10437,17 +11508,17 @@ export default function AIWorkspace() {
 
           {showSkillChoiceModal && pendingSkillChoice && (
             <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/30 px-4">
-              <div className="w-full max-w-md rounded-[24px] border border-[#2a3038] bg-[#171b21] p-5 shadow-[0_28px_80px_rgba(0,0,0,0.4)]">
-                <div className="mb-1 text-base font-semibold text-zinc-100">{pendingSkillChoice.title}</div>
+              <div className="workspace-popover-panel w-full max-w-md rounded-[24px] p-5">
+                <div className="mb-1 text-base font-semibold">{pendingSkillChoice.title}</div>
                 {pendingSkillChoice.message && (
-                  <p className="mb-4 whitespace-pre-wrap text-sm text-zinc-400">{pendingSkillChoice.message}</p>
+                  <p className="workspace-text-muted mb-4 whitespace-pre-wrap text-sm">{pendingSkillChoice.message}</p>
                 )}
                 <div className="space-y-2">
                   {pendingSkillChoice.options.map((option, index) => (
                     <button
                       key={`${pendingSkillChoice.id}-option-${index}`}
                       onClick={() => handleSubmitSkillChoice(pendingSkillChoice, option)}
-                      className="w-full rounded-xl border border-[#2a3038] px-3 py-2 text-left text-sm text-zinc-200 hover:bg-[#1f242c]"
+                      className="w-full rounded-xl border border-[var(--workspace-border)] px-3 py-2 text-left text-sm hover:bg-[var(--workspace-control-hover)]"
                     >
                       {option.label}
                     </button>
@@ -10456,7 +11527,7 @@ export default function AIWorkspace() {
                 <div className="mt-4 flex justify-end">
                   <button
                     onClick={handleCloseSkillChoiceModal}
-                    className="rounded-lg border border-[#2a3038] px-3 py-1.5 text-xs text-zinc-400 hover:bg-[#1f242c]"
+                    className="rounded-lg border border-[var(--workspace-border)] px-3 py-1.5 text-xs text-[var(--workspace-text-muted)] hover:bg-[var(--workspace-control-hover)]"
                   >
                     稍后再选
                   </button>
@@ -10500,7 +11571,7 @@ export default function AIWorkspace() {
           {/* Input Bar */}
           <div className="p-4 flex-shrink-0">
             <input ref={chatFileInputRef} type="file" accept="image/*" multiple className="hidden" onChange={handleChatImageUpload} />
-            <div className="flex flex-col rounded-[24px] border border-[#303640] bg-[#151a20] shadow-[0_18px_40px_rgba(0,0,0,0.22)]">
+            <div className="workspace-chat-input flex flex-col rounded-[24px]">
               <div
                 className="px-4 py-3"
                 onClick={() => chatInputEditorRef.current?.focus()}
@@ -10515,24 +11586,24 @@ export default function AIWorkspace() {
                     onKeyDown={handleChatEditorKeyDown}
                     onFocus={() => setChatInputFocused(true)}
                     onBlur={() => setChatInputFocused(false)}
-                    className="panel-scrollbar w-full overflow-y-auto bg-transparent text-sm leading-5 text-zinc-100 outline-none whitespace-pre-wrap break-words"
+                    className="panel-scrollbar w-full overflow-y-auto bg-transparent text-sm leading-5 outline-none whitespace-pre-wrap break-words"
                     style={{ minHeight: '24px', maxHeight: '240px', height: `${chatInputHeight}px` }}
                   />
                   {!chatInput.trim() && !activeSkill && !chatInputFocused && (
-                    <span className="pointer-events-none absolute left-0 top-0 text-sm leading-5 text-zinc-500">
+                    <span className="workspace-text-muted pointer-events-none absolute left-0 top-0 text-sm leading-5">
                       请输入你的设计需求
                     </span>
                   )}
                 </div>
               </div>
-              <div className="flex items-center justify-between rounded-b-[24px] border-t border-[#2a3038] px-4 py-2">
+              <div className="workspace-subtle-divider flex items-center justify-between rounded-b-[24px] border-t px-4 py-2">
                 <div className="flex items-center gap-2">
-                  <button className="text-zinc-500 transition-colors hover:text-zinc-100" onClick={() => chatFileInputRef.current?.click()} title="上传参考图">
+                  <button className="workspace-control-chip inline-flex h-7 w-7 items-center justify-center rounded-full" onClick={() => chatFileInputRef.current?.click()} title="上传参考图">
                     <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" /></svg>
                   </button>
                   <div className="relative" ref={skillsMenuRef}>
                     {showSkillsMenu && (
-                      <div className="absolute bottom-full left-0 z-20 mb-2 min-w-[180px] rounded-2xl border border-[#2a3038] bg-[#171b21] p-1 shadow-[0_20px_60px_rgba(0,0,0,0.42)]">
+                      <div className="workspace-menu-panel absolute bottom-full left-0 z-20 mb-2 min-w-[180px] rounded-2xl p-1">
                         {quickActions.map((action) => {
                           const isActive = activeSkill?.id === action.id;
                           return (
@@ -10546,15 +11617,13 @@ export default function AIWorkspace() {
                                   moveCaretToEditorEnd();
                                 }, 0);
                               }}
-                              className={`flex w-full items-center justify-between gap-2 rounded-xl px-3 py-1.5 text-xs transition-colors ${
-                                isActive ? 'bg-[#1f242c] text-zinc-100' : 'text-zinc-300 hover:bg-[#1f242c]'
-                              }`}
+                              className={`workspace-menu-item flex w-full items-center justify-between gap-2 rounded-xl border border-transparent px-3 py-1.5 text-xs ${isActive ? 'is-selected' : ''}`}
                             >
                               <span className="flex items-center gap-1.5">
                                 <Sparkles size={11} />
                                 <span>{action.label}</span>
                               </span>
-                              {isActive && <span className="text-[10px] text-zinc-500">✓</span>}
+                              {isActive && <span className="workspace-text-muted text-[10px]">✓</span>}
                             </button>
                           );
                         })}
@@ -10566,7 +11635,7 @@ export default function AIWorkspace() {
                         setShowSkillsMenu((prev) => !prev);
                       }}
                       disabled={isGenerating}
-                      className="flex items-center gap-1 rounded-full border border-[#2a3038] bg-[#181d24] px-2 py-1 text-xs font-medium text-zinc-300 transition-colors hover:bg-[#212730] disabled:cursor-not-allowed disabled:opacity-50"
+                      className={`workspace-control-chip flex items-center gap-1 rounded-full px-2 py-1 text-xs font-medium ${showSkillsMenu ? 'is-active' : ''}`}
                     >
                       <Sparkles size={12} />
                       <span>Skills</span>
@@ -10574,7 +11643,7 @@ export default function AIWorkspace() {
                   </div>
                   <div className="relative" ref={generationModeMenuRef}>
                     {showGenerationModeMenu && (
-                      <div className="absolute bottom-full left-0 z-20 mb-2 min-w-[80px] rounded-2xl border border-[#2a3038] bg-[#171b21] p-1 shadow-[0_20px_60px_rgba(0,0,0,0.42)]">
+                      <div className="workspace-menu-panel absolute bottom-full left-0 z-20 mb-2 min-w-[80px] rounded-2xl p-1">
                         {[
                           { id: 'auto' as const, label: '默认' },
                           { id: 'image' as const, label: '生图' },
@@ -10589,7 +11658,7 @@ export default function AIWorkspace() {
                                 setShowAspectRatioMenu(false);
                               }
                             }}
-                            className={`w-full rounded-xl px-3 py-1.5 text-left text-xs transition-colors ${generationMode === option.id ? 'bg-[#1f242c] text-zinc-100' : 'text-zinc-300 hover:bg-[#1f242c]'}`}
+                            className={`workspace-menu-item w-full rounded-xl border border-transparent px-3 py-1.5 text-left text-xs ${generationMode === option.id ? 'is-selected' : ''}`}
                           >
                             {option.label}
                           </button>
@@ -10602,7 +11671,7 @@ export default function AIWorkspace() {
                         setShowGenerationModeMenu((prev) => !prev);
                       }}
                       disabled={isGenerating}
-                      className="flex items-center gap-1 rounded-full border border-[#2a3038] bg-[#181d24] px-2 py-1 text-xs font-medium text-zinc-300 transition-colors hover:bg-[#212730] disabled:cursor-not-allowed disabled:opacity-50"
+                      className={`workspace-control-chip flex items-center gap-1 rounded-full px-2 py-1 text-xs font-medium ${showGenerationModeMenu ? 'is-active' : ''}`}
                     >
                       <SlidersHorizontal size={12} />
                       <span>{generationMode === 'auto' ? '默认' : generationMode === 'image' ? '生图' : '对话'}</span>
@@ -10611,7 +11680,7 @@ export default function AIWorkspace() {
                   {generationMode === 'image' && (
                     <div className="relative" ref={aspectRatioMenuRef}>
                       {showAspectRatioMenu && (
-                        <div className="absolute bottom-full left-0 z-20 mb-2 min-w-[180px] rounded-2xl border border-[#2a3038] bg-[#171b21] p-1 shadow-[0_20px_60px_rgba(0,0,0,0.42)]">
+                        <div className="workspace-menu-panel absolute bottom-full left-0 z-20 mb-2 min-w-[180px] rounded-2xl p-1">
                           {ASPECT_RATIOS.map((option) => (
                             <button
                               key={option.id}
@@ -10619,8 +11688,8 @@ export default function AIWorkspace() {
                                 setImageAspectRatio(option.id);
                                 setShowAspectRatioMenu(false);
                               }}
-                              className={`w-full rounded-xl px-3 py-1.5 text-left text-xs transition-colors ${
-                                imageAspectRatio === option.id ? 'bg-[#1f242c] text-zinc-100' : 'text-zinc-300 hover:bg-[#1f242c]'
+                              className={`workspace-menu-item w-full rounded-xl border border-transparent px-3 py-1.5 text-left text-xs ${
+                                imageAspectRatio === option.id ? 'is-selected' : ''
                               }`}
                             >
                               {option.name}
@@ -10634,7 +11703,7 @@ export default function AIWorkspace() {
                           setShowAspectRatioMenu((prev) => !prev);
                         }}
                         disabled={isGenerating}
-                        className="flex items-center gap-1 rounded-full border border-[#2a3038] bg-[#181d24] px-2 py-1 text-xs font-medium text-zinc-300 transition-colors hover:bg-[#212730] disabled:cursor-not-allowed disabled:opacity-50"
+                        className={`workspace-control-chip flex items-center gap-1 rounded-full px-2 py-1 text-xs font-medium ${showAspectRatioMenu ? 'is-active' : ''}`}
                       >
                         <span>
                           {ASPECT_RATIOS.find((item) => item.id === imageAspectRatio)?.name || imageAspectRatio}
@@ -10648,7 +11717,7 @@ export default function AIWorkspace() {
                     onClick={isGenerating ? handleCancelGenerate : () => { void handleGenerate(); }}
                     disabled={!isGenerating && !chatInput.trim()}
                     title={isGenerating ? '终止任务' : '发送'}
-                    className="ml-1 rounded-xl border border-[#2a3038] bg-[#f1f5f9] p-1.5 text-black transition-colors hover:bg-white disabled:cursor-not-allowed disabled:opacity-50"
+                    className="workspace-add-button ml-1 rounded-xl p-1.5 transition-colors disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     {isGenerating ? (
                       <svg className="animate-spin" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">

@@ -1,8 +1,25 @@
-export type ProviderId = 'comfly' | 'gpt-best' | 'custom';
 export type ProviderConfigSource = 'runtime' | 'env';
+export type ProviderProtocol = 'openai' | 'gemini';
+export type ImageRequestMode = 'openai' | 'openai-json';
+
+export interface WorkspaceApiProvider {
+  id: string;
+  name: string;
+  baseUrl: string;
+  protocol: ProviderProtocol;
+  imageRequestMode: ImageRequestMode;
+  imageGenerationEndpoint: string;
+  imageEditEndpoint: string;
+  enabled: boolean;
+  primary: boolean;
+  imageModels: string[];
+  chatModels: string[];
+  apiKey: string;
+  updatedAt: string;
+}
 
 export interface ProviderRuntimeConfig {
-  providerId: ProviderId;
+  providerId: string;
   baseUrl: string;
   apiKey: string;
   updatedAt: string;
@@ -15,12 +32,42 @@ export interface ProviderRuntimeConfigResult {
 }
 
 export interface ProviderRuntimeConfigView {
-  providerId: ProviderId;
+  providerId: string;
   baseUrl: string;
+  apiKey: string;
   hasApiKey: boolean;
   maskedApiKey: string;
   source: ProviderConfigSource;
   updatedAt?: string;
+}
+
+export interface ProviderRegistryResult {
+  providers: WorkspaceApiProvider[];
+  source: ProviderConfigSource;
+  path: string;
+}
+
+export interface ProviderRegistryViewProvider {
+  id: string;
+  name: string;
+  baseUrl: string;
+  protocol: ProviderProtocol;
+  imageRequestMode: ImageRequestMode;
+  imageGenerationEndpoint: string;
+  imageEditEndpoint: string;
+  enabled: boolean;
+  primary: boolean;
+  imageModels: string[];
+  chatModels: string[];
+  apiKey: string;
+  hasApiKey: boolean;
+  maskedApiKey: string;
+  source: ProviderConfigSource;
+  updatedAt?: string;
+}
+
+export interface ProviderRegistryView {
+  providers: ProviderRegistryViewProvider[];
 }
 
 export class ProviderConfigError extends Error {
@@ -34,6 +81,27 @@ export function resolveProviderRequestTargets(baseUrl: string): {
   recraftBaseUrl: string;
 };
 
+export function providerEndpointUrl(provider: WorkspaceApiProvider, key: 'imageGenerationEndpoint' | 'imageEditEndpoint', defaultPath: string): string;
+
+export function getPrimaryProvider(providers: WorkspaceApiProvider[]): WorkspaceApiProvider | null;
+
+export function getProviderById(providers: WorkspaceApiProvider[], providerId?: string): WorkspaceApiProvider | null;
+
+export function readProviderRegistry(options?: {
+  runtimeDir?: string;
+  env?: Record<string, string | undefined>;
+  readFileImpl?: (path: string, encoding: string) => Promise<string>;
+}): Promise<ProviderRegistryResult>;
+
+export function updateProviderRegistry(
+  providersInput: Array<Partial<WorkspaceApiProvider> & { baseUrl: string }>,
+  options?: {
+    runtimeDir?: string;
+    mkdirImpl?: (path: string, options: { recursive: true }) => Promise<unknown>;
+    writeFileImpl?: (path: string, data: string, encoding: string) => Promise<unknown>;
+  }
+): Promise<ProviderRegistryResult>;
+
 export function readProviderConfig(options?: {
   runtimeDir?: string;
   env?: Record<string, string | undefined>;
@@ -42,7 +110,7 @@ export function readProviderConfig(options?: {
 
 export function updateProviderConfig(
   input: {
-    providerId?: ProviderId | string;
+    providerId?: string;
     baseUrl?: string;
     apiKey?: string;
   },
@@ -55,3 +123,5 @@ export function updateProviderConfig(
 ): Promise<ProviderRuntimeConfigResult>;
 
 export function toProviderConfigView(result: ProviderRuntimeConfigResult): ProviderRuntimeConfigView;
+
+export function toProviderRegistryView(result: ProviderRegistryResult): ProviderRegistryView;

@@ -2,19 +2,24 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import os from 'node:os';
 import path from 'node:path';
-import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile, mkdir } from 'node:fs/promises';
 
 import {
+  getPrimaryProvider,
+  getProviderById,
+  providerEndpointUrl,
   readProviderConfig,
+  readProviderRegistry,
   resolveProviderRequestTargets,
   updateProviderConfig,
+  updateProviderRegistry,
 } from './provider-config.mjs';
 
-test('readProviderConfig falls back to env defaults when no runtime config exists', async () => {
-  const runtimeDir = await mkdtemp(path.join(os.tmpdir(), 'provider-config-read-'));
+test('readProviderRegistry falls back to default multi-provider env templates', async () => {
+  const runtimeDir = await mkdtemp(path.join(os.tmpdir(), 'provider-registry-read-'));
 
   try {
-    const result = await readProviderConfig({
+    const result = await readProviderRegistry({
       runtimeDir,
       env: {
         COMFLY_API_URL: 'https://ai.comfly.org/v1',
@@ -23,15 +28,55 @@ test('readProviderConfig falls back to env defaults when no runtime config exist
     });
 
     assert.equal(result.source, 'env');
-    assert.equal(result.config.providerId, 'comfly');
-    assert.equal(result.config.baseUrl, 'https://ai.comfly.org/v1');
-    assert.equal(result.config.apiKey, 'env-test-key');
+    assert.deepEqual(
+      result.providers.map((provider) => provider.id),
+      ['comfly', 'gpt-best', 'custom']
+    );
+    assert.equal(getPrimaryProvider(result.providers).id, 'comfly');
+    assert.equal(getPrimaryProvider(result.providers).apiKey, 'env-test-key');
   } finally {
     await rm(runtimeDir, { recursive: true, force: true });
   }
 });
 
-test('readProviderConfig uses the new Comfly default base url when no env override exists', async () => {
+test('provider registry view exposes settings api keys and masks them with middle stars', async () => {
+  const runtimeDir = await mkdtemp(path.join(os.tmpdir(), 'provider-registry-view-'));
+
+  try {
+    await writeFile(
+      path.join(runtimeDir, 'api-providers.json'),
+      JSON.stringify([
+        {
+          id: 'comfly',
+          name: 'Comfly',
+          baseUrl: 'https://ai.comfly.org/v1',
+          protocol: 'openai',
+          imageRequestMode: 'openai',
+          imageGenerationEndpoint: '',
+          imageEditEndpoint: '',
+          enabled: true,
+          primary: true,
+          imageModels: [],
+          chatModels: [],
+          apiKey: 'sk-test-secret-1234',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        },
+      ]),
+      'utf8'
+    );
+
+    const result = await readProviderRegistry({ runtimeDir, env: {} });
+    const view = (await import('./provider-config.mjs')).toProviderRegistryView(result);
+
+    assert.equal(view.providers[0].apiKey, 'sk-test-secret-1234');
+    assert.equal(view.providers[0].maskedApiKey, 'sk-t***********1234');
+    assert.equal(view.providers[0].maskedApiKey.includes('...'), false);
+  } finally {
+    await rm(runtimeDir, { recursive: true, force: true });
+  }
+});
+
+test('readProviderConfig remains compatible with the primary provider view', async () => {
   const runtimeDir = await mkdtemp(path.join(os.tmpdir(), 'provider-config-default-'));
 
   try {
@@ -49,6 +94,35 @@ test('readProviderConfig uses the new Comfly default base url when no env overri
   }
 });
 
+test('readProviderRegistry migrates legacy provider-config.json into the multi-provider registry view', async () => {
+  const runtimeDir = await mkdtemp(path.join(os.tmpdir(), 'provider-registry-legacy-'));
+
+  try {
+    await mkdir(runtimeDir, { recursive: true });
+    await writeFile(
+      path.join(runtimeDir, 'provider-config.json'),
+      JSON.stringify({
+        providerId: 'custom',
+        baseUrl: 'https://supplier.example.com/v1',
+        apiKey: 'legacy-secret',
+        updatedAt: '2026-01-01T00:00:00.000Z',
+      }),
+      'utf8'
+    );
+
+    const result = await readProviderRegistry({ runtimeDir, env: {} });
+    const primary = getPrimaryProvider(result.providers);
+
+    assert.equal(result.source, 'runtime');
+    assert.equal(primary.id, 'custom');
+    assert.equal(primary.baseUrl, 'https://supplier.example.com/v1');
+    assert.equal(primary.apiKey, 'legacy-secret');
+    assert.equal(primary.updatedAt, '2026-01-01T00:00:00.000Z');
+  } finally {
+    await rm(runtimeDir, { recursive: true, force: true });
+  }
+});
+
 test('resolveProviderRequestTargets keeps OpenAI compatibility and trims /v1 for Gemini and Recraft paths', () => {
   assert.deepEqual(resolveProviderRequestTargets('https://example.com/v1'), {
     baseUrl: 'https://example.com/v1',
@@ -58,16 +132,43 @@ test('resolveProviderRequestTargets keeps OpenAI compatibility and trims /v1 for
   });
 });
 
-test('resolveProviderRequestTargets preserves the new Comfly /v1 base while trimming route-specific roots', () => {
-  assert.deepEqual(resolveProviderRequestTargets('https://ai.comfly.org/v1'), {
-    baseUrl: 'https://ai.comfly.org/v1',
-    openAiBaseUrl: 'https://ai.comfly.org/v1',
-    geminiBaseUrl: 'https://ai.comfly.org',
-    recraftBaseUrl: 'https://ai.comfly.org',
-  });
+test('providerEndpointUrl supports overrides and avoids duplicate version prefixes', () => {
+  const openAiProvider = {
+    id: 'custom',
+    name: 'Custom',
+    baseUrl: 'https://supplier.example.com/v1',
+    protocol: 'openai',
+    imageRequestMode: 'openai',
+    imageGenerationEndpoint: '',
+    imageEditEndpoint: '/v1/images/edits',
+    enabled: true,
+    primary: true,
+    imageModels: [],
+    chatModels: [],
+    apiKey: 'secret',
+    updatedAt: new Date(0).toISOString(),
+  };
+  const geminiProvider = {
+    ...openAiProvider,
+    baseUrl: 'https://generativelanguage.googleapis.com/v1beta',
+    protocol: 'gemini',
+  };
+
+  assert.equal(
+    providerEndpointUrl(openAiProvider, 'imageGenerationEndpoint', '/v1/images/generations'),
+    'https://supplier.example.com/v1/images/generations'
+  );
+  assert.equal(
+    providerEndpointUrl(openAiProvider, 'imageEditEndpoint', '/v1/images/edits'),
+    'https://supplier.example.com/v1/images/edits'
+  );
+  assert.equal(
+    providerEndpointUrl(geminiProvider, 'imageGenerationEndpoint', '/v1beta/models/gemini-2.5-flash-image:generateContent'),
+    'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent'
+  );
 });
 
-test('updateProviderConfig requires apiKey on first save and preserves the previous key on blank updates', async () => {
+test('updateProviderConfig writes api-providers.json and preserves the previous key on blank updates', async () => {
   const runtimeDir = await mkdtemp(path.join(os.tmpdir(), 'provider-config-write-'));
 
   try {
@@ -94,6 +195,7 @@ test('updateProviderConfig requires apiKey on first save and preserves the previ
     );
 
     assert.equal(initial.source, 'runtime');
+    assert.equal(initial.config.providerId, 'custom');
     assert.equal(initial.config.apiKey, 'first-secret');
 
     const updated = await updateProviderConfig(
@@ -109,8 +211,56 @@ test('updateProviderConfig requires apiKey on first save and preserves the previ
     assert.equal(updated.config.baseUrl, 'https://gpt-best.cn');
     assert.equal(updated.config.apiKey, 'first-secret');
 
-    const rawConfig = JSON.parse(await readFile(path.join(runtimeDir, 'provider-config.json'), 'utf8'));
-    assert.equal(rawConfig.apiKey, 'first-secret');
+    const rawProviders = JSON.parse(await readFile(path.join(runtimeDir, 'api-providers.json'), 'utf8'));
+    assert.equal(Array.isArray(rawProviders), true);
+    assert.equal(rawProviders.find((provider) => provider.id === 'gpt-best').apiKey, 'first-secret');
+  } finally {
+    await rm(runtimeDir, { recursive: true, force: true });
+  }
+});
+
+test('updateProviderRegistry normalizes protocol modes, endpoint overrides, model lists, and primary selection', async () => {
+  const runtimeDir = await mkdtemp(path.join(os.tmpdir(), 'provider-registry-write-'));
+
+  try {
+    const result = await updateProviderRegistry(
+      [
+        {
+          id: 'first',
+          name: 'First',
+          baseUrl: 'https://first.example.com/v1',
+          protocol: 'invalid',
+          imageRequestMode: 'openai-json',
+          enabled: true,
+          primary: true,
+          imageModels: ['gpt-image-2', 'gpt-image-2'],
+          chatModels: ['chat-a'],
+          apiKey: 'first-secret',
+        },
+        {
+          id: 'second',
+          name: 'Second',
+          baseUrl: 'https://second.example.com/v1beta',
+          protocol: 'gemini',
+          imageGenerationEndpoint: 'https://override.example.com/images',
+          enabled: true,
+          primary: true,
+          imageModels: ['gemini-2.5-flash-image'],
+          chatModels: ['gemini-3.1-flash-lite-preview-thinking-medium'],
+          apiKey: 'second-secret',
+        },
+      ],
+      { runtimeDir }
+    );
+
+    assert.equal(getPrimaryProvider(result.providers).id, 'second');
+    assert.equal(getProviderById(result.providers, 'first').protocol, 'openai');
+    assert.equal(getProviderById(result.providers, 'first').imageRequestMode, 'openai-json');
+    assert.deepEqual(getProviderById(result.providers, 'first').imageModels, ['gpt-image-2']);
+    assert.equal(
+      getProviderById(result.providers, 'second').imageGenerationEndpoint,
+      'https://override.example.com/images'
+    );
   } finally {
     await rm(runtimeDir, { recursive: true, force: true });
   }

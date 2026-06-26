@@ -67,12 +67,12 @@ export function GalleryView({
 
   if (sessions.length === 0) {
     return (
-      <div className="workspace-gallery-shell min-h-screen flex flex-col items-center justify-center text-zinc-100">
+      <div className="workspace-gallery-shell workspace-text-primary min-h-screen flex flex-col items-center justify-center">
         <div className="workspace-empty-icon mb-4">
-          <Sparkles size={32} className="text-zinc-500" />
+          <Sparkles size={32} className="workspace-text-muted" />
         </div>
-        <h2 className="text-lg font-medium text-zinc-100 mb-2">还没有画布</h2>
-        <p className="text-sm text-zinc-500 mb-6">创建一个新画布开始你的创作之旅</p>
+        <h2 className="workspace-text-primary text-lg font-medium mb-2">还没有画布</h2>
+        <p className="workspace-text-muted text-sm mb-6">创建一个新画布开始你的创作之旅</p>
         <button
           onClick={onCreateNew}
           disabled={isSessionMutationPending}
@@ -86,7 +86,7 @@ export function GalleryView({
   }
 
   return (
-    <div className="workspace-gallery-shell min-h-screen text-zinc-100">
+    <div className="workspace-gallery-shell workspace-text-primary min-h-screen">
       <div className="workspace-gallery-header sticky top-0 z-10">
         <div className="flex w-full items-center justify-start py-4 pl-4 pr-4 sm:pl-[34px] sm:pr-0">
           <div className="flex items-center">
@@ -115,7 +115,7 @@ export function GalleryView({
                   onEnterEditor(session.id);
                 }}
               >
-                <div className="relative aspect-[4/3] overflow-hidden bg-[#0d1015]">
+                <div className="workspace-preview-tile relative aspect-[4/3] overflow-hidden">
                   {previewImage ? (
                     <Image
                       src={previewImage}
@@ -127,7 +127,7 @@ export function GalleryView({
                     />
                   ) : (
                     <div className="flex h-full w-full items-center justify-center">
-                      <Sparkles size={32} className="text-zinc-700" />
+                      <Sparkles size={32} className="workspace-text-soft" />
                     </div>
                   )}
                   <div className="absolute inset-0 bg-black/10 group-hover:bg-black/0 transition-colors" />
@@ -135,7 +135,7 @@ export function GalleryView({
                   <button
                     onClick={(e) => onDeleteSession(session.id, e)}
                     disabled={isSessionMutationPending}
-                    className="workspace-dark-icon-button absolute right-2 top-2 z-20 h-11 w-11 rounded-full text-zinc-400 opacity-100 hover:text-red-400 sm:opacity-0 sm:group-hover:opacity-100"
+                    className="workspace-dark-icon-button workspace-text-muted absolute right-2 top-2 z-20 h-11 w-11 rounded-full opacity-100 hover:text-red-400 sm:opacity-0 sm:group-hover:opacity-100"
                     title="删除画布"
                     aria-label={`删除 ${session.name}`}
                   >
@@ -158,7 +158,7 @@ export function GalleryView({
                         }
                       }}
                       onClick={(e) => e.stopPropagation()}
-                      className="w-full rounded-lg border border-white/10 bg-[rgba(10,12,16,0.92)] px-2 py-1 text-sm text-zinc-100 focus:outline-none focus:border-white/20"
+                      className="w-full rounded-lg border border-[var(--workspace-border)] bg-[var(--workspace-surface-elevated)] px-2 py-1 text-sm text-[var(--workspace-text-primary)] focus:outline-none focus:border-[var(--workspace-border-strong)]"
                     />
                   ) : (
                     <div
@@ -169,7 +169,7 @@ export function GalleryView({
                         onStartEdit(session.id, session.name, e);
                       }}
                     >
-                      <h3 className="truncate font-medium text-zinc-100">{session.name}</h3>
+                      <h3 className="workspace-text-primary truncate font-medium">{session.name}</h3>
                       <button
                         onClick={(e) => onStartEdit(session.id, session.name, e)}
                         disabled={isSessionMutationPending}
@@ -177,13 +177,13 @@ export function GalleryView({
                         title="重命名"
                         aria-label={`重命名 ${session.name}`}
                       >
-                        <Edit3 size={14} className="text-zinc-500" />
+                          <Edit3 size={14} className="workspace-text-muted" />
                       </button>
                     </div>
                   )}
                   <div className="mt-2 flex items-center justify-between">
-                    <span className="text-xs text-zinc-500">{session.items.length} 个元素</span>
-                    <span className="text-xs text-zinc-500">{formatDate(session.updatedAt)}</span>
+                    <span className="workspace-text-muted text-xs">{session.items.length} 个元素</span>
+                    <span className="workspace-text-muted text-xs">{formatDate(session.updatedAt)}</span>
                   </div>
                 </div>
               </div>

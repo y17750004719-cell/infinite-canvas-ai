@@ -13,8 +13,23 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="zh-CN">
+    <html lang="zh-CN" data-workspace-theme="light" suppressHydrationWarning>
       <body className="antialiased">
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `
+              try {
+                var key = 'zo-design-workspace-theme';
+                var theme = window.localStorage.getItem(key) === 'dark' ? 'dark' : 'light';
+                document.documentElement.dataset.workspaceTheme = theme;
+                document.documentElement.classList.toggle('dark', theme === 'dark');
+              } catch (error) {
+                document.documentElement.dataset.workspaceTheme = 'light';
+                document.documentElement.classList.remove('dark');
+              }
+            `,
+          }}
+        />
         <ClientErrorReporter />
         {children}
       </body>

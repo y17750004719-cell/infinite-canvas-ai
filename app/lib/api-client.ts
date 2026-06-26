@@ -5,8 +5,8 @@ import {
   extractGeminiImageOutputs,
   summarizeGeminiImagePayload,
 } from "./gemini-image-response.mjs";
-import { getGeminiImageSizeEnum, getImageModelCapability, resolveImageRequestModel, supportsImageModelImageSizeConfig, supportsImageModelRequestedSize } from "./image-model-capabilities.mjs";
-import { readProviderConfig, resolveProviderRequestTargets } from "./provider-config.mjs";
+import { getGeminiImageSizeEnum, getImageModelCapability, normalizeImageModelCapabilityId, resolveImageRequestModel, getGptImage2SizeValidationError, supportsImageModelImageSizeConfig, supportsImageModelRequestedSize } from "./image-model-capabilities.mjs";
+import { getProviderById, providerEndpointUrl, readProviderRegistry, resolveProviderRequestTargets } from "./provider-config.mjs";
 const LOG_LEVEL = (process.env.LOG_LEVEL || "basic").toLowerCase();
 const LOG_ENABLED = LOG_LEVEL !== "off";
 const LOG_DEBUG = LOG_LEVEL === "debug";
@@ -212,6 +212,7 @@ interface AsyncImageTaskResultResponse {
 export interface UnifiedImageRequest {
   model: string;
   prompt: string;
+  providerId?: string;
   images?: string[];
   mask?: string;
   n?: number;
@@ -310,13 +311,58 @@ function getOpenAiCompatibleImageApiBaseUrl(providerTargets: ReturnType<typeof r
   return providerTargets.openAiBaseUrl;
 }
 
-async function getProviderTransport() {
-  const providerConfig = await readProviderConfig();
-  const providerTargets = resolveProviderRequestTargets(providerConfig.config.baseUrl);
+function bearerAuthorizationHeader(apiKey: string): string {
+  const token = apiKey.replace(/^Bearer\s+/i, "").trim();
+  return token ? `Bearer ${token}` : "";
+}
+
+async function getProviderTransport({
+  providerId,
+  model,
+  purpose = "chat",
+}: {
+  providerId?: string;
+  model?: string;
+  purpose?: "chat" | "image" | "image_task";
+} = {}) {
+  const providerRegistry = await readProviderRegistry();
+  const provider = getProviderById(providerRegistry.providers, providerId);
+  if (!provider) {
+    throw new ImageGenerationError("Please configure a supplier provider in settings or environment");
+  }
+  const providerTargets = resolveProviderRequestTargets(provider.baseUrl);
+  const protocol = provider.protocol === "gemini" || normalizeImageModelKey(model).startsWith("gemini-")
+    ? "gemini"
+    : "openai";
+  const apiKey = provider.apiKey;
+  const headers = protocol === "gemini"
+    ? {
+        Accept: "application/json",
+        "x-goog-api-key": apiKey,
+      }
+    : {
+        Accept: "application/json",
+        Authorization: bearerAuthorizationHeader(apiKey),
+      };
+  const chatBaseUrl = protocol === "gemini"
+    ? providerTargets.geminiBaseUrl
+    : providerTargets.openAiBaseUrl;
+  const imageGenerationUrl = providerEndpointUrl(provider, "imageGenerationEndpoint", "/v1/images/generations");
+  const imageEditUrl = providerEndpointUrl(provider, "imageEditEndpoint", "/v1/images/edits");
+  const taskBaseUrl = getOpenAiCompatibleImageApiBaseUrl(providerTargets);
+
   return {
-    providerConfig,
+    providerRegistry,
+    provider,
     providerTargets,
-    apiKey: providerConfig.config.apiKey,
+    apiKey,
+    protocol,
+    headers,
+    chatBaseUrl,
+    imageGenerationUrl,
+    imageEditUrl,
+    taskBaseUrl,
+    purpose,
   };
 }
 
@@ -329,18 +375,26 @@ function normalizeImageRequestModel(model?: string): string {
   return normalizedModel;
 }
 
+function resolveImageCapabilityModelId(model?: string): string {
+  return normalizeImageModelCapabilityId(model);
+}
+
+function isGptImage2Model(model?: string): boolean {
+  return resolveImageCapabilityModelId(model) === "gpt-image-2";
+}
+
 function isGeminiOfficialImageModel(model?: string): boolean {
-  const normalizedModel = normalizeImageRequestModel(model);
+  const normalizedModel = resolveImageCapabilityModelId(model);
   return normalizedModel.length > 0 && SUPPORTED_GEMINI_OFFICIAL_IMAGE_MODELS.has(normalizedModel);
 }
 
 function isOpenAiCompatibleImageModel(model?: string): boolean {
-  const normalizedModel = normalizeImageRequestModel(model);
+  const normalizedModel = resolveImageCapabilityModelId(model);
   return normalizedModel.length > 0 && SUPPORTED_OPENAI_COMPATIBLE_IMAGE_MODELS.has(normalizedModel);
 }
 
 export function shouldUseExactImageSizeApi(model?: string, size?: string): boolean {
-  const normalizedModel = normalizeImageRequestModel(model);
+  const normalizedModel = resolveImageCapabilityModelId(model);
   const normalizedSize = typeof size === "string" ? size.trim() : "";
   const capability = getImageModelCapability(normalizedModel);
   return (
@@ -354,12 +408,12 @@ export function shouldUseExactImageSizeApi(model?: string, size?: string): boole
 }
 
 function usesGeminiAspectRatioImageModel(model?: string): boolean {
-  const normalizedModel = normalizeImageRequestModel(model);
+  const normalizedModel = resolveImageCapabilityModelId(model);
   return normalizedModel.length > 0 && GEMINI_ASPECT_RATIO_IMAGE_MODELS.has(normalizedModel);
 }
 
 function supportsGeminiImageSizeConfig(model?: string): boolean {
-  const normalizedModel = normalizeImageRequestModel(model);
+  const normalizedModel = resolveImageCapabilityModelId(model);
   return supportsImageModelImageSizeConfig(normalizedModel);
 }
 
@@ -517,14 +571,81 @@ function extractTaskErrorMessage(payload: AsyncImageTaskResultResponse | AsyncIm
   return directError || lastError || payload.message || undefined;
 }
 
+const IMAGE_ENTRY_URL_KEYS = [
+  "url",
+  "image_url",
+  "imageUrl",
+  "file_url",
+  "fileUrl",
+  "output_url",
+  "outputUrl",
+  "result_url",
+  "resultUrl",
+] as const;
+
+const IMAGE_ENTRY_NESTED_KEYS = ["data", "result", "output", "image", "images", "urls"] as const;
+
+function normalizeImageEntryUrl(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (trimmed.startsWith("http://") || trimmed.startsWith("https://") || trimmed.startsWith("data:image/")) {
+    return trimmed;
+  }
+  return null;
+}
+
+function buildBase64ImageDataUrl(base64Value: unknown, mimeTypeValue?: unknown): string | null {
+  const obj = { b64_json: base64Value };
+  const hasBase64Json = typeof obj.b64_json === "string" && obj.b64_json.trim().length > 0;
+  if (!hasBase64Json) return null;
+  const b64Json = typeof obj.b64_json === "string" ? obj.b64_json : "";
+  const normalizedBase64 = b64Json.trim();
+  const normalizedMimeType = typeof mimeTypeValue === "string" && mimeTypeValue.trim()
+    ? mimeTypeValue.trim().toLowerCase()
+    : "image/png";
+
+  if (normalizedMimeType.includes("jpeg") || normalizedMimeType.includes("jpg")) {
+    return `data:image/jpeg;base64,${normalizedBase64}`;
+  }
+  if (normalizedMimeType.includes("webp")) {
+    return `data:image/webp;base64,${normalizedBase64}`;
+  }
+  if (normalizedMimeType.includes("gif")) {
+    return `data:image/gif;base64,${normalizedBase64}`;
+  }
+  return `data:image/png;base64,${normalizedBase64}`;
+}
+
+function summarizePayloadKeys(payload: unknown, depth = 0): unknown {
+  if (depth > 2 || payload == null) return null;
+  if (Array.isArray(payload)) {
+    return payload.slice(0, 5).map((item) => summarizePayloadKeys(item, depth + 1));
+  }
+  if (typeof payload === "object") {
+    return Object.fromEntries(
+      Object.entries(payload as Record<string, unknown>)
+        .slice(0, 12)
+        .map(([key, value]) => {
+          if (value == null) return [key, null];
+          if (Array.isArray(value)) return [key, `array(${value.length})`];
+          if (typeof value === "object") return [key, summarizePayloadKeys(value, depth + 1)];
+          return [key, typeof value];
+        })
+    );
+  }
+  return typeof payload;
+}
+
 function toImageEntries(input: unknown, depth = 0): Array<{ url: string; revised_prompt?: string }> {
   if (depth > 4 || input == null) return [];
 
   if (typeof input === "string") {
-    const trimmed = input.trim();
-    if (trimmed.startsWith("http://") || trimmed.startsWith("https://")) {
-      return [{ url: trimmed }];
+    const normalizedUrl = normalizeImageEntryUrl(input);
+    if (normalizedUrl) {
+      return [{ url: normalizedUrl }];
     }
+    const trimmed = input.trim();
     if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
       try {
         return toImageEntries(JSON.parse(trimmed), depth + 1);
@@ -539,10 +660,13 @@ function toImageEntries(input: unknown, depth = 0): Array<{ url: string; revised
     const direct = input
       .map((item) => {
         if (!item || typeof item !== "object") return null;
-        const obj = item as { url?: unknown; revised_prompt?: unknown };
-        if (typeof obj.url !== "string" || !obj.url) return null;
+        const obj = item as Record<string, unknown>;
+        const directUrl =
+          IMAGE_ENTRY_URL_KEYS.map((key) => normalizeImageEntryUrl(obj[key])).find(Boolean) || null;
+        const b64DataUrl = buildBase64ImageDataUrl(obj.b64_json, obj.mime_type ?? obj.mimeType);
+        if (!directUrl && !b64DataUrl) return null;
         return {
-          url: obj.url,
+          url: directUrl || b64DataUrl!,
           revised_prompt: typeof obj.revised_prompt === "string" ? obj.revised_prompt : undefined,
         };
       })
@@ -559,15 +683,24 @@ function toImageEntries(input: unknown, depth = 0): Array<{ url: string; revised
   if (typeof input === "object") {
     const obj = input as Record<string, unknown>;
 
-    if (typeof obj.url === "string" && obj.url) {
+    const directUrl =
+      IMAGE_ENTRY_URL_KEYS.map((key) => normalizeImageEntryUrl(obj[key])).find(Boolean) || null;
+    if (directUrl) {
       return [{
-        url: obj.url,
+        url: directUrl,
         revised_prompt: typeof obj.revised_prompt === "string" ? obj.revised_prompt : undefined,
       }];
     }
 
-    const keys = ["data", "result", "output", "image", "images"];
-    for (const key of keys) {
+    const b64DataUrl = buildBase64ImageDataUrl(obj.b64_json, obj.mime_type ?? obj.mimeType);
+    if (b64DataUrl) {
+      return [{
+        url: b64DataUrl,
+        revised_prompt: typeof obj.revised_prompt === "string" ? obj.revised_prompt : undefined,
+      }];
+    }
+
+    for (const key of IMAGE_ENTRY_NESTED_KEYS) {
       if (key in obj) {
         const parsed = toImageEntries(obj[key], depth + 1);
         if (parsed.length > 0) return parsed;
@@ -688,12 +821,17 @@ async function referenceToInlineData(
 }
 
 async function generateGeminiOfficialImage(request: UnifiedImageRequest): Promise<GenerationResponse> {
-  const { providerConfig, providerTargets, apiKey } = await getProviderTransport();
+  const { provider, providerTargets, apiKey, headers } = await getProviderTransport({
+    providerId: request.providerId,
+    model: request.model,
+    purpose: "image",
+  });
   if (!apiKey) {
     throw new ImageGenerationError("Please configure a supplier API Key in settings or environment");
   }
 
   const model = normalizeImageRequestModel(request.model);
+  const capabilityModelId = resolveImageCapabilityModelId(model);
   if (!isGeminiOfficialImageModel(model)) {
     throw new ImageGenerationError(`Gemini official image request failed: model "${request.model}" is not supported`, 400);
   }
@@ -736,13 +874,14 @@ async function generateGeminiOfficialImage(request: UnifiedImageRequest): Promis
     mode: "gemini_official_image",
     requestedModel: request.model,
     normalizedModel: model,
+    capabilityModelId,
     resolvedRequestModel: resolvedRequestModel,
     imageSize: supportsGeminiImageSizeConfig(model) ? imageSize : null,
     aspectRatio,
     n: request.n || 1,
     referenceCount: referenceImages.length,
     executionMode: request.executionMode === "async" ? "async" : "sync",
-    providerId: providerConfig.config.providerId,
+    providerId: provider.id,
     apiKeyMasked: maskToken(apiKey),
   });
   debugLog("[SUPPLIER][PREP_PROMPT]", {
@@ -772,7 +911,7 @@ async function generateGeminiOfficialImage(request: UnifiedImageRequest): Promis
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${apiKey}`,
+          ...headers,
         },
         body: JSON.stringify(requestBody),
         signal: controller.signal,
@@ -954,7 +1093,11 @@ async function generateGeminiOfficialImage(request: UnifiedImageRequest): Promis
 }
 
 async function generateOpenAiCompatibleImage(request: UnifiedImageRequest): Promise<GenerationResponse> {
-  const { providerConfig, providerTargets, apiKey } = await getProviderTransport();
+  const { provider, providerTargets, apiKey, imageGenerationUrl, imageEditUrl, taskBaseUrl } = await getProviderTransport({
+    providerId: request.providerId,
+    model: request.model,
+    purpose: "image",
+  });
   if (!apiKey) {
     throw new ImageGenerationError("Please configure a supplier API Key in settings or environment");
   }
@@ -967,19 +1110,35 @@ async function generateOpenAiCompatibleImage(request: UnifiedImageRequest): Prom
   const executionMode = request.executionMode === "async" ? "async" : "sync";
   const prompt = typeof request.prompt === "string" ? request.prompt : "";
   const referenceImages = Array.isArray(request.images) ? request.images.filter(Boolean) : [];
-  const usesImageEditsApi = shouldUseImageEditsApi(model, referenceImages.length);
+  const usesImageEditsApi = provider.imageRequestMode === "openai-json"
+    ? false
+    : shouldUseImageEditsApi(model, referenceImages.length);
   const endpointPath = usesImageEditsApi ? "/images/edits" : "/images/generations";
-  const endpoint = executionMode === "async"
-    ? `${getOpenAiCompatibleImageApiBaseUrl(providerTargets)}${endpointPath}?async=true`
-    : `${getOpenAiCompatibleImageApiBaseUrl(providerTargets)}${endpointPath}`;
+  const baseEndpoint = usesImageEditsApi ? imageEditUrl : imageGenerationUrl;
+  const endpoint = executionMode === "async" ? `${baseEndpoint}?async=true` : baseEndpoint;
   const supportsAspectRatio = getImageModelCapability(model).supportsAspectRatio;
   const aspectRatio = supportsAspectRatio ? (normalizeAspectRatio(request.aspect_ratio) || toAspectRatio(request.size)) : "";
   const imageSize = typeof request.size === "string" && request.size.trim() ? request.size.trim() : null;
   const imageQuality = typeof request.quality === "string" && request.quality.trim() ? request.quality.trim() : null;
+  const shouldSendTopLevelResponseFormat = !usesImageEditsApi && provider.imageRequestMode !== "openai-json";
+  const defaultOpenAiImageResponseFormat = { response_format: "url" };
+  const attempt = 1;
+  const maxAttempts = 1;
   const requestBody: Record<string, unknown> = {
     model,
     prompt,
   };
+
+  if (isGptImage2Model(model) && imageSize) {
+    const gptImage2SizeError = getGptImage2SizeValidationError(imageSize);
+    if (gptImage2SizeError) {
+      throw new ImageGenerationError(`gpt-image-2 尺寸不合法: ${gptImage2SizeError}`, 400, {
+        failureClass: "payload",
+        isRetryable: false,
+        retryAttempt: attempt,
+      });
+    }
+  }
 
   if (imageSize) {
     requestBody.size = imageSize;
@@ -987,10 +1146,19 @@ async function generateOpenAiCompatibleImage(request: UnifiedImageRequest): Prom
   if (imageQuality) {
     requestBody.quality = imageQuality;
   }
+  if (shouldSendTopLevelResponseFormat) {
+    requestBody.response_format = request.response_format || "url";
+  }
   if (supportsAspectRatio && aspectRatio) {
     requestBody.aspect_ratio = aspectRatio;
   }
-  if (!usesImageEditsApi && referenceImages.length > 0) {
+  if (provider.imageRequestMode === "openai-json") {
+    requestBody.extra_body = {
+      ...defaultOpenAiImageResponseFormat,
+      response_format: request.response_format || "url",
+      image: referenceImages,
+    };
+  } else if (!usesImageEditsApi && referenceImages.length > 0) {
     requestBody.image = referenceImages;
   }
 
@@ -1019,18 +1187,16 @@ async function generateOpenAiCompatibleImage(request: UnifiedImageRequest): Prom
 
     requestPayload = formData;
     requestHeaders = {
-      Authorization: `Bearer ${apiKey}`,
+      Authorization: bearerAuthorizationHeader(apiKey),
     };
   } else {
     requestPayload = JSON.stringify(requestBody);
     requestHeaders = {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
+      Authorization: bearerAuthorizationHeader(apiKey),
     };
   }
 
-  const attempt = 1;
-  const maxAttempts = 1;
   let requestStartedAt = Date.now();
 
   try {
@@ -1046,7 +1212,7 @@ async function generateOpenAiCompatibleImage(request: UnifiedImageRequest): Prom
       aspectRatio,
       referenceCount: referenceImages.length,
       usesImageEditsApi,
-      providerId: providerConfig.config.providerId,
+      providerId: provider.id,
       attempt,
       maxAttempts,
     });
@@ -1119,7 +1285,7 @@ async function generateOpenAiCompatibleImage(request: UnifiedImageRequest): Prom
       const taskId = extractTaskId(payload as AsyncImageTaskSubmitResponse);
       return pollOpenAiCompatibleImageTask({
         taskId,
-        providerTargets,
+        taskBaseUrl,
         apiKey,
         signal: request.signal,
         requestModel: request.model,
@@ -1201,7 +1367,7 @@ async function generateOpenAiCompatibleImage(request: UnifiedImageRequest): Prom
 
 async function pollOpenAiCompatibleImageTask({
   taskId,
-  providerTargets,
+  taskBaseUrl,
   apiKey,
   signal,
   requestModel,
@@ -1211,7 +1377,7 @@ async function pollOpenAiCompatibleImageTask({
   referenceCount,
 }: {
   taskId: string;
-  providerTargets: ReturnType<typeof resolveProviderRequestTargets>;
+  taskBaseUrl: string;
   apiKey: string;
   signal?: AbortSignal;
   requestModel: string;
@@ -1220,7 +1386,7 @@ async function pollOpenAiCompatibleImageTask({
   aspectRatio: string;
   referenceCount: number;
 }): Promise<GenerationResponse> {
-  const endpoint = `${getOpenAiCompatibleImageApiBaseUrl(providerTargets)}/images/tasks/${taskId}`;
+  const endpoint = `${taskBaseUrl}/images/tasks/${taskId}`;
   const startAt = Date.now();
   const successStatuses = new Set(["SUCCESS", "SUCCEEDED", "COMPLETED", "DONE", "FINISHED"]);
   const failureStatuses = new Set(["FAILURE", "FAILED", "ERROR", "CANCELLED", "CANCELED", "TIMEOUT", "TIMED_OUT"]);
@@ -1247,7 +1413,7 @@ async function pollOpenAiCompatibleImageTask({
     const response = await fetch(endpoint, {
       method: "GET",
       headers: {
-        Authorization: `Bearer ${apiKey}`,
+        Authorization: bearerAuthorizationHeader(apiKey),
       },
       signal,
     });
@@ -1313,9 +1479,10 @@ async function pollOpenAiCompatibleImageTask({
           imageSize,
           aspectRatio,
           referenceCount,
+          payloadKeys: summarizePayloadKeys(payload),
           ...summarizeImagePayloadCounts(payload),
         });
-        throw new ImageGenerationError("OpenAI compatible image task succeeded but returned no images", 502, {
+        throw new ImageGenerationError("供应商任务成功，但返回体未识别到图片地址", 502, {
           failureClass: "payload",
           isRetryable: false,
           retryAttempt: pollCount,
@@ -1382,6 +1549,7 @@ export async function runImageTask(request: UnifiedImageRequest): Promise<Genera
 
 export interface ChatRequest {
   model: string;
+  providerId?: string;
   messages: Array<{
     role: 'user' | 'assistant' | 'system';
     content:
@@ -1558,7 +1726,11 @@ function extractGeminiTextResponse(payload: GeminiGenerateContentPayload): { con
 export async function chat(
   request: ChatRequest
 ): Promise<ChatResponse> {
-  const { providerConfig, providerTargets, apiKey } = await getProviderTransport();
+  const { provider, providerTargets, apiKey, protocol, headers, chatBaseUrl } = await getProviderTransport({
+    providerId: request.providerId,
+    model: request.model,
+    purpose: "chat",
+  });
   if (!apiKey) {
     throw new ImageGenerationError(
       "Please configure a supplier API Key in settings or environment"
@@ -1566,10 +1738,10 @@ export async function chat(
   }
 
   const model = normalizeImageModelKey(request.model);
-  const isGeminiModel = isGeminiOfficialTextModel(model);
+  const isGeminiModel = protocol === "gemini" || isGeminiOfficialTextModel(model);
   const endpoint = isGeminiModel
     ? `${getGeminiOfficialApiBaseUrl(providerTargets)}/v1beta/models/${model}:generateContent`
-    : `${providerTargets.openAiBaseUrl}/chat/completions`;
+    : `${chatBaseUrl}/chat/completions`;
   const attempt = 1;
   const maxAttempts = 1;
   let requestStartedAt = Date.now();
@@ -1583,7 +1755,7 @@ export async function chat(
       mode: "chat",
       model,
       messageCount: request.messages.length,
-      providerId: providerConfig.config.providerId,
+      providerId: provider.id,
       attempt,
       maxAttempts,
     });
@@ -1596,7 +1768,7 @@ export async function chat(
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
+        ...headers,
       },
       body: JSON.stringify(requestBody),
       signal: request.signal,
@@ -1666,7 +1838,11 @@ export async function chat(
 export async function* chatStream(
   request: ChatStreamRequest
 ): AsyncGenerator<ChatStreamEvent, void, unknown> {
-  const { providerConfig, providerTargets, apiKey } = await getProviderTransport();
+  const { provider, providerTargets, apiKey, protocol, headers, chatBaseUrl } = await getProviderTransport({
+    providerId: request.providerId,
+    model: request.model,
+    purpose: "chat",
+  });
   if (!apiKey) {
     throw new ImageGenerationError(
       "Please configure a supplier API Key in settings or environment"
@@ -1674,10 +1850,10 @@ export async function* chatStream(
   }
 
   const model = normalizeImageModelKey(request.model);
-  const isGeminiModel = isGeminiOfficialTextModel(model);
+  const isGeminiModel = protocol === "gemini" || isGeminiOfficialTextModel(model);
   const endpoint = isGeminiModel
     ? `${getGeminiOfficialApiBaseUrl(providerTargets)}/v1beta/models/${model}:streamGenerateContent?alt=sse`
-    : `${providerTargets.openAiBaseUrl}/chat/completions`;
+    : `${chatBaseUrl}/chat/completions`;
   const attempt = 1;
   const maxAttempts = 1;
   let requestStartedAt = Date.now();
@@ -1692,7 +1868,7 @@ export async function* chatStream(
       mode: "chat_stream",
       model,
       messageCount: request.messages.length,
-      providerId: providerConfig.config.providerId,
+      providerId: provider.id,
       attempt,
       maxAttempts,
     });
@@ -1709,7 +1885,7 @@ export async function* chatStream(
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
+        ...headers,
       },
       body: JSON.stringify(requestBody),
       signal: request.signal,

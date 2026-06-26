@@ -94,6 +94,19 @@ export function normalizeImageCardModelById(values, items) {
   }, {});
 }
 
+export function normalizeImageCardProviderById(values, items) {
+  if (!isRecord(values)) return {};
+
+  const validImageCardIds = getValidImageCardIds(items);
+  return Object.entries(values).reduce((result, [itemId, value]) => {
+    if (!validImageCardIds.has(itemId)) return result;
+    if (typeof value !== 'string' || value.trim().length === 0) return result;
+
+    result[itemId] = value.trim();
+    return result;
+  }, {});
+}
+
 export function normalizeImageCardSizeById(values, items) {
   if (!isRecord(values)) return {};
 
@@ -155,6 +168,7 @@ export function normalizeProjectSession(session) {
     connections: normalizeConnections(session?.connections, normalizedItems),
     textCardPanelDrafts: normalizeTextCardPanelDrafts(session?.textCardPanelDrafts, normalizedItems),
     imageCardPanelDrafts: normalizeImageCardPanelDrafts(session?.imageCardPanelDrafts, normalizedItems),
+    imageCardProviderById: normalizeImageCardProviderById(session?.imageCardProviderById, normalizedItems),
     imageCardModelById: normalizeImageCardModelById(session?.imageCardModelById, normalizedItems),
     imageCardSizeById: normalizeImageCardSizeById(session?.imageCardSizeById, normalizedItems),
     imageCardQualityById: normalizeImageCardQualityById(session?.imageCardQualityById, normalizedItems),
@@ -181,6 +195,9 @@ export function buildPersistedSession(session, patch) {
   const normalizedImageCardModelById = cloneValue(
     normalizeImageCardModelById(nextSession.imageCardModelById, normalizedItems)
   );
+  const normalizedImageCardProviderById = cloneValue(
+    normalizeImageCardProviderById(nextSession.imageCardProviderById, normalizedItems)
+  );
   const normalizedImageCardSizeById = cloneValue(
     normalizeImageCardSizeById(nextSession.imageCardSizeById, normalizedItems)
   );
@@ -203,6 +220,7 @@ export function buildPersistedSession(session, patch) {
     connections: normalizedConnections,
     textCardPanelDrafts: normalizedTextCardPanelDrafts,
     imageCardPanelDrafts: normalizedImageCardPanelDrafts,
+    imageCardProviderById: normalizedImageCardProviderById,
     imageCardModelById: normalizedImageCardModelById,
     imageCardSizeById: normalizedImageCardSizeById,
     imageCardQualityById: normalizedImageCardQualityById,

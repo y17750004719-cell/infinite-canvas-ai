@@ -223,7 +223,7 @@ export default function WorkspaceDetailPage() {
             {session.items.map(item => (
               <div
                 key={item.id}
-                className="workspace-surface-card break-inside-avoid group cursor-pointer overflow-hidden rounded-2xl transition-all hover:shadow-md"
+                className="workspace-surface-card break-inside-avoid group cursor-pointer overflow-hidden rounded-2xl transition-all"
                 onClick={handleEdit}
               >
                 {/* Preview */}
