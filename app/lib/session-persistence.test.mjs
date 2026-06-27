@@ -160,6 +160,42 @@ test('buildPersistedSession keeps valid image card panel state for existing imag
   });
 });
 
+test('buildPersistedSession keeps card generation timing metadata on items', () => {
+  const session = {
+    id: 'session-1',
+    name: 'Canvas',
+    createdAt: 1,
+    updatedAt: 1,
+    items: [
+      {
+        id: 'text-1',
+        type: 'text',
+        textVariant: 'card',
+        lastGenerationDurationMs: 12345,
+        lastGenerationCompletedAt: 23456,
+      },
+      {
+        id: 'image-card-1',
+        type: 'image',
+        imageVariant: 'card',
+        lastGenerationDurationMs: 67890,
+        lastGenerationCompletedAt: 78901,
+      },
+    ],
+    messages: [],
+    viewport: { x: 0, y: 0, scale: 1 },
+  };
+
+  const result = buildPersistedSession(session, {
+    items: session.items,
+  });
+
+  assert.equal(result.items[0].lastGenerationDurationMs, 12345);
+  assert.equal(result.items[0].lastGenerationCompletedAt, 23456);
+  assert.equal(result.items[1].lastGenerationDurationMs, 67890);
+  assert.equal(result.items[1].lastGenerationCompletedAt, 78901);
+});
+
 test('buildPersistedSession preserves manual text card mode on items', () => {
   const session = {
     id: 'session-1',

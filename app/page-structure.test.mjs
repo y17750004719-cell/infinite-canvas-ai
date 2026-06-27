@@ -79,6 +79,46 @@ test('image card content images fill the card content area with object-cover', (
   assert.equal(imageCardContentBlock.includes('object-contain'), false);
 });
 
+test('canvas text and image cards render a compact generation duration badge in the title row', () => {
+  assert.equal(pageSource.includes('const cardGenerationDurationLabel = getGenerationDurationDisplay('), true);
+  assert.equal(pageSource.includes("{cardGenerationDurationLabel && ("), true);
+  assert.equal(pageSource.includes('<Clock3 size={12} strokeWidth={2} />'), true);
+});
+
+test('image card header renders image dimensions to the left of the generation duration chip', () => {
+  const imageCardBlockStart = pageSource.indexOf('{isImageCard && (');
+  const imageCardBlockEnd = pageSource.indexOf('{item.type === \'shape\' &&', imageCardBlockStart);
+  const imageCardContentStart = pageSource.indexOf("{imageCardVisualState === 'content' && item.src && (", imageCardBlockStart);
+  const imageCardContentEnd = pageSource.indexOf('{item.type === \'shape\' &&', imageCardContentStart);
+
+  assert.notEqual(imageCardBlockStart, -1);
+  assert.notEqual(imageCardBlockEnd, -1);
+  assert.ok(imageCardBlockEnd > imageCardBlockStart);
+  assert.notEqual(imageCardContentStart, -1);
+  assert.notEqual(imageCardContentEnd, -1);
+  assert.ok(imageCardContentEnd > imageCardContentStart);
+
+  const imageCardBlock = pageSource.slice(imageCardBlockStart, imageCardBlockEnd);
+  const imageCardContentBlock = pageSource.slice(imageCardContentStart, imageCardContentEnd);
+
+  assert.equal(pageSource.includes('const currentImageDimensionsLabel = isImageCard && currentImageOutput'), true);
+  assert.equal(imageCardBlock.includes('{(currentImageDimensionsLabel || cardGenerationDurationLabel) && ('), true);
+  assert.equal(imageCardBlock.includes('className="inline-flex items-center gap-2"'), true);
+  assert.equal(imageCardBlock.includes('<span>{currentImageDimensionsLabel}</span>'), true);
+  assert.equal(imageCardBlock.includes('<Clock3 size={12} strokeWidth={2} />'), true);
+  assert.equal(imageCardBlock.includes('workspace-control-chip inline-flex h-6 items-center gap-1 rounded-lg px-2 text-[11px]'), true);
+  assert.equal(imageCardContentBlock.includes('absolute right-3 top-3'), false);
+  assert.equal(pageSource.includes('`${currentImageOutput.naturalWidth}×${currentImageOutput.naturalHeight}`'), true);
+});
+
+test('canvas card surfaces and selected outlines use fixed 5px corner radii', () => {
+  assert.equal(pageSource.includes('getScaledNodeCornerRadius('), false);
+  assert.equal(pageSource.includes('const itemCornerRadius = CANVAS_NODE_CORNER_RADIUS;'), true);
+  assert.equal(pageSource.includes('const frameCornerRadius = CANVAS_NODE_CORNER_RADIUS;'), true);
+  assert.equal(pageSource.includes('const selectedOutlineCornerRadius = CANVAS_NODE_CORNER_RADIUS;'), true);
+  assert.equal(pageSource.includes('const CANVAS_NODE_CORNER_RADIUS = 5;'), true);
+});
+
 test('left rail history uses a dedicated generated image history panel state', () => {
   assert.equal(
     pageSource.includes('const [showGeneratedImageHistoryPanel, setShowGeneratedImageHistoryPanel] = useState(false);'),

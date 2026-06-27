@@ -1512,6 +1512,21 @@ export function getCurrentImageCardOutput(item) {
   return null;
 }
 
+export function getGenerationDurationDisplay(durationMs) {
+  if (!Number.isFinite(durationMs) || durationMs < 0) {
+    return null;
+  }
+
+  if (durationMs < 60000) {
+    return `${(durationMs / 1000).toFixed(1)}s`;
+  }
+
+  const totalSeconds = Math.floor(durationMs / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}m ${String(seconds).padStart(2, '0')}s`;
+}
+
 function extractTimestampFromGeneratedId(value) {
   if (typeof value !== 'string' || value.length === 0) {
     return null;

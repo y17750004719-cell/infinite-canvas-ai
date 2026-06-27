@@ -58,6 +58,7 @@ import {
   getGeneratedImageHistoryEntries,
   getDirectImagePreviewsForTextCard,
   getDirectTextInputsForTextCard,
+  getGenerationDurationDisplay,
   getImageToolResultSpawnPosition,
   getImageCardFrameSizeForAspectRatio,
   getImageCardItemSizeForFrameSize,
@@ -65,6 +66,7 @@ import {
   getImageCardQualitySummary,
   getSupportedImageCardSizeOptions,
   getSelectedImageToolbarSource,
+  getCurrentImageCardOutput,
   isEventInsideTextCardPanel,
   extractImageFilesFromClipboardItems,
   getReplacedImageAssetItem,
@@ -177,6 +179,8 @@ interface CanvasItem {
   text?: string;
   textVariant?: 'legacy' | 'card';
   textMode?: 'ai' | 'manual';
+  lastGenerationDurationMs?: number;
+  lastGenerationCompletedAt?: number;
   visible: boolean;
   locked: boolean;
 }
@@ -527,6 +531,7 @@ const SKILL_DEFAULT_PROMPTS: Record<string, string> = {
 
 const SKILL_CHOICE_START = '<<skill_choice>>';
 const SKILL_CHOICE_END = '<</skill_choice>>';
+const CANVAS_NODE_CORNER_RADIUS = 5;
 const NODE_CORNER_RADIUS = 24;
 const CORNER_HANDLE_GAP = 10;
 const CORNER_HANDLE_STROKE = 4;
@@ -1083,6 +1088,10 @@ const getTextCardFrameBounds = (item: CanvasItem) => ({
   height: Math.max(0, item.height - TEXT_CARD_FRAME_TOP - TEXT_CARD_FRAME_BOTTOM),
 });
 
+const getTextCardFrameCornerRadius = (_item: CanvasItem) => CANVAS_NODE_CORNER_RADIUS;
+
+const getItemCornerRadius = (_item: CanvasItem) => CANVAS_NODE_CORNER_RADIUS;
+
 const getCanvasItemsVisualBounds = (items: CanvasItem[]) => {
   if (!Array.isArray(items) || items.length === 0) {
     return null;
@@ -1443,6 +1452,9 @@ const CanvasNodesLayer = memo(function CanvasNodesLayer({
   hoveredCanvasItemId,
   activeCanvasTextGenerationItemIds,
   activeCanvasImageGenerationItemIds,
+  activeCanvasTextGenerations,
+  activeCanvasImageGenerations,
+  generationClockMs,
   editingTextCardId,
   editingTextCardTextareaRef,
   onImageCardOutputSelect,
@@ -1465,6 +1477,9 @@ const CanvasNodesLayer = memo(function CanvasNodesLayer({
   hoveredCanvasItemId: string | null;
   activeCanvasTextGenerationItemIds: Set<string>;
   activeCanvasImageGenerationItemIds: Set<string>;
+  activeCanvasTextGenerations: Record<string, { status: 'running'; startedAt: number }>;
+  activeCanvasImageGenerations: Record<string, { status: 'running'; startedAt: number; total: number; completed: number; failed: number }>;
+  generationClockMs: number;
   editingTextCardId: string | null;
   editingTextCardTextareaRef: React.RefObject<HTMLTextAreaElement | null>;
   onImageCardOutputSelect: (itemId: string, outputIndex: number) => void;
@@ -1527,6 +1542,28 @@ const CanvasNodesLayer = memo(function CanvasNodesLayer({
           : 'idle';
         const imageOutputCount = Array.isArray(item.imageOutputs) ? item.imageOutputs.length : 0;
         const activeImageOutputIndex = Number.isFinite(item.activeImageOutputIndex) ? item.activeImageOutputIndex ?? 0 : 0;
+        const currentImageOutput = isImageCard ? getCurrentImageCardOutput(item) : null;
+        const activeGenerationStartedAt = isTextCard
+          ? activeCanvasTextGenerations[item.id]?.startedAt
+          : isImageCard
+            ? activeCanvasImageGenerations[item.id]?.startedAt
+            : null;
+        const itemCornerRadius = CANVAS_NODE_CORNER_RADIUS;
+        const frameCornerRadius = CANVAS_NODE_CORNER_RADIUS;
+        const selectedOutlineCornerRadius = CANVAS_NODE_CORNER_RADIUS;
+        const cardGenerationDurationLabel = getGenerationDurationDisplay(
+          Number.isFinite(activeGenerationStartedAt)
+            ? Math.max(0, generationClockMs - (activeGenerationStartedAt ?? 0))
+            : item.lastGenerationDurationMs
+        );
+        const currentImageDimensionsLabel = isImageCard && currentImageOutput
+          ? Number.isFinite(currentImageOutput.naturalWidth) &&
+            currentImageOutput.naturalWidth > 0 &&
+            Number.isFinite(currentImageOutput.naturalHeight) &&
+            currentImageOutput.naturalHeight > 0
+              ? `${currentImageOutput.naturalWidth}×${currentImageOutput.naturalHeight}`
+              : null
+          : null;
 
         return (
           <div
@@ -1554,23 +1591,41 @@ const CanvasNodesLayer = memo(function CanvasNodesLayer({
                 unoptimized
                 sizes={`${Math.max(1, Math.round(item.width))}px`}
                 className="h-full w-full object-contain pointer-events-none"
-                style={{ borderRadius: `${NODE_CORNER_RADIUS}px` }}
+                style={{ borderRadius: `${itemCornerRadius}px` }}
                 draggable={false}
               />
             )}
             {isImageCard && (
               <div className="relative h-full w-full">
-                <div className="absolute left-4 top-0 inline-flex items-center gap-1.5 text-sm font-medium text-zinc-500">
-                  <ImageIcon size={14} strokeWidth={2.1} />
-                  <span>Image</span>
+                <div className="absolute inset-x-4 top-0 flex items-center justify-between gap-3 text-sm font-medium text-zinc-500">
+                  <div className="inline-flex min-w-0 items-center gap-1.5">
+                    <ImageIcon size={14} strokeWidth={2.1} />
+                    <span>Image</span>
+                  </div>
+                  {(currentImageDimensionsLabel || cardGenerationDurationLabel) && (
+                    <div className="inline-flex items-center gap-2">
+                      {currentImageDimensionsLabel && (
+                        <div className="workspace-control-chip inline-flex h-6 items-center gap-1 rounded-lg px-2 text-[11px]">
+                          <span>{currentImageDimensionsLabel}</span>
+                        </div>
+                      )}
+                      {cardGenerationDurationLabel && (
+                        <div className="workspace-control-chip inline-flex h-6 items-center gap-1 rounded-lg px-2 text-[11px]">
+                          <Clock3 size={12} strokeWidth={2} />
+                          <span>{cardGenerationDurationLabel}</span>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
                 <div
-                  className="workspace-panel-surface absolute overflow-hidden rounded-[22px]"
+                  className="workspace-panel-surface absolute overflow-hidden"
                   style={{
                     left: `${TEXT_CARD_FRAME_INSET_X}px`,
                     top: `${TEXT_CARD_FRAME_TOP}px`,
                     right: `${TEXT_CARD_FRAME_INSET_X}px`,
                     bottom: `${TEXT_CARD_FRAME_BOTTOM}px`,
+                    borderRadius: `${frameCornerRadius}px`,
                   }}
                 >
                   <div className="flex h-full w-full items-center justify-center">
@@ -1611,54 +1666,56 @@ const CanvasNodesLayer = memo(function CanvasNodesLayer({
                         </span>
                       </div>
                     )}
-                    {imageCardVisualState === 'content' && item.src && (
-                      <div className="relative h-full w-full overflow-hidden bg-black/20">
-                        <Image
-                          src={item.src}
-                          alt=""
-                          fill
-                          unoptimized
-                          sizes={`${Math.max(1, Math.round(item.width - TEXT_CARD_FRAME_INSET_X * 2))}px`}
-                          className="object-cover pointer-events-none"
-                          draggable={false}
-                        />
-                        {imageOutputCount > 1 && (
-                          <div className="absolute inset-x-3 bottom-3 flex items-center justify-between gap-3">
-                            <button
-                              type="button"
-                              onPointerDown={(e) => {
-                                e.stopPropagation();
-                              }}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                onImageCardOutputSelect(item.id, activeImageOutputIndex - 1);
-                              }}
-                              className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-black/55 text-zinc-100 transition-colors hover:bg-black/70"
-                              aria-label="查看上一张"
-                            >
-                              <ArrowLeft size={15} />
-                            </button>
-                            <div className="rounded-full border border-white/10 bg-black/55 px-3 py-1 text-[12px] font-medium text-zinc-100">
-                              {activeImageOutputIndex + 1} / {imageOutputCount}
+                    {imageCardVisualState === 'content' && item.src && (() => {
+                      return (
+                        <div className="relative h-full w-full overflow-hidden bg-black/20">
+                          <Image
+                            src={item.src}
+                            alt=""
+                            fill
+                            unoptimized
+                            sizes={`${Math.max(1, Math.round(item.width - TEXT_CARD_FRAME_INSET_X * 2))}px`}
+                            className="object-cover pointer-events-none"
+                            draggable={false}
+                          />
+                          {imageOutputCount > 1 && (
+                            <div className="absolute inset-x-3 bottom-3 flex items-center justify-between gap-3">
+                              <button
+                                type="button"
+                                onPointerDown={(e) => {
+                                  e.stopPropagation();
+                                }}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  onImageCardOutputSelect(item.id, activeImageOutputIndex - 1);
+                                }}
+                                className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-black/55 text-zinc-100 transition-colors hover:bg-black/70"
+                                aria-label="查看上一张"
+                              >
+                                <ArrowLeft size={15} />
+                              </button>
+                              <div className="rounded-full border border-white/10 bg-black/55 px-3 py-1 text-[12px] font-medium text-zinc-100">
+                                {activeImageOutputIndex + 1} / {imageOutputCount}
+                              </div>
+                              <button
+                                type="button"
+                                onPointerDown={(e) => {
+                                  e.stopPropagation();
+                                }}
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  onImageCardOutputSelect(item.id, activeImageOutputIndex + 1);
+                                }}
+                                className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-black/55 text-zinc-100 transition-colors hover:bg-black/70"
+                                aria-label="查看下一张"
+                              >
+                                <ArrowLeft size={15} className="rotate-180" />
+                              </button>
                             </div>
-                            <button
-                              type="button"
-                              onPointerDown={(e) => {
-                                e.stopPropagation();
-                              }}
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                onImageCardOutputSelect(item.id, activeImageOutputIndex + 1);
-                              }}
-                              className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-black/55 text-zinc-100 transition-colors hover:bg-black/70"
-                              aria-label="查看下一张"
-                            >
-                              <ArrowLeft size={15} className="rotate-180" />
-                            </button>
-                          </div>
-                        )}
-                      </div>
-                    )}
+                          )}
+                        </div>
+                      );
+                    })()}
                   </div>
                 </div>
               </div>
@@ -1669,17 +1726,26 @@ const CanvasNodesLayer = memo(function CanvasNodesLayer({
             )}
             {item.type === 'text' && item.textVariant === 'card' && (
               <div className="relative h-full w-full">
-                <div className="absolute left-4 top-0 inline-flex items-center gap-1.5 text-sm font-medium text-zinc-500">
-                  <Type size={14} strokeWidth={2.1} />
-                  <span>Text</span>
+                <div className="absolute inset-x-4 top-0 flex items-center justify-between gap-3 text-sm font-medium text-zinc-500">
+                  <div className="inline-flex min-w-0 items-center gap-1.5">
+                    <Type size={14} strokeWidth={2.1} />
+                    <span>Text</span>
+                  </div>
+                  {cardGenerationDurationLabel && (
+                    <div className="workspace-control-chip inline-flex h-6 items-center gap-1 rounded-lg px-2 text-[11px]">
+                      <Clock3 size={12} strokeWidth={2} />
+                      <span>{cardGenerationDurationLabel}</span>
+                    </div>
+                  )}
                 </div>
                 <div
-                  className="workspace-panel-surface absolute overflow-hidden rounded-[22px]"
+                  className="workspace-panel-surface absolute overflow-hidden"
                   style={{
                     left: `${TEXT_CARD_FRAME_INSET_X}px`,
                     top: `${TEXT_CARD_FRAME_TOP}px`,
                     right: `${TEXT_CARD_FRAME_INSET_X}px`,
                     bottom: `${TEXT_CARD_FRAME_BOTTOM}px`,
+                    borderRadius: `${frameCornerRadius}px`,
                   }}
                 >
                   <div className="flex h-full w-full items-center justify-center">
@@ -1797,7 +1863,7 @@ const CanvasNodesLayer = memo(function CanvasNodesLayer({
                     top: `${textCardFrameBounds.top - NODE_SELECTED_OUTLINE_WIDTH}px`,
                     width: `${textCardFrameBounds.width + NODE_SELECTED_OUTLINE_WIDTH * 2}px`,
                     height: `${textCardFrameBounds.height + NODE_SELECTED_OUTLINE_WIDTH * 2}px`,
-                    borderRadius: '24px',
+                    borderRadius: `${selectedOutlineCornerRadius}px`,
                     border: `${NODE_SELECTED_OUTLINE_WIDTH}px solid ${NODE_SELECTED_OUTLINE_COLOR}`,
                   }}
                 />
@@ -1806,7 +1872,7 @@ const CanvasNodesLayer = memo(function CanvasNodesLayer({
                   className="absolute z-10 pointer-events-none"
                   style={{
                     inset: `${-NODE_SELECTED_OUTLINE_WIDTH}px`,
-                    borderRadius: `${NODE_CORNER_RADIUS}px`,
+                    borderRadius: `${selectedOutlineCornerRadius}px`,
                     border: `${NODE_SELECTED_OUTLINE_WIDTH}px solid ${NODE_SELECTED_OUTLINE_COLOR}`,
                   }}
                 />
@@ -1913,6 +1979,9 @@ const CanvasViewport = memo(function CanvasViewport({
   selectedImageCardPanelLinkedImagePreviews,
   activeCanvasTextGenerationItemIds,
   activeCanvasImageGenerationItemIds,
+  activeCanvasTextGenerations,
+  activeCanvasImageGenerations,
+  generationClockMs,
   selectedTextPanelModel,
   textPanelModelOptions,
   showTextPanelModelMenu,
@@ -2041,6 +2110,9 @@ const CanvasViewport = memo(function CanvasViewport({
   selectedImageCardPanelLinkedImagePreviews: Array<{ id: string; src: string; label: string; alt?: string }>;
   activeCanvasTextGenerationItemIds: Set<string>;
   activeCanvasImageGenerationItemIds: Set<string>;
+  activeCanvasTextGenerations: Record<string, { status: 'running'; startedAt: number }>;
+  activeCanvasImageGenerations: Record<string, { status: 'running'; startedAt: number; total: number; completed: number; failed: number }>;
+  generationClockMs: number;
   selectedTextPanelModel: { id: string; label: string };
   textPanelModelOptions: Array<{ id: string; label: string }>;
   showTextPanelModelMenu: boolean;
@@ -3256,6 +3328,9 @@ const CanvasViewport = memo(function CanvasViewport({
         hoveredCanvasItemId={hoveredCanvasItemId}
         activeCanvasTextGenerationItemIds={activeCanvasTextGenerationItemIds}
         activeCanvasImageGenerationItemIds={activeCanvasImageGenerationItemIds}
+        activeCanvasTextGenerations={activeCanvasTextGenerations}
+        activeCanvasImageGenerations={activeCanvasImageGenerations}
+        generationClockMs={generationClockMs}
         editingTextCardId={editingTextCardId}
         editingTextCardTextareaRef={editingTextCardTextareaRef}
         onImageCardOutputSelect={onImageCardOutputSelect}
@@ -3803,6 +3878,7 @@ export default function AIWorkspace() {
   const [activeCanvasImageGenerations, setActiveCanvasImageGenerations] = useState<
     Record<string, { status: 'running'; startedAt: number; total: number; completed: number; failed: number }>
   >({});
+  const [generationClockMs, setGenerationClockMs] = useState(() => Date.now());
   const [canvasTextGenerationErrorById, setCanvasTextGenerationErrorById] = useState<Record<string, string>>({});
   const [canvasImageGenerationErrorById, setCanvasImageGenerationErrorById] = useState<Record<string, string>>({});
   const [hasStartedChat, setHasStartedChat] = useState(false);
@@ -4221,6 +4297,23 @@ export default function AIWorkspace() {
     () => new Set(Object.keys(activeCanvasImageGenerations)),
     [activeCanvasImageGenerations]
   );
+  useEffect(() => {
+    if (
+      Object.keys(activeCanvasTextGenerations).length === 0 &&
+      Object.keys(activeCanvasImageGenerations).length === 0
+    ) {
+      return;
+    }
+
+    setGenerationClockMs(Date.now());
+    const timer = window.setInterval(() => {
+      setGenerationClockMs(Date.now());
+    }, 1000);
+
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [activeCanvasTextGenerations, activeCanvasImageGenerations]);
   const isSelectedTextCardGenerating =
     !!selectedTextCardPanelItem && !!activeCanvasTextGenerations[selectedTextCardPanelItem.id];
   const isSelectedImageCardGenerating =
@@ -6968,13 +7061,14 @@ export default function AIWorkspace() {
       });
 
       const generationSessionId = currentSessionIdRef.current;
+      const generationStartedAt = Date.now();
       const controller = new AbortController();
       canvasTextGenerateAbortControllersRef.current.set(itemId, controller);
       setActiveCanvasTextGenerations((prev) => ({
         ...prev,
         [itemId]: {
           status: 'running',
-          startedAt: Date.now(),
+          startedAt: generationStartedAt,
         },
       }));
       setShowTextPanelModelMenu(false);
@@ -7039,6 +7133,8 @@ export default function AIWorkspace() {
                   ...item,
                   text: result.result.content,
                   textMode: 'ai',
+                  lastGenerationDurationMs: Math.max(0, Date.now() - generationStartedAt),
+                  lastGenerationCompletedAt: Date.now(),
                 }
               : item
           )
@@ -7216,13 +7312,14 @@ export default function AIWorkspace() {
       });
 
       const generationSessionId = currentSessionIdRef.current;
+      const generationStartedAt = Date.now();
       const controller = new AbortController();
       canvasImageGenerateAbortControllersRef.current.set(itemId, controller);
       setActiveCanvasImageGenerations((prev) => ({
         ...prev,
         [itemId]: {
           status: 'running',
-          startedAt: Date.now(),
+          startedAt: generationStartedAt,
           total: count > 1 ? count : 1,
           completed: 0,
           failed: 0,
@@ -7408,6 +7505,20 @@ export default function AIWorkspace() {
             result.status === 'fulfilled' && typeof result.value?.failureReason === 'string' && result.value.failureReason.length > 0
         )?.value.failureReason;
         const failedCount = requestFailureCount + validationFailureCount;
+        if (completedCount > 0) {
+          const generationCompletedAt = Date.now();
+          setItems((prev) =>
+            prev.map((item) =>
+              item.id === itemId
+                ? {
+                    ...item,
+                    lastGenerationDurationMs: Math.max(0, generationCompletedAt - generationStartedAt),
+                    lastGenerationCompletedAt: generationCompletedAt,
+                  }
+                : item
+            )
+          );
+        }
 
         if (controller.signal.aborted) {
           throw new DOMException('Aborted', 'AbortError');
@@ -10385,6 +10496,9 @@ export default function AIWorkspace() {
         selectedImageCardPanelLinkedImagePreviews={selectedImageCardPanelLinkedImagePreviews}
         activeCanvasTextGenerationItemIds={activeCanvasTextGenerationItemIds}
         activeCanvasImageGenerationItemIds={activeCanvasImageGenerationItemIds}
+        activeCanvasTextGenerations={activeCanvasTextGenerations}
+        activeCanvasImageGenerations={activeCanvasImageGenerations}
+        generationClockMs={generationClockMs}
         selectedTextPanelModel={selectedTextPanelModel}
         textPanelModelOptions={workspaceTextModelOptions}
         showTextPanelModelMenu={showTextPanelModelMenu}

@@ -33,6 +33,7 @@ import {
   getGeneratedImageHistoryEntries,
   getSupportedImageCardSizeOptions,
   getImageToolResultSpawnPosition,
+  getGenerationDurationDisplay,
   getSelectedImageToolbarSource,
   getTextCardPanelPlaceholder,
   getImageCardQualitySummary,
@@ -2799,6 +2800,13 @@ test('getCurrentImageCardOutput resolves the active output from imageOutputs bef
     }),
     { src: '/second-output.png', naturalWidth: 1024, naturalHeight: 1792 }
   );
+});
+
+test('getGenerationDurationDisplay formats sub-minute and minute-plus durations for card badges', () => {
+  assert.equal(getGenerationDurationDisplay(12345), '12.3s');
+  assert.equal(getGenerationDurationDisplay(68000), '1m 08s');
+  assert.equal(getGenerationDurationDisplay(0), '0.0s');
+  assert.equal(getGenerationDurationDisplay(Number.NaN), null);
 });
 
 test('buildCanvasTextGenerationRequest only uses the current input, direct image previews, and selected model', () => {
