@@ -105,6 +105,45 @@ test('buildPersistedSession keeps valid text card panel drafts for existing text
   });
 });
 
+test('buildPersistedSession keeps valid text card provider and model state for existing text card items', () => {
+  const session = {
+    id: 'session-1',
+    name: 'Canvas',
+    createdAt: 1,
+    updatedAt: 1,
+    items: [
+      { id: 'text-1', type: 'text', textVariant: 'card' },
+      { id: 'text-legacy-1', type: 'text' },
+      { id: 'image-1', type: 'image' },
+    ],
+    messages: [],
+    viewport: { x: 0, y: 0, scale: 1 },
+  };
+
+  const result = buildPersistedSession(session, {
+    items: session.items,
+    textCardProviderById: {
+      'text-1': 'provider-a',
+      'text-legacy-1': 'drop legacy',
+      'image-1': 'drop image',
+      missing: 'drop missing',
+    },
+    textCardModelById: {
+      'text-1': 'chat-a',
+      'text-legacy-1': 'drop legacy',
+      'image-1': 'drop image',
+      missing: 'drop missing',
+    },
+  });
+
+  assert.deepEqual(result.textCardProviderById, {
+    'text-1': 'provider-a',
+  });
+  assert.deepEqual(result.textCardModelById, {
+    'text-1': 'chat-a',
+  });
+});
+
 test('buildPersistedSession keeps valid image card panel state for existing image card items', () => {
   const session = {
     id: 'session-1',

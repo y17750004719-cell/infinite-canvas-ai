@@ -30,6 +30,8 @@ const buildCanvasState = (overrides = {}) => ({
   ],
   connections: [{ id: 'conn-1', fromItemId: 'item-1', toItemId: 'item-1' }],
   textCardPanelDrafts: { 'item-1': 'draft-1' },
+  textCardProviderById: {},
+  textCardModelById: {},
   imageCardPanelDrafts: {},
   imageCardProviderById: {},
   imageCardModelById: {},

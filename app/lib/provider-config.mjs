@@ -257,7 +257,7 @@ function ensureSinglePrimary(providers) {
 }
 
 function createDefaultProvidersFromEnv(env = process.env) {
-  const providers = ['comfly', 'gpt-best', 'custom'].map((providerId) => buildProviderTemplate(providerId));
+  const providers = ['comfly'].map((providerId) => buildProviderTemplate(providerId));
   const comflyBaseUrl = normalizeText(env.COMFLY_API_URL);
   const gptBestBaseUrl = normalizeText(env.GPT_BEST_BASE_URL);
   const inferredPrimaryId = inferProviderId(comflyBaseUrl || gptBestBaseUrl || PROVIDER_PRESET_TEMPLATES.comfly.baseUrl);
@@ -300,9 +300,11 @@ function normalizeLegacyProviderConfig(rawConfig, env = process.env) {
   );
 
   const defaults = createDefaultProvidersFromEnv(env);
-  return ensureSinglePrimary(
-    defaults.map((item) => (item.id === provider.id ? { ...item, ...provider, primary: true } : item))
-  );
+  const matchedDefaults = defaults.map((item) => (item.id === provider.id ? { ...item, ...provider, primary: true } : item));
+  if (matchedDefaults.some((item) => item.id === provider.id)) {
+    return ensureSinglePrimary(matchedDefaults);
+  }
+  return ensureSinglePrimary([...matchedDefaults, provider]);
 }
 
 function normalizeProviderArray(rawProviders) {

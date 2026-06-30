@@ -11,6 +11,12 @@ import {
   resolveImageSizeForAspectRatio,
   resolveSupportedImageSize,
 } from './image-model-capabilities.mjs';
+import {
+  getProviderModelQualityOptions,
+  getProviderModelSizeOptions,
+  normalizeProviderModelAspectRatioForSize,
+  resolveProviderModelRequestedSize,
+} from './image-provider-option-profiles.mjs';
 
 const DEFAULT_VIEWPORT = { x: 0, y: 0, scale: 1 };
 export const CANVAS_TEXT_GENERATION_CONCURRENCY_LIMIT = 5;
@@ -105,19 +111,81 @@ export function resolveWorkspaceImageCardModel(requestedModel, allowedModelIds, 
   return resolveImageCardModel(requestedModel, fallbackModel);
 }
 
-export function getSupportedImageCardSizeOptions(modelId, fallbackModel = getDefaultImageCardModelOption()?.id) {
+export function getSupportedImageCardSizeOptions(
+  modelId,
+  fallbackModel = getDefaultImageCardModelOption()?.id,
+  providerId = '',
+  providerImageOptionProfiles = {}
+) {
   const normalizedModelId = typeof modelId === 'string' && modelId.trim() ? modelId.trim() : fallbackModel;
+  const providerSizeOptions = getProviderModelSizeOptions(providerId, normalizedModelId, providerImageOptionProfiles);
+  if (providerSizeOptions.length > 0) {
+    return providerSizeOptions;
+  }
   return getSupportedImageSizeOptions(normalizedModelId);
 }
 
-export function resolveImageCardSize(modelId, requestedSize, fallbackSize = IMAGE_CARD_SIZE_OPTIONS[0]?.id) {
+export function resolveImageCardSize(
+  modelId,
+  requestedSize,
+  fallbackSize = IMAGE_CARD_SIZE_OPTIONS[0]?.id,
+  providerId = '',
+  providerImageOptionProfiles = {}
+) {
   const normalizedModelId = typeof modelId === 'string' && modelId.trim() ? modelId.trim() : getDefaultImageCardModelOption()?.id;
+  const providerSizeOptions = getSupportedImageCardSizeOptions(
+    normalizedModelId,
+    fallbackSize,
+    providerId,
+    providerImageOptionProfiles
+  );
+  const providerSupportedIds = new Set(providerSizeOptions.map((option) => option.id));
+  const normalizedRequestedSize = typeof requestedSize === 'string' ? requestedSize.trim() : '';
+  if (normalizedRequestedSize && providerSupportedIds.has(normalizedRequestedSize)) {
+    return normalizedRequestedSize;
+  }
+  if (providerSupportedIds.has(fallbackSize)) {
+    return fallbackSize;
+  }
+  if (providerSizeOptions[0]?.id) {
+    return providerSizeOptions[0].id;
+  }
   return resolveSupportedImageSize(normalizedModelId, requestedSize, fallbackSize);
 }
 
-export function resolveImageCardSizeForAspectRatio(modelId, requestedSize, aspectRatio, fallbackSize = IMAGE_CARD_SIZE_OPTIONS[0]?.id) {
-  const resolvedSize = resolveImageCardSize(modelId, requestedSize, fallbackSize);
-  return resolveImageSizeForAspectRatio(modelId, resolvedSize, aspectRatio);
+export function resolveImageCardSizeForAspectRatio(
+  modelId,
+  requestedSize,
+  aspectRatio,
+  fallbackSize = IMAGE_CARD_SIZE_OPTIONS[0]?.id,
+  providerId = '',
+  providerImageOptionProfiles = {}
+) {
+  const resolvedSize = resolveImageCardSize(
+    modelId,
+    requestedSize,
+    fallbackSize,
+    providerId,
+    providerImageOptionProfiles
+  );
+  const normalizedAspectRatio = normalizeProviderModelAspectRatioForSize(
+    providerId,
+    modelId,
+    resolvedSize,
+    aspectRatio,
+    providerImageOptionProfiles
+  );
+  const providerResolvedSize = resolveProviderModelRequestedSize(
+    providerId,
+    modelId,
+    resolvedSize,
+    normalizedAspectRatio,
+    providerImageOptionProfiles
+  );
+  if (providerResolvedSize !== resolvedSize) {
+    return providerResolvedSize;
+  }
+  return resolveImageSizeForAspectRatio(modelId, resolvedSize, normalizedAspectRatio);
 }
 
 export function normalizeImageCardAspectRatio(value, fallbackValue = '1:1') {
@@ -448,22 +516,6 @@ export function finalizeManualTextCardItem(item) {
   };
 }
 
-export function resolveCanvasBackgroundDotGap(
-  scale,
-  {
-    baseGap = CANVAS_BACKGROUND_BASE_DOT_GAP,
-    minimumGap = CANVAS_BACKGROUND_MIN_DOT_GAP,
-  } = {}
-) {
-  const safeScale = Number.isFinite(scale) && scale > 0 ? scale : 1;
-  const safeBaseGap = Number.isFinite(baseGap) && baseGap > 0 ? baseGap : CANVAS_BACKGROUND_BASE_DOT_GAP;
-  const safeMinimumGap = Number.isFinite(minimumGap) && minimumGap > 0
-    ? Math.min(minimumGap, safeBaseGap)
-    : Math.min(CANVAS_BACKGROUND_MIN_DOT_GAP, safeBaseGap);
-
-  return Math.max(safeMinimumGap, safeBaseGap * safeScale);
-}
-
 export function isImageCardItem(item) {
   return !!item && item.type === 'image' && item.imageVariant === 'card';
 }
@@ -584,6 +636,8 @@ export function createCanvasClipboardSnapshot({
   items,
   selectedIds,
   textCardPanelDrafts = {},
+  textCardProviderById = {},
+  textCardModelById = {},
   imageCardPanelDrafts = {},
   imageCardProviderById = {},
   imageCardModelById = {},
@@ -633,6 +687,8 @@ export function createCanvasClipboardSnapshot({
     items: cloneClipboardValue(selectedItems),
     bounds,
     textCardPanelDrafts: pickClipboardStateByIds(textCardPanelDrafts, idMap),
+    textCardProviderById: pickClipboardStateByIds(textCardProviderById, idMap),
+    textCardModelById: pickClipboardStateByIds(textCardModelById, idMap),
     imageCardPanelDrafts: pickClipboardStateByIds(imageCardPanelDrafts, idMap),
     imageCardProviderById: pickClipboardStateByIds(imageCardProviderById, idMap),
     imageCardModelById: pickClipboardStateByIds(imageCardModelById, idMap),
@@ -677,6 +733,8 @@ export function materializeCanvasClipboardPaste({
     items: nextItems,
     selectedIds: nextItems.map((item) => item.id),
     textCardPanelDrafts: pickClipboardStateByIds(clipboard?.textCardPanelDrafts, remappedIds),
+    textCardProviderById: pickClipboardStateByIds(clipboard?.textCardProviderById, remappedIds),
+    textCardModelById: pickClipboardStateByIds(clipboard?.textCardModelById, remappedIds),
     imageCardPanelDrafts: pickClipboardStateByIds(clipboard?.imageCardPanelDrafts, remappedIds),
     imageCardProviderById: pickClipboardStateByIds(clipboard?.imageCardProviderById, remappedIds),
     imageCardModelById: pickClipboardStateByIds(clipboard?.imageCardModelById, remappedIds),
@@ -1290,6 +1348,7 @@ export function buildCanvasImageGenerationRequest({
   allowedModelIds = IMAGE_CARD_MODEL_OPTIONS.map((option) => option.id),
   fallbackModel = getDefaultImageCardModelOption()?.id,
   imageProviderId = '',
+  providerImageOptionProfiles = {},
   size,
   quality = 'auto',
   count,
@@ -1299,7 +1358,14 @@ export function buildCanvasImageGenerationRequest({
   const trimmedInput = typeof input === 'string' ? input.trim() : '';
   const references = buildReferenceImageRequestPayload(linkedImagePreviews);
   const resolvedModel = resolveWorkspaceImageCardModel(modelId, allowedModelIds, fallbackModel);
-  const resolvedSize = resolveImageCardSizeForAspectRatio(resolvedModel, size, aspectRatio);
+  const resolvedSize = resolveImageCardSizeForAspectRatio(
+    resolvedModel,
+    size,
+    aspectRatio,
+    IMAGE_CARD_SIZE_OPTIONS[0]?.id,
+    imageProviderId,
+    providerImageOptionProfiles
+  );
   const supportsAspectRatio = imageModelSupportsAspectRatioRequest(resolvedModel);
 
   const request = {
@@ -1323,8 +1389,11 @@ export function buildCanvasImageGenerationRequest({
     request.n = count;
   }
 
+  const allowedQualityOptions = getProviderModelQualityOptions(imageProviderId, resolvedModel, providerImageOptionProfiles);
   if (typeof quality === 'string' && quality.trim()) {
-    request.quality = quality.trim();
+    if (allowedQualityOptions.length === 0 || allowedQualityOptions.some((option) => option.id === quality.trim())) {
+      request.quality = quality.trim();
+    }
   }
 
   if (supportsAspectRatio && typeof aspectRatio === 'string' && aspectRatio.trim() && aspectRatio !== 'auto') {
@@ -1350,6 +1419,7 @@ export function buildAsyncImageTaskRequests({
   allowedModelIds = IMAGE_CARD_MODEL_OPTIONS.map((option) => option.id),
   fallbackModel = getDefaultImageCardModelOption()?.id,
   imageProviderId = '',
+  providerImageOptionProfiles = {},
   size,
   quality = 'auto',
   count,
@@ -1368,6 +1438,7 @@ export function buildAsyncImageTaskRequests({
       allowedModelIds,
       fallbackModel,
       imageProviderId,
+      providerImageOptionProfiles,
       size,
       quality,
       count: 1,
@@ -1413,29 +1484,18 @@ export async function settleCanvasImageGenerationRequests({
 export function buildCanvasImageGenerationFailureMessage({
   requestedCount,
   completedCount,
-  validationFailureCount = 0,
   requestFailureCount = 0,
 }) {
   const safeRequestedCount = Number.isFinite(requestedCount) && requestedCount > 0 ? Math.floor(requestedCount) : 0;
   const safeCompletedCount = Number.isFinite(completedCount) && completedCount >= 0 ? Math.floor(completedCount) : 0;
-  const safeValidationFailureCount =
-    Number.isFinite(validationFailureCount) && validationFailureCount > 0 ? Math.floor(validationFailureCount) : 0;
   const safeRequestFailureCount =
     Number.isFinite(requestFailureCount) && requestFailureCount > 0 ? Math.floor(requestFailureCount) : 0;
 
-  if (safeValidationFailureCount <= 0 && safeRequestFailureCount <= 0) {
+  if (safeRequestFailureCount <= 0) {
     return null;
   }
 
-  if (safeValidationFailureCount > 0 && safeRequestFailureCount > 0) {
-    return `请求 ${safeRequestedCount} 张，成功 ${safeCompletedCount} 张；${safeValidationFailureCount} 张未达标已丢弃，请手动补生成剩余 ${safeRequestFailureCount} 张`;
-  }
-
-  if (safeRequestFailureCount > 0) {
-    return `请求 ${safeRequestedCount} 张，成功 ${safeCompletedCount} 张；请手动补生成剩余 ${safeRequestFailureCount} 张`;
-  }
-
-  return `请求 ${safeRequestedCount} 张，成功 ${safeCompletedCount} 张，未达标结果已丢弃`;
+  return `请求 ${safeRequestedCount} 张，成功 ${safeCompletedCount} 张；请手动补生成剩余 ${safeRequestFailureCount} 张`;
 }
 
 export function buildImageCardOutputsState(outputs, requestedActiveIndex = 0) {

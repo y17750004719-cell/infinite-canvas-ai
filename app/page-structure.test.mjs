@@ -26,13 +26,10 @@ test('image card floating menus are not rendered inside the pending connection m
   const pendingMenuBlock = pageSource.slice(pendingMenuStart, pendingMenuEnd);
 
   assert.equal(
-    pendingMenuBlock.includes('{showImageCardQualityMenu && selectedImageCardQualityPopoverOffset && ('),
+    pendingMenuBlock.includes('{showImageCardSettingsMenu && selectedImageCardSettingsPopoverOffset && ('),
     false
   );
-  assert.equal(
-    pendingMenuBlock.includes('{showImageCardCountMenu && selectedImageCardCountPopoverOffset && ('),
-    false
-  );
+  assert.equal(pendingMenuBlock.includes('{showImageCardCountMenu && selectedImageCardCountPopoverOffset && ('), false);
 });
 
 test('image card model menu uses a dedicated fixed popover that drops below the panel footer', () => {
@@ -46,14 +43,17 @@ test('image card model menu uses a dedicated fixed popover that drops below the 
   assert.equal(pageSource.includes("placement: 'below-panel',"), true);
 });
 
-test('image card count menu also uses a fixed below-panel dropdown instead of the legacy upward popover', () => {
-  assert.equal(pageSource.includes('const [selectedImageCardCountPopoverOffset, setSelectedImageCardCountPopoverOffset] = useState<{ left: number; top: number } | null>(null);'), true);
-  assert.equal(pageSource.includes('imageCardCountPopoverRef: React.RefObject<HTMLDivElement | null>;'), true);
-  assert.equal(pageSource.includes('{showImageCardCountMenu && selectedImageCardCountPopoverOffset && ('), true);
-  assert.equal(pageSource.includes('ref={imageCardCountPopoverRef}'), true);
-  assert.equal(pageSource.includes('className="workspace-menu-panel pointer-events-auto fixed z-[116] min-w-[124px] overflow-hidden rounded-[18px] p-1.5"'), true);
-  assert.equal(pageSource.includes('top: selectedImageCardPanelViewportOrigin.top + selectedImageCardCountPopoverOffset.top * viewport.scale,'), true);
-  assert.equal(pageSource.includes('top: selectedImageCardPanelViewportOrigin.top + selectedImageCardCountPopoverOffset.top * viewport.scale - 8,'), false);
+test('image card count control uses an inline stepper instead of a floating dropdown menu', () => {
+  assert.equal(pageSource.includes('const IMAGE_CARD_COUNT_MIN = 1;'), true);
+  assert.equal(pageSource.includes('const IMAGE_CARD_COUNT_MAX = 9;'), true);
+  assert.equal(pageSource.includes('const clampImageCardCount = (value: number) => {'), true);
+  assert.equal(pageSource.includes('const [selectedImageCardCountPopoverOffset, setSelectedImageCardCountPopoverOffset] = useState<{ left: number; top: number } | null>(null);'), false);
+  assert.equal(pageSource.includes('imageCardCountPopoverRef: React.RefObject<HTMLDivElement | null>;'), false);
+  assert.equal(pageSource.includes('{showImageCardCountMenu && selectedImageCardCountPopoverOffset && ('), false);
+  assert.equal(pageSource.includes('aria-label="减少张数"'), true);
+  assert.equal(pageSource.includes('aria-label="增加张数"'), true);
+  assert.equal(pageSource.includes('inputMode="numeric"'), true);
+  assert.equal(pageSource.includes('pattern="[0-9]*"'), true);
 });
 
 test('canvas image preview metadata retries local asset loading before falling back to default dimensions', () => {
@@ -117,6 +117,20 @@ test('canvas card surfaces and selected outlines use fixed 5px corner radii', ()
   assert.equal(pageSource.includes('const frameCornerRadius = CANVAS_NODE_CORNER_RADIUS;'), true);
   assert.equal(pageSource.includes('const selectedOutlineCornerRadius = CANVAS_NODE_CORNER_RADIUS;'), true);
   assert.equal(pageSource.includes('const CANVAS_NODE_CORNER_RADIUS = 5;'), true);
+  assert.equal(pageSource.includes('const HANDLE_ARC_RADIUS = NODE_CORNER_RADIUS + CORNER_HANDLE_GAP;'), false);
+  assert.equal(pageSource.includes('const HANDLE_ARC_RADIUS = CANVAS_NODE_CORNER_RADIUS + CORNER_HANDLE_GAP;'), true);
+  assert.equal(pageSource.includes('const NODE_CORNER_RADIUS = 24;'), false);
+  assert.equal(pageSource.includes('A ${HANDLE_ARC_RADIUS} ${HANDLE_ARC_RADIUS}'), false);
+  assert.equal(
+    pageSource.includes(
+      'd={`M ${CORNER_HANDLE_CENTER + HANDLE_ARC_RADIUS} ${CORNER_HANDLE_CENTER} L ${CORNER_HANDLE_CENTER + HANDLE_ARC_RADIUS} ${CORNER_HANDLE_CENTER + HANDLE_ARC_RADIUS} L ${CORNER_HANDLE_CENTER} ${CORNER_HANDLE_CENTER + HANDLE_ARC_RADIUS}`}'
+    ),
+    true
+  );
+  assert.equal(pageSource.includes('right: isTextCard\n                    ?'), false);
+  assert.equal(pageSource.includes('bottom: isTextCard\n                    ?'), false);
+  assert.equal(pageSource.includes('right: isTextCard || isImageCard'), true);
+  assert.equal(pageSource.includes('bottom: isTextCard || isImageCard'), true);
 });
 
 test('left rail history uses a dedicated generated image history panel state', () => {
@@ -210,14 +224,134 @@ test('workspace model menus read provider-saved model lists instead of static co
   assert.equal(pageSource.includes('workspaceImageModelOptions'), true);
   assert.equal(pageSource.includes('workspaceTextModelOptions'), true);
   assert.equal(pageSource.includes('imageCardProviderById'), true);
-  assert.equal(pageSource.includes('selectedTextPanelProviderId'), true);
+  assert.equal(pageSource.includes('textCardProviderById'), true);
+  assert.equal(pageSource.includes('textCardModelById'), true);
   assert.equal(pageSource.includes('providerSettingsProviders.filter((provider) => provider.enabled !== false)'), true);
-  assert.equal(pageSource.includes('imageCardModelOptions={workspaceImageModelOptions}'), true);
-  assert.equal(pageSource.includes('textPanelModelOptions={workspaceTextModelOptions}'), true);
+  assert.equal(pageSource.includes('const selectedImageCardProviderModelOptions = React.useMemo('), true);
+  assert.equal(pageSource.includes('workspaceImageModelOptions.filter((option) => option.providerId === selectedImageCardProviderId)'), true);
+  assert.equal(pageSource.includes('imageCardModelOptions={selectedImageCardProviderModelOptions}'), true);
+  assert.equal(pageSource.includes('imageCardModelOptions={workspaceImageModelOptions}'), false);
+  assert.equal(pageSource.includes('const selectableTextProviders = React.useMemo('), true);
+  assert.equal(pageSource.includes('enabledProviderSettingsProviders.filter((provider) => provider.chatModels.length > 0)'), true);
+  assert.equal(pageSource.includes('const selectedTextCardProviderModelOptions = React.useMemo('), true);
+  assert.equal(pageSource.includes('workspaceTextModelOptions.filter((option) => option.providerId === selectedTextCardProviderId)'), true);
+  assert.equal(pageSource.includes('textPanelModelOptions={selectedTextCardProviderModelOptions}'), true);
+  assert.equal(pageSource.includes('textPanelModelOptions={workspaceTextModelOptions}'), false);
   assert.equal(pageSource.includes('imageProviderId:'), true);
   assert.equal(pageSource.includes('chatProviderId:'), true);
   assert.equal(pageSource.includes('IMAGE_CARD_MODEL_OPTIONS.find((option)'), false);
   assert.equal(pageSource.includes('TEXT_PANEL_MODEL_OPTIONS.find((option)'), false);
+});
+
+test('text card panel has provider picker and switches model to selected provider first chat model', () => {
+  assert.equal(pageSource.includes('selectedTextCardProviderLabel'), true);
+  assert.equal(pageSource.includes('selectableTextProviders={selectableTextProviders}'), true);
+  assert.equal(pageSource.includes('showTextPanelProviderMenu'), true);
+  assert.equal(pageSource.includes('onSelectTextPanelProvider={(providerId) => {'), true);
+  assert.equal(pageSource.includes('const nextModel = findWorkspaceModelOption(workspaceTextModelOptions, \'\', providerId);'), true);
+  assert.equal(pageSource.includes('[selectedTextCardPanelItem.id]: providerId'), true);
+  assert.equal(pageSource.includes('[selectedTextCardPanelItem.id]: nextModel?.id || defaultWorkspaceTextModelOption.id'), true);
+});
+
+test('text card panel uses bottom large provider and model controls with fixed popovers', () => {
+  const textPanelStart = pageSource.indexOf('const portaledSelectedTextCardPanel =');
+  const textPanelEnd = pageSource.indexOf('\n  return (\n', textPanelStart);
+
+  assert.notEqual(textPanelStart, -1);
+  assert.notEqual(textPanelEnd, -1);
+  assert.ok(textPanelEnd > textPanelStart);
+
+  const textPanelBlock = pageSource.slice(textPanelStart, textPanelEnd);
+
+  assert.equal(textPanelBlock.includes('className="workspace-panel-footer flex items-end justify-between gap-4 px-5 py-3"'), true);
+  assert.equal(textPanelBlock.includes('grid min-w-0 flex-1 grid-cols-[minmax(0,1.1fr)_minmax(0,1.2fr)] gap-2'), true);
+  assert.equal(textPanelBlock.includes('workspace-control-chip flex min-h-[52px] w-full items-center justify-between gap-3 rounded-[14px] px-3 py-2 text-left'), true);
+  assert.equal(textPanelBlock.includes('workspace-control-chip inline-flex items-center gap-2 rounded-full px-2.5 py-1.5 text-[13px] font-semibold tracking-[-0.02em]'), false);
+  assert.equal(textPanelBlock.includes('className="workspace-menu-panel absolute bottom-full left-0 mb-2'), false);
+  assert.equal(pageSource.includes('const [selectedTextCardProviderPopoverOffset, setSelectedTextCardProviderPopoverOffset] = useState<{ left: number; top: number } | null>(null);'), true);
+  assert.equal(pageSource.includes('const [selectedTextCardModelPopoverOffset, setSelectedTextCardModelPopoverOffset] = useState<{ left: number; top: number } | null>(null);'), true);
+  assert.equal(pageSource.includes('textPanelProviderPopoverRef = useRef<HTMLDivElement | null>(null);'), true);
+  assert.equal(pageSource.includes('textPanelModelPopoverRef = useRef<HTMLDivElement | null>(null);'), true);
+  assert.equal(pageSource.includes('{showTextPanelProviderMenu && selectedTextCardProviderPopoverOffset && ('), true);
+  assert.equal(pageSource.includes('{showTextPanelModelMenu && selectedTextCardModelPopoverOffset && ('), true);
+  assert.equal(pageSource.includes('left: selectedTextCardPanelViewportOrigin.left + selectedTextCardProviderPopoverOffset.left * viewport.scale,'), true);
+  assert.equal(pageSource.includes('left: selectedTextCardPanelViewportOrigin.left + selectedTextCardModelPopoverOffset.left * viewport.scale,'), true);
+});
+
+test('provider settings sidebar keeps Comfly and adds a create-provider action for user-managed entries', () => {
+  assert.equal(pageSource.includes('增加供应商'), true);
+  assert.equal(pageSource.includes('providerSettingsEditableProviderIds'), true);
+  assert.equal(pageSource.includes('const createProviderSettingsDraftId = (providers: ProviderSettingsItem[]) => {'), true);
+  assert.equal(pageSource.includes('const nextDraftProvider = createProviderSettingsDraftProvider(providerSettingsProviders);'), true);
+  assert.equal(pageSource.includes('setProviderSettingsSelectedProviderId(nextDraftProvider.id);'), true);
+  assert.equal(pageSource.includes('provider.name || provider.id || getProviderSettingsProviderLabel(provider.id)'), true);
+  assert.equal(pageSource.includes("{ id: 'gpt-best', name: 'GPT-Best'"), true);
+  assert.equal(pageSource.includes("{ id: 'custom', name: '自定义'"), true);
+});
+
+test('newly added providers keep an editable ID field while existing providers stay read-only', () => {
+  assert.equal(pageSource.includes('const isSelectedProviderSettingsIdEditable = selectedProviderSettings'), true);
+  assert.equal(pageSource.includes('providerSettingsEditableProviderIds.includes(selectedProviderSettings.id)'), true);
+  assert.equal(pageSource.includes('disabled={!isSelectedProviderSettingsIdEditable}'), true);
+  assert.equal(pageSource.includes("placeholder={isSelectedProviderSettingsIdEditable ? 'provider-id' : ''}"), true);
+  assert.equal(pageSource.includes('setProviderSettingsEditableProviderIds((prev) => prev.map((providerId) => providerId === selectedProviderSettings.id ? nextId : providerId))'), true);
+  assert.equal(pageSource.includes("const nextId = e.target.value.trim().toLowerCase().replace(/\\s+/g, '-');"), true);
+});
+
+test('provider settings sidebar shows a delete action for non-Comfly providers and removes them locally', () => {
+  assert.equal(pageSource.includes('const handleProviderSettingsDeleteProvider = useCallback((providerId: ProviderSettingsProviderId) => {'), true);
+  assert.equal(pageSource.includes("const isDeletable = provider.id !== 'comfly';"), true);
+  assert.equal(pageSource.includes('{isDeletable && ('), true);
+  assert.equal(pageSource.includes('aria-label={`删除供应商 ${provider.name || provider.id}`}' ), true);
+  assert.equal(pageSource.includes("if (providerId === 'comfly') return;"), true);
+  assert.equal(pageSource.includes('setProviderSettingsProviders((prev) => prev.filter((provider) => provider.id !== providerId));'), true);
+  assert.equal(pageSource.includes('setProviderSettingsEditableProviderIds((prev) => prev.filter((id) => id !== providerId));'), true);
+});
+
+test('provider delete fallback resets selected provider state and clears provider picker transient state', () => {
+  const deleteStart = pageSource.indexOf('const handleProviderSettingsDeleteProvider = useCallback((providerId: ProviderSettingsProviderId) => {');
+  const deleteEnd = pageSource.indexOf('  const handleProviderSettingsSave = useCallback(async () => {', deleteStart);
+
+  assert.notEqual(deleteStart, -1);
+  assert.notEqual(deleteEnd, -1);
+  assert.ok(deleteEnd > deleteStart);
+
+  const deleteBlock = pageSource.slice(deleteStart, deleteEnd);
+
+  assert.equal(deleteBlock.includes('setProviderSettingsSelectedProviderId(nextSelectedProvider?.id || \'comfly\');'), true);
+  assert.equal(deleteBlock.includes('setProviderSettingsApiKey(nextSelectedProvider?.apiKey || \'\');'), true);
+  assert.equal(deleteBlock.includes('setProviderSettingsError(null);'), true);
+  assert.equal(deleteBlock.includes('setProviderSettingsTestResult(null);'), true);
+  assert.equal(deleteBlock.includes('setProviderSettingsFetchedModels(null);'), true);
+  assert.equal(deleteBlock.includes('setProviderSettingsModelPickerOpen(false);'), true);
+  assert.equal(deleteBlock.includes('setProviderSettingsModelPickerCategory(\'all\');'), true);
+  assert.equal(deleteBlock.includes('setProviderSettingsModelPickerSearch(\'\');'), true);
+  assert.equal(deleteBlock.includes('setProviderSettingsSelectedFetchedModels({});'), true);
+  assert.equal(deleteBlock.includes('setProviderSettingsFetchedModelCategoryById({});'), true);
+});
+
+test('provider delete rewrites image card provider model and size through existing fallback helpers', () => {
+  const deleteStart = pageSource.indexOf('const handleProviderSettingsDeleteProvider = useCallback((providerId: ProviderSettingsProviderId) => {');
+  const deleteEnd = pageSource.indexOf('  const handleProviderSettingsSave = useCallback(async () => {', deleteStart);
+
+  assert.notEqual(deleteStart, -1);
+  assert.notEqual(deleteEnd, -1);
+  assert.ok(deleteEnd > deleteStart);
+
+  const deleteBlock = pageSource.slice(deleteStart, deleteEnd);
+
+  assert.equal(deleteBlock.includes('const remainingProviders = providerSettingsProviders.filter((provider) => provider.id !== providerId);'), true);
+  assert.equal(deleteBlock.includes('const fallbackImageProviders = remainingProviders.filter((provider) => provider.enabled !== false && provider.imageModels.length > 0);'), true);
+  assert.equal(deleteBlock.includes('const fallbackImageProvider = fallbackImageProviders[0] || null;'), true);
+  assert.equal(deleteBlock.includes('const fallbackModel = fallbackImageProvider'), true);
+  assert.equal(deleteBlock.includes('findWorkspaceModelOption(fallbackWorkspaceImageOptions, \'\', fallbackImageProvider.id)'), true);
+  assert.equal(deleteBlock.includes('const fallbackModelId = resolveWorkspaceImageCardModel('), true);
+  assert.equal(deleteBlock.includes('syncImageCardOptionsForProviderModel('), true);
+  assert.equal(deleteBlock.includes('setImageCardProviderById((prev) => {'), true);
+  assert.equal(deleteBlock.includes('setImageCardModelById((prev) => {'), true);
+  assert.equal(deleteBlock.includes('setImageCardSizeById((prev) => {'), true);
+  assert.equal(deleteBlock.includes('setImageCardAspectRatioById((prev) => {'), true);
+  assert.equal(deleteBlock.includes('setImageCardQualityById((prev) => {'), true);
 });
 
 test('image card submit keeps resolution-tier UI state and lets request builders resolve the final exact size once', () => {
@@ -325,34 +459,49 @@ test('left rail generated image history panel uses a wider layout than the origi
   assert.equal(pageSource.includes('className="min-w-0 flex-1"'), true);
 });
 
-test('image card generation controls render as five independent model ratio resolution quality and count menus', () => {
+test('image card generation controls render model parameter and count menus with a unified parameter popover', () => {
   assert.equal(pageSource.includes('const selectedImageCardSizeOptions = React.useMemo('), true);
-  assert.equal(pageSource.includes('getSupportedImageCardSizeOptions(selectedImageCardPanelModelId)'), true);
-  assert.equal(pageSource.includes('const IMAGE_CARD_QUALITY_OPTIONS = ['), true);
-  assert.equal(pageSource.includes("label: 'Auto'"), true);
-  assert.equal(pageSource.includes("label: 'High'"), true);
-  assert.equal(pageSource.includes("label: 'Medium'"), true);
-  assert.equal(pageSource.includes("label: 'Low'"), true);
-  assert.equal(pageSource.includes('className="grid min-w-0 flex-1 grid-cols-5 gap-2"'), true);
-  assert.equal(pageSource.includes('<span className="workspace-text-muted text-[11px] font-medium">模型</span>'), true);
-  assert.equal(pageSource.includes('<span className="workspace-text-muted text-[11px] font-medium">比例</span>'), true);
-  assert.equal(pageSource.includes('<span className="workspace-text-muted text-[11px] font-medium">清晰度</span>'), true);
-  assert.equal(pageSource.includes('<span className="workspace-text-muted text-[11px] font-medium">质量</span>'), true);
-  assert.equal(pageSource.includes('<span className="workspace-text-muted text-[11px] font-medium">张数</span>'), true);
-  assert.equal(pageSource.includes('{showImageCardAspectRatioMenu && selectedImageCardAspectRatioPopoverOffset && ('), true);
-  assert.equal(pageSource.includes('{showImageCardResolutionMenu && selectedImageCardResolutionPopoverOffset && ('), true);
-  assert.equal(pageSource.includes('{showImageCardQualityMenu && selectedImageCardQualityPopoverOffset && ('), true);
-  assert.equal(pageSource.includes('{showImageCardCountMenu && selectedImageCardCountPopoverOffset && ('), true);
+  assert.equal(pageSource.includes('getSupportedImageCardSizeOptions('), true);
+  assert.equal(pageSource.includes('selectedImageCardProviderId,'), true);
+  assert.equal(pageSource.includes('providerImageOptionProfiles'), true);
+  assert.equal(pageSource.includes('const selectableImageProviders = React.useMemo('), true);
+  assert.equal(pageSource.includes("provider.imageModels.length > 0"), true);
+  assert.equal(pageSource.includes('const IMAGE_CARD_QUALITY_OPTIONS = DEFAULT_IMAGE_CARD_QUALITY_OPTIONS;'), true);
+  assert.equal(pageSource.includes('const selectedImageCardQualityOptions = React.useMemo(() => {'), true);
+  assert.equal(pageSource.includes('getProviderModelQualityOptions('), true);
+  assert.equal(pageSource.includes('const selectedImageCardAspectRatioOptions = React.useMemo('), true);
+  assert.equal(pageSource.includes('const selectedImageCardEnabledAspectRatios = React.useMemo('), true);
+  assert.equal(pageSource.includes('className="grid min-w-0 flex-1 grid-cols-[minmax(0,1.1fr)_minmax(0,1.2fr)_minmax(0,1.6fr)_minmax(0,1fr)] gap-2"'), true);
+  assert.equal(pageSource.includes('<span className="workspace-text-muted text-[11px] font-medium">模型</span>'), false);
+  assert.equal(pageSource.includes('<span className="workspace-text-muted text-[11px] font-medium">参数</span>'), false);
+  assert.equal(pageSource.includes('<span className="workspace-text-muted text-[11px] font-medium">张数</span>'), false);
+  assert.equal(pageSource.includes('{showImageCardProviderMenu && selectedImageCardProviderPopoverOffset && ('), true);
+  assert.equal(pageSource.includes('ref={imageCardProviderMenuRef}'), true);
+  assert.equal(pageSource.includes('ref={imageCardProviderPopoverRef}'), true);
+  assert.equal(pageSource.includes('onToggleImageCardProviderMenu();'), true);
+  assert.equal(pageSource.includes('{imageCardModelOptions.map((option) => {'), true);
+  assert.equal(pageSource.includes('{showImageCardSettingsMenu && selectedImageCardSettingsPopoverOffset && ('), true);
+  assert.equal(pageSource.includes('{showImageCardCountMenu && selectedImageCardCountPopoverOffset && ('), false);
+  assert.equal(pageSource.includes('ref={imageCardSettingsMenuRef}'), true);
+  assert.equal(pageSource.includes('ref={imageCardSettingsPopoverRef}'), true);
+  assert.equal(pageSource.includes('onToggleImageCardSettingsMenu();'), true);
   assert.equal(pageSource.includes('width: 292,'), true);
   assert.equal(pageSource.includes('className="workspace-panel-input inline-flex w-full items-center rounded-[14px] p-1"'), true);
   assert.equal(pageSource.includes('className="grid grid-cols-4 gap-1.5"'), true);
   assert.equal(pageSource.includes("workspace-control-chip flex min-h-[58px] flex-col items-center justify-center gap-1.5 rounded-[14px] px-1.5 py-2 text-center"), true);
   assert.equal(pageSource.includes("isSelected ? 'is-active' : ''"), true);
-  assert.equal(pageSource.includes('1:1 · 2K · Auto'), false);
+  assert.equal(
+    pageSource.includes('{`${getImageCardAspectRatioShortLabel(selectedImageCardPanelAspectRatio)} · ${selectedImageCardSizeOptions.find((item) => item.id === selectedImageCardPanelSize)?.label || selectedImageCardPanelSize} · ${getImageCardQualityLabel(selectedImageCardPanelQuality)}`}'),
+    true
+  );
+  assert.equal(pageSource.includes('value={selectedImageCardCountInput}'), true);
+  assert.equal(pageSource.includes('IMAGE_CARD_COUNT_OPTIONS.find((item) => item.id === selectedImageCardPanelCount)?.label || `X${selectedImageCardPanelCount}`'), false);
   assert.equal(pageSource.includes('const getAspectRatioFromImageSize = (sizeId: string): string =>'), false);
   assert.equal(pageSource.includes('const selectedImageCardResolutionStatus = React.useMemo('), false);
   assert.equal(pageSource.includes('实际尺寸'), false);
   assert.equal(pageSource.includes('selectedImageCardResolutionStatus.warning'), false);
+  assert.equal(pageSource.includes('selectedImageCardAspectRatioOptions.map((aspectRatioId) => {'), true);
+  assert.equal(pageSource.includes('selectedImageCardQualityOptions.map((option) => {'), true);
 });
 
 test('generated image history merges persisted sessions with live session history and archive backfill entries', () => {
@@ -391,6 +540,11 @@ test('image generation materializes the current image-card outputs into history 
 test('image nodes expose a shared toolbar target and render an above-node image toolbar overlay', () => {
   assert.equal(pageSource.includes('const selectedImageToolbarTarget = React.useMemo<'), true);
   assert.equal(pageSource.includes('getSelectedImageToolbarSource({'), true);
+  assert.equal(pageSource.includes('getItemVisualBounds(selectedImageToolbarItem)'), false);
+  assert.equal(pageSource.includes('left: selectedImageToolbarItem.x,'), true);
+  assert.equal(pageSource.includes('y: itemBounds.top - canvasGap,'), true);
+  assert.equal(pageSource.includes('width: selectedImageToolbarItem.width,'), true);
+  assert.equal(pageSource.includes('height: selectedImageToolbarItem.height,'), true);
   assert.equal(pageSource.includes("typeof document !== 'undefined' &&"), true);
   assert.equal(pageSource.includes('data-image-node-toolbar="true"'), true);
   assert.equal(pageSource.includes('抠图'), true);
@@ -431,9 +585,13 @@ test('image toolbar positioning no longer clamps against canvas width and uses a
 });
 
 test('image toolbar scales with the current viewport zoom', () => {
-  assert.equal(pageSource.includes('transform: `translate(-50%, -100%) scale(${viewport.scale})`'), true);
-  assert.equal(pageSource.includes('top: selectedImageToolbarTop - 12 * viewport.scale,'), true);
-  assert.equal(pageSource.includes("transform: 'translate(-50%, calc(-100% - 12px))'"), false);
+  assert.equal(pageSource.includes('top: selectedImageToolbarTop,'), true);
+  assert.equal(pageSource.includes("transform: 'translate(-50%, -100%)'"), true);
+  assert.equal(pageSource.includes('transform: `scale(${viewport.scale})`'), true);
+  assert.equal(pageSource.includes("transformOrigin: 'bottom center'"), true);
+  assert.equal(pageSource.includes('top: selectedImageToolbarTop - 12,'), false);
+  assert.equal(pageSource.includes('canvasGap: 12,'), true);
+  assert.equal(pageSource.includes('transform: `translate(-50%, -100%) scale(${viewport.scale})`'), false);
 });
 
 test('image toolbar keeps its natural width and does not clamp back into the viewport shell', () => {
@@ -475,6 +633,17 @@ test('selected image card panel keeps a fixed 720px canvas width', () => {
   assert.equal(
     pageSource.includes('? Math.max(IMAGE_CARD_GENERATION_PANEL_DEFAULT_WIDTH, selectedImageCardPanelFrameBounds.width)'),
     false
+  );
+});
+
+test('selected text card panel keeps a 720px minimum canvas width so bottom controls stay on one row', () => {
+  assert.equal(
+    pageSource.includes('const TEXT_CARD_GENERATION_PANEL_DEFAULT_WIDTH = 720;'),
+    true
+  );
+  assert.equal(
+    pageSource.includes('? Math.max(TEXT_CARD_GENERATION_PANEL_DEFAULT_WIDTH, selectedTextCardPanelFrameBounds.width)'),
+    true
   );
 });
 
@@ -620,14 +789,40 @@ test('image card aspect ratio selection still routes through resizeImageCardItem
   assert.equal(pageSource.includes('? resizeImageCardItemToAspectRatio(item, normalizedAspectRatio)'), true);
 });
 
-test('image card resolution selection only updates the saved resolution tier and closes the resolution menu', () => {
-  assert.equal(pageSource.includes('const resolvedSizeId = resolveImageCardSize(selectedImageCardPanelModelId, sizeId);'), true);
+test('image card resolution selection re-syncs aspect ratio and quality without closing the grouped menu', () => {
+  const sizeSelectStart = pageSource.indexOf('onSelectImageCardSize={(sizeId) => {');
+  const sizeSelectEnd = pageSource.indexOf('        onSelectImageCardQuality={(qualityId) => {', sizeSelectStart);
+
+  assert.notEqual(sizeSelectStart, -1);
+  assert.notEqual(sizeSelectEnd, -1);
+  assert.ok(sizeSelectEnd > sizeSelectStart);
+
+  const sizeSelectBlock = pageSource.slice(sizeSelectStart, sizeSelectEnd);
+
+  assert.equal(sizeSelectBlock.includes('const syncedOptions = syncImageCardOptionsForProviderModel('), true);
   assert.equal(pageSource.includes('[selectedImageCardPanelItem.id]: resolvedSizeId,'), true);
-  assert.equal(pageSource.includes('const normalizedAspectRatio = getAspectRatioFromImageSize(resolvedSizeId);'), false);
-  assert.equal(pageSource.includes('setShowImageCardResolutionMenu(false);'), true);
+  assert.equal(sizeSelectBlock.includes('setImageCardAspectRatioById((prev) => ({'), true);
+  assert.equal(sizeSelectBlock.includes('setImageCardQualityById((prev) => ({'), true);
+  assert.equal(sizeSelectBlock.includes('setShowImageCardSettingsMenu(false);'), false);
+  assert.equal(pageSource.includes('setShowImageCardResolutionMenu(false);'), false);
 });
 
-test('image card aspect ratio resolution and quality menus close independently on selection and outside clicks', () => {
+test('image card count updates are clamped to the 1 through 9 stepper range', () => {
+  const countSelectStart = pageSource.indexOf('onSelectImageCardCount={(count) => {');
+  const countSelectEnd = pageSource.indexOf('        onSelectImageCardAspectRatio={(aspectRatioId) => {', countSelectStart);
+
+  assert.notEqual(countSelectStart, -1);
+  assert.notEqual(countSelectEnd, -1);
+  assert.ok(countSelectEnd > countSelectStart);
+
+  const countSelectBlock = pageSource.slice(countSelectStart, countSelectEnd);
+
+  assert.equal(countSelectBlock.includes('const nextCount = clampImageCardCount(count);'), true);
+  assert.equal(countSelectBlock.includes('[selectedImageCardPanelItem.id]: nextCount,'), true);
+  assert.equal(countSelectBlock.includes('setShowImageCardCountMenu(false);'), false);
+});
+
+test('image card unified parameter menu stays open for grouped selections and closes on outside click', () => {
   const sizeSelectStart = pageSource.indexOf('onSelectImageCardSize={(sizeId) => {');
   const sizeSelectEnd = pageSource.indexOf('        onSelectImageCardQuality={(qualityId) => {', sizeSelectStart);
   const aspectSelectStart = pageSource.indexOf('onSelectImageCardAspectRatio={(aspectRatioId) => {');
@@ -643,15 +838,52 @@ test('image card aspect ratio resolution and quality menus close independently o
   const sizeSelectBlock = pageSource.slice(sizeSelectStart, sizeSelectEnd);
   const aspectSelectBlock = pageSource.slice(aspectSelectStart, aspectSelectEnd);
 
-  assert.equal(sizeSelectBlock.includes('setShowImageCardResolutionMenu(false);'), true);
-  assert.equal(aspectSelectBlock.includes('setShowImageCardAspectRatioMenu(false);'), true);
-  assert.equal(aspectSelectBlock.includes('setShowImageCardQualityMenu(false);'), false);
-  assert.equal(pageSource.includes('const isInsideImageCardQualityMenu ='), true);
-  assert.equal(pageSource.includes('if (!isInsideImageCardQualityMenu) {\n        setShowImageCardQualityMenu(false);\n      }'), true);
-  assert.equal(pageSource.includes('const isInsideImageCardAspectRatioMenu ='), true);
-  assert.equal(pageSource.includes('if (!isInsideImageCardAspectRatioMenu) {\n        setShowImageCardAspectRatioMenu(false);\n      }'), true);
-  assert.equal(pageSource.includes('const isInsideImageCardResolutionMenu ='), true);
-  assert.equal(pageSource.includes('if (!isInsideImageCardResolutionMenu) {\n        setShowImageCardResolutionMenu(false);\n      }'), true);
+  assert.equal(sizeSelectBlock.includes('setShowImageCardSettingsMenu(false);'), false);
+  assert.equal(aspectSelectBlock.includes('setShowImageCardSettingsMenu(false);'), false);
+  assert.equal(pageSource.includes('const isInsideImageCardSettingsMenu ='), true);
+  assert.equal(pageSource.includes('if (!isInsideImageCardSettingsMenu) {\n        setShowImageCardSettingsMenu(false);\n      }'), true);
+});
+
+test('image card provider menu closes on outside click and stays separate from model and parameter menus', () => {
+  assert.equal(pageSource.includes('const isInsideImageCardProviderMenu ='), true);
+  assert.equal(pageSource.includes('if (!isInsideImageCardProviderMenu) {\n        setShowImageCardProviderMenu(false);\n      }'), true);
+  assert.equal(pageSource.includes('setShowImageCardProviderMenu(false);'), true);
+});
+
+test('image card provider selection updates provider and re-syncs model size aspect ratio and quality through provider rules', () => {
+  const providerSelectStart = pageSource.indexOf('onSelectImageCardProvider={(providerId) => {');
+  const providerSelectEnd = pageSource.indexOf('        onToggleImageCardModelMenu={() => {', providerSelectStart);
+
+  assert.notEqual(providerSelectStart, -1);
+  assert.notEqual(providerSelectEnd, -1);
+  assert.ok(providerSelectEnd > providerSelectStart);
+
+  const providerSelectBlock = pageSource.slice(providerSelectStart, providerSelectEnd);
+
+  assert.equal(providerSelectBlock.includes('const nextProvider = selectableImageProviders.find((provider) => provider.id === providerId);'), true);
+  assert.equal(providerSelectBlock.includes('const nextModel = findWorkspaceModelOption(workspaceImageModelOptions, \'\', providerId);'), true);
+  assert.equal(providerSelectBlock.includes('const resolvedModelId = resolveWorkspaceImageCardModel('), true);
+  assert.equal(providerSelectBlock.includes('const syncedOptions = syncImageCardOptionsForProviderModel('), true);
+  assert.equal(providerSelectBlock.includes('[selectedImageCardPanelItem.id]: providerId,'), true);
+  assert.equal(providerSelectBlock.includes('[selectedImageCardPanelItem.id]: resolvedModelId,'), true);
+  assert.equal(providerSelectBlock.includes('[selectedImageCardPanelItem.id]: resolvedSizeId,'), true);
+  assert.equal(providerSelectBlock.includes('setImageCardAspectRatioById((prev) => ({'), true);
+  assert.equal(providerSelectBlock.includes('setImageCardQualityById((prev) => ({'), true);
+});
+
+test('image card model selection stays scoped to the current provider model list', () => {
+  const modelSelectStart = pageSource.indexOf('onSelectImageCardModel={(modelId) => {');
+  const modelSelectEnd = pageSource.indexOf('        onToggleImageCardSettingsMenu={() => {', modelSelectStart);
+
+  assert.notEqual(modelSelectStart, -1);
+  assert.notEqual(modelSelectEnd, -1);
+  assert.ok(modelSelectEnd > modelSelectStart);
+
+  const modelSelectBlock = pageSource.slice(modelSelectStart, modelSelectEnd);
+
+  assert.equal(modelSelectBlock.includes('const nextModel = findWorkspaceModelOption(selectedImageCardProviderModelOptions, modelId, selectedImageCardProviderId);'), true);
+  assert.equal(modelSelectBlock.includes('selectedImageCardProviderModelOptions.map((option) => option.id)'), true);
+  assert.equal(modelSelectBlock.includes('findWorkspaceModelOption(workspaceImageModelOptions, modelId, selectedImageCardProviderId);'), false);
 });
 
 test('image card generation always uses async task requests instead of keeping a single-image sync branch', () => {
@@ -662,7 +894,7 @@ test('image card generation always uses async task requests instead of keeping a
   assert.equal(pageSource.includes('settleCanvasImageGenerationRequests({'), true);
 });
 
-test('image card generation validates actual output resolution before appending image outputs', () => {
+test('image card generation no longer treats accepted outputs as validation failures', () => {
   const generateStart = pageSource.indexOf('const handleCanvasImageGenerate = useCallback(');
   const generateEnd = pageSource.indexOf('const handleCancelCanvasImageGenerate = useCallback(', generateStart);
 
@@ -675,7 +907,12 @@ test('image card generation validates actual output resolution before appending 
   assert.equal(generateBlock.includes('getImageCardResolutionStatus({'), false);
   assert.equal(generateBlock.includes('acceptedOutputs: outputMetas'), true);
   assert.equal(generateBlock.includes('appendImageCardOutput({'), true);
+  assert.equal(generateBlock.includes('const validationFailureCount ='), false);
+  assert.equal(generateBlock.includes('const firstValidationFailureReason ='), false);
+  assert.equal(generateBlock.includes('failedCount = requestFailureCount + validationFailureCount'), false);
   assert.equal(generateBlock.includes('warningCount: 0'), true);
+  assert.equal(generateBlock.includes('未达标已丢弃'), false);
+  assert.equal(generateBlock.includes('返回图未达到'), false);
 });
 
 test('image card generation uses the shared failure message helper for partial success states', () => {
@@ -687,6 +924,7 @@ test('image card generation uses the shared failure message helper for partial s
     pageSource.includes('[itemId]: failureMessage,'),
     true
   );
+  assert.equal(pageSource.includes('validationFailureCount,'), false);
 });
 
 test('image card panel shows a validation hint when references exist without any text prompt', () => {

@@ -18,6 +18,14 @@ const normalizeSnapshot = (snapshot) => ({
     snapshot?.textCardPanelDrafts && typeof snapshot.textCardPanelDrafts === 'object'
       ? cloneValue(snapshot.textCardPanelDrafts)
       : {},
+  textCardProviderById:
+    snapshot?.textCardProviderById && typeof snapshot.textCardProviderById === 'object'
+      ? cloneValue(snapshot.textCardProviderById)
+      : {},
+  textCardModelById:
+    snapshot?.textCardModelById && typeof snapshot.textCardModelById === 'object'
+      ? cloneValue(snapshot.textCardModelById)
+      : {},
   imageCardPanelDrafts:
     snapshot?.imageCardPanelDrafts && typeof snapshot.imageCardPanelDrafts === 'object'
       ? cloneValue(snapshot.imageCardPanelDrafts)

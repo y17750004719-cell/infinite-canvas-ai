@@ -24,6 +24,8 @@ export function createEmptySession({
     items: [],
     connections: [],
     textCardPanelDrafts: {},
+    textCardProviderById: {},
+    textCardModelById: {},
     imageCardPanelDrafts: {},
     imageCardProviderById: {},
     imageCardModelById: {},

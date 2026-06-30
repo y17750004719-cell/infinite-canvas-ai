@@ -5,6 +5,12 @@ import { buildGeneratedImageHistorySortKey } from './generated-image-history.mjs
 import * as workspaceSessionView from './workspace-session-view.mjs';
 import { createEmptySession } from './session-crud.mjs';
 import {
+  buildProviderImageOptionProfiles,
+  getEnabledProviderModelAspectRatios,
+  getProviderModelAspectRatios,
+  getProviderModelQualityOptions,
+} from './image-provider-option-profiles.mjs';
+import {
   CANVAS_TEXT_GENERATION_CONCURRENCY_LIMIT,
   canItemAcceptIncomingConnection,
   canSubmitImageCardPanel,
@@ -65,7 +71,6 @@ import {
   getReplacedImageAssetItem,
   resolveCanvasImagePasteTarget,
   reorderIncomingImageConnections,
-  resolveCanvasBackgroundDotGap,
   settleCanvasImageGenerationRequests,
   shouldHandleCanvasImagePaste,
   shouldPreventScrollableRegionWheelDefault,
@@ -923,6 +928,14 @@ test('createCanvasClipboardSnapshot keeps selected items in canvas order and cop
       'text-card-1': '给我一句简短品牌口号',
       'other-text': 'ignore',
     },
+    textCardProviderById: {
+      'text-card-1': 'comfly',
+      'other-text': 'ignore',
+    },
+    textCardModelById: {
+      'text-card-1': 'gemini-3.5-flash',
+      'other-text': 'ignore',
+    },
     imageCardPanelDrafts: {
       'image-card-1': '做一张主视觉海报',
       'other-image': 'ignore',
@@ -1002,6 +1015,12 @@ test('createCanvasClipboardSnapshot keeps selected items in canvas order and cop
     textCardPanelDrafts: {
       'text-card-1': '给我一句简短品牌口号',
     },
+    textCardProviderById: {
+      'text-card-1': 'comfly',
+    },
+    textCardModelById: {
+      'text-card-1': 'gemini-3.5-flash',
+    },
     imageCardPanelDrafts: {
       'image-card-1': '做一张主视觉海报',
     },
@@ -1079,6 +1098,12 @@ test('materializeCanvasClipboardPaste remaps ids, offsets items, and carries car
       textCardPanelDrafts: {
         'text-card-1': '给我一句简短品牌口号',
       },
+      textCardProviderById: {
+        'text-card-1': 'comfly',
+      },
+      textCardModelById: {
+        'text-card-1': 'gemini-3.5-flash',
+      },
       imageCardPanelDrafts: {
         'image-card-1': '做一张主视觉海报',
       },
@@ -1149,6 +1174,12 @@ test('materializeCanvasClipboardPaste remaps ids, offsets items, and carries car
     selectedIds: ['copy-1-text-card-1', 'copy-2-image-card-1'],
     textCardPanelDrafts: {
       'copy-1-text-card-1': '给我一句简短品牌口号',
+    },
+    textCardProviderById: {
+      'copy-1-text-card-1': 'comfly',
+    },
+    textCardModelById: {
+      'copy-1-text-card-1': 'gemini-3.5-flash',
     },
     imageCardPanelDrafts: {
       'copy-2-image-card-1': '做一张主视觉海报',
@@ -2140,11 +2171,6 @@ test('resolveCanvasImageTaskExecutionMode keeps all checked request shapes in pa
   );
 });
 
-test('resolveCanvasBackgroundDotGap keeps a minimum gap when zooming out the canvas', () => {
-  assert.equal(resolveCanvasBackgroundDotGap(1), 20);
-  assert.equal(resolveCanvasBackgroundDotGap(0.7), 14);
-  assert.equal(resolveCanvasBackgroundDotGap(0.35), 14);
-});
 
 test('settleCanvasImageGenerationRequests runs serial tasks one at a time and preserves later successes after failures', async () => {
   let releaseFirstTask;
@@ -2182,33 +2208,30 @@ test('buildCanvasImageGenerationFailureMessage asks for manual backfill when req
   const result = buildCanvasImageGenerationFailureMessage({
     requestedCount: 2,
     completedCount: 1,
-    validationFailureCount: 0,
     requestFailureCount: 1,
   });
 
   assert.equal(result, '请求 2 张，成功 1 张；请手动补生成剩余 1 张');
 });
 
-test('buildCanvasImageGenerationFailureMessage keeps validation-specific wording when outputs are discarded', () => {
+test('buildCanvasImageGenerationFailureMessage returns null when outputs exist and there are no request failures', () => {
   const result = buildCanvasImageGenerationFailureMessage({
     requestedCount: 2,
     completedCount: 1,
-    validationFailureCount: 1,
     requestFailureCount: 0,
   });
 
-  assert.equal(result, '请求 2 张，成功 1 张，未达标结果已丢弃');
+  assert.equal(result, null);
 });
 
-test('buildCanvasImageGenerationFailureMessage explains both discarded and missing outputs when both happen', () => {
+test('buildCanvasImageGenerationFailureMessage ignores legacy validation failure inputs and only reports request failures', () => {
   const result = buildCanvasImageGenerationFailureMessage({
     requestedCount: 3,
     completedCount: 1,
-    validationFailureCount: 1,
     requestFailureCount: 1,
   });
 
-  assert.equal(result, '请求 3 张，成功 1 张；1 张未达标已丢弃，请手动补生成剩余 1 张');
+  assert.equal(result, '请求 3 张，成功 1 张；请手动补生成剩余 1 张');
 });
 
 test('createCanvasCardItemAtCanvasPoint creates a text card centered on the spawn point', () => {
@@ -2487,7 +2510,7 @@ test('getSupportedImageCardSizeOptions returns official gpt-image-2 size choices
   );
 });
 
-test('gpt-image-2 provider variants reuse resolution tier choices and resolve 2K by aspect ratio', () => {
+test('gpt-image-2 provider variants reuse resolution tier choices and fall back to the comfly default template', () => {
   assert.deepEqual(
     getSupportedImageCardSizeOptions('gpt-image-2-2k').map((option) => option.id),
     ['1024x1024', '2048x2048', '4096x4096']
@@ -2497,6 +2520,110 @@ test('gpt-image-2 provider variants reuse resolution tier choices and resolve 2K
   assert.equal(resolveImageCardSizeForAspectRatio('gpt-image-2-2k', '2048x2048', '9:16'), '1152x2048');
   assert.equal(resolveImageCardSizeForAspectRatio('gpt-image-2-2k', '2048x2048', '3:2'), '2048x1360');
   assert.equal(resolveImageCardSizeForAspectRatio('gpt-image-2-2k', '2048x2048', '2:3'), '1360x2048');
+  assert.equal(resolveImageCardSizeForAspectRatio('gpt-image-2-2k', '2048x2048', '4:3'), '2048x1536');
+  assert.equal(resolveImageCardSizeForAspectRatio('gpt-image-2-2k', '2048x2048', '3:4'), '1536x2048');
+});
+
+test('comfly gpt-image-2 is the default image option template', () => {
+  const providerOptionProfiles = buildProviderImageOptionProfiles([
+    {
+      id: 'custom-provider',
+      baseUrl: 'https://example.com/v1',
+      imageModels: ['gpt-image-2'],
+    },
+  ]);
+
+  assert.deepEqual(
+    getProviderModelAspectRatios('custom-provider', 'gpt-image-2', providerOptionProfiles),
+    ['1:1', '3:2', '2:3', '16:9', '9:16', '4:3', '3:4']
+  );
+  assert.deepEqual(
+    getProviderModelQualityOptions('custom-provider', 'gpt-image-2', providerOptionProfiles).map((option) => option.id),
+    ['auto', 'low', 'medium', 'high']
+  );
+  assert.deepEqual(
+    getEnabledProviderModelAspectRatios('custom-provider', 'gpt-image-2', '1024x1024', providerOptionProfiles),
+    ['1:1', '3:2', '2:3', '16:9', '9:16', '4:3', '3:4']
+  );
+  assert.deepEqual(
+    getEnabledProviderModelAspectRatios('custom-provider', 'gpt-image-2', '2048x2048', providerOptionProfiles),
+    ['1:1', '3:2', '2:3', '16:9', '9:16', '4:3', '3:4']
+  );
+  assert.deepEqual(
+    getEnabledProviderModelAspectRatios('custom-provider', 'gpt-image-2', '4096x4096', providerOptionProfiles),
+    ['16:9', '9:16', '4:3', '3:4']
+  );
+});
+
+test('comfly gpt-image-2 maps default-template ratios to documented request sizes', () => {
+  const providerOptionProfiles = buildProviderImageOptionProfiles([
+    {
+      id: 'custom-provider',
+      baseUrl: 'https://example.com/v1',
+      imageModels: ['gpt-image-2'],
+    },
+  ]);
+
+  assert.equal(resolveImageCardSizeForAspectRatio('gpt-image-2', '1024x1024', '3:2', undefined, 'custom-provider', providerOptionProfiles), '1536x1024');
+  assert.equal(resolveImageCardSizeForAspectRatio('gpt-image-2', '1024x1024', '2:3', undefined, 'custom-provider', providerOptionProfiles), '1024x1536');
+  assert.equal(resolveImageCardSizeForAspectRatio('gpt-image-2', '1024x1024', '16:9', undefined, 'custom-provider', providerOptionProfiles), '1280x720');
+  assert.equal(resolveImageCardSizeForAspectRatio('gpt-image-2', '1024x1024', '9:16', undefined, 'custom-provider', providerOptionProfiles), '720x1280');
+  assert.equal(resolveImageCardSizeForAspectRatio('gpt-image-2', '1024x1024', '4:3', undefined, 'custom-provider', providerOptionProfiles), '1344x1008');
+  assert.equal(resolveImageCardSizeForAspectRatio('gpt-image-2', '1024x1024', '3:4', undefined, 'custom-provider', providerOptionProfiles), '1008x1344');
+  assert.equal(resolveImageCardSizeForAspectRatio('gpt-image-2', '2048x2048', '3:2', undefined, 'custom-provider', providerOptionProfiles), '2048x1360');
+  assert.equal(resolveImageCardSizeForAspectRatio('gpt-image-2', '2048x2048', '2:3', undefined, 'custom-provider', providerOptionProfiles), '1360x2048');
+  assert.equal(resolveImageCardSizeForAspectRatio('gpt-image-2', '2048x2048', '16:9', undefined, 'custom-provider', providerOptionProfiles), '2048x1152');
+  assert.equal(resolveImageCardSizeForAspectRatio('gpt-image-2', '2048x2048', '9:16', undefined, 'custom-provider', providerOptionProfiles), '1152x2048');
+  assert.equal(resolveImageCardSizeForAspectRatio('gpt-image-2', '2048x2048', '4:3', undefined, 'custom-provider', providerOptionProfiles), '2048x1536');
+  assert.equal(resolveImageCardSizeForAspectRatio('gpt-image-2', '2048x2048', '3:4', undefined, 'custom-provider', providerOptionProfiles), '1536x2048');
+  assert.equal(resolveImageCardSizeForAspectRatio('gpt-image-2', '4096x4096', '16:9', undefined, 'custom-provider', providerOptionProfiles), '3840x2160');
+  assert.equal(resolveImageCardSizeForAspectRatio('gpt-image-2', '4096x4096', '9:16', undefined, 'custom-provider', providerOptionProfiles), '2160x3840');
+  assert.equal(resolveImageCardSizeForAspectRatio('gpt-image-2', '4096x4096', '4:3', undefined, 'custom-provider', providerOptionProfiles), '3264x2448');
+  assert.equal(resolveImageCardSizeForAspectRatio('gpt-image-2', '4096x4096', '3:4', undefined, 'custom-provider', providerOptionProfiles), '2448x3264');
+});
+
+test('86game gpt-image-2 falls back to the first legal 2K ratio when the selected ratio is unsupported', () => {
+  const providerOptionProfiles = {
+    'provider-2': {
+      models: {
+        'gpt-image-2': {
+          aspectRatios: ['1:1', '3:2', '2:3', '16:9', '9:16'],
+          enabledAspectRatiosBySize: {
+            '1024x1024': ['1:1'],
+            '2048x2048': ['1:1', '3:2', '2:3'],
+            '4096x4096': ['16:9', '9:16'],
+          },
+        },
+      },
+    },
+  };
+
+  assert.equal(
+    resolveImageCardSizeForAspectRatio('gpt-image-2', '2048x2048', '16:9', undefined, 'provider-2', providerOptionProfiles),
+    '2048x2048'
+  );
+});
+
+test('86game gpt-image-2 falls back to the first legal 4K ratio when the selected ratio is unsupported', () => {
+  const providerOptionProfiles = {
+    'provider-2': {
+      models: {
+        'gpt-image-2': {
+          aspectRatios: ['1:1', '3:2', '2:3', '16:9', '9:16'],
+          enabledAspectRatiosBySize: {
+            '1024x1024': ['1:1'],
+            '2048x2048': ['1:1', '3:2', '2:3'],
+            '4096x4096': ['16:9', '9:16'],
+          },
+        },
+      },
+    },
+  };
+
+  assert.equal(
+    resolveImageCardSizeForAspectRatio('gpt-image-2', '4096x4096', '1:1', undefined, 'provider-2', providerOptionProfiles),
+    '3840x2160'
+  );
 });
 
 test('resolveImageCardModel falls back to default when removed nano-banana ids are requested', () => {

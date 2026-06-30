@@ -15,7 +15,7 @@ import {
   updateProviderRegistry,
 } from './provider-config.mjs';
 
-test('readProviderRegistry falls back to default multi-provider env templates', async () => {
+test('readProviderRegistry falls back to the Comfly env template only', async () => {
   const runtimeDir = await mkdtemp(path.join(os.tmpdir(), 'provider-registry-read-'));
 
   try {
@@ -30,7 +30,7 @@ test('readProviderRegistry falls back to default multi-provider env templates', 
     assert.equal(result.source, 'env');
     assert.deepEqual(
       result.providers.map((provider) => provider.id),
-      ['comfly', 'gpt-best', 'custom']
+      ['comfly']
     );
     assert.equal(getPrimaryProvider(result.providers).id, 'comfly');
     assert.equal(getPrimaryProvider(result.providers).apiKey, 'env-test-key');

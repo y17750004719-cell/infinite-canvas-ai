@@ -30,7 +30,20 @@ const normalizeConnections = (connections, items) => {
 export function normalizeTextCardPanelDrafts(drafts, items) {
   if (!isRecord(drafts)) return {};
 
-  const validTextCardIds = new Set(
+  const validTextCardIds = getValidTextCardIds(items);
+
+  return Object.entries(drafts).reduce((result, [itemId, value]) => {
+    if (!validTextCardIds.has(itemId)) return result;
+    if (typeof value !== 'string') return result;
+    if (value.trim().length === 0) return result;
+
+    result[itemId] = value;
+    return result;
+  }, {});
+}
+
+function getValidTextCardIds(items) {
+  return new Set(
     (Array.isArray(items) ? items : [])
       .filter(
         (item) =>
@@ -41,13 +54,30 @@ export function normalizeTextCardPanelDrafts(drafts, items) {
       )
       .map((item) => item.id)
   );
+}
 
-  return Object.entries(drafts).reduce((result, [itemId, value]) => {
+export function normalizeTextCardProviderById(values, items) {
+  if (!isRecord(values)) return {};
+
+  const validTextCardIds = getValidTextCardIds(items);
+  return Object.entries(values).reduce((result, [itemId, value]) => {
     if (!validTextCardIds.has(itemId)) return result;
-    if (typeof value !== 'string') return result;
-    if (value.trim().length === 0) return result;
+    if (typeof value !== 'string' || value.trim().length === 0) return result;
 
-    result[itemId] = value;
+    result[itemId] = value.trim();
+    return result;
+  }, {});
+}
+
+export function normalizeTextCardModelById(values, items) {
+  if (!isRecord(values)) return {};
+
+  const validTextCardIds = getValidTextCardIds(items);
+  return Object.entries(values).reduce((result, [itemId, value]) => {
+    if (!validTextCardIds.has(itemId)) return result;
+    if (typeof value !== 'string' || value.trim().length === 0) return result;
+
+    result[itemId] = value.trim();
     return result;
   }, {});
 }
@@ -167,6 +197,8 @@ export function normalizeProjectSession(session) {
     items: normalizedItems,
     connections: normalizeConnections(session?.connections, normalizedItems),
     textCardPanelDrafts: normalizeTextCardPanelDrafts(session?.textCardPanelDrafts, normalizedItems),
+    textCardProviderById: normalizeTextCardProviderById(session?.textCardProviderById, normalizedItems),
+    textCardModelById: normalizeTextCardModelById(session?.textCardModelById, normalizedItems),
     imageCardPanelDrafts: normalizeImageCardPanelDrafts(session?.imageCardPanelDrafts, normalizedItems),
     imageCardProviderById: normalizeImageCardProviderById(session?.imageCardProviderById, normalizedItems),
     imageCardModelById: normalizeImageCardModelById(session?.imageCardModelById, normalizedItems),
@@ -188,6 +220,12 @@ export function buildPersistedSession(session, patch) {
   const normalizedConnections = cloneValue(normalizeConnections(nextSession.connections, normalizedItems));
   const normalizedTextCardPanelDrafts = cloneValue(
     normalizeTextCardPanelDrafts(nextSession.textCardPanelDrafts, normalizedItems)
+  );
+  const normalizedTextCardProviderById = cloneValue(
+    normalizeTextCardProviderById(nextSession.textCardProviderById, normalizedItems)
+  );
+  const normalizedTextCardModelById = cloneValue(
+    normalizeTextCardModelById(nextSession.textCardModelById, normalizedItems)
   );
   const normalizedImageCardPanelDrafts = cloneValue(
     normalizeImageCardPanelDrafts(nextSession.imageCardPanelDrafts, normalizedItems)
@@ -219,6 +257,8 @@ export function buildPersistedSession(session, patch) {
     items: normalizedItems,
     connections: normalizedConnections,
     textCardPanelDrafts: normalizedTextCardPanelDrafts,
+    textCardProviderById: normalizedTextCardProviderById,
+    textCardModelById: normalizedTextCardModelById,
     imageCardPanelDrafts: normalizedImageCardPanelDrafts,
     imageCardProviderById: normalizedImageCardProviderById,
     imageCardModelById: normalizedImageCardModelById,

@@ -67,6 +67,10 @@ test('provider fetch-models route exposes categorized upstream models without sa
   assert.equal(routeSource.includes('updateProviderRegistry'), false);
   assert.equal(helperSource.includes('upstreamModelsUrl'), true);
   assert.equal(helperSource.includes('classifyModel'), true);
+  assert.equal(helperSource.includes('modelSupportsImageFromMetadata'), true);
+  assert.equal(helperSource.includes('modalities'), true);
+  assert.equal(helperSource.includes('output_modalities'), true);
+  assert.equal(helperSource.includes('capabilities'), true);
   assert.equal(helperSource.includes("'x-goog-api-key': apiKey"), true);
   assert.equal(helperSource.includes('Authorization: `Bearer ${apiKey.replace(/^Bearer\\s+/i, \'\')}`'), true);
 });
