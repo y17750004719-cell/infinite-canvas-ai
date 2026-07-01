@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const pageSource = fs.readFileSync(path.join(__dirname, 'page.tsx'), 'utf8');
+const globalsSource = fs.readFileSync(path.join(__dirname, 'globals.css'), 'utf8');
 const appSourceFilesWithoutShadows = [
   'globals.css',
   'page.tsx',
@@ -33,13 +34,22 @@ test('image card floating menus are not rendered inside the pending connection m
 });
 
 test('image card model menu uses a dedicated fixed popover that drops below the panel footer', () => {
+  const imagePanelStart = pageSource.indexOf('const portaledSelectedImageCardPanel =');
+  const imagePanelEnd = pageSource.indexOf('const portaledSelectedTextCardPanel =', imagePanelStart);
+
+  assert.notEqual(imagePanelStart, -1);
+  assert.notEqual(imagePanelEnd, -1);
+  assert.ok(imagePanelEnd > imagePanelStart);
+
+  const imagePanelBlock = pageSource.slice(imagePanelStart, imagePanelEnd);
+
   assert.equal(pageSource.includes('const [selectedImageCardModelPopoverOffset, setSelectedImageCardModelPopoverOffset] = useState<{ left: number; top: number } | null>(null);'), true);
   assert.equal(pageSource.includes('imageCardModelPopoverRef: React.RefObject<HTMLDivElement | null>;'), true);
   assert.equal(pageSource.includes('{showImageCardModelMenu && selectedImageCardModelPopoverOffset && ('), true);
   assert.equal(pageSource.includes('ref={imageCardModelPopoverRef}'), true);
   assert.equal(pageSource.includes('className="workspace-menu-panel pointer-events-auto fixed z-[116] min-w-[248px] overflow-hidden rounded-[18px] p-1.5"'), true);
   assert.equal(pageSource.includes("transform: `translateY(-100%) scale(${viewport.scale})`"), false);
-  assert.equal(pageSource.includes("transform: `scale(${viewport.scale})`"), true);
+  assert.equal(imagePanelBlock.includes("transform: `scale(${viewport.scale})`"), false);
   assert.equal(pageSource.includes("placement: 'below-panel',"), true);
 });
 
@@ -153,6 +163,20 @@ test('workspace theme defaults to light and syncs root theme state', () => {
   assert.equal(pageSource.includes('window.localStorage.setItem(WORKSPACE_THEME_STORAGE_KEY, theme);'), true);
 });
 
+test('workspace palette and canvas background are neutral gray and dot-free', () => {
+  assert.equal(pageSource.includes("appBg: '#f5f5f4'"), true);
+  assert.equal(pageSource.includes("panel: 'rgba(255, 255, 255, 0.86)'"), true);
+  assert.equal(pageSource.includes("border: 'rgba(23, 23, 23, 0.1)'"), true);
+  assert.equal(pageSource.includes("textMuted: '#737373'"), true);
+  assert.equal(pageSource.includes("canvasLine: 'rgba(23, 23, 23, 0.24)'"), true);
+  assert.equal(pageSource.includes("appBg: '#0b0b0b'"), true);
+  assert.equal(pageSource.includes("canvasLine: 'rgba(245, 245, 245, 0.84)'"), true);
+  assert.equal(globalsSource.includes('background: var(--workspace-page-bg);'), true);
+  assert.equal(globalsSource.includes('background-image:'), false);
+  assert.equal(globalsSource.includes('background-size:'), false);
+  assert.equal(globalsSource.includes('background-position:'), false);
+});
+
 test('left rail places the theme toggle between history and settings', () => {
   const railStart = pageSource.indexOf('const LEFT_RAIL_ITEMS = [');
   const railEnd = pageSource.indexOf('] as const;', railStart);
@@ -170,6 +194,56 @@ test('left rail places the theme toggle between history and settings', () => {
   assert.ok(settingsIndex > themeIndex);
   assert.equal(pageSource.includes('<WorkspaceThemeToggle'), true);
   assert.equal(pageSource.includes("aria-label={theme === 'dark' ? '切换到白天模式' : '切换到黑夜模式'}"), true);
+});
+
+test('canvas bottom toolbar renders a screenshot-style icon-only dock', () => {
+  const configStart = pageSource.indexOf('const CANVAS_BOTTOM_TOOLBAR_ITEMS = [');
+  const configEnd = pageSource.indexOf('] as const;', configStart);
+  const toolbarStart = pageSource.indexOf('data-canvas-bottom-toolbar="true"');
+  const toolbarEnd = pageSource.indexOf('{/* Zoom Controller - Outside Canvas */}', toolbarStart);
+
+  assert.notEqual(configStart, -1);
+  assert.notEqual(configEnd, -1);
+  assert.notEqual(toolbarStart, -1);
+  assert.notEqual(toolbarEnd, -1);
+
+  const configBlock = pageSource.slice(configStart, configEnd);
+  const toolbarBlock = pageSource.slice(toolbarStart, toolbarEnd);
+
+  assert.equal((configBlock.match(/\{ id: '/g) || []).length, 10);
+  assert.equal((configBlock.match(/svgPath: '/g) || []).length, 10);
+  assert.equal(configBlock.includes("{ id: 'select', label: '选择', svgPath:"), true);
+  assert.equal(configBlock.includes("id: 'image-enhance', label: '图片增强', action: 'add-image-card'"), true);
+  assert.equal(configBlock.includes("id: 'video', label: '视频（即将支持）', action: 'video-placeholder'"), true);
+  assert.equal(configBlock.includes("id: 'text-add', label: '添加文字', action: 'add-text-card'"), true);
+  assert.equal(configBlock.includes("active: true"), true);
+  assert.equal(pageSource.includes('type CanvasBottomToolbarAction ='), true);
+  assert.equal(pageSource.includes('const handleCanvasBottomToolbarAction = (action?: CanvasBottomToolbarAction) => {'), true);
+  assert.equal(pageSource.includes("if (!action || action === 'video-placeholder') return;"), true);
+  assert.equal(pageSource.includes("if (action === 'add-image-card')"), true);
+  assert.equal(pageSource.includes('const canvasBottomToolbarReservedRightClassName = sidebarCollapsed'), true);
+  assert.equal(pageSource.includes("? '[--canvas-bottom-toolbar-reserved-right:0px]'"), true);
+  assert.equal(pageSource.includes(": '[--canvas-bottom-toolbar-reserved-right:0px] sm:[--canvas-bottom-toolbar-reserved-right:500px]'"), true);
+  assert.equal(pageSource.includes('const CANVAS_CHAT_PANEL_RESERVED_WIDTH = 500;'), true);
+  assert.equal(pageSource.includes('const reservedRight = !sidebarCollapsed && isDesktopCanvas'), true);
+  assert.equal(pageSource.includes('? CANVAS_CHAT_PANEL_RESERVED_WIDTH'), true);
+  assert.equal(pageSource.includes('Math.max(0, window.innerWidth - reservedRight)'), true);
+  assert.equal(pageSource.includes('window.innerWidth / 2'), false);
+  assert.equal(
+    pageSource.includes("left: 'calc((100vw - var(--canvas-bottom-toolbar-reserved-right)) / 2)'"),
+    true
+  );
+  assert.equal(toolbarBlock.includes('absolute bottom-4 left-1/2'), false);
+  assert.equal(toolbarBlock.includes('absolute bottom-4 z-50 flex -translate-x-1/2'), true);
+  assert.equal(toolbarBlock.includes('style={canvasBottomToolbarStyle}'), true);
+  assert.equal(toolbarBlock.includes('rounded-[14px] border border-neutral-200 bg-white'), true);
+  assert.equal(toolbarBlock.includes('aria-label={item.label}'), true);
+  assert.equal(toolbarBlock.includes('title={item.label}'), true);
+  assert.equal(toolbarBlock.includes("onClick={() => handleCanvasBottomToolbarAction('action' in item ? item.action : undefined)}"), true);
+  assert.equal(toolbarBlock.includes('bg-neutral-900 text-white'), true);
+  assert.equal(toolbarBlock.includes('<svg width="20" height="20" viewBox="0 0 24 24"'), true);
+  assert.equal(toolbarBlock.includes('fillOpacity={item.svgOpacity ?? 0.9}'), true);
+  assert.equal(toolbarBlock.includes('<span'), false);
 });
 
 test('workspace menus and chips use shared theme classes instead of hardcoded dark colors', () => {
@@ -200,6 +274,12 @@ test('workspace controls no longer keep the legacy dark-only menu palette', () =
   for (const snippet of forbiddenDarkSnippets) {
     assert.equal(pageSource.includes(snippet), false, `${snippet} should be replaced with theme tokens`);
   }
+});
+
+test('workspace session view no longer keeps the dead canvas dot-gap helper constants', () => {
+  assert.equal(pageSource.includes('resolveCanvasBackgroundDotGap'), false);
+  assert.equal(pageSource.includes('CANVAS_BACKGROUND_BASE_DOT_GAP'), false);
+  assert.equal(pageSource.includes('CANVAS_BACKGROUND_MIN_DOT_GAP'), false);
 });
 
 test('workspace app sources do not use component shadow styles', () => {
@@ -274,8 +354,10 @@ test('text card panel uses bottom large provider and model controls with fixed p
   assert.equal(pageSource.includes('textPanelModelPopoverRef = useRef<HTMLDivElement | null>(null);'), true);
   assert.equal(pageSource.includes('{showTextPanelProviderMenu && selectedTextCardProviderPopoverOffset && ('), true);
   assert.equal(pageSource.includes('{showTextPanelModelMenu && selectedTextCardModelPopoverOffset && ('), true);
-  assert.equal(pageSource.includes('left: selectedTextCardPanelViewportOrigin.left + selectedTextCardProviderPopoverOffset.left * viewport.scale,'), true);
-  assert.equal(pageSource.includes('left: selectedTextCardPanelViewportOrigin.left + selectedTextCardModelPopoverOffset.left * viewport.scale,'), true);
+  assert.equal(pageSource.includes('left: selectedTextCardPanelViewportOrigin.left + selectedTextCardProviderPopoverOffset.left,'), true);
+  assert.equal(pageSource.includes('left: selectedTextCardPanelViewportOrigin.left + selectedTextCardModelPopoverOffset.left,'), true);
+  assert.equal(pageSource.includes('left: selectedTextCardPanelViewportOrigin.left + selectedTextCardProviderPopoverOffset.left * viewport.scale,'), false);
+  assert.equal(pageSource.includes('left: selectedTextCardPanelViewportOrigin.left + selectedTextCardModelPopoverOffset.left * viewport.scale,'), false);
 });
 
 test('provider settings sidebar keeps Comfly and adds a create-provider action for user-managed entries', () => {
@@ -542,7 +624,9 @@ test('image nodes expose a shared toolbar target and render an above-node image 
   assert.equal(pageSource.includes('getSelectedImageToolbarSource({'), true);
   assert.equal(pageSource.includes('getItemVisualBounds(selectedImageToolbarItem)'), false);
   assert.equal(pageSource.includes('left: selectedImageToolbarItem.x,'), true);
-  assert.equal(pageSource.includes('y: itemBounds.top - canvasGap,'), true);
+  assert.equal(pageSource.includes('y: itemBounds.top,'), true);
+  assert.equal(pageSource.includes('y: itemBounds.top - canvasGap,'), false);
+  assert.equal(pageSource.includes('y: canvasRect.top + canvasScreenPoint.y - screenGap,'), true);
   assert.equal(pageSource.includes('width: selectedImageToolbarItem.width,'), true);
   assert.equal(pageSource.includes('height: selectedImageToolbarItem.height,'), true);
   assert.equal(pageSource.includes("typeof document !== 'undefined' &&"), true);
@@ -584,13 +668,23 @@ test('image toolbar positioning no longer clamps against canvas width and uses a
   assert.equal(pageSource.includes('className="pointer-events-none fixed inset-0 z-[114]"'), true);
 });
 
-test('image toolbar scales with the current viewport zoom', () => {
+test('image toolbar keeps a fixed screen size while following the selected image', () => {
+  const toolbarStart = pageSource.indexOf('data-image-node-toolbar="true"');
+  const toolbarEnd = pageSource.indexOf('{IMAGE_NODE_TOOLBAR_ACTIONS.map', toolbarStart);
+
+  assert.notEqual(toolbarStart, -1);
+  assert.notEqual(toolbarEnd, -1);
+  assert.ok(toolbarEnd > toolbarStart);
+
+  const toolbarBlock = pageSource.slice(toolbarStart, toolbarEnd);
+
   assert.equal(pageSource.includes('top: selectedImageToolbarTop,'), true);
   assert.equal(pageSource.includes("transform: 'translate(-50%, -100%)'"), true);
-  assert.equal(pageSource.includes('transform: `scale(${viewport.scale})`'), true);
+  assert.equal(toolbarBlock.includes('transform: `scale(${viewport.scale})`'), false);
   assert.equal(pageSource.includes("transformOrigin: 'bottom center'"), true);
   assert.equal(pageSource.includes('top: selectedImageToolbarTop - 12,'), false);
-  assert.equal(pageSource.includes('canvasGap: 12,'), true);
+  assert.equal(pageSource.includes('screenGap: 12,'), true);
+  assert.equal(pageSource.includes('canvasGap: 12,'), false);
   assert.equal(pageSource.includes('transform: `translate(-50%, -100%) scale(${viewport.scale})`'), false);
 });
 
@@ -645,6 +739,33 @@ test('selected text card panel keeps a 720px minimum canvas width so bottom cont
     pageSource.includes('? Math.max(TEXT_CARD_GENERATION_PANEL_DEFAULT_WIDTH, selectedTextCardPanelFrameBounds.width)'),
     true
   );
+});
+
+test('selected card panels keep 100 percent screen size while following card anchors', () => {
+  const imagePanelStart = pageSource.indexOf('const portaledSelectedImageCardPanel =');
+  const imagePanelEnd = pageSource.indexOf('const portaledSelectedTextCardPanel =', imagePanelStart);
+  const textPanelStart = pageSource.indexOf('const portaledSelectedTextCardPanel =');
+  const textPanelEnd = pageSource.indexOf('\n  return (\n', textPanelStart);
+
+  assert.notEqual(imagePanelStart, -1);
+  assert.notEqual(imagePanelEnd, -1);
+  assert.notEqual(textPanelStart, -1);
+  assert.notEqual(textPanelEnd, -1);
+
+  const imagePanelBlock = pageSource.slice(imagePanelStart, imagePanelEnd);
+  const textPanelBlock = pageSource.slice(textPanelStart, textPanelEnd);
+
+  assert.equal(pageSource.includes('const selectedTextCardPanelAnchorPoint ='), true);
+  assert.equal(pageSource.includes('const selectedImageCardPanelAnchorPoint ='), true);
+  assert.equal(pageSource.includes('left: canvasRect.left + selectedTextCardPanelAnchorPoint.x - selectedTextCardPanelCanvasWidth / 2,'), true);
+  assert.equal(pageSource.includes('top: canvasRect.top + selectedTextCardPanelAnchorPoint.y + 18,'), true);
+  assert.equal(pageSource.includes('left: canvasRect.left + selectedImageCardPanelAnchorPoint.x - selectedImageCardPanelCanvasWidth / 2,'), true);
+  assert.equal(pageSource.includes('top: canvasRect.top + selectedImageCardPanelAnchorPoint.y + 18,'), true);
+  assert.equal(imagePanelBlock.includes('transform: `scale(${viewport.scale})`'), false);
+  assert.equal(textPanelBlock.includes('transform: `scale(${viewport.scale})`'), false);
+  assert.equal(imagePanelBlock.includes('* viewport.scale'), false);
+  assert.equal(textPanelBlock.includes('* viewport.scale'), false);
+  assert.equal(pageSource.includes('scale: 1,'), true);
 });
 
 test('text card floating panel renders through a portal instead of the legacy in-canvas branch', () => {

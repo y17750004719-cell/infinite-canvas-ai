@@ -454,6 +454,7 @@ const PROVIDER_SETTINGS_MODEL_PICKER_LABELS: Record<ProviderSettingsModelPickerC
   image: '图片',
   chat: '聊天',
 };
+const CANVAS_CHAT_PANEL_RESERVED_WIDTH = 500;
 
 const uniqueModelIds = (models: string[]) =>
   Array.from(new Set(models.map((model) => model.trim()).filter(Boolean)));
@@ -624,7 +625,7 @@ const TEXT_CARD_PANEL_INPUT_MIN_HEIGHT = 52;
 const TEXT_CARD_PANEL_INPUT_MAX_HEIGHT =
   TEXT_CARD_PANEL_INPUT_MIN_HEIGHT +
   (TEXT_CARD_PANEL_INPUT_MAX_ROWS - TEXT_CARD_PANEL_INPUT_MIN_ROWS) * TEXT_CARD_PANEL_INPUT_LINE_HEIGHT;
-const TEXT_CARD_BODY_TEXT_CLASSNAME = 'text-[15px] leading-7 tracking-[-0.02em] text-zinc-200';
+const TEXT_CARD_BODY_TEXT_CLASSNAME = 'text-[15px] leading-7 tracking-[-0.02em] text-[var(--workspace-text-primary)]';
 const IMAGE_CARD_PANEL_PROMPT_PLACEHOLDER = '描述你想生成的图片内容…（按 Enter 生成，Shift+Enter 换行）';
 const IMAGE_CARD_MENU_OPTIONS = [
   { icon: ImageIcon, label: '图生图' },
@@ -639,7 +640,7 @@ const IMAGE_CARD_SIZE_OPTIONS = [
 ] as const;
 const IMAGE_CARD_COUNT_MIN = 1;
 const IMAGE_CARD_COUNT_MAX = 9;
-const NODE_SELECTED_OUTLINE_COLOR = 'rgba(226, 232, 240, 0.76)';
+const NODE_SELECTED_OUTLINE_COLOR = 'rgba(23, 23, 23, 0.74)';
 const NODE_SELECTED_OUTLINE_WIDTH = 2;
 const VIEWPORT_ZOOM_DURATION_MS = 140;
 type WorkspaceTheme = 'light' | 'dark';
@@ -682,38 +683,38 @@ function useWorkspaceTheme() {
 }
 
 const LIGHT_THEME = {
-  appBg: '#f6f6f4',
-  panel: 'rgba(255, 255, 255, 0.84)',
-  panelElevated: 'rgba(255, 255, 255, 0.94)',
-  panelSoft: 'rgba(248, 250, 252, 0.78)',
-  border: 'rgba(15, 23, 42, 0.1)',
-  borderStrong: 'rgba(15, 23, 42, 0.18)',
-  textPrimary: '#111827',
-  textMuted: '#667085',
-  textSoft: '#98a2b3',
-  accent: '#0f172a',
-  accentSurface: 'rgba(15, 23, 42, 0.06)',
-  accentSurfaceStrong: 'rgba(15, 23, 42, 0.1)',
-  canvasLine: 'rgba(17, 24, 39, 0.24)',
-  portFill: '#f8fafc',
-  portStroke: 'rgba(51, 65, 85, 0.58)',
+  appBg: '#f5f5f4',
+  panel: 'rgba(255, 255, 255, 0.86)',
+  panelElevated: 'rgba(255, 255, 255, 0.96)',
+  panelSoft: 'rgba(250, 250, 249, 0.82)',
+  border: 'rgba(23, 23, 23, 0.1)',
+  borderStrong: 'rgba(23, 23, 23, 0.18)',
+  textPrimary: '#171717',
+  textMuted: '#737373',
+  textSoft: '#a3a3a3',
+  accent: '#171717',
+  accentSurface: 'rgba(23, 23, 23, 0.05)',
+  accentSurfaceStrong: 'rgba(23, 23, 23, 0.09)',
+  canvasLine: 'rgba(23, 23, 23, 0.24)',
+  portFill: '#fafaf9',
+  portStroke: 'rgba(64, 64, 64, 0.58)',
 };
 const DARK_THEME = {
-  appBg: '#050608',
-  panel: 'rgba(16, 18, 22, 0.88)',
-  panelElevated: 'rgba(24, 27, 33, 0.96)',
-  panelSoft: 'rgba(12, 14, 18, 0.76)',
+  appBg: '#0b0b0b',
+  panel: 'rgba(20, 20, 20, 0.9)',
+  panelElevated: 'rgba(24, 24, 24, 0.96)',
+  panelSoft: 'rgba(16, 16, 16, 0.78)',
   border: 'rgba(255, 255, 255, 0.09)',
   borderStrong: 'rgba(255, 255, 255, 0.16)',
-  textPrimary: '#f5f7fb',
-  textMuted: '#98a2b3',
-  textSoft: '#6b7280',
-  accent: '#d7dde8',
+  textPrimary: '#f5f5f5',
+  textMuted: '#a3a3a3',
+  textSoft: '#737373',
+  accent: '#f5f5f5',
   accentSurface: 'rgba(255, 255, 255, 0.08)',
   accentSurfaceStrong: 'rgba(255, 255, 255, 0.12)',
-  canvasLine: 'rgba(229, 231, 235, 0.86)',
-  portFill: '#090b0f',
-  portStroke: 'rgba(229, 231, 235, 0.78)',
+  canvasLine: 'rgba(245, 245, 245, 0.84)',
+  portFill: '#090909',
+  portStroke: 'rgba(245, 245, 245, 0.78)',
 };
 const WORKSPACE_THEME_PALETTES = {
   light: LIGHT_THEME,
@@ -829,12 +830,12 @@ const resolveImageToolbarViewportAnchor = ({
   itemBounds,
   toCanvasScreenPoint,
   canvasRect,
-  canvasGap = 12,
+  screenGap = 12,
 }: {
   itemBounds: { left: number; top: number; width: number; height: number } | null;
   toCanvasScreenPoint: (point: { x: number; y: number }) => { x: number; y: number };
   canvasRect: DOMRect | null | undefined;
-  canvasGap?: number;
+  screenGap?: number;
 }) => {
   if (!itemBounds || !canvasRect) {
     return null;
@@ -842,12 +843,12 @@ const resolveImageToolbarViewportAnchor = ({
 
   const canvasScreenPoint = toCanvasScreenPoint({
     x: itemBounds.left + itemBounds.width / 2,
-    y: itemBounds.top - canvasGap,
+    y: itemBounds.top,
   });
 
   return {
     x: canvasRect.left + canvasScreenPoint.x,
-    y: canvasRect.top + canvasScreenPoint.y,
+    y: canvasRect.top + canvasScreenPoint.y - screenGap,
   };
 };
 
@@ -2377,7 +2378,7 @@ const CanvasViewport = memo(function CanvasViewport({
       resolveFloatingPopoverOffset({
         panelRect,
         anchorRect,
-        scale: viewport.scale,
+        scale: 1,
         placement: 'below-panel',
         gap: 12,
       })
@@ -2402,7 +2403,7 @@ const CanvasViewport = memo(function CanvasViewport({
       resolveFloatingPopoverOffset({
         panelRect,
         anchorRect,
-        scale: viewport.scale,
+        scale: 1,
         placement: 'below-panel',
         gap: 12,
       })
@@ -2427,7 +2428,7 @@ const CanvasViewport = memo(function CanvasViewport({
       resolveFloatingPopoverOffset({
         panelRect,
         anchorRect,
-        scale: viewport.scale,
+        scale: 1,
         placement: 'below-panel',
         gap: 12,
       })
@@ -2452,7 +2453,7 @@ const CanvasViewport = memo(function CanvasViewport({
       resolveFloatingPopoverOffset({
         panelRect,
         anchorRect,
-        scale: viewport.scale,
+        scale: 1,
         placement: 'below-panel',
         gap: 12,
       })
@@ -2477,7 +2478,7 @@ const CanvasViewport = memo(function CanvasViewport({
       resolveFloatingPopoverOffset({
         panelRect,
         anchorRect,
-        scale: viewport.scale,
+        scale: 1,
         placement: 'below-panel',
         gap: 12,
       })
@@ -2540,28 +2541,42 @@ const CanvasViewport = memo(function CanvasViewport({
           height: selectedImageCardPanelCanvasHeight,
         }
       : null;
-  const selectedTextCardPanelScreenPoint = selectedTextCardPanelCanvasRect
-    ? toCanvasScreenPoint({
-        x: selectedTextCardPanelCanvasRect.left,
-        y: selectedTextCardPanelCanvasRect.top,
-      })
+  const selectedTextCardPanelAnchorPoint =
+    selectedTextCardPanelItem && selectedTextCardPanelFrameBounds
+      ? toCanvasScreenPoint({
+          x:
+            selectedTextCardPanelItem.x +
+            selectedTextCardPanelFrameBounds.left +
+            selectedTextCardPanelFrameBounds.width / 2,
+          y:
+            selectedTextCardPanelItem.y +
+            selectedTextCardPanelFrameBounds.top +
+            selectedTextCardPanelFrameBounds.height,
+        })
     : null;
-  const selectedTextCardPanelViewportOrigin = selectedTextCardPanelScreenPoint && canvasRect
+  const selectedTextCardPanelViewportOrigin = selectedTextCardPanelAnchorPoint && canvasRect
     ? {
-        left: canvasRect.left + selectedTextCardPanelScreenPoint.x,
-        top: canvasRect.top + selectedTextCardPanelScreenPoint.y,
+        left: canvasRect.left + selectedTextCardPanelAnchorPoint.x - selectedTextCardPanelCanvasWidth / 2,
+        top: canvasRect.top + selectedTextCardPanelAnchorPoint.y + 18,
       }
     : null;
-  const selectedImageCardPanelScreenPoint = selectedImageCardPanelCanvasRect
-    ? toCanvasScreenPoint({
-        x: selectedImageCardPanelCanvasRect.left,
-        y: selectedImageCardPanelCanvasRect.top,
-      })
+  const selectedImageCardPanelAnchorPoint =
+    selectedImageCardPanelItem && selectedImageCardPanelFrameBounds
+      ? toCanvasScreenPoint({
+          x:
+            selectedImageCardPanelItem.x +
+            selectedImageCardPanelFrameBounds.left +
+            selectedImageCardPanelFrameBounds.width / 2,
+          y:
+            selectedImageCardPanelItem.y +
+            selectedImageCardPanelFrameBounds.top +
+            selectedImageCardPanelFrameBounds.height,
+        })
     : null;
-  const selectedImageCardPanelViewportOrigin = selectedImageCardPanelScreenPoint && canvasRect
+  const selectedImageCardPanelViewportOrigin = selectedImageCardPanelAnchorPoint && canvasRect
     ? {
-        left: canvasRect.left + selectedImageCardPanelScreenPoint.x,
-        top: canvasRect.top + selectedImageCardPanelScreenPoint.y,
+        left: canvasRect.left + selectedImageCardPanelAnchorPoint.x - selectedImageCardPanelCanvasWidth / 2,
+        top: canvasRect.top + selectedImageCardPanelAnchorPoint.y + 18,
       }
     : null;
   const portaledSelectedImageCardPanel =
@@ -2581,8 +2596,6 @@ const CanvasViewport = memo(function CanvasViewport({
                 left: selectedImageCardPanelViewportOrigin.left,
                 top: selectedImageCardPanelViewportOrigin.top,
                 width: selectedImageCardPanelCanvasRect.width,
-                transform: `scale(${viewport.scale})`,
-                transformOrigin: 'top left',
               }}
               onPointerDown={(e) => {
                 e.stopPropagation();
@@ -2868,10 +2881,8 @@ const CanvasViewport = memo(function CanvasViewport({
                 data-text-card-panel-control="true"
                 className="workspace-menu-panel pointer-events-auto fixed z-[116] min-w-[248px] overflow-hidden rounded-[18px] p-1.5"
                 style={{
-                  left: selectedImageCardPanelViewportOrigin.left + selectedImageCardModelPopoverOffset.left * viewport.scale,
-                  top: selectedImageCardPanelViewportOrigin.top + selectedImageCardModelPopoverOffset.top * viewport.scale,
-                  transform: `scale(${viewport.scale})`,
-                  transformOrigin: 'top left',
+                  left: selectedImageCardPanelViewportOrigin.left + selectedImageCardModelPopoverOffset.left,
+                  top: selectedImageCardPanelViewportOrigin.top + selectedImageCardModelPopoverOffset.top,
                 }}
                 onPointerDown={(e) => {
                   e.stopPropagation();
@@ -2904,10 +2915,8 @@ const CanvasViewport = memo(function CanvasViewport({
                 data-text-card-panel-control="true"
                 className="workspace-menu-panel pointer-events-auto fixed z-[116] min-w-[220px] overflow-hidden rounded-[18px] p-1.5"
                 style={{
-                  left: selectedImageCardPanelViewportOrigin.left + selectedImageCardProviderPopoverOffset.left * viewport.scale,
-                  top: selectedImageCardPanelViewportOrigin.top + selectedImageCardProviderPopoverOffset.top * viewport.scale,
-                  transform: `scale(${viewport.scale})`,
-                  transformOrigin: 'top left',
+                  left: selectedImageCardPanelViewportOrigin.left + selectedImageCardProviderPopoverOffset.left,
+                  top: selectedImageCardPanelViewportOrigin.top + selectedImageCardProviderPopoverOffset.top,
                 }}
                 onPointerDown={(e) => {
                   e.stopPropagation();
@@ -2942,11 +2951,9 @@ const CanvasViewport = memo(function CanvasViewport({
                 data-text-card-panel-control="true"
                 className="workspace-menu-panel pointer-events-auto fixed z-[116] overflow-hidden rounded-[22px] p-3"
                 style={{
-                  left: selectedImageCardPanelViewportOrigin.left + selectedImageCardSettingsPopoverOffset.left * viewport.scale,
-                  top: selectedImageCardPanelViewportOrigin.top + selectedImageCardSettingsPopoverOffset.top * viewport.scale,
+                  left: selectedImageCardPanelViewportOrigin.left + selectedImageCardSettingsPopoverOffset.left,
+                  top: selectedImageCardPanelViewportOrigin.top + selectedImageCardSettingsPopoverOffset.top,
                   width: 292,
-                  transform: `scale(${viewport.scale})`,
-                  transformOrigin: 'top left',
                 }}
                 onPointerDown={(e) => {
                   e.stopPropagation();
@@ -3055,8 +3062,6 @@ const CanvasViewport = memo(function CanvasViewport({
                 left: selectedTextCardPanelViewportOrigin.left,
                 top: selectedTextCardPanelViewportOrigin.top,
                 width: selectedTextCardPanelCanvasRect.width,
-                transform: `scale(${viewport.scale})`,
-                transformOrigin: 'top left',
               }}
               onPointerDown={(e) => {
                 e.stopPropagation();
@@ -3265,10 +3270,8 @@ const CanvasViewport = memo(function CanvasViewport({
                 data-text-card-panel-control="true"
                 className="workspace-menu-panel pointer-events-auto fixed z-[116] min-w-[220px] overflow-hidden rounded-[18px] p-1.5"
                 style={{
-                  left: selectedTextCardPanelViewportOrigin.left + selectedTextCardProviderPopoverOffset.left * viewport.scale,
-                  top: selectedTextCardPanelViewportOrigin.top + selectedTextCardProviderPopoverOffset.top * viewport.scale,
-                  transform: `scale(${viewport.scale})`,
-                  transformOrigin: 'top left',
+                  left: selectedTextCardPanelViewportOrigin.left + selectedTextCardProviderPopoverOffset.left,
+                  top: selectedTextCardPanelViewportOrigin.top + selectedTextCardProviderPopoverOffset.top,
                 }}
                 onPointerDown={(e) => {
                   e.stopPropagation();
@@ -3303,10 +3306,8 @@ const CanvasViewport = memo(function CanvasViewport({
                 data-text-card-panel-control="true"
                 className="workspace-menu-panel pointer-events-auto fixed z-[116] min-w-[248px] overflow-hidden rounded-[18px] p-1.5"
                 style={{
-                  left: selectedTextCardPanelViewportOrigin.left + selectedTextCardModelPopoverOffset.left * viewport.scale,
-                  top: selectedTextCardPanelViewportOrigin.top + selectedTextCardModelPopoverOffset.top * viewport.scale,
-                  transform: `scale(${viewport.scale})`,
-                  transformOrigin: 'top left',
+                  left: selectedTextCardPanelViewportOrigin.left + selectedTextCardModelPopoverOffset.left,
+                  top: selectedTextCardPanelViewportOrigin.top + selectedTextCardModelPopoverOffset.top,
                 }}
                 onPointerDown={(e) => {
                   e.stopPropagation();
@@ -3808,6 +3809,20 @@ const IMAGE_NODE_TOOLBAR_ACTIONS = [
   { id: 'crop', label: '裁剪', icon: SlidersHorizontal, enabled: false, disabledReason: undefined },
   { id: 'export', label: '导出', icon: Send, enabled: true, disabledReason: undefined },
 ] as const;
+
+const CANVAS_BOTTOM_TOOLBAR_ITEMS = [
+  { id: 'select', label: '选择', svgPath: 'M2.8 5.66C2.187 3.886 3.887 2.186 5.66 2.8l14.833 5.126c1.96.677 2.038 3.42.12 4.208l-5.722 2.35a.75.75 0 0 0-.408.409l-2.35 5.721-.08.174c-.849 1.682-3.307 1.611-4.059-.116l-.07-.178zm2.37-1.444a.75.75 0 0 0-.953.954l5.127 14.833c.225.653 1.14.68 1.402.04l2.35-5.72.096-.204c.245-.46.645-.823 1.131-1.023l5.72-2.35c.64-.263.614-1.177-.04-1.403z', active: true },
+  { id: 'target', label: '定位', svgPath: 'M12.463 2.012A9 9 0 0 1 21 11l-.004.29c-.09 2.975-1.54 5.293-2.996 7.112l-.275.328c-1.45 1.66-3.967 3.52-5.725 3.52l-.179-.006c-1.746-.118-4.145-1.91-5.546-3.514L6 18.403C4.497 16.524 3 14.115 3 11a9 9 0 0 1 9-9zM12 3.38A7.62 7.62 0 0 0 4.38 11c0 2.646 1.264 4.747 2.698 6.54.602.752 1.53 1.622 2.517 2.295 1.036.707 1.9 1.034 2.405 1.034.506 0 1.369-.327 2.405-1.034.986-.673 1.915-1.543 2.517-2.295 1.434-1.793 2.697-3.894 2.697-6.54A7.62 7.62 0 0 0 12 3.38M12 7.5a3.5 3.5 0 1 1 0 7 3.5 3.5 0 0 1 0-7M12 9a2 2 0 1 0 0 4 2 2 0 0 0 0-4' },
+  { id: 'image', label: '图片', svgPath: 'M17.25 3A3.75 3.75 0 0 1 21 6.75v4.5a.75.75 0 0 1-1.5 0v-4.5a2.25 2.25 0 0 0-2.25-2.25H6.75A2.25 2.25 0 0 0 4.5 6.75v8.505l2.777-2.634.002-.002a1.75 1.75 0 0 1 2.438.036l2.813 2.815a.75.75 0 1 1-1.06 1.06l-2.815-2.813a.25.25 0 0 0-.347-.006l-3.805 3.607A2.25 2.25 0 0 0 6.75 19.5h6.75a.75.75 0 0 1 0 1.5H6.75A3.75 3.75 0 0 1 3 17.25V6.75A3.75 3.75 0 0 1 6.75 3zm1 10.25a.75.75 0 0 1 .55.241l3 3.25a.75.75 0 0 1-1.1 1.018L19 15.918v4.332a.75.75 0 0 1-1.5 0v-4.332l-1.7 1.84a.75.75 0 0 1-1.1-1.017l3-3.25.055-.054a.75.75 0 0 1 .495-.187M15 7.5a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3' },
+  { id: 'grid', label: '网格', svgPath: 'M16.8 3a.75.75 0 0 1 .75.75v3.3h2.7a.75.75 0 0 1 0 1.5h-2.7v6.9h2.7a.75.75 0 0 1 0 1.5h-2.7v3.3a.75.75 0 0 1-1.5 0v-3.3h-8.1v3.3a.75.75 0 0 1-1.5 0v-3.3h-2.7a.75.75 0 0 1 0-1.5h2.7v-6.9h-2.7a.75.75 0 0 1 0-1.5h2.7v-3.3a.75.75 0 0 1 1.5 0v3.3h8.1v-3.3A.75.75 0 0 1 16.8 3M7.95 15.45h8.1v-6.9h-8.1z' },
+  { id: 'shape', label: '形状', svgPath: 'M19.5 8.55c0-.853 0-1.447-.038-1.91-.037-.453-.107-.714-.207-.911a2.25 2.25 0 0 0-.983-.984c-.198-.1-.459-.17-.913-.207-.462-.038-1.057-.038-1.909-.038h-6.9c-.853 0-1.447 0-1.91.038-.453.037-.714.106-.911.207a2.25 2.25 0 0 0-.984.984c-.1.197-.17.458-.207.912C4.5 7.103 4.5 7.697 4.5 8.55v6.9c0 .852 0 1.447.038 1.91.037.453.106.714.207.912.216.423.56.767.984.983.197.1.458.17.912.207.462.038 1.056.038 1.909.038h6.9c.852 0 1.447 0 1.91-.038.453-.037.714-.107.912-.207a2.25 2.25 0 0 0 .983-.983c.1-.198.17-.459.207-.913.038-.462.038-1.057.038-1.909zm1.5 6.9c0 .828.001 1.494-.043 2.031-.045.547-.14 1.027-.366 1.471a3.75 3.75 0 0 1-1.639 1.639c-.444.226-.924.321-1.47.366-.538.044-1.204.043-2.032.043h-6.9c-.828 0-1.494.001-2.031-.043-.547-.045-1.027-.14-1.471-.366a3.75 3.75 0 0 1-1.639-1.639c-.226-.444-.321-.924-.366-1.47C2.999 16.943 3 16.277 3 15.45v-6.9c0-.828-.001-1.494.043-2.031.045-.547.14-1.027.366-1.471a3.75 3.75 0 0 1 1.639-1.639c.444-.226.924-.321 1.47-.366C7.057 2.999 7.723 3 8.55 3h6.9c.828 0 1.494-.001 2.031.043.547.045 1.027.14 1.471.366a3.75 3.75 0 0 1 1.639 1.639c.226.444.321.924.366 1.47.044.538.043 1.204.043 2.032z' },
+  { id: 'draw', label: '画笔', svgPath: 'M14.72 3.72a3.932 3.932 0 0 1 5.56 5.56L8.366 21.195A2.75 2.75 0 0 1 6.422 22H2.75a.75.75 0 0 1-.75-.75v-3.671c0-.73.29-1.43.806-1.946zm4.5 1.06c-.95-.95-2.49-.95-3.44 0l-1.47 1.47 3.44 3.44 1.47-1.47c.95-.95.95-2.49 0-3.44M3.5 20.5h2.922c.331 0 .65-.132.884-.367l9.383-9.383-3.439-3.44-9.384 9.385a1.25 1.25 0 0 0-.366.884z' },
+  { id: 'text', label: '文字', svgPath: 'M19.5 6.25V4.5h-6.75v15h1.5a.75.75 0 0 1 0 1.5h-4.5a.75.75 0 0 1 0-1.5h1.5v-15H4.5v1.75a.75.75 0 0 1-1.5 0v-2.5A.75.75 0 0 1 3.75 3h16.5a.75.75 0 0 1 .75.75v2.5a.75.75 0 0 1-1.5 0' },
+  { id: 'image-enhance', label: '图片增强', action: 'add-image-card', svgPath: 'M11.75 3a.75.75 0 0 1 0 1.5h-5A2.25 2.25 0 0 0 4.5 6.75v7.513l2.28-2.145a1.75 1.75 0 0 1 2.437.037L12 14.94l.763-.762a1.75 1.75 0 0 1 2.474 0l4.041 4.04c.14-.293.222-.62.222-.967v-5a.75.75 0 0 1 1.5 0v5A3.75 3.75 0 0 1 17.25 21H6.75A3.75 3.75 0 0 1 3 17.25V6.75A3.75 3.75 0 0 1 6.75 3zM8.155 13.216a.25.25 0 0 0-.347-.005L4.5 16.323v.927a2.25 2.25 0 0 0 2.25 2.25h10.5c.347 0 .674-.081.968-.222l-4.041-4.04a.25.25 0 0 0-.315-.033l-.039.032-1.293 1.293a.75.75 0 0 1-1.06 0zM18 2c.241 0 .457.148.544.373l.696 1.813a1 1 0 0 0 .575.574l1.812.696a.583.583 0 0 1 0 1.088l-1.812.696a1 1 0 0 0-.575.574l-.696 1.813a.583.583 0 0 1-1.088 0l-.696-1.813a1 1 0 0 0-.575-.574l-1.812-.696a.583.583 0 0 1 0-1.088l1.813-.696a1 1 0 0 0 .574-.574l.696-1.813A.58.58 0 0 1 18 2' },
+  { id: 'video', label: '视频（即将支持）', action: 'video-placeholder', svgPath: 'M11.977 3a.75.75 0 0 1 0 1.5h-5a2.25 2.25 0 0 0-2.25 2.25v10.5a2.25 2.25 0 0 0 2.25 2.25h10.5a2.25 2.25 0 0 0 2.25-2.25v-5a.75.75 0 0 1 1.5 0v5a3.75 3.75 0 0 1-3.75 3.75h-10.5a3.75 3.75 0 0 1-3.75-3.75V6.75A3.75 3.75 0 0 1 6.977 3zm-1.558 5.827a.75.75 0 0 1 .788.078l3.25 2.5a.75.75 0 0 1 0 1.19l-3.25 2.5A.75.75 0 0 1 10 14.5v-5l.008-.105a.75.75 0 0 1 .41-.568M18.227 2c.24 0 .457.148.543.373l.698 1.813a1 1 0 0 0 .574.574l1.811.696a.583.583 0 0 1 0 1.088l-1.811.696a1 1 0 0 0-.574.574l-.698 1.813a.583.583 0 0 1-1.086 0l-.698-1.813a1 1 0 0 0-.574-.574l-1.811-.696a.584.584 0 0 1 0-1.088l1.811-.696a1 1 0 0 0 .574-.574l.698-1.813A.58.58 0 0 1 18.227 2' },
+  { id: 'text-add', label: '添加文字', action: 'add-text-card', svgPath: 'M19 14c.241 0 .457.148.544.373l.696 1.813a1 1 0 0 0 .575.574l1.812.696a.583.583 0 0 1 0 1.088l-1.812.696a1 1 0 0 0-.575.575l-.696 1.812a.583.583 0 0 1-1.088 0l-.696-1.812a1 1 0 0 0-.575-.575l-1.812-.696a.583.583 0 0 1 0-1.088l1.813-.696a1 1 0 0 0 .574-.575l.696-1.812A.58.58 0 0 1 19 14M15.45 3c.828 0 1.494-.001 2.031.043.547.045 1.027.14 1.471.366a3.75 3.75 0 0 1 1.639 1.639c.226.444.321.924.366 1.47.044.538.043 1.204.043 2.032v1.95a.75.75 0 0 1-1.5 0V8.55c0-.853 0-1.447-.038-1.91-.037-.453-.107-.714-.207-.911a2.25 2.25 0 0 0-.983-.984c-.198-.1-.459-.17-.913-.207-.462-.038-1.057-.038-1.909-.038h-6.9c-.853 0-1.447 0-1.91.038-.453.037-.714.106-.911.207a2.25 2.25 0 0 0-.984.984c-.1.197-.17.458-.207.912C4.5 7.103 4.5 7.697 4.5 8.55v6.9c0 .852 0 1.447.038 1.91.037.453.106.714.207.912.216.423.56.767.984.983.197.1.458.17.912.207.462.038 1.056.038 1.909.038h1.95a.75.75 0 0 1 0 1.5H8.55c-.828 0-1.494.001-2.031-.043-.547-.045-1.027-.14-1.471-.366a3.75 3.75 0 0 1-1.639-1.639c-.226-.444-.321-.924-.366-1.47C2.999 16.943 3 16.277 3 15.45v-6.9c0-.828-.001-1.494.043-2.031.045-.547.14-1.027.366-1.471a3.75 3.75 0 0 1 1.639-1.639c.444-.226.924-.321 1.47-.366C7.057 2.999 7.723 3 8.55 3zM16 7.25a.75.75 0 0 1 0 1.5h-3.25V15a.75.75 0 0 1-1.5 0V8.75H8a.75.75 0 1 1 0-1.5z', svgOpacity: 1 },
+] as const;
+type CanvasBottomToolbarAction = 'add-image-card' | 'add-text-card' | 'video-placeholder';
 
 const ADD_NODE_MENU_OPTIONS = [
   {
@@ -5181,15 +5196,25 @@ export default function AIWorkspace() {
     (overrideViewport?: { x: number; y: number; scale: number }) => {
       const activeViewport = overrideViewport ?? viewport;
       const canvasRect = canvasRef.current?.getBoundingClientRect();
-      const canvasWidth = canvasRect?.width ?? 0;
-      const canvasHeight = canvasRect?.height ?? 0;
+      const isDesktopCanvas = typeof window === 'undefined'
+        ? true
+        : window.matchMedia('(min-width: 640px)').matches;
+      const reservedRight = !sidebarCollapsed && isDesktopCanvas
+        ? CANVAS_CHAT_PANEL_RESERVED_WIDTH
+        : 0;
+      const fallbackCanvasWidth = typeof window === 'undefined'
+        ? 0
+        : Math.max(0, window.innerWidth - reservedRight);
+      const fallbackCanvasHeight = typeof window === 'undefined' ? 0 : window.innerHeight;
+      const canvasWidth = canvasRect?.width ?? fallbackCanvasWidth;
+      const canvasHeight = canvasRect?.height ?? fallbackCanvasHeight;
 
       return {
         x: (canvasWidth / 2 - activeViewport.x) / activeViewport.scale,
         y: (canvasHeight / 2 - activeViewport.y) / activeViewport.scale,
       };
     },
-    [viewport]
+    [sidebarCollapsed, viewport]
   );
 
   const getSpawnPosition = useCallback(
@@ -5907,6 +5932,9 @@ export default function AIWorkspace() {
     };
     recordCurrentCanvasUndoSnapshot();
     setItems(prev => [...prev, newItem]);
+    setSelectedConnectionIds([]);
+    setSelectedId(newItem.id);
+    setSelectedIds([newItem.id]);
   };
 
   const addImageCard = useCallback(() => {
@@ -5926,6 +5954,9 @@ export default function AIWorkspace() {
     };
     recordCurrentCanvasUndoSnapshot();
     setItems((prev) => [...prev, newItem]);
+    setSelectedConnectionIds([]);
+    setSelectedId(newItem.id);
+    setSelectedIds([newItem.id]);
   }, [getSpawnPosition, recordCurrentCanvasUndoSnapshot]);
 
   const createTextItemAtCanvasPoint = useCallback((canvasPoint: { x: number; y: number }) => {
@@ -5998,11 +6029,17 @@ export default function AIWorkspace() {
     itemBounds: selectedImageToolbarBounds,
     toCanvasScreenPoint,
     canvasRect: canvasRef.current?.getBoundingClientRect(),
-    canvasGap: 12,
+    screenGap: 12,
   });
   const selectedImageToolbarTop = selectedImageToolbarAnchor
     ? selectedImageToolbarAnchor.y
     : null;
+  const canvasBottomToolbarReservedRightClassName = sidebarCollapsed
+    ? '[--canvas-bottom-toolbar-reserved-right:0px]'
+    : '[--canvas-bottom-toolbar-reserved-right:0px] sm:[--canvas-bottom-toolbar-reserved-right:500px]';
+  const canvasBottomToolbarStyle = {
+    left: 'calc((100vw - var(--canvas-bottom-toolbar-reserved-right)) / 2)',
+  } satisfies React.CSSProperties;
 
   const buildConnectionPath = (from: { x: number; y: number }, to: { x: number; y: number }) => {
     const dx = Math.max(64, Math.abs(to.x - from.x) * 0.42);
@@ -9311,6 +9348,19 @@ export default function AIWorkspace() {
     }
   };
 
+  const handleCanvasBottomToolbarAction = (action?: CanvasBottomToolbarAction) => {
+    if (!action || action === 'video-placeholder') return;
+    clearPendingConnectionMenu();
+    setShowAddNodeMenu(false);
+
+    if (action === 'add-image-card') {
+      addImageCard();
+      return;
+    }
+
+    addText();
+  };
+
   const showImageToolbarNoticeWithTimeout = useCallback((message: string, autoHideMs?: number) => {
     setImageToolbarNotice(message);
     if (imageToolbarNoticeTimeoutRef.current) {
@@ -11279,10 +11329,6 @@ export default function AIWorkspace() {
               <div
                 data-image-node-toolbar="true"
                 className="workspace-menu-panel pointer-events-auto flex items-center gap-1 rounded-full px-2 py-1.5"
-                style={{
-                  transform: `scale(${viewport.scale})`,
-                  transformOrigin: 'bottom center',
-                }}
                 onPointerDown={(e) => {
                   e.stopPropagation();
                 }}
@@ -11917,6 +11963,35 @@ export default function AIWorkspace() {
         </div>
       )}
 
+      <div
+        data-canvas-bottom-toolbar="true"
+        className={`absolute bottom-4 z-50 flex -translate-x-1/2 items-center gap-2 rounded-[14px] border border-neutral-200 bg-white px-1.5 py-1.5 text-neutral-700 ${canvasBottomToolbarReservedRightClassName}`}
+        style={canvasBottomToolbarStyle}
+      >
+        {CANVAS_BOTTOM_TOOLBAR_ITEMS.map((item) => {
+          const isActive = item.active === true;
+
+          return (
+            <button
+              key={item.id}
+              type="button"
+              aria-label={item.label}
+              title={item.label}
+              onClick={() => handleCanvasBottomToolbarAction('action' in item ? item.action : undefined)}
+              className={`inline-flex h-8 w-8 items-center justify-center rounded-[9px] transition-colors ${
+                isActive
+                  ? 'bg-neutral-900 text-white'
+                  : 'text-neutral-700 hover:bg-neutral-100 hover:text-neutral-950'
+              }`}
+            >
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                <path fill="currentColor" fillOpacity={item.svgOpacity ?? 0.9} d={item.svgPath} />
+              </svg>
+            </button>
+          );
+        })}
+      </div>
+
       {/* Zoom Controller - Outside Canvas */}
       <div className="workspace-floating-control absolute left-4 bottom-4 z-50 flex items-center gap-2 rounded-xl p-1.5 backdrop-blur-xl">
         <button 
@@ -12053,10 +12128,6 @@ export default function AIWorkspace() {
             <div className="flex-1 px-6 py-8 flex items-center justify-center">
               {!hideWelcomeByCenterSkillPick && (
                 <div>
-                  <div className="text-center mb-8">
-                    <h2 className="mb-2 text-xl font-medium">你好，我是 Levert Skills</h2>
-                    <p className="workspace-text-muted text-sm">描述你的设计需求，我来帮你实现</p>
-                  </div>
                   <div className="flex justify-center">
                     <div className="flex flex-col gap-1.5">
                       <div className="flex gap-1.5 justify-center">

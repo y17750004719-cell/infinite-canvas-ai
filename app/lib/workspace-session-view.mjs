@@ -48,8 +48,6 @@ export const IMAGE_CARD_MODEL_OPTIONS = [
 ];
 
 export const IMAGE_CARD_SIZE_OPTIONS = getSupportedImageSizeOptions(IMAGE_CARD_MODEL_OPTIONS[0]?.id);
-const CANVAS_BACKGROUND_BASE_DOT_GAP = 20;
-const CANVAS_BACKGROUND_MIN_DOT_GAP = 14;
 
 export function getDefaultTextPanelModelOption() {
   return TEXT_PANEL_MODEL_OPTIONS[0];
