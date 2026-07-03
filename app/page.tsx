@@ -5,6 +5,8 @@ import Image from 'next/image';
 import { createPortal } from 'react-dom';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import gsap from 'gsap';
+import { useGSAP } from '@gsap/react';
 import { 
   MousePointer2, Type, Image as ImageIcon,
   Share2, History, Settings, Paperclip,
@@ -107,12 +109,18 @@ import {
 import { GalleryView, SessionActionErrorBanner } from './components/workspace/GalleryView';
 import { useWorkspaceSessionController } from './hooks/useWorkspaceSessionController';
 
+gsap.registerPlugin(useGSAP);
+
 const DEBUG_CANVAS_CONNECTIONS = false;
 const CANVAS_OVERLAY_Z = 120;
 const CHAT_PANEL_Z = 180;
 const GLOBAL_NOTICE_Z = 220;
 const CANVAS_CLIPBOARD_PASTE_OFFSET = { x: 32, y: 32 };
 const CANVAS_VIEWPORT_PASTE_ANIMATION_MS = 240;
+const CHAT_PANEL_GSAP_OPEN_DURATION = 0.54;
+const CHAT_PANEL_GSAP_CLOSE_DURATION = 0.46;
+const CHAT_PANEL_GSAP_EASE = 'expo.out';
+const FLOATING_PANEL_GSAP_DURATION = 0.18;
 
 const extractPlainText = (value: React.ReactNode): string =>
   React.Children.toArray(value)
@@ -2274,6 +2282,58 @@ const CanvasViewport = memo(function CanvasViewport({
     width: canvasRect?.width ?? 0,
     height: canvasRect?.height ?? 0,
   };
+
+  useGSAP(
+    () => {
+      const floatingPanels = [
+        selectedImageCardPanelRootRef.current,
+        selectedTextCardPanelRootRef.current,
+        imageCardProviderPopoverRef.current,
+        imageCardModelPopoverRef.current,
+        imageCardSettingsPopoverRef.current,
+        textPanelProviderPopoverRef.current,
+        textPanelModelPopoverRef.current,
+      ].filter((element): element is HTMLDivElement => element !== null);
+
+      if (floatingPanels.length === 0) return;
+
+      const prefersReducedMotion =
+        typeof window !== 'undefined' &&
+        typeof window.matchMedia === 'function' &&
+        window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+      if (prefersReducedMotion) {
+        gsap.set(floatingPanels, { autoAlpha: 1, y: 0, scale: 1 });
+        return;
+      }
+
+      gsap.fromTo(
+        floatingPanels,
+        { autoAlpha: 0, y: 8, scale: 0.985 },
+        {
+          autoAlpha: 1,
+          y: 0,
+          scale: 1,
+          duration: FLOATING_PANEL_GSAP_DURATION,
+          ease: 'power2.out',
+          overwrite: 'auto',
+        }
+      );
+    },
+    {
+      dependencies: [
+        selectedImageCardPanelItem?.id,
+        selectedTextCardPanelItem?.id,
+        showImageCardProviderMenu,
+        showImageCardModelMenu,
+        showImageCardSettingsMenu,
+        showTextPanelProviderMenu,
+        showTextPanelModelMenu,
+      ],
+      revertOnUpdate: true,
+    }
+  );
+
   const connectionMenuWidth = 360;
   const connectionMenuHeight = 292;
   const connectionMenuPadding = 24;
@@ -3932,6 +3992,10 @@ function WorkspaceThemeToggle({
 export default function AIWorkspace() {
   const { theme, toggleTheme } = useWorkspaceTheme();
   const themePalette = WORKSPACE_THEME_PALETTES[theme];
+  const editorShellRef = useRef<HTMLDivElement | null>(null);
+  const chatPanelRef = useRef<HTMLDivElement | null>(null);
+  const chatPanelReserveRef = useRef({ width: CANVAS_CHAT_PANEL_RESERVED_WIDTH });
+  const chatPanelToolbarReserveRef = useRef({ width: CANVAS_CHAT_PANEL_RESERVED_WIDTH });
   const [viewMode, setViewMode] = useState<'gallery' | 'editor'>('gallery');
   const [tool, setTool] = useState<Tool>('select');
   const [items, setItemsState] = useState<CanvasItem[]>([]);
@@ -4006,6 +4070,7 @@ export default function AIWorkspace() {
   const [hasStartedChat, setHasStartedChat] = useState(false);
   const [showAvatarMenu, setShowAvatarMenu] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [chatPanelOpening, setChatPanelOpening] = useState(false);
   const [activeSkill, setActiveSkillState] = useState<{ id: string; label: string } | null>(null);
   const [generationMode, setGenerationMode] = useState<GenerationMode>('auto');
   const [showGenerationModeMenu, setShowGenerationModeMenu] = useState(false);
@@ -4021,6 +4086,98 @@ export default function AIWorkspace() {
     targetItemId: string;
     sourceItemId: string;
   } | null>(null);
+
+  const getChatPanelTargetReservedWidth = useCallback((collapsed: boolean) => {
+    if (collapsed || typeof window === 'undefined' || typeof window.matchMedia !== 'function') return 0;
+    return window.matchMedia('(min-width: 640px)').matches ? CANVAS_CHAT_PANEL_RESERVED_WIDTH : 0;
+  }, []);
+
+  const setChatPanelReservedWidth = useCallback((width: number) => {
+    const nextWidth = Math.max(0, Math.min(CANVAS_CHAT_PANEL_RESERVED_WIDTH, width));
+    chatPanelReserveRef.current.width = nextWidth;
+    editorShellRef.current?.style.setProperty('--chat-panel-reserved-width', `${nextWidth}px`);
+  }, []);
+
+  const setChatPanelToolbarReservedWidth = useCallback((width: number) => {
+    const nextWidth = Math.max(0, Math.min(CANVAS_CHAT_PANEL_RESERVED_WIDTH, width));
+    chatPanelToolbarReserveRef.current.width = nextWidth;
+    editorShellRef.current?.style.setProperty('--chat-panel-toolbar-reserved-width', `${nextWidth}px`);
+  }, []);
+
+  useGSAP(
+    () => {
+      const panel = chatPanelRef.current;
+      if (!panel) return;
+
+      const targetReservedWidth = getChatPanelTargetReservedWidth(sidebarCollapsed);
+      const targetXPercent = sidebarCollapsed ? 100 : 0;
+      const duration = sidebarCollapsed ? CHAT_PANEL_GSAP_CLOSE_DURATION : CHAT_PANEL_GSAP_OPEN_DURATION;
+
+      if (sidebarCollapsed || targetReservedWidth === 0) {
+        setChatPanelReservedWidth(targetReservedWidth);
+      }
+
+      if (reducedMotionRef.current) {
+        gsap.set(panel, { xPercent: targetXPercent });
+        setChatPanelReservedWidth(targetReservedWidth);
+        setChatPanelToolbarReservedWidth(targetReservedWidth);
+        setChatPanelOpening(false);
+        return;
+      }
+
+      const toolbarReserve = { width: chatPanelToolbarReserveRef.current.width };
+      const timeline = gsap.timeline({
+        defaults: {
+          duration,
+          ease: CHAT_PANEL_GSAP_EASE,
+          overwrite: 'auto',
+        },
+        onComplete: () => {
+          setChatPanelReservedWidth(targetReservedWidth);
+          setChatPanelToolbarReservedWidth(targetReservedWidth);
+          setChatPanelOpening(false);
+        },
+      });
+
+      timeline.to(panel, { xPercent: targetXPercent }, 0);
+      timeline.to(
+        toolbarReserve,
+        {
+          width: targetReservedWidth,
+          onUpdate: () => setChatPanelToolbarReservedWidth(toolbarReserve.width),
+        },
+        0
+      );
+
+      return () => {
+        timeline.kill();
+      };
+    },
+    {
+      dependencies: [
+        getChatPanelTargetReservedWidth,
+        sidebarCollapsed,
+        setChatPanelReservedWidth,
+        setChatPanelToolbarReservedWidth,
+      ],
+      scope: editorShellRef,
+    }
+  );
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const handleResize = () => {
+      if (!sidebarCollapsed) {
+        const nextReservedWidth = getChatPanelTargetReservedWidth(false);
+        setChatPanelReservedWidth(nextReservedWidth);
+        setChatPanelToolbarReservedWidth(nextReservedWidth);
+      }
+    };
+    window.addEventListener('resize', handleResize);
+    return () => {
+      window.removeEventListener('resize', handleResize);
+    };
+  }, [getChatPanelTargetReservedWidth, setChatPanelReservedWidth, setChatPanelToolbarReservedWidth, sidebarCollapsed]);
   const [dragOverPanelReference, setDragOverPanelReference] = useState<{
     targetItemId: string;
     sourceItemId: string;
@@ -5199,9 +5356,7 @@ export default function AIWorkspace() {
       const isDesktopCanvas = typeof window === 'undefined'
         ? true
         : window.matchMedia('(min-width: 640px)').matches;
-      const reservedRight = !sidebarCollapsed && isDesktopCanvas
-        ? CANVAS_CHAT_PANEL_RESERVED_WIDTH
-        : 0;
+      const reservedRight = isDesktopCanvas ? chatPanelReserveRef.current.width : 0;
       const fallbackCanvasWidth = typeof window === 'undefined'
         ? 0
         : Math.max(0, window.innerWidth - reservedRight);
@@ -5214,7 +5369,7 @@ export default function AIWorkspace() {
         y: (canvasHeight / 2 - activeViewport.y) / activeViewport.scale,
       };
     },
-    [sidebarCollapsed, viewport]
+    [viewport]
   );
 
   const getSpawnPosition = useCallback(
@@ -6034,9 +6189,8 @@ export default function AIWorkspace() {
   const selectedImageToolbarTop = selectedImageToolbarAnchor
     ? selectedImageToolbarAnchor.y
     : null;
-  const canvasBottomToolbarReservedRightClassName = sidebarCollapsed
-    ? '[--canvas-bottom-toolbar-reserved-right:0px]'
-    : '[--canvas-bottom-toolbar-reserved-right:0px] sm:[--canvas-bottom-toolbar-reserved-right:500px]';
+  const canvasBottomToolbarReservedRightClassName =
+    '[--canvas-bottom-toolbar-reserved-right:0px] sm:[--canvas-bottom-toolbar-reserved-right:var(--chat-panel-toolbar-reserved-width,0px)]';
   const canvasBottomToolbarStyle = {
     left: 'calc((100vw - var(--canvas-bottom-toolbar-reserved-right)) / 2)',
   } satisfies React.CSSProperties;
@@ -6898,6 +7052,10 @@ export default function AIWorkspace() {
 
   const handleCanvasPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     const target = e.target as HTMLElement;
+    const activeElement = document.activeElement;
+    if (activeElement instanceof HTMLElement && activeElement.closest('[data-zoom-control="true"]')) {
+      activeElement.blur();
+    }
     cancelViewportAnimation();
     Object.values(magneticPorts).forEach((port) => {
       if (port.isTracking) releaseMagneticPort(port);
@@ -7107,6 +7265,29 @@ export default function AIWorkspace() {
     },
     [scheduleWheelZoom]
   );
+
+  const fitCanvasItemsToViewport = useCallback(() => {
+    const canvas = canvasRef.current;
+    const bounds = getCanvasItemsVisualBounds(itemsRef.current);
+    if (!canvas || !bounds) return;
+
+    const padding = 80;
+    const availableWidth = Math.max(1, canvas.clientWidth - padding * 2);
+    const availableHeight = Math.max(1, canvas.clientHeight - padding * 2);
+    const scaleX = bounds.width > 0 ? availableWidth / bounds.width : viewportRef.current.scale;
+    const scaleY = bounds.height > 0 ? availableHeight / bounds.height : viewportRef.current.scale;
+    const nextScale = Math.min(Math.max(Math.min(scaleX, scaleY), 0.1), 10);
+    const nextViewport = getViewportCenteredOnBounds(
+      { ...viewportRef.current, scale: nextScale },
+      bounds,
+      canvas.clientWidth,
+      canvas.clientHeight
+    );
+
+    cancelZoomAnimation();
+    cancelViewportAnimation();
+    setViewport(nextViewport);
+  }, [cancelViewportAnimation, cancelZoomAnimation, setViewport]);
 
   const handleWheel = (e: React.WheelEvent) => {
     e.preventDefault();
@@ -9361,6 +9542,16 @@ export default function AIWorkspace() {
     addText();
   };
 
+  const handleOpenChatPanel = useCallback(() => {
+    setChatPanelOpening(true);
+    setSidebarCollapsed(false);
+  }, []);
+
+  const handleCloseChatPanel = useCallback(() => {
+    setChatPanelOpening(false);
+    setSidebarCollapsed(true);
+  }, []);
+
   const showImageToolbarNoticeWithTimeout = useCallback((message: string, autoHideMs?: number) => {
     setImageToolbarNotice(message);
     if (imageToolbarNoticeTimeoutRef.current) {
@@ -10257,6 +10448,24 @@ export default function AIWorkspace() {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (isEditableUndoRedoTarget(e.target)) return;
 
+      if ((e.metaKey || e.ctrlKey) && (e.key === '+' || e.key === '=')) {
+        e.preventDefault();
+        applyViewportScale(viewportRef.current.scale + 0.1);
+        return;
+      }
+
+      if ((e.metaKey || e.ctrlKey) && e.key === '-') {
+        e.preventDefault();
+        applyViewportScale(viewportRef.current.scale - 0.1);
+        return;
+      }
+
+      if (e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && e.code === 'Digit1') {
+        e.preventDefault();
+        fitCanvasItemsToViewport();
+        return;
+      }
+
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'z') {
         e.preventDefault();
         const isRedoShortcut = e.shiftKey || (!e.metaKey && e.ctrlKey && e.key.toLowerCase() === 'y');
@@ -10353,7 +10562,7 @@ export default function AIWorkspace() {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
     };
-  }, [selectedId, selectedIds, connectionPointerId, selectedConnectionIds, pendingConnectionMenu, clearPendingConnectionMenu, copySelectedCanvasItemsToClipboard, deleteItem, hasActiveNonEditableTextSelection, recordCurrentCanvasUndoSnapshot, redoCanvasEdit, resetConnectionInteraction, undoCanvasEdit]);
+  }, [selectedId, selectedIds, connectionPointerId, selectedConnectionIds, pendingConnectionMenu, applyViewportScale, clearPendingConnectionMenu, copySelectedCanvasItemsToClipboard, deleteItem, fitCanvasItemsToViewport, hasActiveNonEditableTextSelection, recordCurrentCanvasUndoSnapshot, redoCanvasEdit, resetConnectionInteraction, undoCanvasEdit]);
 
   useEffect(() => {
     const handleWindowPaste = (e: ClipboardEvent) => {
@@ -10721,7 +10930,16 @@ export default function AIWorkspace() {
   }
 
   return (
-    <div className="workspace-editor-shell relative isolate flex h-screen w-full overflow-hidden">
+    <div
+      ref={editorShellRef}
+      className="workspace-editor-shell relative isolate flex h-screen w-full overflow-hidden"
+      style={
+        {
+          '--chat-panel-reserved-width': `${chatPanelReserveRef.current.width}px`,
+          '--chat-panel-toolbar-reserved-width': `${chatPanelToolbarReserveRef.current.width}px`,
+        } as React.CSSProperties
+      }
+    >
       {sessionActionError && <SessionActionErrorBanner message={sessionActionError} />}
       <input
         ref={fileInputRef}
@@ -10972,7 +11190,7 @@ export default function AIWorkspace() {
 
         <CanvasViewport
         canvasRef={canvasRef}
-        widthStyle={sidebarCollapsed ? '100%' : 'calc(100% - 500px)'}
+        widthStyle="calc(100% - var(--chat-panel-reserved-width, 0px))"
         isSpacePressed={isSpacePressed}
         isPanning={isPanning}
         viewport={viewport}
@@ -11969,7 +12187,8 @@ export default function AIWorkspace() {
         style={canvasBottomToolbarStyle}
       >
         {CANVAS_BOTTOM_TOOLBAR_ITEMS.map((item) => {
-          const isActive = item.active === true;
+          const isActive = 'active' in item && item.active === true;
+          const svgOpacity = 'svgOpacity' in item ? item.svgOpacity : 0.9;
 
           return (
             <button
@@ -11985,7 +12204,7 @@ export default function AIWorkspace() {
               }`}
             >
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                <path fill="currentColor" fillOpacity={item.svgOpacity ?? 0.9} d={item.svgPath} />
+                <path fill="currentColor" fillOpacity={svgOpacity} d={item.svgPath} />
               </svg>
             </button>
           );
@@ -11993,50 +12212,91 @@ export default function AIWorkspace() {
       </div>
 
       {/* Zoom Controller - Outside Canvas */}
-      <div className="workspace-floating-control absolute left-4 bottom-4 z-50 flex items-center gap-2 rounded-xl p-1.5 backdrop-blur-xl">
-        <button 
-          className="workspace-text-muted rounded-md p-1.5 hover:bg-[var(--workspace-control-hover)] hover:text-[var(--workspace-text-primary)]"
-          onClick={() => applyViewportScale(viewport.scale - 0.1)}
+      <div className="group absolute left-4 bottom-4 z-[130]" data-zoom-control="true">
+        <div className="absolute bottom-full left-0 mb-2 hidden group-hover:block group-focus-within:block">
+          <div className="workspace-menu-panel pointer-events-auto w-[198px] rounded-xl p-2">
+            <button
+              type="button"
+              className="workspace-menu-item flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left text-xs"
+              onClick={() => applyViewportScale(viewportRef.current.scale + 0.1)}
+            >
+              <span>放大</span>
+              <span className="workspace-text-soft">⌘ +</span>
+            </button>
+            <button
+              type="button"
+              className="workspace-menu-item flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left text-xs"
+              onClick={() => applyViewportScale(viewportRef.current.scale - 0.1)}
+            >
+              <span>缩小</span>
+              <span className="workspace-text-soft">⌘ -</span>
+            </button>
+            <button
+              type="button"
+              className="workspace-menu-item flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left text-xs"
+              onClick={fitCanvasItemsToViewport}
+            >
+              <span>显示画布所有元素</span>
+              <span className="workspace-text-soft">⇧ 1</span>
+            </button>
+            <div className="my-1 border-t border-[var(--workspace-border)]" />
+            <button
+              type="button"
+              className="workspace-menu-item flex w-full items-center rounded-md px-2 py-1.5 text-left text-xs"
+              onClick={() => applyViewportScale(0.5)}
+            >
+              缩放至 50%
+            </button>
+            <button
+              type="button"
+              className="workspace-menu-item flex w-full items-center rounded-md px-2 py-1.5 text-left text-xs"
+              onClick={() => applyViewportScale(1)}
+            >
+              缩放至 100%
+            </button>
+            <button
+              type="button"
+              className="workspace-menu-item flex w-full items-center rounded-md px-2 py-1.5 text-left text-xs"
+              onClick={() => applyViewportScale(2)}
+            >
+              缩放至 200%
+            </button>
+          </div>
+        </div>
+        <button
+          type="button"
+          className="workspace-text-muted rounded-md px-2 py-1 text-xs font-medium transition-colors hover:bg-[var(--workspace-control-hover)] focus-visible:outline-none group-hover:bg-[var(--workspace-control-hover)] group-focus-within:bg-[var(--workspace-control-hover)]"
+          aria-label="画布缩放菜单"
         >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <line x1="5" y1="12" x2="19" y2="12" />
-          </svg>
-        </button>
-        <span className="min-w-[3rem] text-center text-xs font-medium">
           {Math.round(viewport.scale * 100)}%
-        </span>
-        <button 
-          className="workspace-text-muted rounded-md p-1.5 hover:bg-[var(--workspace-control-hover)] hover:text-[var(--workspace-text-primary)]"
-          onClick={() => applyViewportScale(viewport.scale + 0.1)}
-        >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <line x1="12" y1="5" x2="12" y2="19" />
-            <line x1="5" y1="12" x2="19" y2="12" />
-          </svg>
         </button>
       </div>
 
       {/* Right Chat Panel */}
       {typeof document !== 'undefined' &&
         createPortal(
-          sidebarCollapsed ? (
-            <div
-              className="workspace-floating-control fixed right-4 top-4 isolate flex h-9 w-9 items-center justify-center rounded-xl transition-all duration-300"
-              style={{ zIndex: CHAT_PANEL_Z }}
-            >
-              <button 
-                className="p-1 transition-colors hover:text-[var(--workspace-text-primary)]"
-                onClick={() => setSidebarCollapsed(false)}
-                title="展开对话"
+          <>
+            {sidebarCollapsed && !chatPanelOpening && (
+              <div
+                className="workspace-floating-control fixed right-4 top-4 isolate flex h-9 w-9 items-center justify-center rounded-xl transition-all duration-300"
+                style={{ zIndex: CHAT_PANEL_Z }}
               >
-                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                  <polyline points="15 18 9 12 15 6" />
-                </svg>
-              </button>
-            </div>
-          ) : (
+                <button
+                  className="p-1 transition-colors hover:text-[var(--workspace-text-primary)]"
+                  onPointerDown={handleOpenChatPanel}
+                  onClick={handleOpenChatPanel}
+                  title="展开对话"
+                >
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <polyline points="15 18 9 12 15 6" />
+                  </svg>
+                </button>
+              </div>
+            )}
             <div
-              className="workspace-chat-panel fixed inset-y-4 left-4 right-4 isolate flex w-auto flex-col overflow-hidden rounded-[28px] backdrop-blur-xl transition-all duration-300 sm:left-auto sm:w-[480px]"
+              ref={chatPanelRef}
+              className="workspace-chat-panel fixed inset-y-0 left-0 right-0 isolate flex w-auto flex-col overflow-hidden will-change-transform sm:left-auto sm:w-[500px]"
+              aria-hidden={sidebarCollapsed}
               style={{ zIndex: CHAT_PANEL_Z }}
             >
           {/* Header */}
@@ -12067,7 +12327,7 @@ export default function AIWorkspace() {
               <button 
                 className="rounded-lg p-2 transition-colors hover:bg-[var(--workspace-control-hover)]" 
                 title="收缩"
-                onClick={() => setSidebarCollapsed(true)}
+                onClick={handleCloseChatPanel}
               >
                 <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className="workspace-text-muted">
                   <polyline points="9 18 15 12 9 6" />
@@ -12559,7 +12819,7 @@ export default function AIWorkspace() {
             </div>
           </div>
             </div>
-          ),
+          </>,
           document.body
         )}
       <style jsx global>{`

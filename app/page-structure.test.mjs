@@ -221,12 +221,11 @@ test('canvas bottom toolbar renders a screenshot-style icon-only dock', () => {
   assert.equal(pageSource.includes('const handleCanvasBottomToolbarAction = (action?: CanvasBottomToolbarAction) => {'), true);
   assert.equal(pageSource.includes("if (!action || action === 'video-placeholder') return;"), true);
   assert.equal(pageSource.includes("if (action === 'add-image-card')"), true);
-  assert.equal(pageSource.includes('const canvasBottomToolbarReservedRightClassName = sidebarCollapsed'), true);
-  assert.equal(pageSource.includes("? '[--canvas-bottom-toolbar-reserved-right:0px]'"), true);
-  assert.equal(pageSource.includes(": '[--canvas-bottom-toolbar-reserved-right:0px] sm:[--canvas-bottom-toolbar-reserved-right:500px]'"), true);
+  assert.equal(pageSource.includes('const canvasBottomToolbarReservedRightClassName ='), true);
+  assert.equal(pageSource.includes("sm:[--canvas-bottom-toolbar-reserved-right:var(--chat-panel-toolbar-reserved-width,0px)]"), true);
+  assert.equal(pageSource.includes("sm:[--canvas-bottom-toolbar-reserved-right:var(--chat-panel-reserved-width,0px)]"), false);
   assert.equal(pageSource.includes('const CANVAS_CHAT_PANEL_RESERVED_WIDTH = 500;'), true);
-  assert.equal(pageSource.includes('const reservedRight = !sidebarCollapsed && isDesktopCanvas'), true);
-  assert.equal(pageSource.includes('? CANVAS_CHAT_PANEL_RESERVED_WIDTH'), true);
+  assert.equal(pageSource.includes('const reservedRight = isDesktopCanvas ? chatPanelReserveRef.current.width : 0;'), true);
   assert.equal(pageSource.includes('Math.max(0, window.innerWidth - reservedRight)'), true);
   assert.equal(pageSource.includes('window.innerWidth / 2'), false);
   assert.equal(
@@ -242,8 +241,48 @@ test('canvas bottom toolbar renders a screenshot-style icon-only dock', () => {
   assert.equal(toolbarBlock.includes("onClick={() => handleCanvasBottomToolbarAction('action' in item ? item.action : undefined)}"), true);
   assert.equal(toolbarBlock.includes('bg-neutral-900 text-white'), true);
   assert.equal(toolbarBlock.includes('<svg width="20" height="20" viewBox="0 0 24 24"'), true);
-  assert.equal(toolbarBlock.includes('fillOpacity={item.svgOpacity ?? 0.9}'), true);
+  assert.equal(toolbarBlock.includes("const svgOpacity = 'svgOpacity' in item ? item.svgOpacity : 0.9;"), true);
+  assert.equal(toolbarBlock.includes('fillOpacity={svgOpacity}'), true);
   assert.equal(toolbarBlock.includes('<span'), false);
+});
+
+test('canvas zoom display opens a hover menu with zoom actions', () => {
+  const zoomStart = pageSource.indexOf('{/* Zoom Controller - Outside Canvas */}');
+  const zoomEnd = pageSource.indexOf('{/* Right Chat Panel */}', zoomStart);
+
+  assert.notEqual(zoomStart, -1);
+  assert.notEqual(zoomEnd, -1);
+
+  const zoomBlock = pageSource.slice(zoomStart, zoomEnd);
+
+  assert.equal(zoomBlock.includes('workspace-floating-control'), false);
+  assert.equal(zoomBlock.includes('group absolute left-4 bottom-4 z-[130]'), true);
+  assert.equal(zoomBlock.includes('data-zoom-control="true"'), true);
+  assert.equal(zoomBlock.includes('group-hover:block group-focus-within:block'), true);
+  assert.equal(zoomBlock.includes('workspace-menu-panel pointer-events-auto w-[198px] rounded-xl p-2'), true);
+  assert.equal(zoomBlock.includes('hover:bg-[var(--workspace-control-hover)]'), true);
+  assert.equal(zoomBlock.includes('group-focus-within:bg-[var(--workspace-control-hover)]'), true);
+  assert.equal(zoomBlock.includes('{Math.round(viewport.scale * 100)}%'), true);
+  assert.equal(zoomBlock.includes('放大'), true);
+  assert.equal(zoomBlock.includes('缩小'), true);
+  assert.equal(zoomBlock.includes('显示画布所有元素'), true);
+  assert.equal(zoomBlock.includes('缩放至 50%'), true);
+  assert.equal(zoomBlock.includes('缩放至 100%'), true);
+  assert.equal(zoomBlock.includes('缩放至 200%'), true);
+  assert.equal(zoomBlock.includes('⌘ +'), true);
+  assert.equal(zoomBlock.includes('⌘ -'), true);
+  assert.equal(zoomBlock.includes('⇧ 1'), true);
+  assert.equal(zoomBlock.includes('onClick={() => applyViewportScale(viewportRef.current.scale + 0.1)}'), true);
+  assert.equal(zoomBlock.includes('onClick={() => applyViewportScale(viewportRef.current.scale - 0.1)}'), true);
+  assert.equal(zoomBlock.includes('onClick={fitCanvasItemsToViewport}'), true);
+  assert.equal(zoomBlock.includes('onClick={() => applyViewportScale(0.5)}'), true);
+  assert.equal(zoomBlock.includes('onClick={() => applyViewportScale(1)}'), true);
+  assert.equal(zoomBlock.includes('onClick={() => applyViewportScale(2)}'), true);
+  assert.equal(pageSource.includes('const fitCanvasItemsToViewport = useCallback(() => {'), true);
+  assert.equal(pageSource.includes('const padding = 80;'), true);
+  assert.equal(pageSource.includes('activeElement.closest(\'[data-zoom-control="true"]\')'), true);
+  assert.equal(pageSource.includes('activeElement.blur();'), true);
+  assert.equal(pageSource.includes("e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && e.code === 'Digit1'"), true);
 });
 
 test('workspace menus and chips use shared theme classes instead of hardcoded dark colors', () => {
@@ -1068,7 +1107,70 @@ test('right chat panel renders through a page-level portal above canvas overlays
   assert.equal(pageSource.includes('document.body'), true);
   assert.equal(pageSource.includes('style={{ zIndex: CHAT_PANEL_Z }}'), true);
   assert.equal(pageSource.includes("className=\"workspace-floating-control fixed right-4 top-4 isolate"), true);
-  assert.equal(pageSource.includes("className=\"workspace-chat-panel fixed inset-y-4 left-4 right-4 isolate"), true);
+  assert.equal(pageSource.includes('{sidebarCollapsed && !chatPanelOpening && ('), true);
+  assert.equal(pageSource.includes('chatPanelTransitioning'), false);
+  assert.equal(pageSource.includes("import gsap from 'gsap';"), true);
+  assert.equal(pageSource.includes("import { useGSAP } from '@gsap/react';"), true);
+  assert.equal(pageSource.includes('gsap.registerPlugin(useGSAP);'), true);
+  assert.equal(pageSource.includes('const [chatPanelOpening, setChatPanelOpening] = useState(false);'), true);
+  assert.equal(pageSource.includes('const chatPanelReserveRef = useRef({ width: CANVAS_CHAT_PANEL_RESERVED_WIDTH });'), true);
+  assert.equal(pageSource.includes('const chatPanelToolbarReserveRef = useRef({ width: CANVAS_CHAT_PANEL_RESERVED_WIDTH });'), true);
+  assert.equal(pageSource.includes('const setChatPanelReservedWidth = useCallback((width: number) => {'), true);
+  assert.equal(pageSource.includes('const setChatPanelToolbarReservedWidth = useCallback((width: number) => {'), true);
+  assert.equal(pageSource.includes("editorShellRef.current?.style.setProperty('--chat-panel-reserved-width', `${nextWidth}px`);"), true);
+  assert.equal(pageSource.includes("editorShellRef.current?.style.setProperty('--chat-panel-toolbar-reserved-width', `${nextWidth}px`);"), true);
+  assert.equal(pageSource.includes('const CHAT_PANEL_GSAP_OPEN_DURATION = 0.54;'), true);
+  assert.equal(pageSource.includes('const CHAT_PANEL_GSAP_CLOSE_DURATION = 0.46;'), true);
+  assert.equal(pageSource.includes("const CHAT_PANEL_GSAP_EASE = 'expo.out';"), true);
+  assert.equal(pageSource.includes('const duration = sidebarCollapsed ? CHAT_PANEL_GSAP_CLOSE_DURATION : CHAT_PANEL_GSAP_OPEN_DURATION;'), true);
+  assert.equal(pageSource.includes('const reserve = { width: chatPanelReserveRef.current.width };'), false);
+  assert.equal(pageSource.includes('const toolbarReserve = { width: chatPanelToolbarReserveRef.current.width };'), true);
+  assert.equal(pageSource.includes('onUpdate: () => {\n              setChatPanelReservedWidth(reserve.width);'), false);
+  assert.equal(pageSource.includes('onUpdate: () => setChatPanelToolbarReservedWidth(toolbarReserve.width),'), true);
+  assert.equal(pageSource.includes('gsap.timeline({'), true);
+  assert.equal(pageSource.includes('.to(panel, { xPercent: targetXPercent }, 0)'), true);
+  assert.equal(pageSource.includes('timeline.to(\n        toolbarReserve,'), true);
+  assert.equal(pageSource.includes('const handleOpenChatPanel = useCallback(() => {'), true);
+  assert.equal(pageSource.includes('const handleCloseChatPanel = useCallback(() => {'), true);
+  assert.equal(pageSource.includes('setChatPanelOpening(true);\n    setSidebarCollapsed(false);'), true);
+  assert.equal(pageSource.includes('setChatPanelOpening(false);\n    setSidebarCollapsed(true);'), true);
+  assert.equal(pageSource.includes('onPointerDown={handleOpenChatPanel}'), true);
+  assert.equal(pageSource.includes('onClick={handleOpenChatPanel}'), true);
+  assert.equal(pageSource.includes('onClick={handleCloseChatPanel}'), true);
+  assert.equal(pageSource.includes('handleSetSidebarCollapsed'), false);
+  assert.equal(pageSource.includes('onClick={() => setSidebarCollapsed(false)}'), false);
+  assert.equal(pageSource.includes('onClick={() => setSidebarCollapsed(true)}'), false);
+  assert.equal(pageSource.includes('{(chatPanelTransitioning || !sidebarCollapsed) && ('), false);
+  assert.equal(pageSource.includes('pointer-events-none fixed inset-y-0 left-0 right-0'), false);
+  assert.equal(pageSource.includes('className="pointer-events-none fixed inset-y-0 left-0 right-0 bg-[var(--workspace-page-bg)] sm:left-auto sm:w-[500px]"'), false);
+  assert.equal(pageSource.includes('style={{ zIndex: CHAT_PANEL_Z - 1 }}'), false);
+  assert.equal(pageSource.includes('const CANVAS_CHAT_PANEL_RESERVED_WIDTH = 500;'), true);
+  assert.equal(pageSource.includes('widthStyle="calc(100% - var(--chat-panel-reserved-width, 0px))"'), true);
+  assert.equal(pageSource.includes("--chat-panel-reserved-width': `${chatPanelReserveRef.current.width}px`"), true);
+  assert.equal(pageSource.includes("--chat-panel-toolbar-reserved-width': `${chatPanelToolbarReserveRef.current.width}px`"), true);
+  assert.equal(pageSource.includes("sm:[--canvas-bottom-toolbar-reserved-right:var(--chat-panel-toolbar-reserved-width,0px)]"), true);
+  assert.equal(pageSource.includes("sm:[--canvas-bottom-toolbar-reserved-right:var(--chat-panel-reserved-width,0px)]"), false);
+  assert.equal(pageSource.includes("widthStyle={chatPanelReservesCanvas ? 'calc(100% - 500px)' : '100%'}"), false);
+  assert.equal(pageSource.includes("widthStyle={sidebarCollapsed ? '100%' : 'calc(100% - 500px)'}"), false);
+  assert.equal(pageSource.includes('workspace-chat-panel fixed inset-y-0 left-0 right-0 isolate flex w-auto flex-col overflow-hidden transition-transform duration-300 ease-out sm:left-auto sm:w-[500px]'), false);
+  assert.equal(pageSource.includes('workspace-chat-panel fixed inset-y-0 left-0 right-0 isolate flex w-auto flex-col overflow-hidden will-change-transform sm:left-auto sm:w-[500px]'), true);
+  assert.equal((pageSource.match(/\$\{sidebarCollapsed \? 'translate-x-full' : 'translate-x-0'\}/g) || []).length, 0);
+  assert.equal(pageSource.includes('aria-hidden={sidebarCollapsed}'), true);
+  assert.equal(pageSource.includes("event.propertyName === 'transform'"), false);
+  assert.equal(pageSource.includes('setChatPanelOpening(false);'), true);
+  assert.equal(pageSource.includes('setChatPanelTransitioning(false);'), false);
+  assert.equal(pageSource.includes('transition-all duration-300 sm:left-auto sm:w-[500px]'), false);
+  assert.equal(pageSource.includes('sm:w-[480px]'), false);
+  assert.equal(pageSource.includes('workspace-chat-panel fixed inset-y-4'), false);
+  assert.equal(pageSource.includes('workspace-chat-panel fixed inset-y-0 left-0 right-0 isolate flex w-auto flex-col overflow-hidden rounded-[28px]'), false);
+  assert.equal(pageSource.includes('workspace-chat-panel fixed inset-y-0 left-0 right-0 isolate flex w-auto flex-col overflow-hidden backdrop-blur-xl'), false);
+  assert.equal(globalsSource.includes('.workspace-chat-panel {\n  border-left: 1px solid var(--workspace-border);'), true);
+  assert.equal(globalsSource.includes('.workspace-chat-panel {\n  border-left: 1px solid var(--workspace-border);\n  background: #fff;'), true);
+  assert.equal(globalsSource.includes('.workspace-chat-panel {\n  border-left: 1px solid var(--workspace-border);\n  background: transparent;'), false);
+  assert.equal(globalsSource.includes('background: color-mix(in srgb, var(--workspace-surface-elevated) 88%, transparent);'), false);
+  assert.equal(globalsSource.includes('.workspace-chat-panel {\n  border: 1px solid var(--workspace-border);'), false);
+  assert.equal(globalsSource.includes('.workspace-editor-shell {\n  background: var(--workspace-page-bg);'), true);
+  assert.equal(globalsSource.includes('.workspace-editor-shell {\n  background: var(--workspace-editor-bg);'), false);
 });
 
 test('page wires session-scoped canvas undo history through a dedicated snapshot helper module', () => {

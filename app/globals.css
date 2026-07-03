@@ -241,7 +241,7 @@ body {
 }
 
 .workspace-editor-shell {
-  background: var(--workspace-editor-bg);
+  background: var(--workspace-page-bg);
   color: var(--workspace-text-primary);
 }
 
@@ -313,8 +313,8 @@ body {
 }
 
 .workspace-chat-panel {
-  border: 1px solid var(--workspace-border);
-  background: color-mix(in srgb, var(--workspace-surface-elevated) 88%, transparent);
+  border-left: 1px solid var(--workspace-border);
+  background: #fff;
   color: var(--workspace-text-primary);
 }
 
