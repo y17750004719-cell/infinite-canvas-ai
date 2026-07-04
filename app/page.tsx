@@ -426,6 +426,7 @@ interface ProviderConnectionTestResult {
 
 interface ProviderFetchedModelsResult extends ProviderConnectionTestResult {
   allModels: string[];
+  modelSources?: Record<string, string[]>;
 }
 
 type ProviderSettingsModelPickerCategory = 'all' | 'image' | 'chat';
@@ -9663,6 +9664,7 @@ export default function AIWorkspace() {
       .map((modelId) => ({
         id: modelId,
         category: getFetchedModelCategory(modelId, providerSettingsFetchedModels, providerSettingsFetchedModelCategoryById),
+        sources: providerSettingsFetchedModels?.modelSources?.[modelId] || [],
       }))
       .filter((model) => {
         const matchesCategory =
@@ -10152,12 +10154,13 @@ export default function AIWorkspace() {
 
   const handleProviderSettingsFetchModels = useCallback(async () => {
     if (!selectedProviderSettings) return;
-    if (!selectedProviderSettings.hasApiKey && providerSettingsApiKey.trim().length === 0) {
-      setProviderSettingsError('请先填写或保存 API Key');
+    const imageApiKeys = persistProviderSettingsImageApiKeys(providerSettingsImageApiKeys);
+    if (!selectedProviderSettings.hasApiKey && providerSettingsApiKey.trim().length === 0 && imageApiKeys.length === 0) {
+      setProviderSettingsError('请先填写或保存 API Key 或生图 API Key');
       setProviderSettingsTestResult({
         ok: false,
         status: 400,
-        message: '连接失败：请先填写或保存 API Key',
+        message: '连接失败：请先填写或保存 API Key 或生图 API Key',
         modelCount: 0,
         imageModels: [],
         chatModels: [],
@@ -10182,6 +10185,7 @@ export default function AIWorkspace() {
           protocol: selectedProviderSettings.protocol,
           imageRequestMode: selectedProviderSettings.imageRequestMode,
           apiKey: providerSettingsApiKey,
+          imageApiKeys,
         }),
       });
       const data = (await response.json().catch(() => null)) as ProviderFetchedModelsResult | { error?: string } | null;
@@ -10260,7 +10264,7 @@ export default function AIWorkspace() {
     } finally {
       setProviderSettingsFetchingModels(false);
     }
-  }, [providerSettingsApiKey, selectedProviderSettings, updateSelectedProviderSettings]);
+  }, [providerSettingsApiKey, providerSettingsImageApiKeys, selectedProviderSettings, updateSelectedProviderSettings]);
 
   const handleProviderSettingsApplyFetchedModels = useCallback(() => {
     if (!selectedProviderSettings || !providerSettingsFetchedModels) return;
@@ -12316,6 +12320,7 @@ export default function AIWorkspace() {
                                   <div className="truncate text-[13px] font-medium text-[var(--workspace-text-primary)]">{model.id}</div>
                                   <div className="workspace-text-muted mt-0.5 text-[11px]">
                                     {model.category === 'image' ? '图片模型' : '聊天模型'}
+                                    {model.sources.length > 0 ? ` · 来源：${model.sources.join('、')}` : ''}
                                   </div>
                                 </div>
                                 <span className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full border ${isSelected ? 'border-[var(--workspace-border-strong)] bg-[var(--workspace-control-active)]' : 'border-[var(--workspace-border)]'}`}>

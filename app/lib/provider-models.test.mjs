@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { classifyModel, parseProviderModels } from './provider-models.ts';
+import { classifyModel, mergeProviderModelProbeResults, parseProviderModels } from './provider-models.ts';
 
 test('classifyModel treats known image model families as image models', () => {
   assert.equal(classifyModel('flux/schnell'), 'image');
@@ -48,4 +48,83 @@ test('parseProviderModels classifies provider objects with capability metadata a
   assert.deepEqual(result.allModels, ['custom-renderer-v1', 'flux/schnell', 'gpt-4.1-mini']);
   assert.deepEqual(result.imageModels, ['custom-renderer-v1', 'flux/schnell']);
   assert.deepEqual(result.chatModels, ['gpt-4.1-mini']);
+});
+
+test('mergeProviderModelProbeResults combines successful model sources', () => {
+  const result = mergeProviderModelProbeResults([
+    {
+      label: '主 API',
+      result: {
+        ok: true,
+        status: 200,
+        message: 'ok',
+        modelCount: 1,
+        allModels: ['gpt-4.1-mini'],
+        imageModels: [],
+        chatModels: ['gpt-4.1-mini'],
+        imageRequestMode: 'openai',
+      },
+    },
+    {
+      label: '生图 API（Gemini）',
+      result: {
+        ok: true,
+        status: 200,
+        message: 'ok',
+        modelCount: 2,
+        allModels: ['gemini-2.5-flash-image', 'gpt-4.1-mini'],
+        imageModels: ['gemini-2.5-flash-image', 'gpt-4.1-mini'],
+        chatModels: [],
+        imageRequestMode: 'openai',
+      },
+    },
+  ]);
+
+  assert.equal(result.ok, true);
+  assert.deepEqual(result.allModels, ['gemini-2.5-flash-image', 'gpt-4.1-mini']);
+  assert.deepEqual(result.imageModels, ['gemini-2.5-flash-image', 'gpt-4.1-mini']);
+  assert.deepEqual(result.chatModels, []);
+  assert.deepEqual(result.modelSources, {
+    'gemini-2.5-flash-image': ['生图 API（Gemini）'],
+    'gpt-4.1-mini': ['主 API', '生图 API（Gemini）'],
+  });
+});
+
+test('mergeProviderModelProbeResults succeeds when at least one source works', () => {
+  const result = mergeProviderModelProbeResults([
+    {
+      label: '主 API',
+      result: {
+        ok: false,
+        status: 401,
+        message: 'unauthorized',
+        modelCount: 0,
+        allModels: [],
+        imageModels: [],
+        chatModels: [],
+        imageRequestMode: 'openai',
+      },
+    },
+    {
+      label: '生图 API',
+      result: {
+        ok: true,
+        status: 200,
+        message: 'ok',
+        modelCount: 1,
+        allModels: ['flux/dev'],
+        imageModels: ['flux/dev'],
+        chatModels: [],
+        imageRequestMode: 'openai-json',
+      },
+    },
+  ]);
+
+  assert.equal(result.ok, true);
+  assert.equal(result.modelCount, 1);
+  assert.equal(result.message, '连接可用，找到 1 个模型；1 个来源失败：主 API');
+  assert.deepEqual(result.failedSources, ['主 API']);
+  assert.deepEqual(result.modelSources, {
+    'flux/dev': ['生图 API'],
+  });
 });

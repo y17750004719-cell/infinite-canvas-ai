@@ -10,6 +10,8 @@ export interface ProviderModelProbeResult {
   imageModels: string[];
   chatModels: string[];
   imageRequestMode: ProviderImageRequestMode;
+  modelSources?: Record<string, string[]>;
+  failedSources?: string[];
 }
 
 export function normalizeProviderModelProtocol(value: unknown): ProviderModelProtocol {
@@ -220,6 +222,83 @@ export function parseProviderModels(
   const imageModels = allModels.filter((modelId) => categoryByModelId.get(modelId) === 'image');
   const chatModels = allModels.filter((modelId) => categoryByModelId.get(modelId) === 'chat');
   return { imageModels, chatModels, allModels };
+}
+
+function uniqueSortedModelIds(values: string[]): string[] {
+  return Array.from(new Set(values.map((value) => value.trim()).filter(Boolean))).sort();
+}
+
+export function mergeProviderModelProbeResults(
+  sourceResults: Array<{ label: string; result: ProviderModelProbeResult }>
+): ProviderModelProbeResult {
+  const successfulResults = sourceResults.filter((entry) => entry.result.ok);
+  const failedSources = sourceResults
+    .filter((entry) => !entry.result.ok)
+    .map((entry) => entry.label);
+  const imageRequestMode =
+    successfulResults[0]?.result.imageRequestMode ||
+    sourceResults[0]?.result.imageRequestMode ||
+    'openai';
+
+  if (successfulResults.length === 0) {
+    const firstResult = sourceResults[0]?.result;
+    return {
+      ok: false,
+      status: firstResult?.status || 502,
+      message: failedSources.length
+        ? `所有模型来源拉取失败：${failedSources.join('、')}`
+        : '拉取模型失败',
+      modelCount: 0,
+      allModels: [],
+      imageModels: [],
+      chatModels: [],
+      imageRequestMode,
+      modelSources: {},
+      failedSources,
+    };
+  }
+
+  const allModelIds = new Set<string>();
+  const imageModelIds = new Set<string>();
+  const modelSources: Record<string, string[]> = {};
+
+  for (const { label, result } of successfulResults) {
+    const sourceModelIds = uniqueSortedModelIds([
+      ...result.allModels,
+      ...result.imageModels,
+      ...result.chatModels,
+    ]);
+    for (const modelId of sourceModelIds) {
+      allModelIds.add(modelId);
+      modelSources[modelId] ||= [];
+      if (!modelSources[modelId].includes(label)) {
+        modelSources[modelId].push(label);
+      }
+    }
+    for (const modelId of result.imageModels) {
+      if (modelId.trim()) {
+        imageModelIds.add(modelId.trim());
+      }
+    }
+  }
+
+  const allModels = uniqueSortedModelIds(Array.from(allModelIds));
+  const imageModels = allModels.filter((modelId) => imageModelIds.has(modelId));
+  const chatModels = allModels.filter((modelId) => !imageModelIds.has(modelId));
+  const failedMessage = failedSources.length ? `；${failedSources.length} 个来源失败：${failedSources.join('、')}` : '';
+
+  return {
+    ok: true,
+    status: successfulResults[0].result.status,
+    message: `连接可用${allModels.length ? `，找到 ${allModels.length} 个模型` : ''}${failedMessage}`,
+    modelCount: allModels.length,
+    allModels,
+    imageModels,
+    chatModels,
+    imageRequestMode,
+    modelSources,
+    failedSources,
+  };
 }
 
 export async function fetchProviderModels({
