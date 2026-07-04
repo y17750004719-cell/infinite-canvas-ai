@@ -63,18 +63,38 @@ test('provider settings loading only lets the latest fetch update error and load
 test('provider settings modal keeps api keys in the field with controlled masking and anti autofill names', () => {
   assert.equal(pageSource.includes('maskProviderSettingsApiKeyForDisplay'), true);
   assert.equal(pageSource.includes('providerSettingsApiKeyInputValue'), true);
+  assert.equal(pageSource.includes('providerSettingsImageApiKeys'), true);
   assert.equal(pageSource.includes('selectedProviderSettings.apiKey'), true);
+  assert.equal(pageSource.includes('imageApiKeys: ProviderSettingsImageApiKey[];'), true);
   assert.equal(pageSource.includes('setProviderSettingsApiKey(nextApiKey)'), true);
+  assert.equal(pageSource.includes('setProviderSettingsImageApiKeys'), true);
+  assert.equal(pageSource.includes('handleProviderSettingsAddImageApiKey'), true);
+  assert.equal(pageSource.includes('handleProviderSettingsRemoveImageApiKey'), true);
   assert.equal(
     pageSource.includes("apiKey: provider.id === providerSettingsSelectedProviderId ? providerSettingsApiKey : provider.apiKey,"),
+    true
+  );
+  assert.equal(
+    pageSource.includes('persistProviderSettingsImageApiKeys(providerSettingsImageApiKeys)'),
     true
   );
   assert.equal(pageSource.includes('autoComplete="off"'), true);
   assert.equal(pageSource.includes('autoComplete="new-password"'), true);
   assert.equal(pageSource.includes('name="provider-image-edit-endpoint"'), true);
   assert.equal(pageSource.includes('name="provider-api-secret-input"'), true);
+  assert.equal(pageSource.includes('name="provider-image-api-secret-input"'), true);
   assert.equal(pageSource.includes('id="provider-api-secret-input"'), true);
+  assert.equal(pageSource.includes('`provider-image-api-secret-input-${imageApiKeyRow.id}`'), true);
   assert.equal(pageSource.includes('value={providerSettingsApiKeyInputValue}'), true);
+  assert.equal(pageSource.includes('value={imageApiKeyRow.isVisible ? imageApiKeyRow.apiKey : maskProviderSettingsApiKeyForDisplay(imageApiKeyRow.apiKey)}'), true);
+  assert.equal(pageSource.includes('主 API Key'), true);
+  assert.equal(pageSource.includes('生图 API Key'), true);
+  assert.equal(pageSource.includes('添加生图 API'), true);
+  assert.equal(pageSource.includes('删除生图 API'), true);
+  assert.equal(pageSource.includes('默认使用主 API Key'), true);
+  assert.equal(pageSource.includes('PROVIDER_IMAGE_API_KEY_SCOPE_OPTIONS.map'), true);
+  assert.equal(pageSource.includes('providerSettingsImageApiKeyInputValue'), false);
+  assert.equal(pageSource.includes('selectedProviderSettings.imageApiKey'), false);
 });
 
 test('provider settings modal uses categorized fetched model selection instead of textarea-only model editing', () => {

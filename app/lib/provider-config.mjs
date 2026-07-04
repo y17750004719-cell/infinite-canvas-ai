@@ -6,6 +6,7 @@ const DEFAULT_PROVIDER_UPDATED_AT = new Date(0).toISOString();
 const PROVIDER_ID_RE = /^[A-Za-z0-9_-]{2,40}$/;
 const SUPPORTED_PROVIDER_PROTOCOLS = new Set(['openai', 'gemini']);
 const SUPPORTED_IMAGE_REQUEST_MODES = new Set(['openai', 'openai-json']);
+const SUPPORTED_IMAGE_API_KEY_SCOPES = new Set(['all', 'gemini', 'gpt']);
 const PROVIDER_PRESET_TEMPLATES = {
   comfly: {
     id: 'comfly',
@@ -149,6 +150,40 @@ function normalizeApiKey(value) {
   return normalizeText(value);
 }
 
+function normalizeImageApiKeyScope(value) {
+  const raw = normalizeText(value).toLowerCase();
+  return SUPPORTED_IMAGE_API_KEY_SCOPES.has(raw) ? raw : 'all';
+}
+
+function normalizeImageApiKeys(input) {
+  const rawRows = Array.isArray(input.imageApiKeys || input.image_api_keys)
+    ? input.imageApiKeys || input.image_api_keys
+    : normalizeApiKey(input.imageApiKey || input.image_api_key)
+      ? [
+          {
+            id: 'image-key-1',
+            apiKey: input.imageApiKey || input.image_api_key,
+            scope: input.imageApiKeyScope || input.image_api_key_scope,
+          },
+        ]
+      : [];
+
+  return rawRows
+    .map((row, index) => {
+      const source = row && typeof row === 'object' && !Array.isArray(row) ? row : {};
+      const apiKey = normalizeApiKey(source.apiKey || source.api_key);
+      if (!apiKey) {
+        return null;
+      }
+      return {
+        id: normalizeText(source.id).slice(0, 80) || `image-key-${index + 1}`,
+        apiKey,
+        scope: normalizeImageApiKeyScope(source.scope || source.imageApiKeyScope || source.image_api_key_scope),
+      };
+    })
+    .filter(Boolean);
+}
+
 function normalizeBoolean(value, fallback = true) {
   if (typeof value === 'boolean') {
     return value;
@@ -194,6 +229,7 @@ function buildProviderTemplate(providerId) {
     imageModels: [],
     chatModels: [],
     apiKey: '',
+    imageApiKeys: [],
     updatedAt: DEFAULT_PROVIDER_UPDATED_AT,
   };
 }
@@ -231,6 +267,7 @@ function normalizeProvider(input, { fallbackApiKey = '', fallbackPrimary = false
     imageModels: normalizeModelList(input.imageModels || input.image_models),
     chatModels: normalizeModelList(input.chatModels || input.chat_models),
     apiKey: normalizeApiKey(input.apiKey || fallbackApiKey),
+    imageApiKeys: normalizeImageApiKeys(input),
     updatedAt,
   };
 }
@@ -240,6 +277,7 @@ function cloneProvider(provider) {
     ...provider,
     imageModels: [...provider.imageModels],
     chatModels: [...provider.chatModels],
+    imageApiKeys: [...provider.imageApiKeys],
   };
 }
 
@@ -354,6 +392,13 @@ function toProviderView(provider, source) {
     imageModels: [...provider.imageModels],
     chatModels: [...provider.chatModels],
     apiKey: provider.apiKey,
+    imageApiKeys: provider.imageApiKeys.map((row) => ({
+      id: row.id,
+      apiKey: row.apiKey,
+      scope: row.scope,
+      hasApiKey: Boolean(row.apiKey),
+      maskedApiKey: maskApiKey(row.apiKey),
+    })),
     hasApiKey: Boolean(provider.apiKey),
     maskedApiKey: maskApiKey(provider.apiKey),
     source: source === 'runtime' ? 'runtime' : 'env',
@@ -485,6 +530,7 @@ export async function updateProviderRegistry(
       imageModels: provider.imageModels,
       chatModels: provider.chatModels,
       apiKey: provider.apiKey,
+      imageApiKeys: provider.imageApiKeys,
       updatedAt: provider.updatedAt,
     })), null, 2)}\n`,
     'utf8'

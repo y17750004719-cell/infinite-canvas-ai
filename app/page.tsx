@@ -366,6 +366,19 @@ type ProviderSettingsProviderId = string;
 type ProviderSettingsSource = 'runtime' | 'env';
 type ProviderProtocol = 'openai' | 'gemini';
 type ProviderImageRequestMode = 'openai' | 'openai-json';
+type ProviderImageApiKeyScope = 'all' | 'gemini' | 'gpt';
+
+interface ProviderSettingsImageApiKey {
+  id: string;
+  apiKey: string;
+  scope: ProviderImageApiKeyScope;
+  hasApiKey?: boolean;
+  maskedApiKey?: string;
+}
+
+interface ProviderSettingsImageApiKeyRow extends ProviderSettingsImageApiKey {
+  isVisible: boolean;
+}
 
 interface ProviderSettingsCompatibilityResponse {
   providerId: ProviderSettingsProviderId;
@@ -390,6 +403,7 @@ interface ProviderSettingsItem {
   imageModels: string[];
   chatModels: string[];
   apiKey: string;
+  imageApiKeys: ProviderSettingsImageApiKey[];
   hasApiKey: boolean;
   maskedApiKey: string;
   source: ProviderSettingsSource;
@@ -454,6 +468,12 @@ const PROVIDER_PROTOCOL_OPTIONS = [
 const PROVIDER_IMAGE_REQUEST_MODE_OPTIONS = [
   { id: 'openai', label: 'openai' },
   { id: 'openai-json', label: 'openai-json' },
+] as const;
+
+const PROVIDER_IMAGE_API_KEY_SCOPE_OPTIONS = [
+  { id: 'all', label: '全部' },
+  { id: 'gemini', label: 'Gemini' },
+  { id: 'gpt', label: 'GPT' },
 ] as const;
 
 const PROVIDER_SETTINGS_MODEL_PICKER_CATEGORIES = ['all', 'image', 'chat'] as const;
@@ -574,12 +594,48 @@ const createProviderSettingsDraftProvider = (providers: ProviderSettingsItem[]):
     imageModels: [],
     chatModels: [],
     apiKey: '',
+    imageApiKeys: [],
     hasApiKey: false,
     maskedApiKey: '',
     source: 'runtime',
     updatedAt: new Date().toISOString(),
   };
 };
+
+const createProviderSettingsImageApiKeyRow = (
+  row?: Partial<ProviderSettingsImageApiKey>,
+  index = 0
+): ProviderSettingsImageApiKeyRow => {
+  const apiKey = row?.apiKey || '';
+  return {
+    id: row?.id || `image-key-${Date.now()}-${index + 1}`,
+    apiKey,
+    scope: row?.scope || 'all',
+    hasApiKey: Boolean(apiKey || row?.hasApiKey),
+    maskedApiKey: row?.maskedApiKey || maskProviderSettingsApiKeyForDisplay(apiKey),
+    isVisible: false,
+  };
+};
+
+const normalizeProviderSettingsImageApiKeyRows = (
+  rows?: ProviderSettingsImageApiKey[]
+): ProviderSettingsImageApiKeyRow[] => {
+  const sourceRows = Array.isArray(rows) ? rows : [];
+  return sourceRows.length > 0
+    ? sourceRows.map((row, index) => createProviderSettingsImageApiKeyRow(row, index))
+    : [createProviderSettingsImageApiKeyRow()];
+};
+
+const persistProviderSettingsImageApiKeys = (
+  rows: ProviderSettingsImageApiKey[]
+): ProviderSettingsImageApiKey[] =>
+  rows
+    .filter((row) => row.apiKey.trim().length > 0)
+    .map((row, index) => ({
+      id: row.id || `image-key-${index + 1}`,
+      apiKey: row.apiKey,
+      scope: row.scope,
+    }));
 
 type SkillSelectSource = 'center_quick_action' | 'bottom_skill_bar';
 
@@ -4198,6 +4254,9 @@ export default function AIWorkspace() {
   const [providerSettingsEditableProviderIds, setProviderSettingsEditableProviderIds] = useState<string[]>([]);
   const [providerSettingsSelectedProviderId, setProviderSettingsSelectedProviderId] = useState<ProviderSettingsProviderId>('comfly');
   const [providerSettingsApiKey, setProviderSettingsApiKey] = useState('');
+  const [providerSettingsImageApiKeys, setProviderSettingsImageApiKeys] = useState<ProviderSettingsImageApiKeyRow[]>(
+    () => normalizeProviderSettingsImageApiKeyRows()
+  );
   const [providerSettingsTestResult, setProviderSettingsTestResult] = useState<ProviderConnectionTestResult | null>(null);
   const [providerSettingsFetchedModels, setProviderSettingsFetchedModels] = useState<ProviderFetchedModelsResult | null>(null);
   const [providerSettingsModelPickerOpen, setProviderSettingsModelPickerOpen] = useState(false);
@@ -9578,6 +9637,7 @@ export default function AIWorkspace() {
     setProviderSettingsEditableProviderIds([]);
     setProviderSettingsSelectedProviderId(nextSelectedProviderId);
     setProviderSettingsApiKey(nextSelectedProvider?.apiKey || '');
+    setProviderSettingsImageApiKeys(normalizeProviderSettingsImageApiKeyRows(nextSelectedProvider?.imageApiKeys));
     setProviderSettingsError(null);
     setProviderSettingsTestResult(null);
     setIsProviderSettingsApiKeyVisible(false);
@@ -9689,6 +9749,7 @@ export default function AIWorkspace() {
   const closeProviderSettingsModal = useCallback(() => {
     setShowProviderSettingsModal(false);
     setProviderSettingsApiKey('');
+    setProviderSettingsImageApiKeys(normalizeProviderSettingsImageApiKeyRows());
     setProviderSettingsError(null);
     setProviderSettingsLoading(false);
     setProviderSettingsSaving(false);
@@ -9708,6 +9769,7 @@ export default function AIWorkspace() {
     const nextProvider = providerSettingsProviders.find((provider) => provider.id === nextProviderId);
     setProviderSettingsSelectedProviderId(nextProviderId);
     setProviderSettingsApiKey(nextProvider?.apiKey || '');
+    setProviderSettingsImageApiKeys(normalizeProviderSettingsImageApiKeyRows(nextProvider?.imageApiKeys));
     setProviderSettingsError(null);
     setProviderSettingsTestResult(null);
     setProviderSettingsFetchedModels(null);
@@ -9727,12 +9789,41 @@ export default function AIWorkspace() {
     );
   }, [providerSettingsSelectedProviderId]);
 
+  const updateProviderSettingsImageApiKeyRows = useCallback((updater: (rows: ProviderSettingsImageApiKeyRow[]) => ProviderSettingsImageApiKeyRow[]) => {
+    setProviderSettingsImageApiKeys((prev) => {
+      const nextRows = updater(prev);
+      updateSelectedProviderSettings((provider) => ({
+        ...provider,
+        imageApiKeys: persistProviderSettingsImageApiKeys(nextRows),
+      }));
+      return nextRows;
+    });
+  }, [updateSelectedProviderSettings]);
+
+  const handleProviderSettingsAddImageApiKey = useCallback(() => {
+    updateProviderSettingsImageApiKeyRows((rows) => [
+      ...rows,
+      {
+        ...createProviderSettingsImageApiKeyRow(),
+        isVisible: true,
+      },
+    ]);
+  }, [updateProviderSettingsImageApiKeyRows]);
+
+  const handleProviderSettingsRemoveImageApiKey = useCallback((rowId: string) => {
+    updateProviderSettingsImageApiKeyRows((rows) => {
+      const nextRows = rows.filter((row) => row.id !== rowId);
+      return nextRows.length > 0 ? nextRows : normalizeProviderSettingsImageApiKeyRows();
+    });
+  }, [updateProviderSettingsImageApiKeyRows]);
+
   const handleProviderSettingsAddProvider = useCallback(() => {
     const nextDraftProvider = createProviderSettingsDraftProvider(providerSettingsProviders);
     setProviderSettingsProviders((prev) => [...prev, nextDraftProvider]);
     setProviderSettingsEditableProviderIds((prev) => [...prev, nextDraftProvider.id]);
     setProviderSettingsSelectedProviderId(nextDraftProvider.id);
     setProviderSettingsApiKey('');
+    setProviderSettingsImageApiKeys(normalizeProviderSettingsImageApiKeyRows());
     setProviderSettingsError(null);
     setProviderSettingsTestResult(null);
     setProviderSettingsFetchedModels(null);
@@ -9788,6 +9879,7 @@ export default function AIWorkspace() {
     setProviderSettingsEditableProviderIds((prev) => prev.filter((id) => id !== providerId));
     setProviderSettingsSelectedProviderId(nextSelectedProvider?.id || 'comfly');
     setProviderSettingsApiKey(nextSelectedProvider?.apiKey || '');
+    setProviderSettingsImageApiKeys(normalizeProviderSettingsImageApiKeyRows(nextSelectedProvider?.imageApiKeys));
     setProviderSettingsError(null);
     setProviderSettingsTestResult(null);
     setProviderSettingsFetchedModels(null);
@@ -9959,6 +10051,9 @@ export default function AIWorkspace() {
         imageModels: provider.imageModels,
         chatModels: provider.chatModels,
         apiKey: provider.id === providerSettingsSelectedProviderId ? providerSettingsApiKey : provider.apiKey,
+        imageApiKeys: provider.id === providerSettingsSelectedProviderId
+          ? persistProviderSettingsImageApiKeys(providerSettingsImageApiKeys)
+          : provider.imageApiKeys,
       }));
       const response = await fetch('/api/settings/providers', {
         method: 'PUT',
@@ -9989,6 +10084,7 @@ export default function AIWorkspace() {
   }, [
     applyProviderSettingsResponse,
     providerSettingsApiKey,
+    providerSettingsImageApiKeys,
     providerSettingsProviders,
     providerSettingsSelectedProviderId,
     showImageToolbarNoticeWithTimeout,
@@ -11826,7 +11922,7 @@ export default function AIWorkspace() {
 
                       <label className="block">
                         <div className="mb-2 flex items-center justify-between gap-3 text-[12px] font-medium">
-                          <span>API Key</span>
+                          <span>主 API Key</span>
                           <span className="workspace-text-muted text-[11px] font-normal">
                             {selectedProviderSettings.hasApiKey
                               ? `当前已保存 ${selectedProviderSettings.maskedApiKey || '已配置'}`
@@ -11874,6 +11970,110 @@ export default function AIWorkspace() {
                           </button>
                         </div>
                       </label>
+
+                      <div className="block">
+                        <div className="mb-2 flex items-center justify-between gap-3 text-[12px] font-medium">
+                          <span>生图 API Key</span>
+                          <span className="workspace-text-muted text-[11px] font-normal">默认使用主 API Key</span>
+                        </div>
+                        <div className="space-y-2">
+                          {providerSettingsImageApiKeys.map((imageApiKeyRow) => (
+                            <div key={imageApiKeyRow.id} className="flex items-center gap-2">
+                              <div className="relative min-w-0 flex-1">
+                                <input
+                                  type="text"
+                                  id={`provider-image-api-secret-input-${imageApiKeyRow.id}`}
+                                  name="provider-image-api-secret-input"
+                                  autoComplete="new-password"
+                                  autoCorrect="off"
+                                  autoCapitalize="none"
+                                  spellCheck={false}
+                                  data-1p-ignore="true"
+                                  data-lpignore="true"
+                                  value={imageApiKeyRow.isVisible ? imageApiKeyRow.apiKey : maskProviderSettingsApiKeyForDisplay(imageApiKeyRow.apiKey)}
+                                  onChange={(e) => {
+                                    const nextImageApiKey = imageApiKeyRow.isVisible
+                                      ? e.target.value
+                                      : e.target.value.replace(/\*/g, '');
+                                    updateProviderSettingsImageApiKeyRows((rows) =>
+                                      rows.map((row) =>
+                                        row.id === imageApiKeyRow.id
+                                          ? {
+                                              ...row,
+                                              apiKey: nextImageApiKey,
+                                              hasApiKey: nextImageApiKey.trim().length > 0,
+                                              maskedApiKey: maskProviderSettingsApiKeyForDisplay(nextImageApiKey),
+                                            }
+                                          : row
+                                      )
+                                    );
+                                    setProviderSettingsError(null);
+                                  }}
+                                  placeholder="默认使用主 API Key"
+                                  className={`w-full rounded-2xl border border-[var(--workspace-border)] bg-[var(--workspace-surface-soft)] px-4 py-3 pr-11 text-[14px] outline-none transition-colors placeholder:text-[var(--workspace-text-soft)] focus:border-[var(--workspace-border-strong)] focus:bg-[var(--workspace-surface-elevated)] ${
+                                    imageApiKeyRow.apiKey ? 'text-[var(--workspace-text-primary)]' : 'text-[var(--workspace-text-muted)]'
+                                  }`}
+                                />
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    updateProviderSettingsImageApiKeyRows((rows) =>
+                                      rows.map((row) =>
+                                        row.id === imageApiKeyRow.id
+                                          ? { ...row, isVisible: !row.isVisible }
+                                          : row
+                                      )
+                                    );
+                                  }}
+                                  className="workspace-text-muted absolute right-3 top-1/2 inline-flex -translate-y-1/2 items-center justify-center rounded-full p-1.5 transition-colors hover:bg-[var(--workspace-control-hover)] hover:text-[var(--workspace-text-primary)]"
+                                  aria-label={imageApiKeyRow.isVisible ? '隐藏生图 API Key' : '显示生图 API Key'}
+                                  title={imageApiKeyRow.isVisible ? '隐藏生图 API Key' : '显示生图 API Key'}
+                                >
+                                  {imageApiKeyRow.isVisible ? <EyeOff size={16} /> : <Eye size={16} />}
+                                </button>
+                              </div>
+                              <div className="relative shrink-0">
+                                <select
+                                  value={imageApiKeyRow.scope}
+                                  onChange={(e) => {
+                                    const nextScope = e.target.value as ProviderImageApiKeyScope;
+                                    updateProviderSettingsImageApiKeyRows((rows) =>
+                                      rows.map((row) =>
+                                        row.id === imageApiKeyRow.id ? { ...row, scope: nextScope } : row
+                                      )
+                                    );
+                                    setProviderSettingsError(null);
+                                  }}
+                                  className="h-11 appearance-none rounded-2xl border border-[var(--workspace-border)] bg-[var(--workspace-surface-soft)] py-2 pl-3 pr-8 text-[12px] text-[var(--workspace-text-primary)] outline-none transition-colors focus:border-[var(--workspace-border-strong)] focus:bg-[var(--workspace-surface-elevated)]"
+                                >
+                                  {PROVIDER_IMAGE_API_KEY_SCOPE_OPTIONS.map((option) => (
+                                    <option key={option.id} value={option.id}>
+                                      {option.label}
+                                    </option>
+                                  ))}
+                                </select>
+                                <ChevronDown size={14} className="workspace-text-muted pointer-events-none absolute right-2.5 top-1/2 -translate-y-1/2" />
+                              </div>
+                              <button
+                                type="button"
+                                className="workspace-text-muted inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl border border-[var(--workspace-border)] bg-[var(--workspace-surface-soft)] transition-colors hover:bg-[var(--workspace-control-hover)] hover:text-red-500"
+                                onClick={() => handleProviderSettingsRemoveImageApiKey(imageApiKeyRow.id)}
+                                aria-label="删除生图 API"
+                                title="删除生图 API"
+                              >
+                                <Trash2 size={15} />
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                        <button
+                          type="button"
+                          className="workspace-control-chip mt-2 inline-flex h-9 items-center justify-center rounded-[14px] px-3 text-[12px] font-semibold tracking-[-0.02em]"
+                          onClick={handleProviderSettingsAddImageApiKey}
+                        >
+                          添加生图 API
+                        </button>
+                      </div>
 
                       <div className="rounded-2xl border border-[var(--workspace-border)] bg-[var(--workspace-surface-soft)] p-4">
                         <div className="mb-3 flex flex-wrap items-center justify-between gap-3">

@@ -316,6 +316,45 @@ function bearerAuthorizationHeader(apiKey: string): string {
   return token ? `Bearer ${token}` : "";
 }
 
+function isGeminiModelFamily(model?: string): boolean {
+  return normalizeImageModelKey(model).toLowerCase().startsWith("gemini-");
+}
+
+function isGptImageModelFamily(model?: string): boolean {
+  return normalizeImageModelCapabilityId(model).startsWith("gpt-image-");
+}
+
+function resolveProviderApiKey({
+  provider,
+  model,
+  purpose,
+}: {
+  provider: { apiKey?: string; imageApiKeys?: Array<{ apiKey?: string; scope?: string }> };
+  model?: string;
+  purpose: "chat" | "image" | "image_task";
+}): string {
+  if (purpose === "chat") {
+    return provider.apiKey || "";
+  }
+
+  const imageApiKeys = Array.isArray(provider.imageApiKeys) ? provider.imageApiKeys : [];
+  for (const imageApiKey of imageApiKeys) {
+    if (!imageApiKey?.apiKey) {
+      continue;
+    }
+    if (imageApiKey.scope === "all") {
+      return imageApiKey.apiKey;
+    }
+    if (imageApiKey.scope === "gemini" && isGeminiModelFamily(model)) {
+      return imageApiKey.apiKey;
+    }
+    if (imageApiKey.scope === "gpt" && isGptImageModelFamily(model)) {
+      return imageApiKey.apiKey;
+    }
+  }
+  return provider.apiKey || "";
+}
+
 async function getProviderTransport({
   providerId,
   model,
@@ -331,10 +370,14 @@ async function getProviderTransport({
     throw new ImageGenerationError("Please configure a supplier provider in settings or environment");
   }
   const providerTargets = resolveProviderRequestTargets(provider.baseUrl);
-  const protocol = provider.protocol === "gemini" || normalizeImageModelKey(model).startsWith("gemini-")
+  const protocol = provider.protocol === "gemini" || isGeminiModelFamily(model)
     ? "gemini"
     : "openai";
-  const apiKey = provider.apiKey;
+  const apiKey = resolveProviderApiKey({
+    provider,
+    model,
+    purpose,
+  });
   const headers = protocol === "gemini"
     ? {
         Accept: "application/json",

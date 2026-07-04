@@ -30,6 +30,18 @@ test('api-client uses protocol-specific auth headers and accepts request-level p
   assert.equal(apiClientSource.includes('response_format: "url"'), true);
 });
 
+test('api-client selects scoped image api keys only for matching image request families', () => {
+  assert.equal(apiClientSource.includes('function resolveProviderApiKey('), true);
+  assert.equal(apiClientSource.includes('purpose === "chat"'), true);
+  assert.equal(apiClientSource.includes('const imageApiKeys = Array.isArray(provider.imageApiKeys)'), true);
+  assert.equal(apiClientSource.includes('for (const imageApiKey of imageApiKeys)'), true);
+  assert.equal(apiClientSource.includes('imageApiKey.scope === "all"'), true);
+  assert.equal(apiClientSource.includes('imageApiKey.apiKey'), true);
+  assert.equal(apiClientSource.includes('isGeminiModelFamily(model)'), true);
+  assert.equal(apiClientSource.includes('isGptImageModelFamily(model)'), true);
+  assert.equal(apiClientSource.includes('const apiKey = resolveProviderApiKey({'), true);
+});
+
 test('api-client keeps the Gemini official image helper available as a non-default path', () => {
   assert.equal(
     apiClientSource.includes('const endpoint = `${getGeminiOfficialApiBaseUrl(providerTargets)}/v1beta/models/${resolvedRequestModel}:generateContent`;'),

@@ -59,6 +59,10 @@ test('provider registry view exposes settings api keys and masks them with middl
           imageModels: [],
           chatModels: [],
           apiKey: 'sk-test-secret-1234',
+          imageApiKeys: [
+            { id: 'img-gemini', apiKey: 'img-secret-5678', scope: 'gemini' },
+            { id: 'img-gpt', apiKey: 'gpt-secret-9999', scope: 'gpt' },
+          ],
           updatedAt: '2026-01-01T00:00:00.000Z',
         },
       ]),
@@ -71,6 +75,89 @@ test('provider registry view exposes settings api keys and masks them with middl
     assert.equal(view.providers[0].apiKey, 'sk-test-secret-1234');
     assert.equal(view.providers[0].maskedApiKey, 'sk-t***********1234');
     assert.equal(view.providers[0].maskedApiKey.includes('...'), false);
+    assert.deepEqual(view.providers[0].imageApiKeys, [
+      {
+        id: 'img-gemini',
+        apiKey: 'img-secret-5678',
+        scope: 'gemini',
+        hasApiKey: true,
+        maskedApiKey: 'img-*******5678',
+      },
+      {
+        id: 'img-gpt',
+        apiKey: 'gpt-secret-9999',
+        scope: 'gpt',
+        hasApiKey: true,
+        maskedApiKey: 'gpt-*******9999',
+      },
+    ]);
+  } finally {
+    await rm(runtimeDir, { recursive: true, force: true });
+  }
+});
+
+test('readProviderRegistry migrates the previous single image api key fields into one row', async () => {
+  const runtimeDir = await mkdtemp(path.join(os.tmpdir(), 'provider-registry-scalar-image-key-'));
+
+  try {
+    await writeFile(
+      path.join(runtimeDir, 'api-providers.json'),
+      JSON.stringify([
+        {
+          id: 'comfly',
+          name: 'Comfly',
+          baseUrl: 'https://ai.comfly.org/v1',
+          protocol: 'openai',
+          imageRequestMode: 'openai',
+          enabled: true,
+          primary: true,
+          imageModels: [],
+          chatModels: [],
+          apiKey: 'main-secret',
+          imageApiKey: 'legacy-image-secret',
+          imageApiKeyScope: 'gpt',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        },
+      ]),
+      'utf8'
+    );
+
+    const result = await readProviderRegistry({ runtimeDir, env: {} });
+    assert.deepEqual(result.providers[0].imageApiKeys, [
+      { id: 'image-key-1', apiKey: 'legacy-image-secret', scope: 'gpt' },
+    ]);
+  } finally {
+    await rm(runtimeDir, { recursive: true, force: true });
+  }
+});
+
+test('readProviderRegistry keeps old provider configs compatible with blank image api key rows', async () => {
+  const runtimeDir = await mkdtemp(path.join(os.tmpdir(), 'provider-registry-old-image-key-'));
+
+  try {
+    await writeFile(
+      path.join(runtimeDir, 'api-providers.json'),
+      JSON.stringify([
+        {
+          id: 'comfly',
+          name: 'Comfly',
+          baseUrl: 'https://ai.comfly.org/v1',
+          protocol: 'openai',
+          imageRequestMode: 'openai',
+          enabled: true,
+          primary: true,
+          imageModels: [],
+          chatModels: [],
+          apiKey: 'main-secret',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        },
+      ]),
+      'utf8'
+    );
+
+    const result = await readProviderRegistry({ runtimeDir, env: {} });
+    assert.equal(result.providers[0].apiKey, 'main-secret');
+    assert.deepEqual(result.providers[0].imageApiKeys, []);
   } finally {
     await rm(runtimeDir, { recursive: true, force: true });
   }
@@ -236,6 +323,10 @@ test('updateProviderRegistry normalizes protocol modes, endpoint overrides, mode
           imageModels: ['gpt-image-2', 'gpt-image-2'],
           chatModels: ['chat-a'],
           apiKey: 'first-secret',
+          imageApiKeys: [
+            { id: 'first-gpt', apiKey: 'first-image-secret', scope: 'gpt' },
+            { id: 'blank-row', apiKey: '', scope: 'gemini' },
+          ],
         },
         {
           id: 'second',
@@ -248,6 +339,9 @@ test('updateProviderRegistry normalizes protocol modes, endpoint overrides, mode
           imageModels: ['gemini-2.5-flash-image'],
           chatModels: ['gemini-3.1-flash-lite-preview-thinking-medium'],
           apiKey: 'second-secret',
+          imageApiKeys: [
+            { id: 'second-gemini', apiKey: 'second-image-secret', scope: 'gemini' },
+          ],
         },
       ],
       { runtimeDir }
@@ -257,10 +351,20 @@ test('updateProviderRegistry normalizes protocol modes, endpoint overrides, mode
     assert.equal(getProviderById(result.providers, 'first').protocol, 'openai');
     assert.equal(getProviderById(result.providers, 'first').imageRequestMode, 'openai-json');
     assert.deepEqual(getProviderById(result.providers, 'first').imageModels, ['gpt-image-2']);
+    assert.deepEqual(getProviderById(result.providers, 'first').imageApiKeys, [
+      { id: 'first-gpt', apiKey: 'first-image-secret', scope: 'gpt' },
+    ]);
+    assert.deepEqual(getProviderById(result.providers, 'second').imageApiKeys, [
+      { id: 'second-gemini', apiKey: 'second-image-secret', scope: 'gemini' },
+    ]);
     assert.equal(
       getProviderById(result.providers, 'second').imageGenerationEndpoint,
       'https://override.example.com/images'
     );
+    const rawProviders = JSON.parse(await readFile(path.join(runtimeDir, 'api-providers.json'), 'utf8'));
+    assert.deepEqual(rawProviders.find((provider) => provider.id === 'first').imageApiKeys, [
+      { id: 'first-gpt', apiKey: 'first-image-secret', scope: 'gpt' },
+    ]);
   } finally {
     await rm(runtimeDir, { recursive: true, force: true });
   }
