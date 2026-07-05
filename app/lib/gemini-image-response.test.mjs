@@ -14,6 +14,13 @@ const IMAGE_PART = {
     data: 'ZmFrZS1pbWFnZQ==',
   },
 };
+const JPEG_BYTES = Buffer.from([0xff, 0xd8, 0xff, 0xdb, 0x00]);
+const PNG_BYTES = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00]);
+const WEBP_BYTES = Buffer.from([
+  0x52, 0x49, 0x46, 0x46,
+  0x00, 0x00, 0x00, 0x00,
+  0x57, 0x45, 0x42, 0x50,
+]);
 
 test('extractGeminiImageOutputs returns data urls from inlineData parts', () => {
   assert.deepEqual(
@@ -31,6 +38,81 @@ test('extractGeminiImageOutputs returns data urls from inlineData parts', () => 
         url: 'data:image/png;base64,ZmFrZS1pbWFnZQ==',
       },
     ]
+  );
+});
+
+test('extractGeminiImageOutputs preserves snake_case inlineData mime_type', () => {
+  const base64 = JPEG_BYTES.toString('base64');
+
+  assert.deepEqual(
+    extractGeminiImageOutputs({
+      candidates: [
+        {
+          content: {
+            parts: [
+              {
+                inlineData: {
+                  mime_type: 'image/jpeg',
+                  data: base64,
+                },
+              },
+            ],
+          },
+        },
+      ],
+    }),
+    [
+      {
+        url: `data:image/jpeg;base64,${base64}`,
+      },
+    ]
+  );
+});
+
+test('extractGeminiImageOutputs accepts snake_case inline_data parts', () => {
+  const base64 = JPEG_BYTES.toString('base64');
+
+  assert.deepEqual(
+    extractGeminiImageOutputs({
+      candidates: [
+        {
+          content: {
+            parts: [
+              {
+                inline_data: {
+                  mime_type: 'image/jpeg',
+                  data: base64,
+                },
+              },
+            ],
+          },
+        },
+      ],
+    }),
+    [
+      {
+        url: `data:image/jpeg;base64,${base64}`,
+      },
+    ]
+  );
+});
+
+test('extractGeminiImageOutputs infers image mime type from base64 signature', () => {
+  assert.deepEqual(
+    extractGeminiImageOutputs({
+      candidates: [
+        {
+          content: {
+            parts: [
+              { inlineData: { data: WEBP_BYTES.toString('base64') } },
+              { inlineData: { data: JPEG_BYTES.toString('base64') } },
+              { inlineData: { data: PNG_BYTES.toString('base64') } },
+            ],
+          },
+        },
+      ],
+    }).map((entry) => entry.url.split(';', 1)[0]),
+    ['data:image/webp', 'data:image/jpeg', 'data:image/png']
   );
 });
 

@@ -39,11 +39,62 @@ function getPartType(part) {
     return null;
   }
 
-  if ('inlineData' in part) return 'inlineData';
+  if ('inlineData' in part || 'inline_data' in part) return 'inlineData';
   if ('text' in part) return 'text';
 
   const [firstKey] = Object.keys(part);
   return firstKey || null;
+}
+
+function inferImageMimeTypeFromBase64(data) {
+  if (typeof data !== 'string' || !data.trim()) {
+    return '';
+  }
+
+  const buffer = Buffer.from(data, 'base64');
+  if (
+    buffer.length >= 8 &&
+    buffer[0] === 0x89 &&
+    buffer[1] === 0x50 &&
+    buffer[2] === 0x4e &&
+    buffer[3] === 0x47 &&
+    buffer[4] === 0x0d &&
+    buffer[5] === 0x0a &&
+    buffer[6] === 0x1a &&
+    buffer[7] === 0x0a
+  ) {
+    return 'image/png';
+  }
+  if (buffer.length >= 3 && buffer[0] === 0xff && buffer[1] === 0xd8 && buffer[2] === 0xff) {
+    return 'image/jpeg';
+  }
+  if (buffer.length >= 6 && buffer.toString('ascii', 0, 6).startsWith('GIF8')) {
+    return 'image/gif';
+  }
+  if (
+    buffer.length >= 12 &&
+    buffer.toString('ascii', 0, 4) === 'RIFF' &&
+    buffer.toString('ascii', 8, 12) === 'WEBP'
+  ) {
+    return 'image/webp';
+  }
+  return '';
+}
+
+function resolveInlineImageMimeType(inlineData, data) {
+  const inferredMimeType = inferImageMimeTypeFromBase64(data);
+  if (inferredMimeType) {
+    return inferredMimeType;
+  }
+
+  const declaredMimeType =
+    typeof inlineData.mimeType === 'string'
+      ? inlineData.mimeType
+      : typeof inlineData.mime_type === 'string'
+        ? inlineData.mime_type
+        : '';
+  const normalizedMimeType = declaredMimeType.trim().toLowerCase();
+  return normalizedMimeType.startsWith('image/') ? normalizedMimeType : 'image/png';
 }
 
 function getRawPayloadPreview(payload) {
@@ -73,11 +124,13 @@ export function extractGeminiImageOutputs(payload) {
     const inlineData =
       record.inlineData && typeof record.inlineData === 'object'
         ? record.inlineData
-        : null;
+        : record.inline_data && typeof record.inline_data === 'object'
+          ? record.inline_data
+          : null;
 
     if (inlineData) {
-      const mimeType = typeof inlineData.mimeType === 'string' ? inlineData.mimeType : 'image/png';
       const data = typeof inlineData.data === 'string' ? inlineData.data : '';
+      const mimeType = resolveInlineImageMimeType(inlineData, data);
       if (mimeType.startsWith('image/') && data) {
         outputs.push({
           url: `data:${mimeType};base64,${data}`,
