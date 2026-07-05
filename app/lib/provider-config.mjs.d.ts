@@ -1,6 +1,18 @@
 export type ProviderConfigSource = 'runtime' | 'env';
 export type ProviderProtocol = 'openai' | 'gemini';
 export type ImageRequestMode = 'openai' | 'openai-json';
+export type ProviderImageApiKeyScope = 'all' | 'gemini' | 'gpt';
+
+export interface ProviderImageApiKey {
+  id: string;
+  apiKey: string;
+  scope: ProviderImageApiKeyScope;
+}
+
+export interface ProviderImageApiKeyView extends ProviderImageApiKey {
+  hasApiKey: boolean;
+  maskedApiKey: string;
+}
 
 export interface WorkspaceApiProvider {
   id: string;
@@ -15,6 +27,7 @@ export interface WorkspaceApiProvider {
   imageModels: string[];
   chatModels: string[];
   apiKey: string;
+  imageApiKeys: ProviderImageApiKey[];
   updatedAt: string;
 }
 
@@ -60,6 +73,7 @@ export interface ProviderRegistryViewProvider {
   imageModels: string[];
   chatModels: string[];
   apiKey: string;
+  imageApiKeys: ProviderImageApiKeyView[];
   hasApiKey: boolean;
   maskedApiKey: string;
   source: ProviderConfigSource;

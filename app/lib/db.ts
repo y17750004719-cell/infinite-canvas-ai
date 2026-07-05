@@ -127,25 +127,6 @@ function awaitTransaction(transaction: IDBTransaction): Promise<void> {
   });
 }
 
-export async function saveSessions(sessions: ProjectSession[]): Promise<void> {
-  try {
-    const database = await openDB();
-    const transaction = database.transaction([STORE_NAME], 'readwrite');
-    const store = transaction.objectStore(STORE_NAME);
-
-    store.clear();
-
-    for (const session of sessions) {
-      store.put(session);
-    }
-
-    await awaitTransaction(transaction);
-  } catch (error) {
-    console.error('Failed to save sessions:', error);
-    throw error;
-  }
-}
-
 export async function upsertSession(session: ProjectSession): Promise<void> {
   try {
     const database = await openDB();
@@ -181,10 +162,6 @@ export async function loadSessions(): Promise<ProjectSession[]> {
   }
 }
 
-export async function deleteSessionFromDB(sessionId: string): Promise<void> {
-  return removeSession(sessionId);
-}
-
 export async function removeSession(sessionId: string): Promise<void> {
   try {
     const database = await openDB();
@@ -195,20 +172,6 @@ export async function removeSession(sessionId: string): Promise<void> {
     await awaitTransaction(transaction);
   } catch (error) {
     console.error('Failed to delete session:', error);
-    throw error;
-  }
-}
-
-export async function clearAllSessions(): Promise<void> {
-  try {
-    const database = await openDB();
-    const transaction = database.transaction([STORE_NAME], 'readwrite');
-    const store = transaction.objectStore(STORE_NAME);
-    store.clear();
-
-    await awaitTransaction(transaction);
-  } catch (error) {
-    console.error('Failed to clear sessions:', error);
     throw error;
   }
 }

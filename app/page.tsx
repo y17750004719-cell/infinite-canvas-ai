@@ -115,7 +115,6 @@ import { useWorkspaceSessionController } from './hooks/useWorkspaceSessionContro
 
 gsap.registerPlugin(useGSAP);
 
-const DEBUG_CANVAS_CONNECTIONS = false;
 const CANVAS_OVERLAY_Z = 120;
 const CHAT_PANEL_Z = 180;
 const GLOBAL_NOTICE_Z = 220;
@@ -1233,8 +1232,6 @@ const CanvasConnectionsLayer = memo(function CanvasConnectionsLayer({
 }) {
   const scaledConnectionStrokeWidth = 3.5 * viewport.scale;
   const scaledSelectedConnectionStrokeWidth = 4.5 * viewport.scale;
-  const scaledDebugConnectionStrokeWidth = 3 * viewport.scale;
-  const showConnectionTestLine = DEBUG_CANVAS_CONNECTIONS && !previewFrom;
   const resolvedConnections = connections
     .map((connection) => {
       const fromItem = itemById[connection.fromItemId];
@@ -1277,18 +1274,6 @@ const CanvasConnectionsLayer = memo(function CanvasConnectionsLayer({
             pointerEvents="none"
           />
         ))}
-        {showConnectionTestLine && (
-          <line
-            x1={40}
-            y1={40}
-            x2={220}
-            y2={120}
-            stroke="#2563eb"
-            strokeWidth={scaledDebugConnectionStrokeWidth}
-            strokeOpacity={1}
-            strokeLinecap="round"
-          />
-        )}
         {previewFrom && previewTo && (
           <path
             d={buildConnectionPath(previewFrom, previewTo)}
@@ -6365,29 +6350,12 @@ export default function AIWorkspace() {
 
   const beginConnectionDragFromItem = (
     item: CanvasItem,
-    pointerId: number,
-    source: 'bridge' | 'button'
+    pointerId: number
   ) => {
     clearPendingConnectionMenu();
     clearMagneticPortResetTimer();
     setMagneticPorts({});
     setSelectedConnectionIds([]);
-    const wasHoveredOutput = hoveredOutputPortItemId === item.id;
-    const isHoveredCanvasItem = hoveredCanvasItemId === item.id;
-    const isConnectionSource = connectionSessionRef.current?.fromItemId === item.id;
-    const isNearPort = hoveredInputPortItemId === item.id || wasHoveredOutput;
-    const showOutputPort = isHoveredCanvasItem || isNearPort || isConnectionSource;
-
-    debugCanvasConnection('begin-connection-drag', {
-      source,
-      itemId: item.id,
-      pointerId,
-      hoveredOutputPortItemId,
-      hoveredInputPortItemId,
-      hoveredCanvasItemId,
-      connectionMode,
-      showOutputPort,
-    });
 
     setHoveredOutputPortItemId((prev) => (prev === item.id ? null : prev));
     connectionDragMovedRef.current = false;
@@ -6418,21 +6386,7 @@ export default function AIWorkspace() {
     marqueeStartRef.current = null;
     setSelectedConnectionIds([]);
     connectionDragMovedRef.current = false;
-    debugCanvasConnection('start-dragging-connection', {
-      itemId: item.id,
-      pointerId: capturedPointerId ?? null,
-      startPoint: portPoint,
-      initialPoint,
-      connectionModeBeforeSync: connectionMode,
-      hoveredOutputPortItemId,
-    });
     attachConnectionWindowListeners();
-    debugCanvasConnection('port-pointerdown', {
-      fromItemId: item.id,
-      x: portPoint.x,
-      y: portPoint.y,
-      pointerId: capturedPointerId ?? null,
-    });
   };
 
   const toggleSelectionId = (ids: string[], id: string) =>
@@ -6577,14 +6531,8 @@ export default function AIWorkspace() {
     }
   }, []);
 
-  const debugCanvasConnection = useCallback((event: string, payload?: Record<string, unknown>) => {
-    if (!DEBUG_CANVAS_CONNECTIONS) return;
-    console.debug('[canvas-conn]', event, payload || {});
-  }, []);
-
   const attachConnectionWindowListeners = () => {
     detachConnectionWindowListeners();
-    debugCanvasConnection('attach-window-listeners');
 
     const handleWindowPointerMove = (e: PointerEvent) => {
       const session = connectionSessionRef.current;
@@ -6594,11 +6542,6 @@ export default function AIWorkspace() {
       const point = getCanvasRelativePoint(e.clientX, e.clientY);
       if (!point) return;
 
-      debugCanvasConnection('window-pointermove', {
-        fromItemId: session.fromItemId,
-        x: point.x,
-        y: point.y,
-      });
       updateConnectionPreview(point.x, point.y);
     };
 
@@ -6606,11 +6549,6 @@ export default function AIWorkspace() {
       const session = connectionSessionRef.current;
       if (!session) return;
       if (session.pointerId !== null && e.pointerId !== session.pointerId) return;
-      debugCanvasConnection('window-pointerend', {
-        fromItemId: session.fromItemId,
-        snapTargetId: session.snapTargetId,
-        pointerId: e.pointerId,
-      });
       finalizeConnectionInteraction();
     };
 
@@ -6627,14 +6565,6 @@ export default function AIWorkspace() {
 
   const resetConnectionInteraction = useCallback(() => {
     const session = connectionSessionRef.current;
-    debugCanvasConnection('reset-start', {
-      fromItemId: session?.fromItemId ?? null,
-      mode: session?.mode ?? null,
-      pointerId: session?.pointerId ?? null,
-      snapTargetId: session?.snapTargetId ?? null,
-      moved: session?.moved ?? null,
-      point: session?.point ?? null,
-    });
     if (canvasRef.current && session?.pointerId !== null && canvasRef.current.hasPointerCapture(session.pointerId)) {
       canvasRef.current.releasePointerCapture(session.pointerId);
     }
@@ -6642,8 +6572,7 @@ export default function AIWorkspace() {
     connectionSessionRef.current = null;
     syncConnectionState(null);
     connectionDragMovedRef.current = false;
-    debugCanvasConnection('reset');
-  }, [debugCanvasConnection, detachConnectionWindowListeners, syncConnectionState]);
+  }, [detachConnectionWindowListeners, syncConnectionState]);
 
   const updateConnectionPreview = (rawX: number, rawY: number) => {
     const session = connectionSessionRef.current;
@@ -6657,23 +6586,10 @@ export default function AIWorkspace() {
     session.snapTargetId = nearest?.targetId || null;
     session.moved = hasMoved;
     syncConnectionState(session);
-    debugCanvasConnection('session-point-updated', {
-      fromItemId: session.fromItemId,
-      x: session.point.x,
-      y: session.point.y,
-      snapTargetId: session.snapTargetId,
-      moved: hasMoved,
-    });
   };
 
   const finalizeConnectionInteraction = () => {
     const session = connectionSessionRef.current;
-    debugCanvasConnection('finalize-connection-interaction', {
-      fromItemId: session?.fromItemId ?? null,
-      snapTargetId: session?.snapTargetId ?? null,
-      moved: session?.moved ?? null,
-      point: session?.point ?? null,
-    });
     if (session && session.mode === 'dragging' && session.fromItemId && session.snapTargetId && session.fromItemId !== session.snapTargetId) {
       clearPendingConnectionMenu();
       recordCurrentCanvasUndoSnapshot();
@@ -7055,20 +6971,6 @@ export default function AIWorkspace() {
     Object.values(magneticPorts).forEach((port) => {
       if (port.isTracking) releaseMagneticPort(port);
     });
-    debugCanvasConnection('canvas-pointerdown', {
-      button: e.button,
-      pointerId: e.pointerId,
-      dataset: {
-        canvas: target.dataset.canvas ?? null,
-        port: target.dataset.port ?? null,
-        portBridge: target.dataset.portBridge ?? null,
-        itemId: target.dataset.itemId ?? null,
-        cornerResize: target.dataset.cornerResize ?? null,
-      },
-      connectionMode,
-      activeFromItemId: connectionSessionRef.current?.fromItemId ?? null,
-    });
-
     if (isEventInsideTextCardPanel(target)) {
       return;
     }
@@ -7175,15 +7077,6 @@ export default function AIWorkspace() {
   };
 
   const handleCanvasPointerUp = (e?: React.PointerEvent<HTMLDivElement>) => {
-    debugCanvasConnection('canvas-pointerup', {
-      button: e?.button ?? null,
-      pointerId: e?.pointerId ?? null,
-      connectionMode,
-      activeFromItemId: connectionSessionRef.current?.fromItemId ?? null,
-      marqueeSelecting: isMarqueeSelecting,
-      dragging: isDragging,
-      panning: isPanning,
-    });
     if (isMarqueeSelecting && marqueeRect) {
       const rectInCanvas = {
         left: (marqueeRect.x - viewport.x) / viewport.scale,
@@ -7343,17 +7236,11 @@ export default function AIWorkspace() {
     setHoveredOutputPortItemId((prev) => (prev === itemId ? null : prev));
   }, []);
 
-  const handleOutputPortPointerDown = (e: React.PointerEvent<HTMLElement>, item: CanvasItem, source: 'bridge' | 'button') => {
+  const handleOutputPortPointerDown = (e: React.PointerEvent<HTMLElement>, item: CanvasItem, _source: 'bridge' | 'button') => {
     if (e.button !== 0) return;
     e.preventDefault();
     e.stopPropagation();
-    debugCanvasConnection(source === 'bridge' ? 'out-bridge-pointerdown' : 'out-button-pointerdown', {
-      itemId: item.id,
-      pointerId: e.pointerId,
-      connectionMode,
-      hoveredOutputPortItemId,
-    });
-    beginConnectionDragFromItem(item, e.pointerId, source);
+    beginConnectionDragFromItem(item, e.pointerId);
   };
 
   const handleSelectionGroupPointerDown = useCallback(
