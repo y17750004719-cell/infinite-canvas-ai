@@ -24,7 +24,6 @@ export const DEFAULT_IMAGE_CARD_QUALITY_OPTIONS = [
   { id: 'low', label: 'Low' },
 ];
 
-const EIGHTY_SIX_GAME_HOST = 'api.86gamestore.com';
 const COMFLY_PROVIDER_ID = 'comfly';
 const COMFLY_DEFAULT_GPT_IMAGE_2_ASPECT_RATIOS = ['1:1', '3:2', '2:3', '16:9', '9:16', '4:3', '3:4'];
 const COMFLY_DEFAULT_GPT_IMAGE_2_SIZE_TO_ASPECTS = {
@@ -58,27 +57,6 @@ const COMFLY_DEFAULT_GPT_IMAGE_2_RESOLVED_SIZES = {
     '3:4': '2448x3264',
   },
 };
-const EIGHTY_SIX_GAME_GPT_IMAGE_2_SIZE_TO_ASPECTS = {
-  '1024x1024': ['1:1'],
-  '2048x2048': ['1:1', '3:2', '2:3'],
-  '4096x4096': ['16:9', '9:16'],
-};
-
-const EIGHTY_SIX_GAME_GPT_IMAGE_2_RESOLVED_SIZES = {
-  '1024x1024': {
-    '1:1': '1024x1024',
-  },
-  '2048x2048': {
-    '1:1': '2048x2048',
-    '3:2': '1536x1024',
-    '2:3': '1024x1536',
-  },
-  '4096x4096': {
-    '16:9': '3840x2160',
-    '9:16': '2160x3840',
-  },
-};
-
 function normalizeText(value) {
   return typeof value === 'string' ? value.trim() : '';
 }
@@ -160,32 +138,6 @@ function createDefaultModelProfile(modelId) {
   };
 }
 
-function getProviderHost(baseUrl) {
-  const normalizedBaseUrl = normalizeText(baseUrl);
-  if (!normalizedBaseUrl) return '';
-  try {
-    return new URL(normalizedBaseUrl).host.toLowerCase();
-  } catch {
-    return '';
-  }
-}
-
-function isEightySixGameProvider(provider) {
-  return getProviderHost(provider?.baseUrl) === EIGHTY_SIX_GAME_HOST;
-}
-
-function createEightySixGameOverrides(modelId) {
-  if (normalizeImageModelCapabilityId(modelId) !== 'gpt-image-2') {
-    return null;
-  }
-
-  return {
-    aspectRatios: ['1:1', '3:2', '2:3', '16:9', '9:16'],
-    enabledAspectRatiosBySize: cloneEnabledAspectRatiosBySize(EIGHTY_SIX_GAME_GPT_IMAGE_2_SIZE_TO_ASPECTS),
-    resolvedSizesBySizeAndAspect: cloneResolvedSizesBySizeAndAspect(EIGHTY_SIX_GAME_GPT_IMAGE_2_RESOLVED_SIZES),
-  };
-}
-
 export function buildProviderImageOptionProfiles(providers = []) {
   const profiles = {};
   for (const provider of Array.isArray(providers) ? providers : []) {
@@ -199,15 +151,7 @@ export function buildProviderImageOptionProfiles(providers = []) {
       const normalizedModelId = normalizeText(modelId);
       if (!normalizedModelId || modelProfiles[normalizedModelId]) continue;
 
-      const defaultProfile = createDefaultModelProfile(normalizedModelId);
-      const overrideProfile = isEightySixGameProvider(provider)
-        ? createEightySixGameOverrides(normalizedModelId)
-        : null;
-
-      modelProfiles[normalizedModelId] = cloneModelProfile({
-        ...defaultProfile,
-        ...(overrideProfile || {}),
-      });
+      modelProfiles[normalizedModelId] = createDefaultModelProfile(normalizedModelId);
     }
 
     profiles[providerId] = {

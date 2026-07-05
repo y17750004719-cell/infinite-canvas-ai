@@ -2582,50 +2582,6 @@ test('comfly gpt-image-2 maps default-template ratios to documented request size
   assert.equal(resolveImageCardSizeForAspectRatio('gpt-image-2', '4096x4096', '3:4', undefined, 'custom-provider', providerOptionProfiles), '2448x3264');
 });
 
-test('86game gpt-image-2 falls back to the first legal 2K ratio when the selected ratio is unsupported', () => {
-  const providerOptionProfiles = {
-    'provider-2': {
-      models: {
-        'gpt-image-2': {
-          aspectRatios: ['1:1', '3:2', '2:3', '16:9', '9:16'],
-          enabledAspectRatiosBySize: {
-            '1024x1024': ['1:1'],
-            '2048x2048': ['1:1', '3:2', '2:3'],
-            '4096x4096': ['16:9', '9:16'],
-          },
-        },
-      },
-    },
-  };
-
-  assert.equal(
-    resolveImageCardSizeForAspectRatio('gpt-image-2', '2048x2048', '16:9', undefined, 'provider-2', providerOptionProfiles),
-    '2048x2048'
-  );
-});
-
-test('86game gpt-image-2 falls back to the first legal 4K ratio when the selected ratio is unsupported', () => {
-  const providerOptionProfiles = {
-    'provider-2': {
-      models: {
-        'gpt-image-2': {
-          aspectRatios: ['1:1', '3:2', '2:3', '16:9', '9:16'],
-          enabledAspectRatiosBySize: {
-            '1024x1024': ['1:1'],
-            '2048x2048': ['1:1', '3:2', '2:3'],
-            '4096x4096': ['16:9', '9:16'],
-          },
-        },
-      },
-    },
-  };
-
-  assert.equal(
-    resolveImageCardSizeForAspectRatio('gpt-image-2', '4096x4096', '1:1', undefined, 'provider-2', providerOptionProfiles),
-    '3840x2160'
-  );
-});
-
 test('resolveImageCardModel falls back to default when removed nano-banana ids are requested', () => {
   assert.equal(resolveImageCardModel('gemini-3.1-flash-image-preview'), 'gemini-3.1-flash-image-preview');
   assert.equal(resolveImageCardModel('nano-banana-2'), 'gemini-3.1-flash-image-preview');
