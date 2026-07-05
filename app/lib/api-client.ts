@@ -175,24 +175,6 @@ export interface GenerationResponse {
   }>;
 }
 
-interface AsyncImageTaskSubmitResponse {
-  task_id?: string;
-  id?: string;
-  status?: string;
-  message?: string;
-  error?: { message?: string } | string;
-  last_error?: { message?: string } | string;
-  data?: Array<{ url: string; revised_prompt?: string }> | { status?: string };
-  result?: {
-    status?: string;
-    data?: Array<{ url: string; revised_prompt?: string }>;
-  };
-  output?: {
-    status?: string;
-    data?: Array<{ url: string; revised_prompt?: string }>;
-  };
-}
-
 interface AsyncImageTaskResultResponse {
   status?: string;
   message?: string;
@@ -570,6 +552,8 @@ function parsePositiveInt(input: string | undefined, fallback: number): number {
 const asyncImageSubmitTimeoutMs = parsePositiveInt(process.env.COMFLY_ASYNC_IMAGE_SUBMIT_TIMEOUT_MS, 600000);
 const asyncImagePollTimeoutMs = parsePositiveInt(process.env.COMFLY_ASYNC_POLL_TIMEOUT_MS, 600000);
 const asyncImagePollIntervalMs = parsePositiveInt(process.env.COMFLY_ASYNC_POLL_INTERVAL_MS, 2000);
+const IMAGE_TASK_SUCCESS_STATUSES = new Set(["SUCCESS", "SUCCESSFUL", "SUCCEED", "SUCCEEDED", "COMPLETED", "COMPLETE", "DONE", "FINISHED", "OK", "READY"]);
+const IMAGE_TASK_FAILURE_STATUSES = new Set(["FAILURE", "FAILED", "FAIL", "ERROR", "ERRORED", "CANCELLED", "CANCELED", "TIMEOUT", "TIMED_OUT", "REJECTED", "EXPIRED"]);
 
 function extractTaskStatus(payload: AsyncImageTaskResultResponse): string {
   const rootStatus = typeof payload.status === "string" ? payload.status : "";
@@ -589,15 +573,36 @@ function extractTaskStatus(payload: AsyncImageTaskResultResponse): string {
   return (rootStatus || nestedDataStatus || nestedResultStatus || nestedOutputStatus).trim().toUpperCase();
 }
 
-function extractTaskId(payload: AsyncImageTaskSubmitResponse): string {
-  const taskId = payload.task_id || payload.id;
-  if (!taskId || typeof taskId !== "string") {
-    throw new ImageGenerationError("Missing task_id from async image response", 502);
+function extractOptionalTaskId(input: unknown, depth = 0): string | null {
+  if (depth > 4 || !input || typeof input !== "object") {
+    return null;
   }
-  return taskId;
+
+  if (Array.isArray(input)) {
+    for (const item of input) {
+      const taskId = extractOptionalTaskId(item, depth + 1);
+      if (taskId) return taskId;
+    }
+    return null;
+  }
+
+  const payload = input as Record<string, unknown>;
+  for (const key of ["task_id", "taskId", "submit_id", "video_id", "videoId"]) {
+    const value = payload[key];
+    if (typeof value === "string" && value.trim()) {
+      return value.trim();
+    }
+  }
+
+  const id = payload.id;
+  if (typeof id === "string" && id.trim().toLowerCase().startsWith("task")) {
+    return id.trim();
+  }
+
+  return extractOptionalTaskId(payload.data, depth + 1);
 }
 
-function extractTaskErrorMessage(payload: AsyncImageTaskResultResponse | AsyncImageTaskSubmitResponse): string | undefined {
+function extractTaskErrorMessage(payload: AsyncImageTaskResultResponse): string | undefined {
   const directError =
     typeof payload.error === "object" && payload.error && "message" in payload.error
       ? (payload.error as { message?: string }).message
@@ -618,21 +623,50 @@ const IMAGE_ENTRY_URL_KEYS = [
   "url",
   "image_url",
   "imageUrl",
+  "image",
   "file_url",
   "fileUrl",
   "output_url",
   "outputUrl",
   "result_url",
   "resultUrl",
+  "download_url",
+  "downloadUrl",
+  "asset_url",
+  "assetUrl",
 ] as const;
 
-const IMAGE_ENTRY_NESTED_KEYS = ["data", "result", "output", "image", "images", "urls"] as const;
+const IMAGE_ENTRY_NESTED_KEYS = [
+  "data",
+  "result",
+  "results",
+  "output",
+  "outputs",
+  "image",
+  "images",
+  "urls",
+  "items",
+  "files",
+  "candidates",
+  "content",
+  "parts",
+  "inlineData",
+  "inline_data",
+] as const;
+
+const IMAGE_ENTRY_BASE64_KEYS = ["b64_json", "base64", "image_base64", "imageBase64"] as const;
 
 function normalizeImageEntryUrl(value: unknown): string | null {
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
   if (!trimmed) return null;
-  if (trimmed.startsWith("http://") || trimmed.startsWith("https://") || trimmed.startsWith("data:image/")) {
+  if (
+    trimmed.startsWith("http://") ||
+    trimmed.startsWith("https://") ||
+    trimmed.startsWith("data:image/") ||
+    trimmed.startsWith("/assets/") ||
+    trimmed.startsWith("/output/")
+  ) {
     return trimmed;
   }
   return null;
@@ -658,6 +692,25 @@ function buildBase64ImageDataUrl(base64Value: unknown, mimeTypeValue?: unknown):
     return `data:image/gif;base64,${normalizedBase64}`;
   }
   return `data:image/png;base64,${normalizedBase64}`;
+}
+
+function imageEntryBase64DataUrl(obj: Record<string, unknown>): string | null {
+  for (const key of IMAGE_ENTRY_BASE64_KEYS) {
+    const parsed = buildBase64ImageDataUrl(obj[key], obj.mime_type ?? obj.mimeType);
+    if (parsed) return parsed;
+  }
+  if ((typeof obj.mime_type === "string" || typeof obj.mimeType === "string") && typeof obj.data === "string") {
+    return buildBase64ImageDataUrl(obj.data, obj.mime_type ?? obj.mimeType);
+  }
+  if (obj.type === "image_generation_call") {
+    return buildBase64ImageDataUrl(obj.result, obj.mime_type ?? obj.mimeType);
+  }
+  return null;
+}
+
+function imagesApiUnsupportedText(text: string): boolean {
+  const normalized = text.toLowerCase();
+  return normalized.includes("images api is not supported") || normalized.includes("not supported for this platform");
 }
 
 function summarizePayloadKeys(payload: unknown, depth = 0): unknown {
@@ -706,7 +759,7 @@ function toImageEntries(input: unknown, depth = 0): Array<{ url: string; revised
         const obj = item as Record<string, unknown>;
         const directUrl =
           IMAGE_ENTRY_URL_KEYS.map((key) => normalizeImageEntryUrl(obj[key])).find(Boolean) || null;
-        const b64DataUrl = buildBase64ImageDataUrl(obj.b64_json, obj.mime_type ?? obj.mimeType);
+        const b64DataUrl = imageEntryBase64DataUrl(obj);
         if (!directUrl && !b64DataUrl) return null;
         return {
           url: directUrl || b64DataUrl!,
@@ -718,7 +771,9 @@ function toImageEntries(input: unknown, depth = 0): Array<{ url: string; revised
 
     const nested: Array<{ url: string; revised_prompt?: string }> = [];
     for (const item of input) {
-      nested.push(...toImageEntries(item, depth + 1));
+      for (const entry of toImageEntries(item, depth + 1)) {
+        nested.push(entry);
+      }
     }
     return nested;
   }
@@ -735,7 +790,7 @@ function toImageEntries(input: unknown, depth = 0): Array<{ url: string; revised
       }];
     }
 
-    const b64DataUrl = buildBase64ImageDataUrl(obj.b64_json, obj.mime_type ?? obj.mimeType);
+    const b64DataUrl = imageEntryBase64DataUrl(obj);
     if (b64DataUrl) {
       return [{
         url: b64DataUrl,
@@ -1150,20 +1205,26 @@ async function generateOpenAiCompatibleImage(request: UnifiedImageRequest): Prom
     throw new ImageGenerationError(`OpenAI compatible image request failed: model "${request.model}" is not supported`, 400);
   }
 
-  const executionMode = request.executionMode === "async" ? "async" : "sync";
   const prompt = typeof request.prompt === "string" ? request.prompt : "";
   const referenceImages = Array.isArray(request.images) ? request.images.filter(Boolean) : [];
   const usesImageEditsApi = provider.imageRequestMode === "openai-json"
     ? false
     : shouldUseImageEditsApi(model, referenceImages.length);
+  const mirrorsInfiniteCanvasGptImage2TextToImage =
+    provider.imageRequestMode === "openai" &&
+    isGptImage2Model(model) &&
+    referenceImages.length === 0;
+  const requestedExecutionMode = request.executionMode === "async" ? "async" : "sync";
+  const executionMode = (mirrorsInfiniteCanvasGptImage2TextToImage || usesImageEditsApi) ? "sync" : requestedExecutionMode;
   const endpointPath = usesImageEditsApi ? "/images/edits" : "/images/generations";
   const baseEndpoint = usesImageEditsApi ? imageEditUrl : imageGenerationUrl;
-  const endpoint = executionMode === "async" ? `${baseEndpoint}?async=true` : baseEndpoint;
+  const endpoint = baseEndpoint;
   const supportsAspectRatio = getImageModelCapability(model).supportsAspectRatio;
   const aspectRatio = supportsAspectRatio ? (normalizeAspectRatio(request.aspect_ratio) || toAspectRatio(request.size)) : "";
   const imageSize = typeof request.size === "string" && request.size.trim() ? request.size.trim() : null;
-  const imageQuality = typeof request.quality === "string" && request.quality.trim() ? request.quality.trim() : null;
-  const shouldSendTopLevelResponseFormat = !usesImageEditsApi && provider.imageRequestMode !== "openai-json";
+  const requestedImageQuality = typeof request.quality === "string" ? request.quality.trim().toLowerCase() : "";
+  const imageQuality = ["low", "medium", "high"].includes(requestedImageQuality) ? requestedImageQuality : null;
+  const shouldSendTopLevelResponseFormat = !usesImageEditsApi && provider.imageRequestMode !== "openai-json" && !mirrorsInfiniteCanvasGptImage2TextToImage;
   const defaultOpenAiImageResponseFormat = { response_format: "url" };
   const attempt = 1;
   const maxAttempts = 1;
@@ -1186,7 +1247,7 @@ async function generateOpenAiCompatibleImage(request: UnifiedImageRequest): Prom
   if (imageSize) {
     requestBody.size = imageSize;
   }
-  if (imageQuality) {
+  if (imageQuality && provider.imageRequestMode !== "openai-json") {
     requestBody.quality = imageQuality;
   }
   if (shouldSendTopLevelResponseFormat) {
@@ -1199,8 +1260,10 @@ async function generateOpenAiCompatibleImage(request: UnifiedImageRequest): Prom
     requestBody.extra_body = {
       ...defaultOpenAiImageResponseFormat,
       response_format: request.response_format || "url",
-      image: referenceImages,
     };
+    if (referenceImages.length > 0) {
+      (requestBody.extra_body as Record<string, unknown>).image = referenceImages;
+    }
   } else if (!usesImageEditsApi && referenceImages.length > 0) {
     requestBody.image = referenceImages;
   }
@@ -1241,40 +1304,119 @@ async function generateOpenAiCompatibleImage(request: UnifiedImageRequest): Prom
   }
 
   let requestStartedAt = Date.now();
+  let responseEndpoint = endpoint;
+  let responseEndpointPath = endpointPath;
+  let responseUsesImageEditsApi = usesImageEditsApi;
+
+  const buildEditsFallbackPayload = async () => {
+    const formData = new FormData();
+    formData.set("model", model);
+    if (prompt) formData.set("prompt", prompt);
+    if (imageSize) formData.set("size", imageSize);
+    if (imageQuality) formData.set("quality", imageQuality);
+    if (supportsAspectRatio && aspectRatio) formData.set("aspect_ratio", aspectRatio);
+    const referenceBlobs = await Promise.all(referenceImages.map((image) => referenceToBlob(image, request.signal)));
+    referenceBlobs.forEach(({ blob, mimeType }, index) => {
+      formData.append("image", blob, `reference-${index + 1}.${mimeTypeToFileExtension(mimeType)}`);
+    });
+    return formData;
+  };
+
+  const buildGenerationsFallbackPayload = () => {
+    const body: Record<string, unknown> = {
+      model,
+      prompt,
+      response_format: request.response_format || "url",
+      n: 1,
+      image: referenceImages,
+    };
+    if (imageSize) body.size = imageSize;
+    if (imageQuality) body.quality = imageQuality;
+    return JSON.stringify(body);
+  };
 
   try {
-    requestStartedAt = Date.now();
-    basicLog("[SUPPLIER][REQ]", {
-      method: "POST",
-      endpoint,
-      host: getEndpointHost(endpoint),
-      mode: "openai_compatible_image",
-      model,
-      executionMode,
-      imageSize,
-      aspectRatio,
-      referenceCount: referenceImages.length,
-      usesImageEditsApi,
-      providerId: provider.id,
-      attempt,
-      maxAttempts,
-    });
+    const postImageRequest = async (
+      nextEndpoint: string,
+      nextEndpointPath: string,
+      nextUsesImageEditsApi: boolean,
+      nextPayload: string | FormData,
+      nextHeaders: Record<string, string>
+    ) => {
+      requestStartedAt = Date.now();
+      responseEndpoint = nextEndpoint;
+      responseEndpointPath = nextEndpointPath;
+      responseUsesImageEditsApi = nextUsesImageEditsApi;
+      basicLog("[SUPPLIER][REQ]", {
+        method: "POST",
+        endpoint: nextEndpoint,
+        host: getEndpointHost(nextEndpoint),
+        mode: "openai_compatible_image",
+        model,
+        executionMode,
+        imageSize,
+        aspectRatio,
+        referenceCount: referenceImages.length,
+        usesImageEditsApi: nextUsesImageEditsApi,
+        providerId: provider.id,
+        attempt,
+        maxAttempts,
+      });
 
-    const response = await fetch(endpoint, {
-      method: "POST",
-      headers: requestHeaders,
-      body: requestPayload,
-      signal: request.signal,
-    });
+      const nextResponse = await fetch(nextEndpoint, {
+        method: "POST",
+        headers: nextHeaders,
+        body: nextPayload,
+        signal: request.signal,
+      });
 
-    basicLog("[SUPPLIER][RES]", {
-      method: "POST",
-      endpoint,
-      mode: "openai_compatible_image",
-      status: response.status,
-      statusText: response.statusText,
-      durationMs: Date.now() - requestStartedAt,
-    });
+      basicLog("[SUPPLIER][RES]", {
+        method: "POST",
+        endpoint: nextEndpoint,
+        mode: "openai_compatible_image",
+        status: nextResponse.status,
+        statusText: nextResponse.statusText,
+        durationMs: Date.now() - requestStartedAt,
+      });
+
+      return nextResponse;
+    };
+
+    let response = await postImageRequest(endpoint, endpointPath, usesImageEditsApi, requestPayload, requestHeaders);
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      if (!usesImageEditsApi && imagesApiUnsupportedText(errorText)) {
+        response = await postImageRequest(
+          imageEditUrl,
+          "/images/edits",
+          true,
+          await buildEditsFallbackPayload(),
+          { Authorization: bearerAuthorizationHeader(apiKey) }
+        );
+      } else if (usesImageEditsApi && !isGptImage2Model(model)) {
+        response = await postImageRequest(
+          imageGenerationUrl,
+          "/images/generations",
+          false,
+          buildGenerationsFallbackPayload(),
+          {
+            "Content-Type": "application/json",
+            Authorization: bearerAuthorizationHeader(apiKey),
+          }
+        );
+      } else {
+        throw new ImageGenerationError(
+          `OpenAI compatible image request failed: ${errorText || response.statusText}`,
+          response.status,
+          {
+            failureClass: "upstream_http",
+            isRetryable: false,
+            retryAttempt: attempt,
+          }
+        );
+      }
+    }
 
     if (!response.ok) {
       const errorText = await response.text();
@@ -1293,14 +1435,14 @@ async function generateOpenAiCompatibleImage(request: UnifiedImageRequest): Prom
     const outputs = toImageEntries(payload);
 
     basicLog("[SUPPLIER][PARSE]", {
-      endpoint: executionMode === "async" ? `${endpointPath}?async=true` : endpointPath,
+      endpoint: responseEndpointPath,
       mode: "openai_compatible_image",
       executionMode,
       imageCount: outputs.length,
       imageSize,
       aspectRatio,
       referenceCount: referenceImages.length,
-      usesImageEditsApi,
+      usesImageEditsApi: responseUsesImageEditsApi,
     });
 
     if (outputs.length > 0) {
@@ -1310,22 +1452,22 @@ async function generateOpenAiCompatibleImage(request: UnifiedImageRequest): Prom
       };
     }
 
-    if (executionMode === "async") {
-      const taskStatus = extractTaskStatus(payload as AsyncImageTaskResultResponse);
-      const taskErrorMessage = extractTaskErrorMessage(payload as AsyncImageTaskResultResponse);
-      if (taskStatus && ["FAILURE", "FAILED", "ERROR", "CANCELLED", "CANCELED", "TIMEOUT", "TIMED_OUT"].includes(taskStatus)) {
-        throw new ImageGenerationError(
-          taskErrorMessage || "OpenAI compatible async image task failed on submit",
-          502,
-          {
-            failureClass: "upstream_http",
-            isRetryable: false,
-            retryAttempt: attempt,
-          }
-        );
-      }
+    const taskStatus = extractTaskStatus(payload as AsyncImageTaskResultResponse);
+    const taskErrorMessage = extractTaskErrorMessage(payload as AsyncImageTaskResultResponse);
+    if (IMAGE_TASK_FAILURE_STATUSES.has(taskStatus)) {
+      throw new ImageGenerationError(
+        taskErrorMessage || "OpenAI compatible async image task failed on submit",
+        502,
+        {
+          failureClass: "upstream_http",
+          isRetryable: false,
+          retryAttempt: attempt,
+        }
+      );
+    }
 
-      const taskId = extractTaskId(payload as AsyncImageTaskSubmitResponse);
+    const taskId = extractOptionalTaskId(payload);
+    if (taskId) {
       return pollOpenAiCompatibleImageTask({
         taskId,
         taskBaseUrl,
@@ -1341,13 +1483,13 @@ async function generateOpenAiCompatibleImage(request: UnifiedImageRequest): Prom
 
     if (outputs.length === 0) {
       basicLog("[SUPPLIER][PARSE_EMPTY]", {
-        endpoint: endpointPath,
+        endpoint: responseEndpointPath,
         mode: "openai_compatible_image",
         executionMode,
         imageSize,
         aspectRatio,
         referenceCount: referenceImages.length,
-        usesImageEditsApi,
+        usesImageEditsApi: responseUsesImageEditsApi,
         ...summarizeImagePayloadCounts(payload),
       });
       throw new ImageGenerationError("OpenAI compatible image request returned no images", 502, {
@@ -1361,7 +1503,7 @@ async function generateOpenAiCompatibleImage(request: UnifiedImageRequest): Prom
     const failureState = classifyGeminiImageTransportFailure(error);
 
     basicLog("[SUPPLIER][ERR]", {
-      endpoint: executionMode === "async" ? `${endpointPath}?async=true` : endpointPath,
+      endpoint: responseEndpointPath,
       mode: "openai_compatible_image",
       requestedModel: request.model,
       normalizedModel: model,
@@ -1369,13 +1511,13 @@ async function generateOpenAiCompatibleImage(request: UnifiedImageRequest): Prom
       imageSize,
       aspectRatio,
       referenceCount: referenceImages.length,
-      usesImageEditsApi,
+      usesImageEditsApi: responseUsesImageEditsApi,
       failureClass: failureState.failureClass,
       isRetryable: failureState.isRetryable,
       retryAttempt: attempt,
       requestCount: request.n || 1,
       ...buildSupplierRequestDiagnostics({
-        endpoint,
+        endpoint: responseEndpoint,
         requestStartedAt,
         attempt,
         maxAttempts,
@@ -1431,8 +1573,6 @@ async function pollOpenAiCompatibleImageTask({
 }): Promise<GenerationResponse> {
   const endpoint = `${taskBaseUrl}/images/tasks/${taskId}`;
   const startAt = Date.now();
-  const successStatuses = new Set(["SUCCESS", "SUCCEEDED", "COMPLETED", "DONE", "FINISHED"]);
-  const failureStatuses = new Set(["FAILURE", "FAILED", "ERROR", "CANCELLED", "CANCELED", "TIMEOUT", "TIMED_OUT"]);
   let pollCount = 0;
   let lastLoggedStatus = "";
 
@@ -1512,7 +1652,7 @@ async function pollOpenAiCompatibleImageTask({
       };
     }
 
-    if (successStatuses.has(status)) {
+    if (IMAGE_TASK_SUCCESS_STATUSES.has(status)) {
       if (outputs.length === 0) {
         basicLog("[SUPPLIER][PARSE_EMPTY]", {
           endpoint: "/images/tasks/{taskId}",
@@ -1538,7 +1678,7 @@ async function pollOpenAiCompatibleImageTask({
       };
     }
 
-    if (failureStatuses.has(status)) {
+    if (IMAGE_TASK_FAILURE_STATUSES.has(status)) {
       throw new ImageGenerationError(
         extractTaskErrorMessage(payload) || "OpenAI compatible image task failed",
         502,

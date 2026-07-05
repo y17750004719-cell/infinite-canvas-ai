@@ -132,9 +132,13 @@ test('api-client normalizes provider-returned gpt-image-2 variants before routin
   );
 });
 
-test('api-client restores async submit and task polling for gpt-image-2 on the OpenAI compatible path', () => {
+test('api-client uses opportunistic task polling for OpenAI compatible images without async submit URLs', () => {
   assert.equal(
-    apiClientSource.includes('const executionMode = request.executionMode === "async" ? "async" : "sync";'),
+    apiClientSource.includes('const requestedExecutionMode = request.executionMode === "async" ? "async" : "sync";'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('const executionMode = (mirrorsInfiniteCanvasGptImage2TextToImage || usesImageEditsApi) ? "sync" : requestedExecutionMode;'),
     true
   );
   assert.equal(
@@ -146,9 +150,11 @@ test('api-client restores async submit and task polling for gpt-image-2 on the O
     true
   );
   assert.equal(
-    apiClientSource.includes('const endpoint = executionMode === "async" ? `${baseEndpoint}?async=true` : baseEndpoint;'),
+    apiClientSource.includes('const endpoint = baseEndpoint;'),
     true
   );
+  assert.equal(apiClientSource.includes('usesAsyncSubmit'), false);
+  assert.equal(apiClientSource.includes('?async=true'), false);
   assert.equal(
     apiClientSource.includes('async function pollOpenAiCompatibleImageTask('),
     true
@@ -158,7 +164,7 @@ test('api-client restores async submit and task polling for gpt-image-2 on the O
     true
   );
   assert.equal(
-    apiClientSource.includes('const taskId = extractTaskId(payload as AsyncImageTaskSubmitResponse);'),
+    apiClientSource.includes('const taskId = extractOptionalTaskId(payload);'),
     true
   );
   assert.equal(
@@ -174,7 +180,7 @@ test('api-client restores async submit and task polling for gpt-image-2 on the O
     true
   );
   assert.equal(
-    apiClientSource.includes('const shouldSendTopLevelResponseFormat = !usesImageEditsApi && provider.imageRequestMode !== "openai-json";'),
+    apiClientSource.includes('const shouldSendTopLevelResponseFormat = !usesImageEditsApi && provider.imageRequestMode !== "openai-json" && !mirrorsInfiniteCanvasGptImage2TextToImage;'),
     true
   );
   assert.equal(
@@ -183,9 +189,17 @@ test('api-client restores async submit and task polling for gpt-image-2 on the O
   );
 });
 
-test('api-client keeps gpt-image-2 text-to-image on generations JSON with top-level response_format and quality', () => {
+test('api-client keeps non-gpt-image-2 generations JSON with top-level response_format and real quality', () => {
   assert.equal(
     apiClientSource.includes('if (imageQuality) {\n    requestBody.quality = imageQuality;\n  }'),
+    false
+  );
+  assert.equal(
+    apiClientSource.includes('if (imageQuality && provider.imageRequestMode !== "openai-json") {\n    requestBody.quality = imageQuality;\n  }'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('const shouldSendTopLevelResponseFormat = !usesImageEditsApi && provider.imageRequestMode !== "openai-json" && !mirrorsInfiniteCanvasGptImage2TextToImage;'),
     true
   );
   assert.equal(
@@ -194,6 +208,67 @@ test('api-client keeps gpt-image-2 text-to-image on generations JSON with top-le
   );
   assert.equal(
     apiClientSource.includes('const endpointPath = usesImageEditsApi ? "/images/edits" : "/images/generations";'),
+    true
+  );
+});
+
+test('api-client mirrors Infinite-Canvas for default OpenAI gpt-image-2 text-to-image requests', () => {
+  assert.equal(
+    apiClientSource.includes('api.86gamestore.com'),
+    false
+  );
+  assert.equal(
+    apiClientSource.includes('const mirrorsInfiniteCanvasGptImage2TextToImage ='),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('provider.imageRequestMode === "openai" &&\n    isGptImage2Model(model) &&\n    referenceImages.length === 0;'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('const executionMode = (mirrorsInfiniteCanvasGptImage2TextToImage || usesImageEditsApi) ? "sync" : requestedExecutionMode;'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('const requestedImageQuality = typeof request.quality === "string" ? request.quality.trim().toLowerCase() : "";'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('const imageQuality = ["low", "medium", "high"].includes(requestedImageQuality) ? requestedImageQuality : null;'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('&& !mirrorsInfiniteCanvasGptImage2TextToImage;'),
+    true
+  );
+});
+
+test('api-client polls sync OpenAI-compatible image responses when the provider returns a task id', () => {
+  assert.equal(
+    apiClientSource.includes('function extractOptionalTaskId(input: unknown, depth = 0): string | null {'),
+    true
+  );
+  for (const fieldName of ['"task_id"', '"taskId"', '"submit_id"', '"video_id"', '"videoId"']) {
+    assert.equal(apiClientSource.includes(fieldName), true, `${fieldName} should be accepted as a task id field`);
+  }
+  assert.equal(apiClientSource.includes('id.trim().toLowerCase().startsWith("task")'), true);
+  assert.equal(
+    apiClientSource.includes('return extractOptionalTaskId(payload.data, depth + 1);'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('if (taskId) {\n      return pollOpenAiCompatibleImageTask({'),
+    true
+  );
+});
+
+test('api-client image payload parsing avoids spread push recursion for nested arrays', () => {
+  assert.equal(
+    apiClientSource.includes('nested.push(...toImageEntries('),
+    false
+  );
+  assert.equal(
+    apiClientSource.includes('for (const entry of toImageEntries(item, depth + 1)) {\n        nested.push(entry);\n      }'),
     true
   );
 });
@@ -211,6 +286,42 @@ test('api-client keeps openai-json mode on generations and sends response_format
     apiClientSource.includes('response_format: request.response_format || "url",'),
     true
   );
+  assert.equal(
+    apiClientSource.includes('if (referenceImages.length > 0) {\n      (requestBody.extra_body as Record<string, unknown>).image = referenceImages;\n    }'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('if (imageQuality && provider.imageRequestMode !== "openai-json") {\n    requestBody.quality = imageQuality;\n  }'),
+    true
+  );
+});
+
+test('api-client mirrors Infinite-Canvas fallback requests for OpenAI-compatible image routes', () => {
+  assert.equal(apiClientSource.includes('function imagesApiUnsupportedText(text: string): boolean {'), true);
+  assert.equal(apiClientSource.includes('response = await postImageRequest(\n          imageEditUrl,'), true);
+  assert.equal(apiClientSource.includes('const buildEditsFallbackPayload = async () => {'), true);
+  assert.equal(apiClientSource.includes('const referenceBlobs = await Promise.all(referenceImages.map((image) => referenceToBlob(image, request.signal)));'), true);
+  assert.equal(apiClientSource.includes('formData.append("image", blob, `reference-${index + 1}.${mimeTypeToFileExtension(mimeType)}`);'), true);
+  assert.equal(apiClientSource.includes('} else if (usesImageEditsApi && !isGptImage2Model(model)) {'), true);
+  assert.equal(apiClientSource.includes('response = await postImageRequest(\n          imageGenerationUrl,'), true);
+  assert.equal(apiClientSource.includes('image: referenceImages,'), true);
+  assert.equal(apiClientSource.includes('n: 1,'), true);
+});
+
+test('api-client keeps image edits synchronous and recognizes Infinite-Canvas task statuses', () => {
+  assert.equal(
+    apiClientSource.includes('const endpoint = baseEndpoint;'),
+    true
+  );
+  for (const statusName of ['"SUCCESSFUL"', '"SUCCEED"', '"COMPLETE"', '"OK"', '"READY"']) {
+    assert.equal(apiClientSource.includes(statusName), true, `${statusName} should be accepted as a success task status`);
+  }
+  for (const statusName of ['"FAIL"', '"ERRORED"', '"REJECTED"', '"EXPIRED"']) {
+    assert.equal(apiClientSource.includes(statusName), true, `${statusName} should be accepted as a failure task status`);
+  }
+  assert.equal(apiClientSource.includes('if (IMAGE_TASK_FAILURE_STATUSES.has(taskStatus)) {'), true);
+  assert.equal(apiClientSource.includes('if (IMAGE_TASK_SUCCESS_STATUSES.has(status)) {'), true);
+  assert.equal(apiClientSource.includes('if (IMAGE_TASK_FAILURE_STATUSES.has(status)) {'), true);
 });
 
 test('api-client parses common OpenAI compatible image2 task output field names', () => {
@@ -225,15 +336,28 @@ test('api-client parses common OpenAI compatible image2 task output field names'
     '"outputUrl"',
     '"result_url"',
     '"resultUrl"',
+    '"download_url"',
+    '"downloadUrl"',
+    '"asset_url"',
+    '"assetUrl"',
   ]) {
     assert.equal(apiClientSource.includes(fieldName), true, `${fieldName} should be accepted as an image URL field`);
   }
   assert.equal(apiClientSource.includes('const IMAGE_ENTRY_NESTED_KEYS = ['), true);
   assert.equal(apiClientSource.includes('"urls"'), true);
+  assert.equal(apiClientSource.includes('"outputs"'), true);
+  assert.equal(apiClientSource.includes('"results"'), true);
+  assert.equal(apiClientSource.includes('"items"'), true);
+  assert.equal(apiClientSource.includes('"files"'), true);
+  assert.equal(apiClientSource.includes('"candidates"'), true);
+  assert.equal(apiClientSource.includes('"inlineData"'), true);
   assert.equal(apiClientSource.includes('normalizeImageEntryUrl'), true);
+  assert.equal(apiClientSource.includes('trimmed.startsWith("/assets/")'), true);
+  assert.equal(apiClientSource.includes('trimmed.startsWith("/output/")'), true);
   assert.equal(apiClientSource.includes('data:image/png;base64,'), true);
   assert.equal(apiClientSource.includes('data:image/jpeg;base64,'), true);
-  assert.equal(apiClientSource.includes('typeof obj.b64_json === "string"'), true);
+  assert.equal(apiClientSource.includes('const IMAGE_ENTRY_BASE64_KEYS = ["b64_json", "base64", "image_base64", "imageBase64"] as const;'), true);
+  assert.equal(apiClientSource.includes('obj.type === "image_generation_call"'), true);
 });
 
 test('api-client logs payload key summaries when async image2 tasks succeed without parsed images', () => {
