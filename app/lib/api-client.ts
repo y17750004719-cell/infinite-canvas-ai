@@ -549,8 +549,8 @@ function parsePositiveInt(input: string | undefined, fallback: number): number {
   return Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
-const asyncImageSubmitTimeoutMs = parsePositiveInt(process.env.COMFLY_ASYNC_IMAGE_SUBMIT_TIMEOUT_MS, 600000);
-const asyncImagePollTimeoutMs = parsePositiveInt(process.env.COMFLY_ASYNC_POLL_TIMEOUT_MS, 600000);
+const asyncImageSubmitTimeoutMs = parsePositiveInt(process.env.COMFLY_ASYNC_IMAGE_SUBMIT_TIMEOUT_MS, 1800000);
+const asyncImagePollTimeoutMs = parsePositiveInt(process.env.COMFLY_ASYNC_POLL_TIMEOUT_MS, 1800000);
 const asyncImagePollIntervalMs = parsePositiveInt(process.env.COMFLY_ASYNC_POLL_INTERVAL_MS, 2000);
 const IMAGE_TASK_SUCCESS_STATUSES = new Set(["SUCCESS", "SUCCESSFUL", "SUCCEED", "SUCCEEDED", "COMPLETED", "COMPLETE", "DONE", "FINISHED", "OK", "READY"]);
 const IMAGE_TASK_FAILURE_STATUSES = new Set(["FAILURE", "FAILED", "FAIL", "ERROR", "ERRORED", "CANCELLED", "CANCELED", "TIMEOUT", "TIMED_OUT", "REJECTED", "EXPIRED"]);
@@ -1226,8 +1226,7 @@ async function generateOpenAiCompatibleImage(request: UnifiedImageRequest): Prom
   const imageQuality = ["low", "medium", "high"].includes(requestedImageQuality) ? requestedImageQuality : null;
   const shouldSendTopLevelResponseFormat = !usesImageEditsApi && provider.imageRequestMode !== "openai-json" && !mirrorsInfiniteCanvasGptImage2TextToImage;
   const defaultOpenAiImageResponseFormat = { response_format: "url" };
-  const attempt = 1;
-  const maxAttempts = 1;
+  const maxAttempts = 2;
   const requestBody: Record<string, unknown> = {
     model,
     prompt,
@@ -1239,7 +1238,7 @@ async function generateOpenAiCompatibleImage(request: UnifiedImageRequest): Prom
       throw new ImageGenerationError(`gpt-image-2 尺寸不合法: ${gptImage2SizeError}`, 400, {
         failureClass: "payload",
         isRetryable: false,
-        retryAttempt: attempt,
+        retryAttempt: 1,
       });
     }
   }
@@ -1303,11 +1302,6 @@ async function generateOpenAiCompatibleImage(request: UnifiedImageRequest): Prom
     };
   }
 
-  let requestStartedAt = Date.now();
-  let responseEndpoint = endpoint;
-  let responseEndpointPath = endpointPath;
-  let responseUsesImageEditsApi = usesImageEditsApi;
-
   const buildEditsFallbackPayload = async () => {
     const formData = new FormData();
     formData.set("model", model);
@@ -1335,77 +1329,113 @@ async function generateOpenAiCompatibleImage(request: UnifiedImageRequest): Prom
     return JSON.stringify(body);
   };
 
-  try {
-    const postImageRequest = async (
-      nextEndpoint: string,
-      nextEndpointPath: string,
-      nextUsesImageEditsApi: boolean,
-      nextPayload: string | FormData,
-      nextHeaders: Record<string, string>
-    ) => {
-      requestStartedAt = Date.now();
-      responseEndpoint = nextEndpoint;
-      responseEndpointPath = nextEndpointPath;
-      responseUsesImageEditsApi = nextUsesImageEditsApi;
-      basicLog("[SUPPLIER][REQ]", {
-        method: "POST",
-        endpoint: nextEndpoint,
-        host: getEndpointHost(nextEndpoint),
-        mode: "openai_compatible_image",
-        model,
-        executionMode,
-        imageSize,
-        aspectRatio,
-        referenceCount: referenceImages.length,
-        usesImageEditsApi: nextUsesImageEditsApi,
-        providerId: provider.id,
-        attempt,
-        maxAttempts,
-      });
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    let requestStartedAt = Date.now();
+    let responseEndpoint = endpoint;
+    let responseEndpointPath = endpointPath;
+    let responseUsesImageEditsApi = usesImageEditsApi;
 
-      const nextResponse = await fetch(nextEndpoint, {
-        method: "POST",
-        headers: nextHeaders,
-        body: nextPayload,
-        signal: request.signal,
-      });
+    try {
+      const postImageRequest = async (
+        nextEndpoint: string,
+        nextEndpointPath: string,
+        nextUsesImageEditsApi: boolean,
+        nextPayload: string | FormData,
+        nextHeaders: Record<string, string>
+      ) => {
+        requestStartedAt = Date.now();
+        responseEndpoint = nextEndpoint;
+        responseEndpointPath = nextEndpointPath;
+        responseUsesImageEditsApi = nextUsesImageEditsApi;
+        basicLog("[SUPPLIER][REQ]", {
+          method: "POST",
+          endpoint: nextEndpoint,
+          host: getEndpointHost(nextEndpoint),
+          mode: "openai_compatible_image",
+          model,
+          executionMode,
+          imageSize,
+          aspectRatio,
+          referenceCount: referenceImages.length,
+          usesImageEditsApi: nextUsesImageEditsApi,
+          providerId: provider.id,
+          attempt,
+          maxAttempts,
+          timeoutMs: asyncImageSubmitTimeoutMs,
+        });
 
-      basicLog("[SUPPLIER][RES]", {
-        method: "POST",
-        endpoint: nextEndpoint,
-        mode: "openai_compatible_image",
-        status: nextResponse.status,
-        statusText: nextResponse.statusText,
-        durationMs: Date.now() - requestStartedAt,
-      });
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), asyncImageSubmitTimeoutMs);
+        const abortFromRequest = () => controller.abort();
+        if (request.signal?.aborted) {
+          abortFromRequest();
+        } else {
+          request.signal?.addEventListener("abort", abortFromRequest, { once: true });
+        }
 
-      return nextResponse;
-    };
+        let nextResponse: Response;
+        try {
+          nextResponse = await fetch(nextEndpoint, {
+            method: "POST",
+            headers: nextHeaders,
+            body: nextPayload,
+            signal: controller.signal,
+          });
+        } finally {
+          clearTimeout(timeoutId);
+          request.signal?.removeEventListener("abort", abortFromRequest);
+        }
 
-    let response = await postImageRequest(endpoint, endpointPath, usesImageEditsApi, requestPayload, requestHeaders);
+        basicLog("[SUPPLIER][RES]", {
+          method: "POST",
+          endpoint: nextEndpoint,
+          mode: "openai_compatible_image",
+          status: nextResponse.status,
+          statusText: nextResponse.statusText,
+          durationMs: Date.now() - requestStartedAt,
+        });
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      if (!usesImageEditsApi && imagesApiUnsupportedText(errorText)) {
-        response = await postImageRequest(
-          imageEditUrl,
-          "/images/edits",
-          true,
-          await buildEditsFallbackPayload(),
-          { Authorization: bearerAuthorizationHeader(apiKey) }
-        );
-      } else if (usesImageEditsApi && !isGptImage2Model(model)) {
-        response = await postImageRequest(
-          imageGenerationUrl,
-          "/images/generations",
-          false,
-          buildGenerationsFallbackPayload(),
-          {
-            "Content-Type": "application/json",
-            Authorization: bearerAuthorizationHeader(apiKey),
-          }
-        );
-      } else {
+        return nextResponse;
+      };
+
+      let response = await postImageRequest(endpoint, endpointPath, usesImageEditsApi, requestPayload, requestHeaders);
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        if (!usesImageEditsApi && imagesApiUnsupportedText(errorText)) {
+          response = await postImageRequest(
+            imageEditUrl,
+            "/images/edits",
+            true,
+            await buildEditsFallbackPayload(),
+            { Authorization: bearerAuthorizationHeader(apiKey) }
+          );
+        } else if (usesImageEditsApi && !isGptImage2Model(model)) {
+          response = await postImageRequest(
+            imageGenerationUrl,
+            "/images/generations",
+            false,
+            buildGenerationsFallbackPayload(),
+            {
+              "Content-Type": "application/json",
+              Authorization: bearerAuthorizationHeader(apiKey),
+            }
+          );
+        } else {
+          throw new ImageGenerationError(
+            `OpenAI compatible image request failed: ${errorText || response.statusText}`,
+            response.status,
+            {
+              failureClass: "upstream_http",
+              isRetryable: false,
+              retryAttempt: attempt,
+            }
+          );
+        }
+      }
+
+      if (!response.ok) {
+        const errorText = await response.text();
         throw new ImageGenerationError(
           `OpenAI compatible image request failed: ${errorText || response.statusText}`,
           response.status,
@@ -1416,138 +1446,146 @@ async function generateOpenAiCompatibleImage(request: UnifiedImageRequest): Prom
           }
         );
       }
-    }
 
-    if (!response.ok) {
-      const errorText = await response.text();
-      throw new ImageGenerationError(
-        `OpenAI compatible image request failed: ${errorText || response.statusText}`,
-        response.status,
-        {
-          failureClass: "upstream_http",
-          isRetryable: false,
-          retryAttempt: attempt,
-        }
-      );
-    }
+      const payload = await response.json();
+      const outputs = toImageEntries(payload);
 
-    const payload = await response.json();
-    const outputs = toImageEntries(payload);
-
-    basicLog("[SUPPLIER][PARSE]", {
-      endpoint: responseEndpointPath,
-      mode: "openai_compatible_image",
-      executionMode,
-      imageCount: outputs.length,
-      imageSize,
-      aspectRatio,
-      referenceCount: referenceImages.length,
-      usesImageEditsApi: responseUsesImageEditsApi,
-    });
-
-    if (outputs.length > 0) {
-      return {
-        created: Math.floor(Date.now() / 1000),
-        data: outputs,
-      };
-    }
-
-    const taskStatus = extractTaskStatus(payload as AsyncImageTaskResultResponse);
-    const taskErrorMessage = extractTaskErrorMessage(payload as AsyncImageTaskResultResponse);
-    if (IMAGE_TASK_FAILURE_STATUSES.has(taskStatus)) {
-      throw new ImageGenerationError(
-        taskErrorMessage || "OpenAI compatible async image task failed on submit",
-        502,
-        {
-          failureClass: "upstream_http",
-          isRetryable: false,
-          retryAttempt: attempt,
-        }
-      );
-    }
-
-    const taskId = extractOptionalTaskId(payload);
-    if (taskId) {
-      return pollOpenAiCompatibleImageTask({
-        taskId,
-        taskBaseUrl,
-        apiKey,
-        signal: request.signal,
-        requestModel: request.model,
-        normalizedModel: model,
+      basicLog("[SUPPLIER][PARSE]", {
+        endpoint: responseEndpointPath,
+        mode: "openai_compatible_image",
+        executionMode,
+        imageCount: outputs.length,
         imageSize,
         aspectRatio,
         referenceCount: referenceImages.length,
+        usesImageEditsApi: responseUsesImageEditsApi,
       });
-    }
 
-    if (outputs.length === 0) {
-      basicLog("[SUPPLIER][PARSE_EMPTY]", {
+      if (outputs.length > 0) {
+        return {
+          created: Math.floor(Date.now() / 1000),
+          data: outputs,
+        };
+      }
+
+      const taskStatus = extractTaskStatus(payload as AsyncImageTaskResultResponse);
+      const taskErrorMessage = extractTaskErrorMessage(payload as AsyncImageTaskResultResponse);
+      if (IMAGE_TASK_FAILURE_STATUSES.has(taskStatus)) {
+        throw new ImageGenerationError(
+          taskErrorMessage || "OpenAI compatible async image task failed on submit",
+          502,
+          {
+            failureClass: "upstream_http",
+            isRetryable: false,
+            retryAttempt: attempt,
+          }
+        );
+      }
+
+      const taskId = extractOptionalTaskId(payload);
+      if (taskId) {
+        return pollOpenAiCompatibleImageTask({
+          taskId,
+          taskBaseUrl,
+          apiKey,
+          signal: request.signal,
+          requestModel: request.model,
+          normalizedModel: model,
+          imageSize,
+          aspectRatio,
+          referenceCount: referenceImages.length,
+        });
+      }
+
+      if (outputs.length === 0) {
+        basicLog("[SUPPLIER][PARSE_EMPTY]", {
+          endpoint: responseEndpointPath,
+          mode: "openai_compatible_image",
+          executionMode,
+          imageSize,
+          aspectRatio,
+          referenceCount: referenceImages.length,
+          usesImageEditsApi: responseUsesImageEditsApi,
+          ...summarizeImagePayloadCounts(payload),
+        });
+        throw new ImageGenerationError("OpenAI compatible image request returned no images", 502, {
+          failureClass: "payload",
+          isRetryable: false,
+          retryAttempt: attempt,
+        });
+      }
+
+    } catch (error) {
+      const failureState = classifyGeminiImageTransportFailure(error);
+
+      basicLog("[SUPPLIER][ERR]", {
         endpoint: responseEndpointPath,
         mode: "openai_compatible_image",
+        requestedModel: request.model,
+        normalizedModel: model,
         executionMode,
         imageSize,
         aspectRatio,
         referenceCount: referenceImages.length,
         usesImageEditsApi: responseUsesImageEditsApi,
-        ...summarizeImagePayloadCounts(payload),
-      });
-      throw new ImageGenerationError("OpenAI compatible image request returned no images", 502, {
-        failureClass: "payload",
-        isRetryable: false,
-        retryAttempt: attempt,
-      });
-    }
-
-  } catch (error) {
-    const failureState = classifyGeminiImageTransportFailure(error);
-
-    basicLog("[SUPPLIER][ERR]", {
-      endpoint: responseEndpointPath,
-      mode: "openai_compatible_image",
-      requestedModel: request.model,
-      normalizedModel: model,
-      executionMode,
-      imageSize,
-      aspectRatio,
-      referenceCount: referenceImages.length,
-      usesImageEditsApi: responseUsesImageEditsApi,
-      failureClass: failureState.failureClass,
-      isRetryable: failureState.isRetryable,
-      retryAttempt: attempt,
-      requestCount: request.n || 1,
-      ...buildSupplierRequestDiagnostics({
-        endpoint: responseEndpoint,
-        requestStartedAt,
-        attempt,
-        maxAttempts,
-      }),
-      ...getErrorDiagnostics(error),
-    });
-
-    if (error instanceof ImageGenerationError) {
-      if (!error.failureClass) {
-        error.failureClass = failureState.failureClass;
-      }
-      if (typeof error.isRetryable !== "boolean") {
-        error.isRetryable = failureState.isRetryable;
-      }
-      if (typeof error.retryAttempt !== "number") {
-        error.retryAttempt = attempt;
-      }
-      throw error;
-    }
-
-    throw new ImageGenerationError(
-      error instanceof Error ? `OpenAI compatible image request failed: ${error.message}` : "OpenAI compatible image request failed",
-      502,
-      {
         failureClass: failureState.failureClass,
         isRetryable: failureState.isRetryable,
         retryAttempt: attempt,
+        requestCount: request.n || 1,
+        ...buildSupplierRequestDiagnostics({
+          endpoint: responseEndpoint,
+          requestStartedAt,
+          timeoutMs: asyncImageSubmitTimeoutMs,
+          attempt,
+          maxAttempts,
+        }),
+        ...getErrorDiagnostics(error),
+      });
+
+      if (failureState.isRetryable && attempt < maxAttempts) {
+        debugWarn("Retrying retryable OpenAI compatible image transport failure", {
+          endpoint: responseEndpoint,
+          mode: "openai_compatible_image",
+          retryAttempt: attempt,
+          nextRetryAttempt: attempt + 1,
+          requestSize: request.size || null,
+          requestCount: request.n || 1,
+          failureClass: failureState.failureClass,
+        });
+        await sleep(350);
+        continue;
       }
-    );
+
+      if (error instanceof ImageGenerationError) {
+        if (!error.failureClass) {
+          error.failureClass = failureState.failureClass;
+        }
+        if (typeof error.isRetryable !== "boolean") {
+          error.isRetryable = failureState.isRetryable;
+        }
+        if (typeof error.retryAttempt !== "number") {
+          error.retryAttempt = attempt;
+        }
+        throw error;
+      }
+
+      throw new ImageGenerationError(
+        error instanceof Error ? `OpenAI compatible image request failed: ${error.message}` : "OpenAI compatible image request failed",
+        502,
+        {
+          failureClass: failureState.failureClass,
+          isRetryable: failureState.isRetryable,
+          retryAttempt: attempt,
+        }
+      );
+    }
   }
+
+  throw new ImageGenerationError("OpenAI compatible image request failed", 502, {
+    failureClass: "unknown",
+    isRetryable: false,
+    retryAttempt: maxAttempts,
+  });
 }
 
 async function pollOpenAiCompatibleImageTask({

@@ -61,18 +61,43 @@ export function parseImageDataUrl(value, { maxBytes }) {
     throw new Error('Image data is required');
   }
 
-  const match = value.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,([A-Za-z0-9+/=\s]+)$/);
-  if (!match) {
+  if (!value.startsWith('data:')) {
     throw new Error('Invalid image data URL');
   }
 
-  const mimeType = match[1].toLowerCase();
+  const separator = ';base64,';
+  const separatorIndex = value.indexOf(separator);
+  if (separatorIndex <= 'data:'.length) {
+    throw new Error('Invalid image data URL');
+  }
+
+  const mimeType = value.slice('data:'.length, separatorIndex).toLowerCase();
   const extension = ALLOWED_IMAGE_TYPES.get(mimeType);
   if (!extension) {
     throw new Error(`Unsupported image type: ${mimeType}`);
   }
 
-  const buffer = Buffer.from(match[2].replace(/\s+/g, ''), 'base64');
+  const rawBase64 = value.slice(separatorIndex + separator.length);
+  let base64 = '';
+  for (const char of rawBase64) {
+    if (char === ' ' || char === '\n' || char === '\r' || char === '\t') {
+      continue;
+    }
+    const code = char.charCodeAt(0);
+    const isBase64Char =
+      (code >= 65 && code <= 90) ||
+      (code >= 97 && code <= 122) ||
+      (code >= 48 && code <= 57) ||
+      char === '+' ||
+      char === '/' ||
+      char === '=';
+    if (!isBase64Char) {
+      throw new Error('Invalid image data URL');
+    }
+    base64 += char;
+  }
+
+  const buffer = Buffer.from(base64, 'base64');
   if (!buffer.length) {
     throw new Error('Image payload is empty');
   }

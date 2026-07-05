@@ -30,6 +30,17 @@ test('parseImageDataUrl accepts a supported image payload and rewrites extension
   assert.deepEqual(parsed.buffer, PNG_BYTES);
 });
 
+test('parseImageDataUrl parses large data URLs without whole-string regex matching', () => {
+  const bytes = Buffer.concat([PNG_BYTES, Buffer.alloc(1024 * 1024, 0)]);
+  const parsed = parseImageDataUrl(`data:image/png;base64,${bytes.toString('base64')}`, {
+    maxBytes: bytes.length + 1,
+  });
+
+  assert.equal(parsed.mimeType, 'image/png');
+  assert.equal(parsed.extension, 'png');
+  assert.equal(parsed.buffer.length, bytes.length);
+});
+
 test('parseImageDataUrl rejects unsupported image types', () => {
   assert.throws(
     () =>

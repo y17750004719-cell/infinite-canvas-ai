@@ -6,6 +6,7 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const apiClientSource = fs.readFileSync(path.join(__dirname, 'api-client.ts'), 'utf8');
+const generateRouteSource = fs.readFileSync(path.join(__dirname, '../api/generate/route.ts'), 'utf8');
 
 test('api-client resolves supplier endpoints from the multi-provider runtime registry instead of module-scoped env constants', () => {
   assert.equal(
@@ -134,6 +135,18 @@ test('api-client normalizes provider-returned gpt-image-2 variants before routin
 
 test('api-client uses opportunistic task polling for OpenAI compatible images without async submit URLs', () => {
   assert.equal(
+    apiClientSource.includes('const asyncImageSubmitTimeoutMs = parsePositiveInt(process.env.COMFLY_ASYNC_IMAGE_SUBMIT_TIMEOUT_MS, 1800000);'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('const asyncImagePollTimeoutMs = parsePositiveInt(process.env.COMFLY_ASYNC_POLL_TIMEOUT_MS, 1800000);'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('const asyncImagePollIntervalMs = parsePositiveInt(process.env.COMFLY_ASYNC_POLL_INTERVAL_MS, 2000);'),
+    true
+  );
+  assert.equal(
     apiClientSource.includes('const requestedExecutionMode = request.executionMode === "async" ? "async" : "sync";'),
     true
   );
@@ -165,6 +178,18 @@ test('api-client uses opportunistic task polling for OpenAI compatible images wi
   );
   assert.equal(
     apiClientSource.includes('const taskId = extractOptionalTaskId(payload);'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('const timeoutId = setTimeout(() => controller.abort(), asyncImageSubmitTimeoutMs);'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('signal: controller.signal,'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('timeoutMs: asyncImageSubmitTimeoutMs'),
     true
   );
   assert.equal(
@@ -257,7 +282,7 @@ test('api-client polls sync OpenAI-compatible image responses when the provider 
     true
   );
   assert.equal(
-    apiClientSource.includes('if (taskId) {\n      return pollOpenAiCompatibleImageTask({'),
+    apiClientSource.includes('if (taskId) {\n        return pollOpenAiCompatibleImageTask({'),
     true
   );
 });
@@ -270,6 +295,21 @@ test('api-client image payload parsing avoids spread push recursion for nested a
   assert.equal(
     apiClientSource.includes('for (const entry of toImageEntries(item, depth + 1)) {\n        nested.push(entry);\n      }'),
     true
+  );
+});
+
+test('generate route saves generated data URLs through the shared non-recursive parser', () => {
+  assert.equal(
+    generateRouteSource.includes('import { createStoredImageName, parseImageDataUrl } from "../../lib/api-security.mjs";'),
+    true
+  );
+  assert.equal(
+    generateRouteSource.includes('const parsed = parseImageDataUrl(imageUrl, { maxBytes: MAX_SAVED_IMAGE_BYTES });'),
+    true
+  );
+  assert.equal(
+    generateRouteSource.includes('imageUrl.match(/^data:'),
+    false
   );
 });
 
@@ -298,12 +338,12 @@ test('api-client keeps openai-json mode on generations and sends response_format
 
 test('api-client mirrors Infinite-Canvas fallback requests for OpenAI-compatible image routes', () => {
   assert.equal(apiClientSource.includes('function imagesApiUnsupportedText(text: string): boolean {'), true);
-  assert.equal(apiClientSource.includes('response = await postImageRequest(\n          imageEditUrl,'), true);
+  assert.equal(apiClientSource.includes('response = await postImageRequest(\n            imageEditUrl,'), true);
   assert.equal(apiClientSource.includes('const buildEditsFallbackPayload = async () => {'), true);
   assert.equal(apiClientSource.includes('const referenceBlobs = await Promise.all(referenceImages.map((image) => referenceToBlob(image, request.signal)));'), true);
   assert.equal(apiClientSource.includes('formData.append("image", blob, `reference-${index + 1}.${mimeTypeToFileExtension(mimeType)}`);'), true);
   assert.equal(apiClientSource.includes('} else if (usesImageEditsApi && !isGptImage2Model(model)) {'), true);
-  assert.equal(apiClientSource.includes('response = await postImageRequest(\n          imageGenerationUrl,'), true);
+  assert.equal(apiClientSource.includes('response = await postImageRequest(\n            imageGenerationUrl,'), true);
   assert.equal(apiClientSource.includes('image: referenceImages,'), true);
   assert.equal(apiClientSource.includes('n: 1,'), true);
 });
@@ -322,6 +362,21 @@ test('api-client keeps image edits synchronous and recognizes Infinite-Canvas ta
   assert.equal(apiClientSource.includes('if (IMAGE_TASK_FAILURE_STATUSES.has(taskStatus)) {'), true);
   assert.equal(apiClientSource.includes('if (IMAGE_TASK_SUCCESS_STATUSES.has(status)) {'), true);
   assert.equal(apiClientSource.includes('if (IMAGE_TASK_FAILURE_STATUSES.has(status)) {'), true);
+});
+
+test('api-client retries retryable OpenAI-compatible image transport failures once', () => {
+  assert.equal(
+    apiClientSource.includes('for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('Retrying retryable OpenAI compatible image transport failure'),
+    true
+  );
+  assert.equal(
+    apiClientSource.includes('if (failureState.isRetryable && attempt < maxAttempts) {'),
+    true
+  );
 });
 
 test('api-client parses common OpenAI compatible image2 task output field names', () => {
@@ -396,7 +451,7 @@ test('api-client exact-size routing stays scoped to explicit 1K 2K and 4K reques
 
 test('api-client uses a fixed 120 second timeout for Gemini official image submit requests', () => {
   assert.equal(
-    apiClientSource.includes('const asyncImageSubmitTimeoutMs = parsePositiveInt(process.env.COMFLY_ASYNC_IMAGE_SUBMIT_TIMEOUT_MS, 600000);'),
+    apiClientSource.includes('const asyncImageSubmitTimeoutMs = parsePositiveInt(process.env.COMFLY_ASYNC_IMAGE_SUBMIT_TIMEOUT_MS, 1800000);'),
     true
   );
   assert.equal(

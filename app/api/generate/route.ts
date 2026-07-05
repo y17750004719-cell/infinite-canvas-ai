@@ -3,7 +3,7 @@ import { chat, chatStream, ImageGenerationError, runImageTask, shouldUseExactIma
 import fs from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { createStoredImageName } from "../../lib/api-security.mjs";
+import { createStoredImageName, parseImageDataUrl } from "../../lib/api-security.mjs";
 import { getImageDimensionsFromBuffer } from "../../lib/image-metadata.mjs";
 import { buildRuntimeAssetUrl, LOCAL_ASSET_ALLOWED_EXTENSIONS, resolveLocalAssetPath } from "../../lib/local-assets.mjs";
 import { getImageModelCapability, normalizeImageModelCapabilityId, supportsImageModelExactSize } from "../../lib/image-model-capabilities.mjs";
@@ -87,38 +87,17 @@ async function saveImageToLocal(imageUrl: string): Promise<{
   naturalHeight: number | null;
 }> {
   if (imageUrl.startsWith("data:image/")) {
-    const match = imageUrl.match(/^data:(image\/[a-z0-9.+-]+);base64,(.+)$/i);
-    if (!match) {
-      throw new Error("Invalid generated image data URL");
-    }
-
-    const mimeType = match[1].toLowerCase();
-    const base64 = match[2];
-    const buffer = Buffer.from(base64, "base64");
-    if (buffer.length === 0) {
-      throw new Error("Generated image payload is empty");
-    }
-    if (buffer.length > MAX_SAVED_IMAGE_BYTES) {
-      throw new Error("Generated image is too large to store");
-    }
-
-    const extension = mimeType.includes("jpeg")
-      ? "jpg"
-      : mimeType.includes("webp")
-        ? "webp"
-        : mimeType.includes("gif")
-          ? "gif"
-          : "png";
-    const filename = createStoredImageName(extension);
+    const parsed = parseImageDataUrl(imageUrl, { maxBytes: MAX_SAVED_IMAGE_BYTES });
+    const filename = createStoredImageName(parsed.extension);
     const filepath = path.join(GENERATED_UPLOADS_DIR, filename);
-    const dimensions = getImageDimensionsFromBuffer(buffer);
+    const dimensions = getImageDimensionsFromBuffer(parsed.buffer);
 
     await mkdir(GENERATED_UPLOADS_DIR, { recursive: true });
-    await writeFile(filepath, buffer);
+    await writeFile(filepath, parsed.buffer);
 
     debugLog("Stored generated image locally", {
       status: 200,
-      sizeBytes: buffer.length,
+      sizeBytes: parsed.buffer.length,
       fileName: filename,
       source: "data-url",
     });
