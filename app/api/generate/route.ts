@@ -9,9 +9,15 @@ import { buildRuntimeAssetUrl, LOCAL_ASSET_ALLOWED_EXTENSIONS, resolveLocalAsset
 import { getImageModelCapability, normalizeImageModelCapabilityId, supportsImageModelExactSize } from "../../lib/image-model-capabilities.mjs";
 import { readProviderRegistry } from "../../lib/provider-config.mjs";
 import {
+  aspectRatioFromSize,
+  buildGenerateRouteErrorMeta,
+  normalizeAspectRatio,
+  resolveGenerateImageModelFromAllowedModels,
+  resolveIntent,
+} from "../../lib/generate-request-flow.mjs";
+import {
   getResolutionFailureReason,
   isOutputResolutionSufficient,
-  resolveImageCardModel,
   resolveImageGenerationFallbackSizes,
   resolveTextPanelChatModel,
 } from "../../lib/workspace-session-view.mjs";
@@ -191,24 +197,7 @@ async function saveImagesToLocal(imageUrls: string[]): Promise<Array<{
 }
 
 const AGENT_MODEL = "gemini-3.1-flash-lite-preview-thinking-medium";
-const IMAGE_MODEL = "gemini-2.5-flash-image";
 const DEFAULT_IMAGE_SIZES = ["2048x2048", "1024x1024", "4096x4096", "1024x1792", "1792x1024"];
-const ALLOWED_ASPECT_RATIOS = new Set([
-  "1:1",
-  "1:4",
-  "1:8",
-  "2:3",
-  "3:2",
-  "3:4",
-  "4:1",
-  "4:3",
-  "4:5",
-  "5:4",
-  "8:1",
-  "9:16",
-  "16:9",
-  "21:9",
-]);
 
 type GenerateIntent = "auto" | "image" | "chat";
 
@@ -284,57 +273,6 @@ function resolveImageSize(requested: unknown, model: string): string {
   return allowlist[0] || capabilityAllowlist[0] || DEFAULT_IMAGE_SIZES[0];
 }
 
-function resolveGenerateImageModel(requestedModel: unknown): string {
-  const normalizedModel = typeof requestedModel === "string" ? requestedModel.trim() : "";
-  if (normalizeImageModelCapabilityId(normalizedModel) === "gpt-image-2") {
-    return normalizedModel;
-  }
-  return resolveImageCardModel(requestedModel, IMAGE_MODEL);
-}
-
-function resolveGenerateImageModelFromAllowedModels(
-  requestedModel: unknown,
-  allowedProviderModelIds: Set<string>
-): string {
-  const normalizedModel = typeof requestedModel === "string" ? requestedModel.trim() : "";
-  if (normalizedModel && allowedProviderModelIds.has(normalizedModel)) {
-    return normalizedModel;
-  }
-  return resolveGenerateImageModel(requestedModel);
-}
-
-function gcd(a: number, b: number): number {
-  let x = Math.abs(a);
-  let y = Math.abs(b);
-  while (y !== 0) {
-    const t = y;
-    y = x % y;
-    x = t;
-  }
-  return x || 1;
-}
-
-function normalizeAspectRatio(input: unknown): string {
-  const raw = typeof input === "string" ? input.trim() : "";
-  if (!raw) return "";
-  return ALLOWED_ASPECT_RATIOS.has(raw) ? raw : "";
-}
-
-function aspectRatioFromSize(size?: string): string {
-  const raw = typeof size === "string" ? size.trim() : "";
-  if (!raw) return "1:1";
-  const match = raw.match(/^(\d+)x(\d+)$/i);
-  if (!match) return "1:1";
-  const width = Number(match[1]);
-  const height = Number(match[2]);
-  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
-    return "1:1";
-  }
-  const divisor = gcd(width, height);
-  const ratio = `${width / divisor}:${height / divisor}`;
-  return ALLOWED_ASPECT_RATIOS.has(ratio) ? ratio : "1:1";
-}
-
 function isGptImage2Model(model?: string): boolean {
   return normalizeImageModelCapabilityId(model || "") === "gpt-image-2";
 }
@@ -358,51 +296,6 @@ function buildSupplierImageSizeMismatchError({
       naturalHeight: actualHeight,
     }) || "供应商未按请求尺寸返回图片";
   return `供应商未按请求尺寸返回图片：请求 ${requestedSize}，实际 ${actualWidth}x${actualHeight}。${failureReason}`;
-}
-
-const IMAGE_HINTS = ["画", "生图", "生成图片", "海报", "logo", "封面", "插画", "渲染", "视觉稿"];
-const CHAT_HINTS = ["解释", "分析", "总结", "翻译", "改写", "代码", "报错", "优化"];
-
-function resolveIntent(
-  intent: unknown,
-  text: string,
-  hasReferenceImages: boolean
-): { intent: "image" | "chat"; ambiguous: boolean; prompt: string } {
-  const raw = typeof text === "string" ? text.trim() : "";
-  const mode = intent === "image" || intent === "chat" || intent === "auto" ? intent : "auto";
-
-  if (raw.startsWith("/img")) {
-    return { intent: "image", ambiguous: false, prompt: raw.replace(/^\/img\s*/i, "").trim() || raw };
-  }
-  if (raw.startsWith("/chat")) {
-    return { intent: "chat", ambiguous: false, prompt: raw.replace(/^\/chat\s*/i, "").trim() || raw };
-  }
-
-  if (mode === "image") {
-    return { intent: "image", ambiguous: false, prompt: raw };
-  }
-
-  if (mode === "chat") {
-    return { intent: "chat", ambiguous: false, prompt: raw };
-  }
-
-  if (hasReferenceImages) {
-    return { intent: "image", ambiguous: false, prompt: raw };
-  }
-
-  const normalized = raw.toLowerCase();
-  const imageHit = IMAGE_HINTS.some((keyword) => normalized.includes(keyword.toLowerCase()));
-  const chatHit = CHAT_HINTS.some((keyword) => normalized.includes(keyword.toLowerCase()));
-
-  if (imageHit && !chatHit) {
-    return { intent: "image", ambiguous: false, prompt: raw };
-  }
-
-  if (chatHit && !imageHit) {
-    return { intent: "chat", ambiguous: false, prompt: raw };
-  }
-
-  return { intent: "chat", ambiguous: true, prompt: raw };
 }
 
 function loadSkillContent(skillId: string): string | null {
@@ -755,8 +648,9 @@ export async function POST(request: NextRequest) {
           reqId,
           ...getErrorDiagnostics(error),
         });
-        const errorMeta =
-          error instanceof ImageGenerationError
+        const routeErrorMeta = buildGenerateRouteErrorMeta(error, ImageGenerationError);
+        const imageErrorMeta =
+          routeErrorMeta.isImageGenerationError && error instanceof ImageGenerationError
             ? {
                 failureClass: error.failureClass,
                 isRetryable: error.isRetryable,
@@ -771,14 +665,14 @@ export async function POST(request: NextRequest) {
         ) {
           throw new ImageGenerationError(
             "Image task failed: ratio unsupported",
-            error instanceof ImageGenerationError ? error.statusCode : 502,
-            errorMeta
+            routeErrorMeta.isImageGenerationError ? routeErrorMeta.statusCode : 502,
+            imageErrorMeta
           );
         }
         throw new ImageGenerationError(
           `Image task failed: ${message}`,
-          error instanceof ImageGenerationError ? error.statusCode : 502,
-          errorMeta
+          routeErrorMeta.isImageGenerationError ? routeErrorMeta.statusCode : 502,
+          imageErrorMeta
         );
       }
 
@@ -1029,17 +923,8 @@ export async function POST(request: NextRequest) {
   } catch (error: unknown) {
     const errorMessage = error instanceof Error ? error.message : "Unknown error";
     const errorStack = error instanceof Error ? error.stack : "";
-    
-    const statusCode = error instanceof ImageGenerationError && error.statusCode
-      ? error.statusCode
-      : 500;
-    const failureClass = error instanceof ImageGenerationError && error.failureClass
-      ? error.failureClass
-      : "unknown";
-    const isRetryable = error instanceof ImageGenerationError ? Boolean(error.isRetryable) : false;
-    const retryAttempt = error instanceof ImageGenerationError && typeof error.retryAttempt === "number"
-      ? error.retryAttempt
-      : null;
+    const routeErrorMeta = buildGenerateRouteErrorMeta(error, ImageGenerationError);
+    const { statusCode, failureClass, isRetryable, retryAttempt } = routeErrorMeta;
 
     await requestLogger.error("request.error", "Generate API error", {
       statusCode,
@@ -1061,7 +946,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({
       status: 'error',
       error: errorMessage,
-      failureClass: error instanceof ImageGenerationError ? error.failureClass : "unknown",
+      failureClass,
       stack: process.env.NODE_ENV === 'development' ? errorStack : undefined,
     }, { status: statusCode });
   }

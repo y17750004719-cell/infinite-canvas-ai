@@ -57,6 +57,53 @@ export function getDefaultImageCardModelOption() {
   return IMAGE_CARD_MODEL_OPTIONS[0];
 }
 
+const uniqueModelIds = (models) =>
+  Array.from(new Set((Array.isArray(models) ? models : []).map((model) => model.trim()).filter(Boolean)));
+
+export function createWorkspaceModelOptions(
+  providers,
+  kind,
+  fallbackOptions,
+  getProviderLabel = (providerId) => providerId || '自定义'
+) {
+  const enabledProviders = (Array.isArray(providers) ? providers : []).filter((provider) => provider.enabled !== false);
+  const options = enabledProviders.flatMap((provider) => {
+    const models = kind === 'image' ? provider.imageModels : provider.chatModels;
+    return uniqueModelIds(models).map((model) => ({
+      id: model,
+      label: model,
+      providerId: provider.id,
+      providerName: provider.name || getProviderLabel(provider.id),
+    }));
+  });
+
+  if (options.length > 0) return options;
+  const fallbackProvider = enabledProviders.find((provider) => provider.primary) || enabledProviders[0] || null;
+  return (Array.isArray(fallbackOptions) ? fallbackOptions : []).map((option) => ({
+    ...option,
+    providerId: fallbackProvider?.id || 'comfly',
+    providerName: fallbackProvider?.name || getProviderLabel(fallbackProvider?.id || 'comfly'),
+  }));
+}
+
+export function findWorkspaceModelOption(options, modelId, providerId) {
+  const normalizedModelId = typeof modelId === 'string' ? modelId.trim() : '';
+  const normalizedProviderId = typeof providerId === 'string' ? providerId.trim() : '';
+  if (normalizedModelId && normalizedProviderId) {
+    const exact = options.find((option) => option.id === normalizedModelId && option.providerId === normalizedProviderId);
+    if (exact) return exact;
+  }
+  if (normalizedModelId) {
+    const byModel = options.find((option) => option.id === normalizedModelId);
+    if (byModel) return byModel;
+  }
+  if (normalizedProviderId) {
+    const byProvider = options.find((option) => option.providerId === normalizedProviderId);
+    if (byProvider) return byProvider;
+  }
+  return options[0] || null;
+}
+
 export function getSessionConversationCount(session) {
   const topics = Array.isArray(session?.topics) ? session.topics : [];
   if (topics.length > 0) {
@@ -151,6 +198,42 @@ export function resolveImageCardSize(
   return resolveSupportedImageSize(normalizedModelId, requestedSize, fallbackSize);
 }
 
+export function syncImageCardOptionsForProviderModel({
+  providerId,
+  modelId,
+  currentSizeId,
+  currentAspectRatioId,
+  currentQualityId,
+  defaultSizeId = IMAGE_CARD_SIZE_OPTIONS[0]?.id,
+  defaultQualityId = 'auto',
+  providerImageOptionProfiles = {},
+}) {
+  const nextSizeId = resolveImageCardSize(
+    modelId,
+    currentSizeId,
+    defaultSizeId,
+    providerId,
+    providerImageOptionProfiles
+  );
+  const nextAspectRatioId = normalizeProviderModelAspectRatioForSize(
+    providerId,
+    modelId,
+    nextSizeId,
+    currentAspectRatioId,
+    providerImageOptionProfiles
+  );
+  const qualityOptions = getProviderModelQualityOptions(providerId, modelId, providerImageOptionProfiles);
+  const nextQualityId =
+    qualityOptions.find((option) => option.id === currentQualityId)?.id ||
+    qualityOptions[0]?.id ||
+    defaultQualityId;
+  return {
+    sizeId: nextSizeId,
+    aspectRatioId: nextAspectRatioId,
+    qualityId: nextQualityId,
+  };
+}
+
 export function resolveImageCardSizeForAspectRatio(
   modelId,
   requestedSize,
@@ -184,6 +267,106 @@ export function resolveImageCardSizeForAspectRatio(
     return providerResolvedSize;
   }
   return resolveImageSizeForAspectRatio(modelId, resolvedSize, normalizedAspectRatio);
+}
+
+export function resolveProviderDeletionFallbacks({
+  deletedProviderId,
+  remainingProviders,
+  textCardProviderById = {},
+  imageCardProviderById = {},
+  imageCardSizeById = {},
+  imageCardAspectRatioById = {},
+  imageCardQualityById = {},
+  textFallbackOptions = TEXT_PANEL_MODEL_OPTIONS,
+  imageFallbackOptions = IMAGE_CARD_MODEL_OPTIONS,
+  defaultTextModelId = getDefaultTextPanelModelOption()?.id,
+  defaultImageModelId = getDefaultImageCardModelOption()?.id,
+  defaultImageSizeId = IMAGE_CARD_SIZE_OPTIONS[0]?.id,
+  defaultImageQualityId = 'auto',
+  providerImageOptionProfiles = {},
+  getProviderLabel,
+}) {
+  const enabledProviders = (Array.isArray(remainingProviders) ? remainingProviders : []).filter(
+    (provider) => provider.enabled !== false
+  );
+  const fallbackTextProvider =
+    enabledProviders.find((provider) => Array.isArray(provider.chatModels) && provider.chatModels.length > 0) || null;
+  const fallbackImageProvider =
+    enabledProviders.find((provider) => Array.isArray(provider.imageModels) && provider.imageModels.length > 0) || null;
+  const fallbackWorkspaceTextOptions = createWorkspaceModelOptions(
+    enabledProviders,
+    'chat',
+    textFallbackOptions,
+    getProviderLabel
+  );
+  const fallbackTextModel = fallbackTextProvider
+    ? findWorkspaceModelOption(fallbackWorkspaceTextOptions, '', fallbackTextProvider.id)
+    : null;
+  const fallbackTextModelId = resolveWorkspaceTextPanelChatModel(
+    fallbackTextModel?.id || '',
+    fallbackWorkspaceTextOptions.map((option) => option.id),
+    defaultTextModelId
+  );
+  const fallbackWorkspaceImageOptions = createWorkspaceModelOptions(
+    enabledProviders,
+    'image',
+    imageFallbackOptions,
+    getProviderLabel
+  );
+  const fallbackImageModel = fallbackImageProvider
+    ? findWorkspaceModelOption(fallbackWorkspaceImageOptions, '', fallbackImageProvider.id)
+    : null;
+  const fallbackImageModelId = resolveWorkspaceImageCardModel(
+    fallbackImageModel?.id || '',
+    fallbackWorkspaceImageOptions.map((option) => option.id),
+    defaultImageModelId
+  );
+
+  const textProviderByItemId = {};
+  const textModelByItemId = {};
+  for (const [itemId, currentProviderId] of Object.entries(textCardProviderById)) {
+    if (currentProviderId !== deletedProviderId || !fallbackTextProvider) continue;
+    textProviderByItemId[itemId] = fallbackTextProvider.id;
+    textModelByItemId[itemId] = fallbackTextModelId;
+  }
+
+  const imageProviderByItemId = {};
+  const imageModelByItemId = {};
+  const imageSizeByItemId = {};
+  const imageAspectRatioByItemId = {};
+  const imageQualityByItemId = {};
+  for (const [itemId, currentProviderId] of Object.entries(imageCardProviderById)) {
+    if (currentProviderId !== deletedProviderId || !fallbackImageProvider) continue;
+    const syncedOptions = syncImageCardOptionsForProviderModel({
+      providerId: fallbackImageProvider.id,
+      modelId: fallbackImageModelId,
+      currentSizeId: imageCardSizeById[itemId] ?? defaultImageSizeId,
+      currentAspectRatioId: imageCardAspectRatioById[itemId] ?? '1:1',
+      currentQualityId: imageCardQualityById[itemId] ?? defaultImageQualityId,
+      defaultSizeId: defaultImageSizeId,
+      defaultQualityId: defaultImageQualityId,
+      providerImageOptionProfiles,
+    });
+    imageProviderByItemId[itemId] = fallbackImageProvider.id;
+    imageModelByItemId[itemId] = fallbackImageModelId;
+    imageSizeByItemId[itemId] = syncedOptions.sizeId;
+    imageAspectRatioByItemId[itemId] = syncedOptions.aspectRatioId;
+    imageQualityByItemId[itemId] = syncedOptions.qualityId;
+  }
+
+  return {
+    fallbackTextProvider,
+    fallbackImageProvider,
+    fallbackTextModelId,
+    fallbackImageModelId,
+    textProviderByItemId,
+    textModelByItemId,
+    imageProviderByItemId,
+    imageModelByItemId,
+    imageSizeByItemId,
+    imageAspectRatioByItemId,
+    imageQualityByItemId,
+  };
 }
 
 export function normalizeImageCardAspectRatio(value, fallbackValue = '1:1') {

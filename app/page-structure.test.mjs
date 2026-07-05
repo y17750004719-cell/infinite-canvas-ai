@@ -462,17 +462,20 @@ test('provider delete rewrites image card provider model and size through existi
   const deleteBlock = pageSource.slice(deleteStart, deleteEnd);
 
   assert.equal(deleteBlock.includes('const remainingProviders = providerSettingsProviders.filter((provider) => provider.id !== providerId);'), true);
-  assert.equal(deleteBlock.includes('const fallbackImageProviders = remainingProviders.filter((provider) => provider.enabled !== false && provider.imageModels.length > 0);'), true);
-  assert.equal(deleteBlock.includes('const fallbackImageProvider = fallbackImageProviders[0] || null;'), true);
-  assert.equal(deleteBlock.includes('const fallbackModel = fallbackImageProvider'), true);
-  assert.equal(deleteBlock.includes('findWorkspaceModelOption(fallbackWorkspaceImageOptions, \'\', fallbackImageProvider.id)'), true);
-  assert.equal(deleteBlock.includes('const fallbackModelId = resolveWorkspaceImageCardModel('), true);
-  assert.equal(deleteBlock.includes('syncImageCardOptionsForProviderModel('), true);
+  assert.equal(deleteBlock.includes('const providerDeletionFallbacks = resolveProviderDeletionFallbacks({'), true);
+  assert.equal(deleteBlock.includes('deletedProviderId: providerId,'), true);
+  assert.equal(deleteBlock.includes('remainingProviders,'), true);
+  assert.equal(deleteBlock.includes('providerImageOptionProfiles,'), true);
   assert.equal(deleteBlock.includes('setImageCardProviderById((prev) => {'), true);
+  assert.equal(deleteBlock.includes('providerDeletionFallbacks.imageProviderByItemId[itemId]'), true);
   assert.equal(deleteBlock.includes('setImageCardModelById((prev) => {'), true);
+  assert.equal(deleteBlock.includes('providerDeletionFallbacks.imageModelByItemId[itemId]'), true);
   assert.equal(deleteBlock.includes('setImageCardSizeById((prev) => {'), true);
+  assert.equal(deleteBlock.includes('providerDeletionFallbacks.imageSizeByItemId[itemId]'), true);
   assert.equal(deleteBlock.includes('setImageCardAspectRatioById((prev) => {'), true);
+  assert.equal(deleteBlock.includes('providerDeletionFallbacks.imageAspectRatioByItemId[itemId]'), true);
   assert.equal(deleteBlock.includes('setImageCardQualityById((prev) => {'), true);
+  assert.equal(deleteBlock.includes('providerDeletionFallbacks.imageQualityByItemId[itemId]'), true);
 });
 
 test('image card submit keeps resolution-tier UI state and lets request builders resolve the final exact size once', () => {

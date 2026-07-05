@@ -68,11 +68,11 @@ test('generate route decouples image supplier calls from the incoming request si
     false
   );
   assert.equal(
-    routeSource.includes('failureClass: error instanceof ImageGenerationError ? error.failureClass : "unknown",'),
+    routeSource.includes('buildGenerateRouteErrorMeta'),
     true
   );
   assert.equal(
-    routeSource.includes('const errorMeta ='),
+    routeSource.includes('const routeErrorMeta = buildGenerateRouteErrorMeta(error, ImageGenerationError);'),
     true
   );
   assert.equal(
@@ -165,19 +165,7 @@ test('generate route preserves resolved non-square gpt-image-2 sizes instead of 
 
 test('generate route keeps provider-returned gpt-image-2 variants on the gpt-image-2 capability path', () => {
   assert.equal(
-    routeSource.includes('normalizeImageModelCapabilityId'),
-    true
-  );
-  assert.equal(
-    routeSource.includes('function resolveGenerateImageModel(requestedModel: unknown): string {'),
-    true
-  );
-  assert.equal(
-    routeSource.includes('if (normalizeImageModelCapabilityId(normalizedModel) === "gpt-image-2") {'),
-    true
-  );
-  assert.equal(
-    routeSource.includes('return resolveGenerateImageModel(requestedModel);'),
+    routeSource.includes('from "../../lib/generate-request-flow.mjs";'),
     true
   );
   assert.equal(
@@ -200,11 +188,7 @@ test('generate route preserves provider-saved Gemini image variants instead of f
     true
   );
   assert.equal(
-    routeSource.includes('if (normalizedModel && allowedProviderModelIds.has(normalizedModel)) {'),
-    true
-  );
-  assert.equal(
-    routeSource.includes('return normalizedModel;'),
+    routeSource.includes('const resolvedImageModel = resolveGenerateImageModelFromAllowedModels(model, allowedProviderModelIds);'),
     true
   );
 });

@@ -27,10 +27,12 @@ import {
   buildCanvasTextPanelSubmitInput,
   buildCanvasTextGenerationRequest,
   createCanvasCardItemAtCanvasPoint,
+  createWorkspaceModelOptions,
   buildReferenceImageRequestPayload,
   canEnterManualTextMode,
   canStartCanvasTextGeneration,
   finalizeManualTextCardItem,
+  findWorkspaceModelOption,
   getDefaultTextPanelModelOption,
   getDirectImagePreviewsForTextCard,
   getCurrentImageCardOutput,
@@ -67,6 +69,8 @@ import {
   resolveCanvasImageTaskExecutionMode,
   resolveFloatingPopoverOffset,
   resolveImageGenerationFallbackSizes,
+  resolveProviderDeletionFallbacks,
+  syncImageCardOptionsForProviderModel,
   extractImageFilesFromClipboardItems,
   getReplacedImageAssetItem,
   resolveCanvasImagePasteTarget,
@@ -2482,6 +2486,117 @@ test('getSupportedImageCardSizeOptions returns model-driven fixed size choices',
   assert.deepEqual(
     getSupportedImageCardSizeOptions('gemini-2.5-flash-image').map((option) => option.id),
     ['1024x1024', '2048x2048', '4096x4096']
+  );
+});
+
+test('createWorkspaceModelOptions and findWorkspaceModelOption preserve provider-scoped model choices', () => {
+  const providers = [
+    {
+      id: 'provider-a',
+      name: 'Provider A',
+      enabled: true,
+      imageModels: ['gpt-image-2', 'gpt-image-2', ''],
+      chatModels: ['chat-a'],
+    },
+    {
+      id: 'provider-b',
+      name: '',
+      enabled: true,
+      imageModels: ['gemini-3.1-flash-image-preview'],
+      chatModels: ['chat-b'],
+    },
+    {
+      id: 'disabled',
+      name: 'Disabled',
+      enabled: false,
+      imageModels: ['disabled-image'],
+      chatModels: ['disabled-chat'],
+    },
+  ];
+
+  const options = createWorkspaceModelOptions(
+    providers,
+    'image',
+    [{ id: 'fallback-image', label: 'Fallback Image' }],
+    (providerId) => `Label ${providerId}`
+  );
+
+  assert.deepEqual(options, [
+    { id: 'gpt-image-2', label: 'gpt-image-2', providerId: 'provider-a', providerName: 'Provider A' },
+    {
+      id: 'gemini-3.1-flash-image-preview',
+      label: 'gemini-3.1-flash-image-preview',
+      providerId: 'provider-b',
+      providerName: 'Label provider-b',
+    },
+  ]);
+  assert.equal(findWorkspaceModelOption(options, 'gpt-image-2', 'provider-a')?.providerId, 'provider-a');
+  assert.equal(findWorkspaceModelOption(options, '', 'provider-b')?.id, 'gemini-3.1-flash-image-preview');
+});
+
+test('resolveProviderDeletionFallbacks rewrites deleted provider card state to available providers', () => {
+  const remainingProviders = [
+    {
+      id: 'comfly',
+      name: 'Comfly',
+      enabled: true,
+      primary: true,
+      imageModels: ['gpt-image-2'],
+      chatModels: ['chat-comfly'],
+    },
+  ];
+  const providerImageOptionProfiles = buildProviderImageOptionProfiles(remainingProviders);
+  const result = resolveProviderDeletionFallbacks({
+    deletedProviderId: 'custom',
+    remainingProviders,
+    textCardProviderById: { text1: 'custom', text2: 'comfly' },
+    imageCardProviderById: { image1: 'custom', image2: 'comfly' },
+    imageCardSizeById: { image1: '4096x4096' },
+    imageCardAspectRatioById: { image1: '1:1' },
+    imageCardQualityById: { image1: 'high' },
+    textFallbackOptions: [{ id: 'chat-comfly', label: 'Chat Comfly' }],
+    imageFallbackOptions: [{ id: 'gpt-image-2', label: 'GPT Image 2' }],
+    defaultTextModelId: 'chat-comfly',
+    defaultImageModelId: 'gpt-image-2',
+    defaultImageSizeId: '1024x1024',
+    defaultImageQualityId: 'auto',
+    providerImageOptionProfiles,
+  });
+
+  assert.deepEqual(result.textProviderByItemId, { text1: 'comfly' });
+  assert.deepEqual(result.textModelByItemId, { text1: 'chat-comfly' });
+  assert.deepEqual(result.imageProviderByItemId, { image1: 'comfly' });
+  assert.deepEqual(result.imageModelByItemId, { image1: 'gpt-image-2' });
+  assert.deepEqual(result.imageSizeByItemId, { image1: '4096x4096' });
+  assert.deepEqual(result.imageAspectRatioByItemId, { image1: '16:9' });
+  assert.deepEqual(result.imageQualityByItemId, { image1: 'high' });
+});
+
+test('syncImageCardOptionsForProviderModel keeps valid size and quality while normalizing invalid aspect ratio', () => {
+  const providerImageOptionProfiles = buildProviderImageOptionProfiles([
+    {
+      id: 'comfly',
+      baseUrl: 'https://ai.comfly.org/v1',
+      imageModels: ['gpt-image-2'],
+    },
+  ]);
+
+  assert.deepEqual(
+    syncImageCardOptionsForProviderModel({
+      providerId: 'comfly',
+      modelId: 'gpt-image-2',
+      currentSizeId: '4096x4096',
+      currentAspectRatioId: '1:1',
+      currentQualityId: 'high',
+      defaultSizeId: '1024x1024',
+      defaultQualityId: 'auto',
+      providerImageOptionProfiles,
+    }),
+    {
+      sizeId: '4096x4096',
+      aspectRatioId: '16:9',
+      qualityId: 'high',
+    }
   );
 });
 

@@ -53,7 +53,9 @@ import {
   canStartCanvasTextGeneration,
   createCanvasClipboardSnapshot,
   createCanvasCardItemAtCanvasPoint,
+  createWorkspaceModelOptions,
   finalizeManualTextCardItem,
+  findWorkspaceModelOption,
   getDefaultImageCardModelOption,
   getDefaultTextPanelModelOption,
   getDisplayableTextCardPanelDraft,
@@ -91,12 +93,14 @@ import {
   resolveImageCardModel,
   resolveImageCardSize,
   resolveImageCardSizeForAspectRatio,
+  resolveProviderDeletionFallbacks,
   resolveWorkspaceImageCardModel,
   resolveWorkspaceTextPanelChatModel,
   resolveSessionPresentationState,
   settleCanvasImageGenerationRequests,
   shouldPreventScrollableRegionWheelDefault,
   syncAutoResizedTextareaLayout,
+  syncImageCardOptionsForProviderModel as syncWorkspaceImageCardOptionsForProviderModel,
 } from './lib/workspace-session-view.mjs';
 import {
   buildProviderImageOptionProfiles,
@@ -487,61 +491,6 @@ const CANVAS_CHAT_PANEL_RESERVED_WIDTH = 500;
 
 const uniqueModelIds = (models: string[]) =>
   Array.from(new Set(models.map((model) => model.trim()).filter(Boolean)));
-
-const createFallbackWorkspaceModelOptions = (
-  fallbackOptions: Array<{ id: string; label: string }>,
-  provider: ProviderSettingsItem | null
-): WorkspaceModelOption[] =>
-  fallbackOptions.map((option) => ({
-    ...option,
-    providerId: provider?.id || 'comfly',
-    providerName: provider?.name || '主供应商',
-  }));
-
-const createWorkspaceModelOptions = (
-  providers: ProviderSettingsItem[],
-  kind: 'image' | 'chat',
-  fallbackOptions: Array<{ id: string; label: string }>
-): WorkspaceModelOption[] => {
-  const enabledProviders = providers.filter((provider) => provider.enabled !== false);
-  const options = enabledProviders.flatMap((provider) => {
-    const models = kind === 'image' ? provider.imageModels : provider.chatModels;
-    return uniqueModelIds(models).map((model) => ({
-      id: model,
-      label: model,
-      providerId: provider.id,
-      providerName: provider.name || getProviderSettingsProviderLabel(provider.id),
-    }));
-  });
-
-  if (options.length > 0) return options;
-  return createFallbackWorkspaceModelOptions(
-    fallbackOptions,
-    enabledProviders.find((provider) => provider.primary) || enabledProviders[0] || null
-  );
-};
-
-const findWorkspaceModelOption = (
-  options: WorkspaceModelOption[],
-  modelId: string,
-  providerId?: string
-): WorkspaceModelOption | null => {
-  const normalizedModelId = modelId.trim();
-  const normalizedProviderId = providerId?.trim();
-  if (normalizedModelId && normalizedProviderId) {
-    const exact = options.find((option) => option.id === normalizedModelId && option.providerId === normalizedProviderId);
-    if (exact) return exact;
-  }
-  if (normalizedModelId) {
-    const byModel = options.find((option) => option.id === normalizedModelId);
-    if (byModel) return byModel;
-  }
-  if (normalizedProviderId) {
-    const byProvider = options.find((option) => option.providerId === normalizedProviderId);
-    if (byProvider) return byProvider;
-  }
-  return options[0] || null;
-};
 
 const getFetchedModelCategory = (
   modelId: string,
@@ -4574,15 +4523,19 @@ export default function AIWorkspace() {
     [enabledProviderSettingsProviders]
   );
   const workspaceImageModelOptions = React.useMemo(
-    () => createWorkspaceModelOptions(enabledProviderSettingsProviders, 'image', IMAGE_CARD_MODEL_OPTIONS),
+    () => createWorkspaceModelOptions(enabledProviderSettingsProviders, 'image', IMAGE_CARD_MODEL_OPTIONS, getProviderSettingsProviderLabel),
     [enabledProviderSettingsProviders]
   );
   const workspaceTextModelOptions = React.useMemo(
-    () => createWorkspaceModelOptions(enabledProviderSettingsProviders, 'chat', TEXT_PANEL_MODEL_OPTIONS),
+    () => createWorkspaceModelOptions(enabledProviderSettingsProviders, 'chat', TEXT_PANEL_MODEL_OPTIONS, getProviderSettingsProviderLabel),
     [enabledProviderSettingsProviders]
   );
-  const defaultWorkspaceImageModelOption = workspaceImageModelOptions[0] || createFallbackWorkspaceModelOptions(IMAGE_CARD_MODEL_OPTIONS, null)[0];
-  const defaultWorkspaceTextModelOption = workspaceTextModelOptions[0] || createFallbackWorkspaceModelOptions(TEXT_PANEL_MODEL_OPTIONS, null)[0];
+  const defaultWorkspaceImageModelOption =
+    workspaceImageModelOptions[0] ||
+    createWorkspaceModelOptions([], 'image', IMAGE_CARD_MODEL_OPTIONS, getProviderSettingsProviderLabel)[0];
+  const defaultWorkspaceTextModelOption =
+    workspaceTextModelOptions[0] ||
+    createWorkspaceModelOptions([], 'chat', TEXT_PANEL_MODEL_OPTIONS, getProviderSettingsProviderLabel)[0];
   const selectedTextCardProviderId = selectedTextCardPanelItem
     ? (
         selectableTextProviders.find((provider) => provider.id === textCardProviderById[selectedTextCardPanelItem.id])?.id ||
@@ -4775,34 +4728,16 @@ export default function AIWorkspace() {
     currentAspectRatioId: string,
     currentQualityId = IMAGE_CARD_QUALITY_OPTIONS[0].id
   ) => {
-    const nextSizeId = resolveImageCardSize(
+    return syncWorkspaceImageCardOptionsForProviderModel({
+      providerId,
       modelId,
       currentSizeId,
-      IMAGE_CARD_SIZE_OPTIONS[0].id,
-      providerId,
-      providerImageOptionProfiles
-    );
-    const nextAspectRatioId = normalizeProviderModelAspectRatioForSize(
-      providerId,
-      modelId,
-      nextSizeId,
       currentAspectRatioId,
-      providerImageOptionProfiles
-    );
-    const qualityOptions = getProviderModelQualityOptions(
-      providerId,
-      modelId,
-      providerImageOptionProfiles
-    );
-    const nextQualityId =
-      qualityOptions.find((option) => option.id === currentQualityId)?.id ||
-      qualityOptions[0]?.id ||
-      IMAGE_CARD_QUALITY_OPTIONS[0].id;
-    return {
-      sizeId: nextSizeId,
-      aspectRatioId: nextAspectRatioId,
-      qualityId: nextQualityId,
-    };
+      currentQualityId,
+      defaultSizeId: IMAGE_CARD_SIZE_OPTIONS[0].id,
+      defaultQualityId: IMAGE_CARD_QUALITY_OPTIONS[0].id,
+      providerImageOptionProfiles,
+    });
   }, [providerImageOptionProfiles]);
   const selectedTextPanelModel =
     findWorkspaceModelOption(selectedTextCardProviderModelOptions, selectedTextCardPanelModelId, selectedTextCardProviderId) ||
@@ -9846,36 +9781,23 @@ export default function AIWorkspace() {
       remainingProviders[Math.min(deletedProviderIndex, remainingProviders.length - 1)] ||
       remainingProviders[remainingProviders.length - 1] ||
       null;
-    const fallbackImageProviders = remainingProviders.filter((provider) => provider.enabled !== false && provider.imageModels.length > 0);
-    const fallbackImageProvider = fallbackImageProviders[0] || null;
-    const fallbackTextProviders = remainingProviders.filter((provider) => provider.enabled !== false && provider.chatModels.length > 0);
-    const fallbackTextProvider = fallbackTextProviders[0] || null;
-    const fallbackWorkspaceTextOptions = createWorkspaceModelOptions(
-      remainingProviders.filter((provider) => provider.enabled !== false),
-      'chat',
-      TEXT_PANEL_MODEL_OPTIONS
-    );
-    const fallbackTextModel = fallbackTextProvider
-      ? findWorkspaceModelOption(fallbackWorkspaceTextOptions, '', fallbackTextProvider.id)
-      : null;
-    const fallbackTextModelId = resolveWorkspaceTextPanelChatModel(
-      fallbackTextModel?.id || '',
-      fallbackWorkspaceTextOptions.map((option) => option.id),
-      defaultWorkspaceTextModelOption.id
-    );
-    const fallbackWorkspaceImageOptions = createWorkspaceModelOptions(
-      remainingProviders.filter((provider) => provider.enabled !== false),
-      'image',
-      IMAGE_CARD_MODEL_OPTIONS
-    );
-    const fallbackModel = fallbackImageProvider
-      ? findWorkspaceModelOption(fallbackWorkspaceImageOptions, '', fallbackImageProvider.id)
-      : null;
-    const fallbackModelId = resolveWorkspaceImageCardModel(
-      fallbackModel?.id || '',
-      fallbackWorkspaceImageOptions.map((option) => option.id),
-      defaultWorkspaceImageModelOption.id
-    );
+    const providerDeletionFallbacks = resolveProviderDeletionFallbacks({
+      deletedProviderId: providerId,
+      remainingProviders,
+      textCardProviderById,
+      imageCardProviderById,
+      imageCardSizeById,
+      imageCardAspectRatioById,
+      imageCardQualityById,
+      textFallbackOptions: TEXT_PANEL_MODEL_OPTIONS,
+      imageFallbackOptions: IMAGE_CARD_MODEL_OPTIONS,
+      defaultTextModelId: defaultWorkspaceTextModelOption.id,
+      defaultImageModelId: defaultWorkspaceImageModelOption.id,
+      defaultImageSizeId: IMAGE_CARD_SIZE_OPTIONS[0].id,
+      defaultImageQualityId: IMAGE_CARD_QUALITY_OPTIONS[0].id,
+      providerImageOptionProfiles,
+      getProviderLabel: getProviderSettingsProviderLabel,
+    });
 
     setProviderSettingsProviders((prev) => prev.filter((provider) => provider.id !== providerId));
     setProviderSettingsEditableProviderIds((prev) => prev.filter((id) => id !== providerId));
@@ -9898,8 +9820,8 @@ export default function AIWorkspace() {
       for (const [itemId, currentProviderId] of Object.entries(prev)) {
         if (currentProviderId !== providerId) continue;
         changed = true;
-        if (fallbackTextProvider) {
-          next[itemId] = fallbackTextProvider.id;
+        if (providerDeletionFallbacks.fallbackTextProvider) {
+          next[itemId] = providerDeletionFallbacks.textProviderByItemId[itemId];
         } else {
           delete next[itemId];
         }
@@ -9912,8 +9834,8 @@ export default function AIWorkspace() {
       for (const [itemId, currentProviderId] of Object.entries(textCardProviderById)) {
         if (currentProviderId !== providerId) continue;
         changed = true;
-        if (fallbackTextProvider) {
-          next[itemId] = fallbackTextModelId;
+        if (providerDeletionFallbacks.fallbackTextProvider) {
+          next[itemId] = providerDeletionFallbacks.textModelByItemId[itemId];
         } else {
           delete next[itemId];
         }
@@ -9927,8 +9849,8 @@ export default function AIWorkspace() {
       for (const [itemId, currentProviderId] of Object.entries(prev)) {
         if (currentProviderId !== providerId) continue;
         changed = true;
-        if (fallbackImageProvider) {
-          next[itemId] = fallbackImageProvider.id;
+        if (providerDeletionFallbacks.fallbackImageProvider) {
+          next[itemId] = providerDeletionFallbacks.imageProviderByItemId[itemId];
         } else {
           delete next[itemId];
         }
@@ -9936,84 +9858,56 @@ export default function AIWorkspace() {
       return changed ? next : prev;
     });
     setImageCardModelById((prev) => {
-      if (!fallbackImageProvider) return prev;
+      if (!providerDeletionFallbacks.fallbackImageProvider) return prev;
       const next = { ...prev };
       let changed = false;
       for (const [itemId, currentProviderId] of Object.entries(imageCardProviderById)) {
         if (currentProviderId !== providerId) continue;
-        next[itemId] = fallbackModelId;
+        next[itemId] = providerDeletionFallbacks.imageModelByItemId[itemId];
         changed = true;
       }
       return changed ? next : prev;
     });
     setImageCardSizeById((prev) => {
-      if (!fallbackImageProvider) return prev;
+      if (!providerDeletionFallbacks.fallbackImageProvider) return prev;
       const next = { ...prev };
       let changed = false;
       for (const [itemId, currentProviderId] of Object.entries(imageCardProviderById)) {
         if (currentProviderId !== providerId) continue;
-        const syncedOptions = syncImageCardOptionsForProviderModel(
-          fallbackImageProvider.id,
-          fallbackModelId,
-          prev[itemId] ?? IMAGE_CARD_SIZE_OPTIONS[0].id,
-          imageCardAspectRatioById[itemId] ?? '1:1',
-          imageCardQualityById[itemId] ?? IMAGE_CARD_QUALITY_OPTIONS[0].id
-        );
-        next[itemId] = syncedOptions.sizeId;
+        next[itemId] = providerDeletionFallbacks.imageSizeByItemId[itemId];
         changed = true;
       }
       return changed ? next : prev;
     });
     setImageCardAspectRatioById((prev) => {
-      if (!fallbackImageProvider) return prev;
+      if (!providerDeletionFallbacks.fallbackImageProvider) return prev;
       const next = { ...prev };
       let changed = false;
       for (const [itemId, currentProviderId] of Object.entries(imageCardProviderById)) {
         if (currentProviderId !== providerId) continue;
-        const syncedOptions = syncImageCardOptionsForProviderModel(
-          fallbackImageProvider.id,
-          fallbackModelId,
-          imageCardSizeById[itemId] ?? IMAGE_CARD_SIZE_OPTIONS[0].id,
-          prev[itemId] ?? '1:1',
-          imageCardQualityById[itemId] ?? IMAGE_CARD_QUALITY_OPTIONS[0].id
-        );
-        next[itemId] = syncedOptions.aspectRatioId;
+        next[itemId] = providerDeletionFallbacks.imageAspectRatioByItemId[itemId];
         changed = true;
       }
       return changed ? next : prev;
     });
     setImageCardQualityById((prev) => {
-      if (!fallbackImageProvider) return prev;
+      if (!providerDeletionFallbacks.fallbackImageProvider) return prev;
       const next = { ...prev };
       let changed = false;
       for (const [itemId, currentProviderId] of Object.entries(imageCardProviderById)) {
         if (currentProviderId !== providerId) continue;
-        const syncedOptions = syncImageCardOptionsForProviderModel(
-          fallbackImageProvider.id,
-          fallbackModelId,
-          imageCardSizeById[itemId] ?? IMAGE_CARD_SIZE_OPTIONS[0].id,
-          imageCardAspectRatioById[itemId] ?? '1:1',
-          prev[itemId] ?? IMAGE_CARD_QUALITY_OPTIONS[0].id
-        );
-        next[itemId] = syncedOptions.qualityId;
+        next[itemId] = providerDeletionFallbacks.imageQualityByItemId[itemId];
         changed = true;
       }
       return changed ? next : prev;
     });
     setItems((prev) =>
-      !fallbackImageProvider
+      !providerDeletionFallbacks.fallbackImageProvider
         ? prev
         : prev.map((item) => {
             if (!isImageCardItem(item)) return item;
             if (imageCardProviderById[item.id] !== providerId) return item;
-            const syncedOptions = syncImageCardOptionsForProviderModel(
-              fallbackImageProvider.id,
-              fallbackModelId,
-              imageCardSizeById[item.id] ?? IMAGE_CARD_SIZE_OPTIONS[0].id,
-              imageCardAspectRatioById[item.id] ?? '1:1',
-              imageCardQualityById[item.id] ?? IMAGE_CARD_QUALITY_OPTIONS[0].id
-            );
-            return resizeImageCardItemToAspectRatio(item, syncedOptions.aspectRatioId);
+            return resizeImageCardItemToAspectRatio(item, providerDeletionFallbacks.imageAspectRatioByItemId[item.id]);
           })
     );
   }, [
@@ -10023,6 +9917,7 @@ export default function AIWorkspace() {
     imageCardProviderById,
     imageCardQualityById,
     imageCardSizeById,
+    providerImageOptionProfiles,
     providerSettingsProviders,
     setTextCardModelById,
     setTextCardProviderById,
@@ -10031,7 +9926,6 @@ export default function AIWorkspace() {
     setImageCardProviderById,
     setImageCardQualityById,
     setImageCardSizeById,
-    syncImageCardOptionsForProviderModel,
     textCardProviderById,
   ]);
 
