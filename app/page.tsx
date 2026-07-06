@@ -405,6 +405,7 @@ interface ProviderSettingsItem {
   primary: boolean;
   imageModels: string[];
   chatModels: string[];
+  modelProtocols: Record<string, ProviderProtocol>;
   apiKey: string;
   imageApiKeys: ProviderSettingsImageApiKey[];
   hasApiKey: boolean;
@@ -477,7 +478,7 @@ const PROVIDER_IMAGE_REQUEST_MODE_OPTIONS = [
 const PROVIDER_IMAGE_API_KEY_SCOPE_OPTIONS = [
   { id: 'all', label: '全部' },
   { id: 'gemini', label: 'Gemini' },
-  { id: 'gpt', label: 'GPT' },
+  { id: 'gpt', label: 'OpenAI' },
 ] as const;
 
 const PROVIDER_SETTINGS_MODEL_PICKER_CATEGORIES = ['all', 'image', 'chat'] as const;
@@ -490,6 +491,20 @@ const CANVAS_CHAT_PANEL_RESERVED_WIDTH = 500;
 
 const uniqueModelIds = (models: string[]) =>
   Array.from(new Set(models.map((model) => model.trim()).filter(Boolean)));
+
+const normalizeProviderSettingsModelProtocols = (
+  modelProtocols?: Record<string, ProviderProtocol>,
+  allowedModels?: string[]
+): Record<string, ProviderProtocol> => {
+  const allowedModelSet = allowedModels ? new Set(uniqueModelIds(allowedModels)) : null;
+  return Object.entries(modelProtocols || {}).reduce<Record<string, ProviderProtocol>>((result, [modelId, protocol]) => {
+    const normalizedModelId = modelId.trim();
+    if (!normalizedModelId || (protocol !== 'openai' && protocol !== 'gemini')) return result;
+    if (allowedModelSet && !allowedModelSet.has(normalizedModelId)) return result;
+    result[normalizedModelId] = protocol;
+    return result;
+  }, {});
+};
 
 const getFetchedModelCategory = (
   modelId: string,
@@ -542,6 +557,7 @@ const createProviderSettingsDraftProvider = (providers: ProviderSettingsItem[]):
     primary: providers.length === 0,
     imageModels: [],
     chatModels: [],
+    modelProtocols: {},
     apiKey: '',
     imageApiKeys: [],
     hasApiKey: false,
@@ -9450,7 +9466,12 @@ export default function AIWorkspace() {
   }, []);
 
   const applyProviderSettingsResponse = useCallback((data: ProviderSettingsResponse) => {
-    const providers = Array.isArray(data.providers) ? data.providers : [];
+    const providers = Array.isArray(data.providers)
+      ? data.providers.map((provider) => ({
+          ...provider,
+          modelProtocols: normalizeProviderSettingsModelProtocols(provider.modelProtocols),
+        }))
+      : [];
     const nextSelectedProviderId =
       providers.find((provider) => provider.primary)?.id ||
       providers[0]?.id ||
@@ -9833,6 +9854,7 @@ export default function AIWorkspace() {
         primary: provider.primary,
         imageModels: provider.imageModels,
         chatModels: provider.chatModels,
+        modelProtocols: provider.modelProtocols,
         apiKey: provider.id === providerSettingsSelectedProviderId ? providerSettingsApiKey : provider.apiKey,
         imageApiKeys: provider.id === providerSettingsSelectedProviderId
           ? persistProviderSettingsImageApiKeys(providerSettingsImageApiKeys)
@@ -10063,6 +10085,10 @@ export default function AIWorkspace() {
       ...provider,
       imageModels: nextImageModels,
       chatModels: nextChatModels,
+      modelProtocols: normalizeProviderSettingsModelProtocols(provider.modelProtocols, [
+        ...nextImageModels,
+        ...nextChatModels,
+      ]),
     }));
     setProviderSettingsModelPickerOpen(false);
     setProviderSettingsTestResult({
@@ -10087,12 +10113,30 @@ export default function AIWorkspace() {
       ...provider,
       imageModels: category === 'image' ? provider.imageModels.filter((id) => id !== modelId) : provider.imageModels,
       chatModels: category === 'chat' ? provider.chatModels.filter((id) => id !== modelId) : provider.chatModels,
+      modelProtocols: Object.fromEntries(
+        Object.entries(provider.modelProtocols).filter(([protocolModelId]) => protocolModelId !== modelId)
+      ) as Record<string, ProviderProtocol>,
     }));
     setProviderSettingsSelectedFetchedModels((prev) => {
       if (!(modelId in prev)) return prev;
       return {
         ...prev,
         [modelId]: false,
+      };
+    });
+  }, [updateSelectedProviderSettings]);
+
+  const handleProviderSettingsModelProtocolChange = useCallback((modelId: string, protocol: ProviderProtocol | '') => {
+    updateSelectedProviderSettings((provider) => {
+      const nextModelProtocols = { ...provider.modelProtocols };
+      if (protocol) {
+        nextModelProtocols[modelId] = protocol;
+      } else {
+        delete nextModelProtocols[modelId];
+      }
+      return {
+        ...provider,
+        modelProtocols: nextModelProtocols,
       };
     });
   }, [updateSelectedProviderSettings]);
@@ -11897,17 +11941,34 @@ export default function AIWorkspace() {
                                       <div className="truncate text-[13px] font-medium text-[var(--workspace-text-primary)]">{model.id}</div>
                                       <div className="workspace-text-muted mt-0.5 text-[11px]">图片模型</div>
                                     </div>
-                                    <button
-                                      type="button"
-                                      className="workspace-text-muted inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full transition-colors hover:bg-[var(--workspace-control-hover)] hover:text-red-500"
-                                      onClick={() => {
-                                        handleProviderSettingsRemoveModel('image', model.id);
-                                      }}
-                                      aria-label={`移除图片模型 ${model.id}`}
-                                      title={`移除图片模型 ${model.id}`}
-                                    >
-                                      <Trash2 size={13} />
-                                    </button>
+                                    <div className="flex shrink-0 items-center gap-2">
+                                      <select
+                                        className="h-7 rounded-full border border-[var(--workspace-border)] bg-[var(--workspace-surface)] px-2 text-[11px] text-[var(--workspace-text-primary)] outline-none transition-colors hover:border-[var(--workspace-text-muted)] focus:border-[var(--workspace-accent)]"
+                                        value={selectedProviderSettings.modelProtocols?.[model.id] || ''}
+                                        onChange={(event) => {
+                                          handleProviderSettingsModelProtocolChange(model.id, event.target.value as ProviderProtocol | '');
+                                        }}
+                                        aria-label={`图片模型协议 ${model.id}`}
+                                      >
+                                        <option value="">默认</option>
+                                        {PROVIDER_PROTOCOL_OPTIONS.map((protocol) => (
+                                          <option key={`image-${model.id}-${protocol.id}`} value={protocol.id}>
+                                            {protocol.id === 'openai' ? 'OpenAI' : protocol.label}
+                                          </option>
+                                        ))}
+                                      </select>
+                                      <button
+                                        type="button"
+                                        className="workspace-text-muted inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full transition-colors hover:bg-[var(--workspace-control-hover)] hover:text-red-500"
+                                        onClick={() => {
+                                          handleProviderSettingsRemoveModel('image', model.id);
+                                        }}
+                                        aria-label={`移除图片模型 ${model.id}`}
+                                        title={`移除图片模型 ${model.id}`}
+                                      >
+                                        <Trash2 size={13} />
+                                      </button>
+                                    </div>
                                   </div>
                                 ))
                               ) : (
@@ -11931,17 +11992,34 @@ export default function AIWorkspace() {
                                       <div className="truncate text-[13px] font-medium text-[var(--workspace-text-primary)]">{model.id}</div>
                                       <div className="workspace-text-muted mt-0.5 text-[11px]">聊天模型</div>
                                     </div>
-                                    <button
-                                      type="button"
-                                      className="workspace-text-muted inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full transition-colors hover:bg-[var(--workspace-control-hover)] hover:text-red-500"
-                                      onClick={() => {
-                                        handleProviderSettingsRemoveModel('chat', model.id);
-                                      }}
-                                      aria-label={`移除聊天模型 ${model.id}`}
-                                      title={`移除聊天模型 ${model.id}`}
-                                    >
-                                      <Trash2 size={13} />
-                                    </button>
+                                    <div className="flex shrink-0 items-center gap-2">
+                                      <select
+                                        className="h-7 rounded-full border border-[var(--workspace-border)] bg-[var(--workspace-surface)] px-2 text-[11px] text-[var(--workspace-text-primary)] outline-none transition-colors hover:border-[var(--workspace-text-muted)] focus:border-[var(--workspace-accent)]"
+                                        value={selectedProviderSettings.modelProtocols?.[model.id] || ''}
+                                        onChange={(event) => {
+                                          handleProviderSettingsModelProtocolChange(model.id, event.target.value as ProviderProtocol | '');
+                                        }}
+                                        aria-label={`聊天模型协议 ${model.id}`}
+                                      >
+                                        <option value="">默认</option>
+                                        {PROVIDER_PROTOCOL_OPTIONS.map((protocol) => (
+                                          <option key={`chat-${model.id}-${protocol.id}`} value={protocol.id}>
+                                            {protocol.id === 'openai' ? 'OpenAI' : protocol.label}
+                                          </option>
+                                        ))}
+                                      </select>
+                                      <button
+                                        type="button"
+                                        className="workspace-text-muted inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full transition-colors hover:bg-[var(--workspace-control-hover)] hover:text-red-500"
+                                        onClick={() => {
+                                          handleProviderSettingsRemoveModel('chat', model.id);
+                                        }}
+                                        aria-label={`移除聊天模型 ${model.id}`}
+                                        title={`移除聊天模型 ${model.id}`}
+                                      >
+                                        <Trash2 size={13} />
+                                      </button>
+                                    </div>
                                   </div>
                                 ))
                               ) : (

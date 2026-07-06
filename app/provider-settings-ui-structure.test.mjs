@@ -93,6 +93,8 @@ test('provider settings modal keeps api keys in the field with controlled maskin
   assert.equal(pageSource.includes('删除生图 API'), true);
   assert.equal(pageSource.includes('默认使用主 API Key'), true);
   assert.equal(pageSource.includes('PROVIDER_IMAGE_API_KEY_SCOPE_OPTIONS.map'), true);
+  assert.equal(pageSource.includes("{ id: 'gpt', label: 'OpenAI' }"), true);
+  assert.equal(pageSource.includes("{ id: 'gpt', label: 'GPT' }"), false);
   assert.equal(pageSource.includes('providerSettingsImageApiKeyInputValue'), false);
   assert.equal(pageSource.includes('selectedProviderSettings.imageApiKey'), false);
 });
@@ -119,6 +121,17 @@ test('provider settings modal uses categorized fetched model selection instead o
   assert.equal(pageSource.includes('providerModelsFromText'), false);
   assert.equal(pageSource.includes('value={providerModelsToText(selectedProviderSettings.imageModels)}'), false);
   assert.equal(pageSource.includes('value={providerModelsToText(selectedProviderSettings.chatModels)}'), false);
+});
+
+test('provider settings model rows expose per-model protocol overrides', () => {
+  assert.equal(pageSource.includes('modelProtocols: Record<string, ProviderProtocol>;'), true);
+  assert.equal(pageSource.includes('modelProtocols: {},'), true);
+  assert.equal(pageSource.includes('modelProtocols: provider.modelProtocols,'), true);
+  assert.equal(pageSource.includes('handleProviderSettingsModelProtocolChange'), true);
+  assert.equal(pageSource.includes("selectedProviderSettings.modelProtocols?.[model.id] || ''"), true);
+  assert.equal(pageSource.includes('<option value="">默认</option>'), true);
+  assert.equal(pageSource.includes('PROVIDER_PROTOCOL_OPTIONS.map'), true);
+  assert.equal(pageSource.includes('modelProtocols: nextModelProtocols,'), true);
 });
 
 test('provider settings opens fetched model selection in a centered overlay instead of expanding the card', () => {

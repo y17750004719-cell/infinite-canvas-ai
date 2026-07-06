@@ -6,7 +6,7 @@ import {
   summarizeGeminiImagePayload,
 } from "./gemini-image-response.mjs";
 import { getGeminiImageSizeEnum, getImageModelCapability, normalizeImageModelCapabilityId, resolveImageRequestModel, getGptImage2SizeValidationError, supportsImageModelImageSizeConfig, supportsImageModelRequestedSize } from "./image-model-capabilities.mjs";
-import { getProviderById, providerEndpointUrl, readProviderRegistry, resolveProviderRequestTargets } from "./provider-config.mjs";
+import { effectiveProviderProtocol, getProviderById, providerEndpointUrl, readProviderRegistry, resolveProviderRequestTargets } from "./provider-config.mjs";
 const LOG_LEVEL = (process.env.LOG_LEVEL || "basic").toLowerCase();
 const LOG_ENABLED = LOG_LEVEL !== "off";
 const LOG_DEBUG = LOG_LEVEL === "debug";
@@ -298,22 +298,14 @@ function bearerAuthorizationHeader(apiKey: string): string {
   return token ? `Bearer ${token}` : "";
 }
 
-function isGeminiModelFamily(model?: string): boolean {
-  return normalizeImageModelKey(model).toLowerCase().startsWith("gemini-");
-}
-
-function isGptImageModelFamily(model?: string): boolean {
-  return normalizeImageModelCapabilityId(model).startsWith("gpt-image-");
-}
-
 function resolveProviderApiKey({
   provider,
-  model,
   purpose,
+  protocol,
 }: {
   provider: { apiKey?: string; imageApiKeys?: Array<{ apiKey?: string; scope?: string }> };
-  model?: string;
   purpose: "chat" | "image" | "image_task";
+  protocol?: "openai" | "gemini";
 }): string {
   if (purpose === "chat") {
     return provider.apiKey || "";
@@ -327,10 +319,10 @@ function resolveProviderApiKey({
     if (imageApiKey.scope === "all") {
       return imageApiKey.apiKey;
     }
-    if (imageApiKey.scope === "gemini" && isGeminiModelFamily(model)) {
+    if (imageApiKey.scope === "gemini" && protocol === "gemini") {
       return imageApiKey.apiKey;
     }
-    if (imageApiKey.scope === "gpt" && isGptImageModelFamily(model)) {
+    if (imageApiKey.scope === "gpt" && protocol === "openai") {
       return imageApiKey.apiKey;
     }
   }
@@ -352,13 +344,12 @@ async function getProviderTransport({
     throw new ImageGenerationError("Please configure a supplier provider in settings or environment");
   }
   const providerTargets = resolveProviderRequestTargets(provider.baseUrl);
-  const protocol = provider.protocol === "gemini" || isGeminiModelFamily(model)
-    ? "gemini"
-    : "openai";
+  const protocol = effectiveProviderProtocol(provider, model);
+  const transportProvider = { ...provider, protocol };
   const apiKey = resolveProviderApiKey({
     provider,
-    model,
     purpose,
+    protocol,
   });
   const headers = protocol === "gemini"
     ? {
@@ -372,13 +363,13 @@ async function getProviderTransport({
   const chatBaseUrl = protocol === "gemini"
     ? providerTargets.geminiBaseUrl
     : providerTargets.openAiBaseUrl;
-  const imageGenerationUrl = providerEndpointUrl(provider, "imageGenerationEndpoint", "/v1/images/generations");
-  const imageEditUrl = providerEndpointUrl(provider, "imageEditEndpoint", "/v1/images/edits");
+  const imageGenerationUrl = providerEndpointUrl(transportProvider, "imageGenerationEndpoint", "/v1/images/generations");
+  const imageEditUrl = providerEndpointUrl(transportProvider, "imageEditEndpoint", "/v1/images/edits");
   const taskBaseUrl = getOpenAiCompatibleImageApiBaseUrl(providerTargets);
 
   return {
     providerRegistry,
-    provider,
+    provider: transportProvider,
     providerTargets,
     apiKey,
     protocol,
@@ -415,7 +406,7 @@ function isGeminiOfficialImageModel(model?: string): boolean {
 
 function isOpenAiCompatibleImageModel(model?: string): boolean {
   const normalizedModel = resolveImageCapabilityModelId(model);
-  return normalizedModel.length > 0 && SUPPORTED_OPENAI_COMPATIBLE_IMAGE_MODELS.has(normalizedModel);
+  return normalizedModel.length > 0;
 }
 
 export function shouldUseExactImageSizeApi(model?: string, size?: string): boolean {
@@ -1740,16 +1731,13 @@ async function pollOpenAiCompatibleImageTask({
 export async function runImageTask(request: UnifiedImageRequest): Promise<GenerationResponse> {
   const images = Array.isArray(request.images) ? request.images.filter(Boolean) : [];
   const normalizedModel = normalizeImageRequestModel(request.model);
+  const { protocol } = await getProviderTransport({
+    providerId: request.providerId,
+    model: normalizedModel,
+    purpose: "image",
+  });
 
-  if (shouldUseExactImageSizeApi(normalizedModel, request.size)) {
-    return generateGeminiOfficialImage({
-      ...request,
-      model: normalizedModel,
-      images,
-    });
-  }
-
-  if (isGeminiOfficialImageModel(normalizedModel)) {
+  if (protocol === "gemini" && isGeminiOfficialImageModel(normalizedModel)) {
     return generateGeminiOfficialImage({
       ...request,
       model: normalizedModel,
@@ -1866,11 +1854,6 @@ function extractStreamDeltaEvents(parsed: SupplierChatStreamPayload): ChatStream
   return events;
 }
 
-function isGeminiOfficialTextModel(model?: string): boolean {
-  const normalizedModel = normalizeImageModelKey(model);
-  return normalizedModel.startsWith("gemini-");
-}
-
 async function convertChatMessagesToGeminiRequest(
   messages: ChatRequest["messages"],
   signal?: AbortSignal
@@ -1959,7 +1942,7 @@ export async function chat(
   }
 
   const model = normalizeImageModelKey(request.model);
-  const isGeminiModel = protocol === "gemini" || isGeminiOfficialTextModel(model);
+  const isGeminiModel = protocol === "gemini";
   const endpoint = isGeminiModel
     ? `${getGeminiOfficialApiBaseUrl(providerTargets)}/v1beta/models/${model}:generateContent`
     : `${chatBaseUrl}/chat/completions`;
@@ -2071,7 +2054,7 @@ export async function* chatStream(
   }
 
   const model = normalizeImageModelKey(request.model);
-  const isGeminiModel = protocol === "gemini" || isGeminiOfficialTextModel(model);
+  const isGeminiModel = protocol === "gemini";
   const endpoint = isGeminiModel
     ? `${getGeminiOfficialApiBaseUrl(providerTargets)}/v1beta/models/${model}:streamGenerateContent?alt=sse`
     : `${chatBaseUrl}/chat/completions`;

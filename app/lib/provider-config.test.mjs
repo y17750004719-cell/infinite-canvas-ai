@@ -5,6 +5,7 @@ import path from 'node:path';
 import { mkdtemp, readFile, rm, writeFile, mkdir } from 'node:fs/promises';
 
 import {
+  effectiveProviderProtocol,
   getPrimaryProvider,
   getProviderById,
   providerEndpointUrl,
@@ -58,6 +59,12 @@ test('provider registry view exposes settings api keys and masks them with middl
           primary: true,
           imageModels: [],
           chatModels: [],
+          model_protocols: {
+            'gemini-3.1-flash-image-preview': 'gemini',
+            'gpt-image-2': 'openai',
+            bad: 'codex',
+            '': 'gemini',
+          },
           apiKey: 'sk-test-secret-1234',
           imageApiKeys: [
             { id: 'img-gemini', apiKey: 'img-secret-5678', scope: 'gemini' },
@@ -75,6 +82,10 @@ test('provider registry view exposes settings api keys and masks them with middl
     assert.equal(view.providers[0].apiKey, 'sk-test-secret-1234');
     assert.equal(view.providers[0].maskedApiKey, 'sk-t***********1234');
     assert.equal(view.providers[0].maskedApiKey.includes('...'), false);
+    assert.deepEqual(view.providers[0].modelProtocols, {
+      'gemini-3.1-flash-image-preview': 'gemini',
+      'gpt-image-2': 'openai',
+    });
     assert.deepEqual(view.providers[0].imageApiKeys, [
       {
         id: 'img-gemini',
@@ -192,6 +203,11 @@ test('readProviderRegistry migrates legacy provider-config.json into the multi-p
         providerId: 'custom',
         baseUrl: 'https://supplier.example.com/v1',
         apiKey: 'legacy-secret',
+        model_protocols: {
+          'gemini-3.1-flash-image-preview': 'gemini',
+          'gpt-image-2': 'openai',
+          ignored: 'runninghub',
+        },
         updatedAt: '2026-01-01T00:00:00.000Z',
       }),
       'utf8'
@@ -204,6 +220,10 @@ test('readProviderRegistry migrates legacy provider-config.json into the multi-p
     assert.equal(primary.id, 'custom');
     assert.equal(primary.baseUrl, 'https://supplier.example.com/v1');
     assert.equal(primary.apiKey, 'legacy-secret');
+    assert.deepEqual(primary.modelProtocols, {
+      'gemini-3.1-flash-image-preview': 'gemini',
+      'gpt-image-2': 'openai',
+    });
     assert.equal(primary.updatedAt, '2026-01-01T00:00:00.000Z');
   } finally {
     await rm(runtimeDir, { recursive: true, force: true });
@@ -253,6 +273,33 @@ test('providerEndpointUrl supports overrides and avoids duplicate version prefix
     providerEndpointUrl(geminiProvider, 'imageGenerationEndpoint', '/v1beta/models/gemini-2.5-flash-image:generateContent'),
     'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-image:generateContent'
   );
+});
+
+test('effectiveProviderProtocol uses per-model overrides before provider protocol', () => {
+  const provider = {
+    id: 'mixed',
+    name: 'Mixed',
+    baseUrl: 'https://supplier.example.com/v1',
+    protocol: 'openai',
+    imageRequestMode: 'openai',
+    imageGenerationEndpoint: '',
+    imageEditEndpoint: '',
+    enabled: true,
+    primary: true,
+    imageModels: [],
+    chatModels: [],
+    modelProtocols: {
+      'gemini-3.1-flash-image-preview': 'gemini',
+      'gpt-image-2': 'openai',
+    },
+    apiKey: 'secret',
+    imageApiKeys: [],
+    updatedAt: new Date(0).toISOString(),
+  };
+
+  assert.equal(effectiveProviderProtocol(provider, 'gemini-3.1-flash-image-preview'), 'gemini');
+  assert.equal(effectiveProviderProtocol(provider, 'gpt-image-2'), 'openai');
+  assert.equal(effectiveProviderProtocol(provider, 'gemini-3.5-flash'), 'openai');
 });
 
 test('updateProviderConfig writes api-providers.json and preserves the previous key on blank updates', async () => {
@@ -322,6 +369,11 @@ test('updateProviderRegistry normalizes protocol modes, endpoint overrides, mode
           primary: true,
           imageModels: ['gpt-image-2', 'gpt-image-2'],
           chatModels: ['chat-a'],
+          modelProtocols: {
+            'gemini-3.1-flash-image-preview': 'gemini',
+            'chat-a': 'openai',
+            ignored: 'runninghub',
+          },
           apiKey: 'first-secret',
           imageApiKeys: [
             { id: 'first-gpt', apiKey: 'first-image-secret', scope: 'gpt' },
@@ -351,6 +403,10 @@ test('updateProviderRegistry normalizes protocol modes, endpoint overrides, mode
     assert.equal(getProviderById(result.providers, 'first').protocol, 'openai');
     assert.equal(getProviderById(result.providers, 'first').imageRequestMode, 'openai-json');
     assert.deepEqual(getProviderById(result.providers, 'first').imageModels, ['gpt-image-2']);
+    assert.deepEqual(getProviderById(result.providers, 'first').modelProtocols, {
+      'gemini-3.1-flash-image-preview': 'gemini',
+      'chat-a': 'openai',
+    });
     assert.deepEqual(getProviderById(result.providers, 'first').imageApiKeys, [
       { id: 'first-gpt', apiKey: 'first-image-secret', scope: 'gpt' },
     ]);
@@ -365,6 +421,10 @@ test('updateProviderRegistry normalizes protocol modes, endpoint overrides, mode
     assert.deepEqual(rawProviders.find((provider) => provider.id === 'first').imageApiKeys, [
       { id: 'first-gpt', apiKey: 'first-image-secret', scope: 'gpt' },
     ]);
+    assert.deepEqual(rawProviders.find((provider) => provider.id === 'first').modelProtocols, {
+      'gemini-3.1-flash-image-preview': 'gemini',
+      'chat-a': 'openai',
+    });
   } finally {
     await rm(runtimeDir, { recursive: true, force: true });
   }

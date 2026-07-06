@@ -10,7 +10,7 @@ const generateRouteSource = fs.readFileSync(path.join(__dirname, '../api/generat
 
 test('api-client resolves supplier endpoints from the multi-provider runtime registry instead of module-scoped env constants', () => {
   assert.equal(
-    apiClientSource.includes('import { getProviderById, providerEndpointUrl, readProviderRegistry, resolveProviderRequestTargets } from "./provider-config.mjs";'),
+    apiClientSource.includes('effectiveProviderProtocol'),
     true
   );
   assert.equal(apiClientSource.includes('const API_URL ='), false);
@@ -18,8 +18,17 @@ test('api-client resolves supplier endpoints from the multi-provider runtime reg
   assert.equal(apiClientSource.includes('const providerRegistry = await readProviderRegistry();'), true);
   assert.equal(apiClientSource.includes('const provider = getProviderById(providerRegistry.providers, providerId);'), true);
   assert.equal(apiClientSource.includes('const providerTargets = resolveProviderRequestTargets(provider.baseUrl);'), true);
-  assert.equal(apiClientSource.includes('providerEndpointUrl(provider, "imageGenerationEndpoint", "/v1/images/generations")'), true);
-  assert.equal(apiClientSource.includes('providerEndpointUrl(provider, "imageEditEndpoint", "/v1/images/edits")'), true);
+  assert.equal(apiClientSource.includes('providerEndpointUrl(transportProvider, "imageGenerationEndpoint", "/v1/images/generations")'), true);
+  assert.equal(apiClientSource.includes('providerEndpointUrl(transportProvider, "imageEditEndpoint", "/v1/images/edits")'), true);
+});
+
+test('api-client uses Infinite-Canvas style per-model protocol overrides instead of Gemini name guessing', () => {
+  assert.equal(apiClientSource.includes('effectiveProviderProtocol(provider, model)'), true);
+  assert.equal(
+    apiClientSource.includes('const protocol = provider.protocol === "gemini" || isGeminiModelFamily(model)'),
+    false
+  );
+  assert.equal(apiClientSource.includes('const protocol = effectiveProviderProtocol(provider, model);'), true);
 });
 
 test('api-client uses protocol-specific auth headers and accepts request-level provider ids', () => {
@@ -31,15 +40,17 @@ test('api-client uses protocol-specific auth headers and accepts request-level p
   assert.equal(apiClientSource.includes('response_format: "url"'), true);
 });
 
-test('api-client selects scoped image api keys only for matching image request families', () => {
+test('api-client selects scoped image api keys from effective protocol only', () => {
   assert.equal(apiClientSource.includes('function resolveProviderApiKey('), true);
   assert.equal(apiClientSource.includes('purpose === "chat"'), true);
   assert.equal(apiClientSource.includes('const imageApiKeys = Array.isArray(provider.imageApiKeys)'), true);
   assert.equal(apiClientSource.includes('for (const imageApiKey of imageApiKeys)'), true);
   assert.equal(apiClientSource.includes('imageApiKey.scope === "all"'), true);
   assert.equal(apiClientSource.includes('imageApiKey.apiKey'), true);
-  assert.equal(apiClientSource.includes('isGeminiModelFamily(model)'), true);
-  assert.equal(apiClientSource.includes('isGptImageModelFamily(model)'), true);
+  assert.equal(apiClientSource.includes('imageApiKey.scope === "gemini" && protocol === "gemini"'), true);
+  assert.equal(apiClientSource.includes('imageApiKey.scope === "gpt" && protocol === "openai"'), true);
+  assert.equal(apiClientSource.includes('isGeminiModelFamily(model)'), false);
+  assert.equal(apiClientSource.includes('isGptImageModelFamily(model)'), false);
   assert.equal(apiClientSource.includes('const apiKey = resolveProviderApiKey({'), true);
 });
 
@@ -68,10 +79,6 @@ test('api-client keeps Gemini native image routing behind the official helper pa
     true
   );
   assert.equal(
-    apiClientSource.includes('if (shouldUseExactImageSizeApi(normalizedModel, request.size)) {'),
-    true
-  );
-  assert.equal(
     apiClientSource.includes('return generateGeminiOfficialImage({'),
     true
   );
@@ -80,7 +87,7 @@ test('api-client keeps Gemini native image routing behind the official helper pa
   assert.equal(supportedGeminiSection.includes('"gemini-3-pro-image-preview"'), true);
   assert.equal(supportedGeminiSection.includes('"gemini-3.1-flash-image-preview"'), true);
   assert.equal(
-    apiClientSource.includes('if (isGeminiOfficialImageModel(normalizedModel)) {'),
+    apiClientSource.includes('if (protocol === "gemini" && isGeminiOfficialImageModel(normalizedModel)) {'),
     true
   );
   assert.equal(
@@ -109,7 +116,7 @@ test('api-client also supports gpt-image-2 through the OpenAI compatible image p
     true
   );
   assert.equal(
-    apiClientSource.includes('return normalizedModel.length > 0 && SUPPORTED_OPENAI_COMPATIBLE_IMAGE_MODELS.has(normalizedModel);'),
+    apiClientSource.includes('return normalizedModel.length > 0;'),
     true
   );
   assert.equal(
@@ -790,15 +797,11 @@ test('api-client logs supplier transport diagnostics for Gemini image and chat f
 
 test('api-client routes Gemini text models through official generateContent and streamGenerateContent endpoints', () => {
   assert.equal(
-    apiClientSource.includes('function isGeminiOfficialTextModel(model?: string): boolean {'),
+    apiClientSource.includes('const isGeminiModel = protocol === "gemini";'),
     true
   );
   assert.equal(
     apiClientSource.includes('? `${getGeminiOfficialApiBaseUrl(providerTargets)}/v1beta/models/${model}:generateContent`'),
-    true
-  );
-  assert.equal(
-    apiClientSource.includes('? `${getGeminiOfficialApiBaseUrl(providerTargets)}/v1beta/models/${model}:streamGenerateContent?alt=sse`'),
     true
   );
   assert.equal(

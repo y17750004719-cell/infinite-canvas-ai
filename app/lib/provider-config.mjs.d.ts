@@ -26,6 +26,7 @@ export interface WorkspaceApiProvider {
   primary: boolean;
   imageModels: string[];
   chatModels: string[];
+  modelProtocols: Record<string, ProviderProtocol>;
   apiKey: string;
   imageApiKeys: ProviderImageApiKey[];
   updatedAt: string;
@@ -72,6 +73,7 @@ export interface ProviderRegistryViewProvider {
   primary: boolean;
   imageModels: string[];
   chatModels: string[];
+  modelProtocols: Record<string, ProviderProtocol>;
   apiKey: string;
   imageApiKeys: ProviderImageApiKeyView[];
   hasApiKey: boolean;
@@ -96,6 +98,8 @@ export function resolveProviderRequestTargets(baseUrl: string): {
 };
 
 export function providerEndpointUrl(provider: WorkspaceApiProvider, key: 'imageGenerationEndpoint' | 'imageEditEndpoint', defaultPath: string): string;
+
+export function effectiveProviderProtocol(provider: Pick<WorkspaceApiProvider, 'protocol' | 'modelProtocols'>, model?: string): ProviderProtocol;
 
 export function getPrimaryProvider(providers: WorkspaceApiProvider[]): WorkspaceApiProvider | null;
 

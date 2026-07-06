@@ -205,6 +205,21 @@ function normalizeModelList(values) {
   return deduped;
 }
 
+function normalizeModelProtocols(values) {
+  if (!values || typeof values !== 'object' || Array.isArray(values)) {
+    return {};
+  }
+  const result = {};
+  for (const [model, protocol] of Object.entries(values)) {
+    const modelId = normalizeText(model);
+    const normalizedProtocol = normalizeText(protocol).toLowerCase();
+    if (modelId && SUPPORTED_PROVIDER_PROTOCOLS.has(normalizedProtocol)) {
+      result[modelId] = normalizedProtocol;
+    }
+  }
+  return result;
+}
+
 function maskApiKey(apiKey) {
   if (!apiKey) return '';
   if (apiKey.length <= 4) return '*'.repeat(apiKey.length);
@@ -228,6 +243,7 @@ function buildProviderTemplate(providerId) {
     primary: providerId === DEFAULT_PROVIDER_ID,
     imageModels: [],
     chatModels: [],
+    modelProtocols: {},
     apiKey: '',
     imageApiKeys: [],
     updatedAt: DEFAULT_PROVIDER_UPDATED_AT,
@@ -266,6 +282,7 @@ function normalizeProvider(input, { fallbackApiKey = '', fallbackPrimary = false
     primary: normalizeBoolean(input.primary, fallbackPrimary),
     imageModels: normalizeModelList(input.imageModels || input.image_models),
     chatModels: normalizeModelList(input.chatModels || input.chat_models),
+    modelProtocols: normalizeModelProtocols(input.modelProtocols || input.model_protocols),
     apiKey: normalizeApiKey(input.apiKey || fallbackApiKey),
     imageApiKeys: normalizeImageApiKeys(input),
     updatedAt,
@@ -277,6 +294,7 @@ function cloneProvider(provider) {
     ...provider,
     imageModels: [...provider.imageModels],
     chatModels: [...provider.chatModels],
+    modelProtocols: { ...provider.modelProtocols },
     imageApiKeys: [...provider.imageApiKeys],
   };
 }
@@ -328,6 +346,7 @@ function normalizeLegacyProviderConfig(rawConfig, env = process.env) {
       ...buildProviderTemplate(providerId),
       id: providerId,
       baseUrl,
+      modelProtocols: rawConfig.modelProtocols || rawConfig.model_protocols,
       apiKey: normalizeApiKey(rawConfig.apiKey) || normalizeApiKey(env[providerKeyEnv(providerId)]),
       updatedAt: normalizeText(rawConfig.updatedAt) || new Date().toISOString(),
       primary: true,
@@ -391,6 +410,7 @@ function toProviderView(provider, source) {
     primary: provider.primary,
     imageModels: [...provider.imageModels],
     chatModels: [...provider.chatModels],
+    modelProtocols: { ...provider.modelProtocols },
     apiKey: provider.apiKey,
     imageApiKeys: provider.imageApiKeys.map((row) => ({
       id: row.id,
@@ -440,6 +460,15 @@ export function providerEndpointUrl(provider, key, defaultPath) {
     }
   }
   return `${trimmedBaseUrl}${defaultPath}`;
+}
+
+export function effectiveProviderProtocol(provider, model) {
+  const modelId = normalizeText(model);
+  const modelProtocol = provider?.modelProtocols?.[modelId];
+  if (SUPPORTED_PROVIDER_PROTOCOLS.has(modelProtocol)) {
+    return modelProtocol;
+  }
+  return normalizeProtocol(provider?.protocol);
 }
 
 export function getPrimaryProvider(providers) {
@@ -529,6 +558,7 @@ export async function updateProviderRegistry(
       primary: provider.primary,
       imageModels: provider.imageModels,
       chatModels: provider.chatModels,
+      modelProtocols: provider.modelProtocols,
       apiKey: provider.apiKey,
       imageApiKeys: provider.imageApiKeys,
       updatedAt: provider.updatedAt,
