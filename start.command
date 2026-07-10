@@ -4,9 +4,9 @@
 
 cd "$(dirname "$0")" || exit 1
 
-APP_URL="http://localhost:3000"
+APP_URL="http://localhost:3001"
 DEV_PID=""
-PORT="3000"
+PORT="3001"
 
 cleanup() {
     if [ -n "$DEV_PID" ] && kill -0 "$DEV_PID" >/dev/null 2>&1; then

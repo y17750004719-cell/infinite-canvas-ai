@@ -10,7 +10,7 @@ cp .env.local.example .env.local
 npm run dev
 ```
 
-启动后访问 [http://localhost:3000](http://localhost:3000)。
+启动后访问 [http://localhost:3001](http://localhost:3001)。
 
 如果你已经准备好了接口密钥，这 3 步就可以把项目跑起来。
 
@@ -90,9 +90,9 @@ npm run dev
 
 启动成功后，打开：
 
-[http://localhost:3000](http://localhost:3000)
+[http://localhost:3001](http://localhost:3001)
 
-默认开发服务器会监听本地 `3000` 端口。
+默认开发服务器会监听本地 `3001` 端口。
 
 ## 生产构建
 
@@ -185,7 +185,7 @@ Content Security Policy of your site blocks the use of 'eval' in JavaScript
 推荐按这个顺序排查：
 
 1. 用浏览器 DevTools 打开 `Network`，选中 `Document` 请求，检查响应头里是否真的带有 `Content-Security-Policy`
-2. 用无扩展窗口或全新浏览器 profile 打开 `http://localhost:3000`
+2. 用无扩展窗口或全新浏览器 profile 打开 `http://localhost:3001`
 3. 暂时关闭代理插件、系统代理、VPN、抓包工具、安全软件后再试
 4. 如果普通浏览器有问题，但无扩展窗口正常，基本可以确认是浏览器侧注入，不需要改项目
 

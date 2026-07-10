@@ -58,9 +58,9 @@ if not exist "%NEXT_CLI%" (
 )
 
 echo Starting development server...
-start "Infinite Canvas AI Dev" "%ComSpec%" /k ""%NODE_EXE%" "%NEXT_CLI%" dev"
+start "Infinite Canvas AI Dev" "%ComSpec%" /k ""%NODE_EXE%" "%NEXT_CLI%" dev -p 3001"
 
 timeout /t 5 /nobreak >nul
-start "" "http://localhost:3000"
+start "" "http://localhost:3001"
 
 exit /b 0
