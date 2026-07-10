@@ -169,7 +169,7 @@ test('workspace palette and canvas background are neutral gray and dot-free', ()
   assert.equal(pageSource.includes("border: 'rgba(23, 23, 23, 0.1)'"), true);
   assert.equal(pageSource.includes("textMuted: '#737373'"), true);
   assert.equal(pageSource.includes("canvasLine: 'rgba(23, 23, 23, 0.24)'"), true);
-  assert.equal(pageSource.includes("appBg: '#0b0b0b'"), true);
+  assert.equal(pageSource.includes("appBg: '#1a1a1a'"), true);
   assert.equal(pageSource.includes("canvasLine: 'rgba(245, 245, 245, 0.84)'"), true);
   assert.equal(globalsSource.includes('background: var(--workspace-page-bg);'), true);
   assert.equal(globalsSource.includes('background-image:'), false);
@@ -235,11 +235,11 @@ test('canvas bottom toolbar renders a screenshot-style icon-only dock', () => {
   assert.equal(toolbarBlock.includes('absolute bottom-4 left-1/2'), false);
   assert.equal(toolbarBlock.includes('absolute bottom-4 z-50 flex -translate-x-1/2'), true);
   assert.equal(toolbarBlock.includes('style={canvasBottomToolbarStyle}'), true);
-  assert.equal(toolbarBlock.includes('rounded-[14px] border border-neutral-200 bg-white'), true);
+  assert.equal(toolbarBlock.includes('workspace-bottom-toolbar'), true);
   assert.equal(toolbarBlock.includes('aria-label={item.label}'), true);
   assert.equal(toolbarBlock.includes('title={item.label}'), true);
   assert.equal(toolbarBlock.includes("onClick={() => handleCanvasBottomToolbarAction('action' in item ? item.action : undefined)}"), true);
-  assert.equal(toolbarBlock.includes('bg-neutral-900 text-white'), true);
+  assert.equal(toolbarBlock.includes("? 'is-active'"), true);
   assert.equal(toolbarBlock.includes('<svg width="20" height="20" viewBox="0 0 24 24"'), true);
   assert.equal(toolbarBlock.includes("const svgOpacity = 'svgOpacity' in item ? item.svgOpacity : 0.9;"), true);
   assert.equal(toolbarBlock.includes('fillOpacity={svgOpacity}'), true);
@@ -1168,7 +1168,7 @@ test('right chat panel renders through a page-level portal above canvas overlays
   assert.equal(pageSource.includes('workspace-chat-panel fixed inset-y-0 left-0 right-0 isolate flex w-auto flex-col overflow-hidden rounded-[28px]'), false);
   assert.equal(pageSource.includes('workspace-chat-panel fixed inset-y-0 left-0 right-0 isolate flex w-auto flex-col overflow-hidden backdrop-blur-xl'), false);
   assert.equal(globalsSource.includes('.workspace-chat-panel {\n  border-left: 1px solid var(--workspace-border);'), true);
-  assert.equal(globalsSource.includes('.workspace-chat-panel {\n  border-left: 1px solid var(--workspace-border);\n  background: #fff;'), true);
+  assert.equal(globalsSource.includes('.workspace-chat-panel {\n  border-left: 1px solid var(--workspace-border);\n  background: var(--workspace-surface-elevated);'), true);
   assert.equal(globalsSource.includes('.workspace-chat-panel {\n  border-left: 1px solid var(--workspace-border);\n  background: transparent;'), false);
   assert.equal(globalsSource.includes('background: color-mix(in srgb, var(--workspace-surface-elevated) 88%, transparent);'), false);
   assert.equal(globalsSource.includes('.workspace-chat-panel {\n  border: 1px solid var(--workspace-border);'), false);

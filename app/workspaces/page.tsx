@@ -256,7 +256,7 @@ export default function WorkspacesPage() {
                     <div className="absolute top-2 right-2 flex gap-1 opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100">
                       <button
                         onClick={(e) => { e.stopPropagation(); router.push(`/workspaces/${session.id}`); }}
-                        className="workspace-light-icon-button h-11 w-11 bg-white/90 hover:bg-white"
+                        className="workspace-light-icon-button workspace-preview-action h-11 w-11"
                         title="查看内容"
                         aria-label={`查看 ${session.name} 的详情`}
                       >
@@ -265,7 +265,7 @@ export default function WorkspacesPage() {
                       <button
                         onClick={(e) => handleRename(session, e)}
                         disabled={pendingAction !== null}
-                        className="workspace-light-icon-button h-11 w-11 bg-white/90 hover:bg-white"
+                        className="workspace-light-icon-button workspace-preview-action h-11 w-11"
                         title="重命名"
                         aria-label={`重命名 ${session.name}`}
                       >
@@ -274,7 +274,7 @@ export default function WorkspacesPage() {
                       <button
                         onClick={(e) => handleDelete(session.id, e)}
                         disabled={pendingAction !== null}
-                        className="workspace-light-icon-button h-11 w-11 bg-white/90 hover:bg-red-50"
+                        className="workspace-light-icon-button workspace-preview-action is-danger h-11 w-11"
                         title="删除"
                         aria-label={`删除 ${session.name}`}
                       >

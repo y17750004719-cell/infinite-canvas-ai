@@ -173,7 +173,7 @@ export function GalleryView({
                       <button
                         onClick={(e) => onStartEdit(session.id, session.name, e)}
                         disabled={isSessionMutationPending}
-                        className="inline-flex h-11 w-11 items-center justify-center rounded-lg transition-colors opacity-100 hover:bg-white/10 sm:opacity-0 sm:group-hover:opacity-100"
+                        className="inline-flex h-11 w-11 items-center justify-center rounded-lg opacity-100 transition-colors hover:bg-[var(--workspace-control-hover)] sm:opacity-0 sm:group-hover:opacity-100"
                         title="重命名"
                         aria-label={`重命名 ${session.name}`}
                       >

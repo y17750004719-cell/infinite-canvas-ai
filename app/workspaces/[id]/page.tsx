@@ -232,7 +232,7 @@ export default function WorkspaceDetailPage() {
                     {getItemPreview(item)}
                     
                     {/* Type Badge */}
-                    <div className="absolute top-2 left-2 flex items-center gap-1 px-2 py-1 bg-white/90 rounded-md text-xs text-gray-600">
+                    <div className="workspace-preview-badge absolute left-2 top-2 flex items-center gap-1 rounded-md px-2 py-1 text-xs">
                       {getItemIcon(item.type)}
                       <span className="capitalize">{item.type}</span>
                     </div>

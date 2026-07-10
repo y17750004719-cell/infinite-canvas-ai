@@ -729,10 +729,10 @@ const LIGHT_THEME = {
   portStroke: 'rgba(64, 64, 64, 0.58)',
 };
 const DARK_THEME = {
-  appBg: '#0b0b0b',
-  panel: 'rgba(20, 20, 20, 0.9)',
-  panelElevated: 'rgba(24, 24, 24, 0.96)',
-  panelSoft: 'rgba(16, 16, 16, 0.78)',
+  appBg: '#1a1a1a',
+  panel: 'rgba(32, 32, 32, 0.92)',
+  panelElevated: 'rgba(38, 38, 38, 0.96)',
+  panelSoft: 'rgba(29, 29, 29, 0.88)',
   border: 'rgba(255, 255, 255, 0.09)',
   borderStrong: 'rgba(255, 255, 255, 0.16)',
   textPrimary: '#f5f5f5',
@@ -742,7 +742,7 @@ const DARK_THEME = {
   accentSurface: 'rgba(255, 255, 255, 0.08)',
   accentSurfaceStrong: 'rgba(255, 255, 255, 0.12)',
   canvasLine: 'rgba(245, 245, 245, 0.84)',
-  portFill: '#090909',
+  portFill: '#1a1a1a',
   portStroke: 'rgba(245, 245, 245, 0.78)',
 };
 const WORKSPACE_THEME_PALETTES = {
@@ -12247,7 +12247,7 @@ export default function AIWorkspace() {
 
       <div
         data-canvas-bottom-toolbar="true"
-        className={`absolute bottom-4 z-50 flex -translate-x-1/2 items-center gap-2 rounded-[14px] border border-neutral-200 bg-white px-1.5 py-1.5 text-neutral-700 ${canvasBottomToolbarReservedRightClassName}`}
+        className={`workspace-bottom-toolbar absolute bottom-4 z-50 flex -translate-x-1/2 items-center gap-2 rounded-[14px] px-1.5 py-1.5 ${canvasBottomToolbarReservedRightClassName}`}
         style={canvasBottomToolbarStyle}
       >
         {CANVAS_BOTTOM_TOOLBAR_ITEMS.map((item) => {
@@ -12261,10 +12261,10 @@ export default function AIWorkspace() {
               aria-label={item.label}
               title={item.label}
               onClick={() => handleCanvasBottomToolbarAction('action' in item ? item.action : undefined)}
-              className={`inline-flex h-8 w-8 items-center justify-center rounded-[9px] transition-colors ${
+              className={`workspace-bottom-toolbar-item inline-flex h-8 w-8 items-center justify-center rounded-[9px] transition-colors ${
                 isActive
-                  ? 'bg-neutral-900 text-white'
-                  : 'text-neutral-700 hover:bg-neutral-100 hover:text-neutral-950'
+                  ? 'is-active'
+                  : ''
               }`}
             >
               <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden="true">
