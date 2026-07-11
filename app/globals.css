@@ -428,6 +428,26 @@ body {
   opacity: 0.55;
 }
 
+.workspace-chat-icon-control {
+  border: 0;
+  background: transparent;
+  color: var(--workspace-text-muted);
+  transition: background-color 160ms ease, color 160ms ease, opacity 160ms ease;
+}
+
+.workspace-chat-icon-control:hover:not(:disabled),
+.workspace-chat-icon-control:focus-visible,
+.workspace-chat-icon-control.is-active {
+  background: var(--workspace-control-hover);
+  color: var(--workspace-text-primary);
+}
+
+.workspace-chat-icon-control:disabled {
+  cursor: not-allowed;
+  color: var(--workspace-text-soft);
+  opacity: 0.45;
+}
+
 .workspace-panel-surface {
   border: 1px solid var(--workspace-border);
   background: var(--workspace-surface-elevated);

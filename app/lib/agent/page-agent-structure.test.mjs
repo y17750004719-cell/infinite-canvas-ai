@@ -156,3 +156,16 @@ test('composer dialogs expose semantics, unique asset labels, and focus restorat
   assert.match(source, /chatComposerMoreButtonRef\.current\?\.focus\(\)/);
   assert.match(source, /modelPreferenceButtonRef\.current\?\.focus\(\)/);
 });
+
+test('chat composer keeps utility icons borderless and hides the Skills label', () => {
+  assert.doesNotMatch(source, /<span>Skills<\/span>/);
+  for (const control of ['more', 'skills', 'reasoning', 'models']) {
+    const start = controlIndex(control);
+    assert.ok(start >= 0, `missing ${control} composer control`);
+    assert.match(source.slice(start, start + 10_000), /workspace-chat-icon-control/);
+  }
+
+  const styles = fs.readFileSync(path.resolve(import.meta.dirname, '../../globals.css'), 'utf8');
+  assert.match(styles, /\.workspace-chat-icon-control\s*\{[\s\S]*?border:\s*0;/);
+  assert.match(styles, /\.workspace-chat-icon-control:hover:not\(:disabled\)[\s\S]*?background:\s*var\(--workspace-control-hover\)/);
+});

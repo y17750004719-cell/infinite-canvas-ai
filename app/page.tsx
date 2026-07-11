@@ -13583,7 +13583,7 @@ export default function AIWorkspace() {
                       disabled={isGenerating}
                       aria-label="更多"
                       aria-expanded={showChatComposerMoreMenu || showChatAssetPicker}
-                      className={`workspace-control-chip inline-flex h-8 w-8 items-center justify-center rounded-full ${showChatComposerMoreMenu || showChatAssetPicker ? 'is-active' : ''}`}
+                      className={`workspace-chat-icon-control inline-flex h-8 w-8 items-center justify-center rounded-lg ${showChatComposerMoreMenu || showChatAssetPicker ? 'is-active' : ''}`}
                     >
                       <MoreHorizontal size={17} />
                     </button>
@@ -13625,8 +13625,10 @@ export default function AIWorkspace() {
                         setShowSkillsMenu(nextOpen);
                       }}
                       disabled={isGenerating}
+                      aria-label="Skills"
                       aria-expanded={showSkillsMenu}
-                      className={`workspace-control-chip flex h-8 items-center gap-1.5 rounded-full px-2.5 text-xs font-medium ${showSkillsMenu ? 'is-active' : ''}`}
+                      title="Skills"
+                      className={`workspace-chat-icon-control inline-flex h-8 w-8 items-center justify-center rounded-lg ${showSkillsMenu ? 'is-active' : ''}`}
                     >
                       <span
                         aria-hidden="true"
@@ -13642,7 +13644,6 @@ export default function AIWorkspace() {
                           WebkitMaskSize: 'contain',
                         }}
                       />
-                      <span>Skills</span>
                     </button>
                   </div>
                   <div className="relative" ref={generationModeMenuRef}>
@@ -13690,7 +13691,7 @@ export default function AIWorkspace() {
                     disabled
                     aria-label="深度思考 · 即将支持"
                     title="深度思考 · 即将支持"
-                    className="workspace-control-chip ml-auto inline-flex h-8 w-8 cursor-not-allowed items-center justify-center rounded-full opacity-45"
+                    className="workspace-chat-icon-control ml-auto inline-flex h-8 w-8 items-center justify-center rounded-lg"
                   >
                     <BrainCircuit size={16} />
                   </button>
@@ -13810,7 +13811,7 @@ export default function AIWorkspace() {
                       aria-label="模型偏好"
                       aria-expanded={showModelPreferencePopover}
                       title="模型偏好"
-                      className={`workspace-control-chip inline-flex h-8 w-8 items-center justify-center rounded-full ${showModelPreferencePopover ? 'is-active' : ''}`}
+                      className={`workspace-chat-icon-control inline-flex h-8 w-8 items-center justify-center rounded-lg ${showModelPreferencePopover ? 'is-active' : ''}`}
                     >
                       <Settings2 size={16} />
                     </button>
