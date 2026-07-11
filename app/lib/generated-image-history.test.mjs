@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import * as generatedHistory from './generated-image-history.mjs';
 
 import {
   appendMissingGeneratedHistoryEntries,
@@ -10,6 +11,24 @@ import {
   mergeGeneratedImageHistoryEntries,
   normalizeGeneratedImageHistory,
 } from './generated-image-history.mjs';
+
+test('mergeGeneratedHistoryReferences appends unique history images up to the reference limit', () => {
+  assert.deepEqual(
+    generatedHistory.mergeGeneratedHistoryReferences(
+      ['/existing.png', '/duplicate.png'],
+      ['/duplicate.png', '/history-a.png', '/history-b.png'],
+      3
+    ),
+    ['/existing.png', '/duplicate.png', '/history-a.png']
+  );
+});
+
+test('mergeGeneratedHistoryReferences ignores blank and repeated selected sources', () => {
+  assert.deepEqual(
+    generatedHistory.mergeGeneratedHistoryReferences([], ['', '/history-a.png', '/history-a.png'], 14),
+    ['/history-a.png']
+  );
+});
 
 test('extractGeneratedImageTimestampFromFilename reads timestamps from generated file names', () => {
   assert.equal(extractGeneratedImageTimestampFromFilename('img-1774856292455-avxj5v.jpg'), 1774856292455);

@@ -10,7 +10,8 @@ import { useGSAP } from '@gsap/react';
 import { 
   MousePointer2, Type, Image as ImageIcon,
   Share2, History, Settings, Paperclip,
-  Send, Sparkles, X, ChevronDown, ChevronLeft, ChevronRight, Trash2, Edit3, ArrowLeft, Plus, SlidersHorizontal, Copy, Check, Video, Pencil, Package2, Workflow, Clock3, Eye, EyeOff, Moon, Sun, MessageCircle
+  Send, Sparkles, X, ChevronDown, ChevronLeft, ChevronRight, Trash2, Edit3, ArrowLeft, Plus, SlidersHorizontal, Copy, Check, Video, Pencil, Package2, Workflow, Clock3, Eye, EyeOff, Moon, Sun, MessageCircle,
+  MoreHorizontal, Upload, Library, Search, BrainCircuit, Settings2, ArrowUp, Square
 } from 'lucide-react';
 import { GeneratedImageHistoryEntry, ProjectSession } from './lib/db';
 import { ASPECT_RATIOS } from './lib/aspect-ratios';
@@ -19,6 +20,7 @@ import {
   appendMissingGeneratedHistoryEntries,
   buildGeneratedImageHistorySortKey,
   buildGeneratedHistoryEntriesFromImageCard,
+  mergeGeneratedHistoryReferences,
 } from './lib/generated-image-history.mjs';
 import {
   buildPersistedSession,
@@ -4251,7 +4253,10 @@ export default function AIWorkspace() {
   const [quickActions, setQuickActions] = useState(DEFAULT_QUICK_ACTIONS);
   const [showGenerationModeMenu, setShowGenerationModeMenu] = useState(false);
   const [showSkillsMenu, setShowSkillsMenu] = useState(false);
-  const [showAspectRatioMenu, setShowAspectRatioMenu] = useState(false);
+  const [showChatComposerMoreMenu, setShowChatComposerMoreMenu] = useState(false);
+  const [showChatAssetPicker, setShowChatAssetPicker] = useState(false);
+  const [selectedChatHistoryAssetIds, setSelectedChatHistoryAssetIds] = useState<string[]>([]);
+  const [showModelPreferencePopover, setShowModelPreferencePopover] = useState(false);
   const [imageAspectRatio, setImageAspectRatio] = useState('auto');
   const [hideWelcomeByCenterSkillPick, setHideWelcomeByCenterSkillPick] = useState(false);
   const [referenceImages, setReferenceImages] = useState<string[]>([]);
@@ -4433,7 +4438,12 @@ export default function AIWorkspace() {
   const chatModelSelectorRef = useRef<HTMLDivElement>(null);
   const imageModelSelectorRef = useRef<HTMLDivElement>(null);
   const skillsMenuRef = useRef<HTMLDivElement>(null);
-  const aspectRatioMenuRef = useRef<HTMLDivElement>(null);
+  const chatComposerMoreMenuRef = useRef<HTMLDivElement>(null);
+  const chatComposerMoreButtonRef = useRef<HTMLButtonElement>(null);
+  const chatAssetPickerRef = useRef<HTMLDivElement>(null);
+  const modelPreferenceContainerRef = useRef<HTMLDivElement>(null);
+  const modelPreferencePopoverRef = useRef<HTMLDivElement>(null);
+  const modelPreferenceButtonRef = useRef<HTMLButtonElement>(null);
   const textPanelModelMenuRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -4441,6 +4451,8 @@ export default function AIWorkspace() {
   const chatInputEditorRef = useRef<HTMLDivElement>(null);
   const chatContainerRef = useRef<HTMLDivElement>(null);
   const generateAbortRef = useRef<AbortController | null>(null);
+  const isGeneratingRef = useRef(false);
+  isGeneratingRef.current = isGenerating;
   const canvasTextGenerateAbortControllersRef = useRef<Map<string, AbortController>>(new Map());
   const suppressCanvasTextAbortErrorItemIdsRef = useRef<Set<string>>(new Set());
   const canvasImageGenerateAbortControllersRef = useRef<Map<string, AbortController>>(new Map());
@@ -4477,7 +4489,7 @@ export default function AIWorkspace() {
   const [pendingSkillChoice, setPendingSkillChoice] = useState<SkillChoicePayload | null>(null);
   const [showSkillChoiceModal, setShowSkillChoiceModal] = useState(false);
   const [chatInputFocused, setChatInputFocused] = useState(false);
-  const [chatInputHeight, setChatInputHeight] = useState(24);
+  const [chatInputHeight, setChatInputHeight] = useState(72);
   const [copiedAssistantMessageId, setCopiedAssistantMessageId] = useState<string | null>(null);
   const [editingTextCardId, setEditingTextCardId] = useState<string | null>(null);
   const [textCardPanelDrafts, setTextCardPanelDraftsState] = useState<Record<string, string>>({});
@@ -5360,7 +5372,7 @@ export default function AIWorkspace() {
     const editor = chatInputEditorRef.current;
     if (!editor) return;
     editor.style.height = "auto";
-    const next = Math.min(editor.scrollHeight || 24, 240);
+    const next = Math.max(72, Math.min(editor.scrollHeight || 72, 240));
     editor.style.height = `${next}px`;
     setChatInputHeight(next);
   }, []);
@@ -5993,7 +6005,13 @@ export default function AIWorkspace() {
 
     try {
       const uploadedImages = await Promise.all(filesToProcess.map((file) => readAsDataURL(file)));
-      setChatReferenceImages(prev => [...prev, ...uploadedImages]);
+      if (isGeneratingRef.current) {
+        e.target.value = '';
+        return;
+      }
+      setChatReferenceImages((currentReferences) =>
+        mergeGeneratedHistoryReferences(currentReferences, uploadedImages, 14)
+      );
     } catch (error) {
       console.error('Chat reference upload failed:', error);
     }
@@ -6050,7 +6068,10 @@ export default function AIWorkspace() {
 
     try {
       const uploadedImages = await Promise.all(filesToProcess.map((file) => readAsDataURL(file)));
-      setChatReferenceImages(prev => [...prev, ...uploadedImages]);
+      if (isGeneratingRef.current) return;
+      setChatReferenceImages((currentReferences) =>
+        mergeGeneratedHistoryReferences(currentReferences, uploadedImages, 14)
+      );
     } catch (error) {
       console.error('Chat paste image upload failed:', error);
     }
@@ -9758,6 +9779,47 @@ export default function AIWorkspace() {
     }),
     [archiveGeneratedImageHistoryEntries, currentSessionHistorySnapshot, sessionsWithGeneratedImageHistory]
   );
+
+  const closeChatComposerPopovers = useCallback(() => {
+    setShowChatComposerMoreMenu(false);
+    setShowChatAssetPicker(false);
+    setShowSkillsMenu(false);
+    setShowGenerationModeMenu(false);
+    setShowModelPreferencePopover(false);
+    setShowChatModelSelector(false);
+    setShowImageModelSelector(false);
+  }, []);
+
+  useEffect(() => {
+    if (!showChatAssetPicker) return;
+    const frameId = window.requestAnimationFrame(() => chatAssetPickerRef.current?.focus());
+    return () => window.cancelAnimationFrame(frameId);
+  }, [showChatAssetPicker]);
+
+  useEffect(() => {
+    if (!showModelPreferencePopover) return;
+    const frameId = window.requestAnimationFrame(() => modelPreferencePopoverRef.current?.focus());
+    return () => window.cancelAnimationFrame(frameId);
+  }, [showModelPreferencePopover]);
+
+  useEffect(() => {
+    if (!isGenerating) return;
+    closeChatComposerPopovers();
+    setSelectedChatHistoryAssetIds([]);
+  }, [closeChatComposerPopovers, isGenerating]);
+
+  const handleAttachSelectedChatHistoryAssets = useCallback(() => {
+    const selectedIds = new Set(selectedChatHistoryAssetIds);
+    const selectedSources = generatedImageHistoryEntries
+      .filter((entry) => selectedIds.has(entry.id))
+      .map((entry) => entry.src);
+
+    setChatReferenceImages((currentReferences) =>
+      mergeGeneratedHistoryReferences(currentReferences, selectedSources, 14)
+    );
+    setSelectedChatHistoryAssetIds([]);
+    setShowChatAssetPicker(false);
+  }, [generatedImageHistoryEntries, selectedChatHistoryAssetIds]);
   
   const currentProjectName = getCurrentSession()?.name || '新画布';
 
@@ -11077,8 +11139,15 @@ export default function AIWorkspace() {
       if (skillsMenuRef.current && !skillsMenuRef.current.contains(e.target as Node)) {
         setShowSkillsMenu(false);
       }
-      if (aspectRatioMenuRef.current && !aspectRatioMenuRef.current.contains(e.target as Node)) {
-        setShowAspectRatioMenu(false);
+      if (chatComposerMoreMenuRef.current && !chatComposerMoreMenuRef.current.contains(e.target as Node)) {
+        setShowChatComposerMoreMenu(false);
+      }
+      if (chatAssetPickerRef.current && !chatAssetPickerRef.current.contains(e.target as Node)) {
+        setShowChatAssetPicker(false);
+        setSelectedChatHistoryAssetIds([]);
+      }
+      if (modelPreferenceContainerRef.current && !modelPreferenceContainerRef.current.contains(e.target as Node)) {
+        setShowModelPreferencePopover(false);
       }
       if (textPanelProviderMenuRef.current && !textPanelProviderMenuRef.current.contains(e.target as Node)) {
         setShowTextPanelProviderMenu(false);
@@ -11107,22 +11176,31 @@ export default function AIWorkspace() {
       setShowAvatarMenu(false);
       setShowHistoryPanel(false);
     };
-    if (showAvatarMenu || showProjectMenu || showAddNodeMenu || showGeneratedImageHistoryPanel || showHistoryPanel || showGenerationModeMenu || showChatModelSelector || showImageModelSelector || showSkillsMenu || showAspectRatioMenu || showTextPanelProviderMenu || showImageCardProviderMenu || showImageCardModelMenu || showImageCardSettingsMenu || showTextPanelModelMenu) {
+    if (showAvatarMenu || showProjectMenu || showAddNodeMenu || showGeneratedImageHistoryPanel || showHistoryPanel || showGenerationModeMenu || showChatModelSelector || showImageModelSelector || showSkillsMenu || showChatComposerMoreMenu || showChatAssetPicker || showModelPreferencePopover || showTextPanelProviderMenu || showImageCardProviderMenu || showImageCardModelMenu || showImageCardSettingsMenu || showTextPanelModelMenu) {
       document.addEventListener('pointerdown', handlePointerDownOutside);
       return () => document.removeEventListener('pointerdown', handlePointerDownOutside);
     }
-  }, [showAvatarMenu, showProjectMenu, showAddNodeMenu, showGeneratedImageHistoryPanel, showHistoryPanel, showGenerationModeMenu, showChatModelSelector, showImageModelSelector, showSkillsMenu, showAspectRatioMenu, showTextPanelProviderMenu, showImageCardProviderMenu, showImageCardModelMenu, showImageCardSettingsMenu, showTextPanelModelMenu, editingSessionId, hasActiveAssistantTextSelection, isNodeInsideAssistantSelectable]);
+  }, [showAvatarMenu, showProjectMenu, showAddNodeMenu, showGeneratedImageHistoryPanel, showHistoryPanel, showGenerationModeMenu, showChatModelSelector, showImageModelSelector, showSkillsMenu, showChatComposerMoreMenu, showChatAssetPicker, showModelPreferencePopover, showTextPanelProviderMenu, showImageCardProviderMenu, showImageCardModelMenu, showImageCardSettingsMenu, showTextPanelModelMenu, editingSessionId, hasActiveAssistantTextSelection, isNodeInsideAssistantSelectable]);
 
   useEffect(() => {
-    if (!showChatModelSelector && !showImageModelSelector) return;
-    const closeModelSelectorsOnEscape = (event: KeyboardEvent) => {
+    if (!showChatModelSelector && !showImageModelSelector && !showChatComposerMoreMenu && !showChatAssetPicker && !showModelPreferencePopover && !showSkillsMenu && !showGenerationModeMenu) return;
+    const closeChatComposerPopoversOnEscape = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return;
-      setShowChatModelSelector(false);
-      setShowImageModelSelector(false);
+      const restoreMoreButtonFocus = showChatComposerMoreMenu || showChatAssetPicker;
+      const restoreModelButtonFocus = showModelPreferencePopover || showChatModelSelector || showImageModelSelector;
+      closeChatComposerPopovers();
+      setSelectedChatHistoryAssetIds([]);
+      window.requestAnimationFrame(() => {
+        if (restoreModelButtonFocus) {
+          modelPreferenceButtonRef.current?.focus();
+        } else if (restoreMoreButtonFocus) {
+          chatComposerMoreButtonRef.current?.focus();
+        }
+      });
     };
-    window.addEventListener('keydown', closeModelSelectorsOnEscape);
-    return () => window.removeEventListener('keydown', closeModelSelectorsOnEscape);
-  }, [showChatModelSelector, showImageModelSelector]);
+    window.addEventListener('keydown', closeChatComposerPopoversOnEscape);
+    return () => window.removeEventListener('keydown', closeChatComposerPopoversOnEscape);
+  }, [closeChatComposerPopovers, showChatAssetPicker, showChatComposerMoreMenu, showChatModelSelector, showGenerationModeMenu, showImageModelSelector, showModelPreferencePopover, showSkillsMenu]);
 
   useEffect(() => {
     const handleSelectionChange = () => {
@@ -13341,9 +13419,9 @@ export default function AIWorkspace() {
           {/* Input Bar */}
           <div className="p-4 flex-shrink-0">
             <input ref={chatFileInputRef} type="file" accept="image/*" multiple className="hidden" onChange={handleChatImageUpload} />
-            <div className="workspace-chat-input flex flex-col rounded-[24px]">
+            <div className="workspace-chat-input flex min-h-[148px] flex-col rounded-[24px]">
               <div
-                className="px-4 py-3"
+                className="flex-1 px-4 pb-2 pt-4"
                 onClick={() => chatInputEditorRef.current?.focus()}
               >
                 <div className="relative min-w-[120px]">
@@ -13357,7 +13435,7 @@ export default function AIWorkspace() {
                     onFocus={() => setChatInputFocused(true)}
                     onBlur={() => setChatInputFocused(false)}
                     className="panel-scrollbar w-full overflow-y-auto bg-transparent text-sm leading-5 outline-none whitespace-pre-wrap break-words"
-                    style={{ minHeight: '24px', maxHeight: '240px', height: `${chatInputHeight}px` }}
+                    style={{ minHeight: '72px', maxHeight: '240px', height: `${chatInputHeight}px` }}
                   />
                   {!chatInput.trim() && !activeSkill && !chatInputFocused && (
                     <span className="workspace-text-muted pointer-events-none absolute left-0 top-0 text-sm leading-5">
@@ -13366,71 +13444,150 @@ export default function AIWorkspace() {
                   )}
                 </div>
               </div>
-              <div
-                className={`workspace-subtle-divider grid gap-2 border-t px-4 py-2 ${generationMode === 'agent' ? 'grid-cols-2' : 'grid-cols-1'}`}
-                aria-label="聊天框供应商与模型"
-              >
-                {(generationMode === 'agent' || generationMode === 'chat') && (
-                  <ChatPanelModelSelector
-                    purpose="chat"
-                    providers={enabledProviderSettingsProviders}
-                    providerId={resolvedChatSelection.providerId}
-                    model={resolvedChatSelection.model}
-                    open={showChatModelSelector}
-                    disabled={isGenerating}
-                    loading={providerSettingsLoading && !providerSettingsLoaded}
-                    loadFailed={Boolean(providerSettingsError && !providerSettingsLoaded)}
-                    containerRef={chatModelSelectorRef}
-                    onToggle={() => {
-                      setShowChatModelSelector((prev) => !prev);
-                      setShowImageModelSelector(false);
-                    }}
-                    onSelect={(providerId, model) => {
-                      setChatProviderId(providerId);
-                      setChatModelId(model);
-                      setShowChatModelSelector(false);
-                    }}
-                    onOpenSettings={() => {
-                      setShowChatModelSelector(false);
-                      openProviderSettingsModal();
-                    }}
-                    onRetry={() => { void loadProviderSettings(); }}
-                  />
-                )}
-                {(generationMode === 'agent' || generationMode === 'image') && (
-                  <ChatPanelModelSelector
-                    purpose="image"
-                    providers={enabledProviderSettingsProviders}
-                    providerId={resolvedImageSelection.providerId}
-                    model={resolvedImageSelection.model}
-                    open={showImageModelSelector}
-                    disabled={isGenerating}
-                    loading={providerSettingsLoading && !providerSettingsLoaded}
-                    loadFailed={Boolean(providerSettingsError && !providerSettingsLoaded)}
-                    align={generationMode === 'agent' ? 'right' : 'left'}
-                    containerRef={imageModelSelectorRef}
-                    onToggle={() => {
-                      setShowImageModelSelector((prev) => !prev);
-                      setShowChatModelSelector(false);
-                    }}
-                    onSelect={(providerId, model) => {
-                      setImageProviderId(providerId);
-                      setImageModelId(model);
-                      setShowImageModelSelector(false);
-                    }}
-                    onOpenSettings={() => {
-                      setShowImageModelSelector(false);
-                      openProviderSettingsModal();
-                    }}
-                    onRetry={() => { void loadProviderSettings(); }}
-                  />
-                )}
-              </div>
-              <div className="workspace-subtle-divider flex items-center justify-between rounded-b-[24px] border-t px-4 py-2">
-                <div className="flex items-center gap-2">
-                  <button className="workspace-control-chip inline-flex h-7 w-7 items-center justify-center rounded-full" onClick={() => chatFileInputRef.current?.click()} title="上传参考图">
-                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" /></svg>
-                  </button>
+              <div className="flex items-center gap-1 px-3 pb-3 pt-1">
+                <div className="flex min-w-0 flex-1 items-center gap-1">
+                  <div className="relative" ref={chatComposerMoreMenuRef} data-chat-composer-control="more">
+                    {showChatComposerMoreMenu && (
+                      <div className="workspace-menu-panel absolute bottom-full left-0 z-30 mb-2 w-[210px] rounded-2xl p-1.5" role="menu" aria-label="更多操作">
+                        <button
+                          type="button"
+                          role="menuitem"
+                          className="workspace-menu-item flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-xs"
+                          onClick={() => {
+                            setShowChatComposerMoreMenu(false);
+                            chatFileInputRef.current?.click();
+                          }}
+                        >
+                          <Upload size={14} />
+                          <span>上传文件</span>
+                        </button>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          className="workspace-menu-item flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-xs"
+                          onClick={() => {
+                            setShowChatComposerMoreMenu(false);
+                            setSelectedChatHistoryAssetIds([]);
+                            setShowChatAssetPicker(true);
+                          }}
+                        >
+                          <Library size={14} />
+                          <span>从素材库选取</span>
+                        </button>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          disabled
+                          aria-label="联网搜索 · 即将支持"
+                          className="workspace-menu-item flex w-full cursor-not-allowed items-center gap-2 rounded-xl px-3 py-2 text-left text-xs opacity-45"
+                        >
+                          <Search size={14} />
+                          <span className="flex-1">联网搜索</span>
+                          <span className="workspace-text-muted text-[10px]">即将支持</span>
+                        </button>
+                      </div>
+                    )}
+                    {showChatAssetPicker && (
+                      <div
+                        ref={chatAssetPickerRef}
+                        className="workspace-menu-panel absolute bottom-full left-0 z-30 mb-2 w-[min(340px,calc(100vw-2rem))] rounded-[20px] p-3"
+                        aria-label="从素材库选取参考图"
+                        role="dialog"
+                        aria-modal="false"
+                        tabIndex={-1}
+                      >
+                        <div className="mb-2 flex items-center justify-between gap-3">
+                          <div>
+                            <div className="text-xs font-semibold">素材库</div>
+                            <div className="workspace-text-muted mt-0.5 text-[10px]">
+                              还可添加 {Math.max(0, 14 - chatReferenceImages.length)} 张参考图
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            className="workspace-control-chip inline-flex h-7 w-7 items-center justify-center rounded-full"
+                            onClick={() => {
+                              setShowChatAssetPicker(false);
+                              setSelectedChatHistoryAssetIds([]);
+                              window.requestAnimationFrame(() => chatComposerMoreButtonRef.current?.focus());
+                            }}
+                            aria-label="关闭素材库"
+                          >
+                            <X size={13} />
+                          </button>
+                        </div>
+                        {generatedImageHistoryEntries.length > 0 ? (
+                          <div className="panel-scrollbar grid max-h-[264px] grid-cols-3 gap-2 overflow-y-auto pr-1">
+                            {generatedImageHistoryEntries.map((entry, index) => {
+                              const isAttached = chatReferenceImages.includes(entry.src);
+                              const isSelected = selectedChatHistoryAssetIds.includes(entry.id);
+                              const selectionLimitReached = selectedChatHistoryAssetIds.length >= Math.max(0, 14 - chatReferenceImages.length);
+                              return (
+                                <button
+                                  key={entry.id}
+                                  type="button"
+                                  disabled={isAttached || (selectionLimitReached && !isSelected)}
+                                  onClick={() => {
+                                    setSelectedChatHistoryAssetIds((current) =>
+                                      current.includes(entry.id)
+                                        ? current.filter((id) => id !== entry.id)
+                                        : [...current, entry.id]
+                                    );
+                                  }}
+                                  className={`relative aspect-square overflow-hidden rounded-xl border transition-colors ${
+                                    isSelected
+                                      ? 'border-[var(--workspace-text)] ring-1 ring-[var(--workspace-text)]'
+                                      : 'border-[var(--workspace-border)]'
+                                  } ${isAttached ? 'cursor-not-allowed opacity-45' : ''}`}
+                                  aria-pressed={isSelected}
+                                  aria-label={`选择历史生成素材 ${index + 1}`}
+                                  title={isAttached ? '已添加到当前对话' : '选择素材'}
+                                >
+                                  <Image src={entry.src} alt={`历史生成素材 ${index + 1}`} fill unoptimized sizes="96px" className="object-cover" />
+                                  {(isSelected || isAttached) && (
+                                    <span className="absolute right-1.5 top-1.5 inline-flex h-5 w-5 items-center justify-center rounded-full bg-zinc-950 text-white">
+                                      <Check size={12} />
+                                    </span>
+                                  )}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        ) : (
+                          <div className="workspace-text-muted flex min-h-28 items-center justify-center rounded-xl border border-dashed border-[var(--workspace-border)] px-4 text-center text-xs">
+                            还没有生成过图片，完成一次生图后会出现在这里。
+                          </div>
+                        )}
+                        <div className="mt-3 flex items-center justify-between gap-2">
+                          <span className="workspace-text-muted text-[10px]">已选 {selectedChatHistoryAssetIds.length} 张</span>
+                          <button
+                            type="button"
+                            disabled={selectedChatHistoryAssetIds.length === 0}
+                            onClick={handleAttachSelectedChatHistoryAssets}
+                            className="rounded-full bg-zinc-950 px-3 py-1.5 text-xs font-medium text-white disabled:cursor-not-allowed disabled:opacity-35 dark:bg-zinc-100 dark:text-zinc-950"
+                          >
+                            添加到对话
+                          </button>
+                        </div>
+                      </div>
+                    )}
+                    <button
+                      ref={chatComposerMoreButtonRef}
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        const nextOpen = !showChatComposerMoreMenu;
+                        closeChatComposerPopovers();
+                        setShowChatComposerMoreMenu(nextOpen);
+                      }}
+                      disabled={isGenerating}
+                      aria-label="更多"
+                      aria-expanded={showChatComposerMoreMenu || showChatAssetPicker}
+                      className={`workspace-control-chip inline-flex h-8 w-8 items-center justify-center rounded-full ${showChatComposerMoreMenu || showChatAssetPicker ? 'is-active' : ''}`}
+                    >
+                      <MoreHorizontal size={17} />
+                    </button>
+                  </div>
                   <div className="relative" ref={skillsMenuRef}>
                     {showSkillsMenu && (
                       <div className="workspace-menu-panel absolute bottom-full left-0 z-20 mb-2 min-w-[180px] rounded-2xl p-1">
@@ -13460,14 +13617,31 @@ export default function AIWorkspace() {
                       </div>
                     )}
                     <button
+                      data-chat-composer-control="skills"
                       onClick={(e) => {
                         e.stopPropagation();
-                        setShowSkillsMenu((prev) => !prev);
+                        const nextOpen = !showSkillsMenu;
+                        closeChatComposerPopovers();
+                        setShowSkillsMenu(nextOpen);
                       }}
                       disabled={isGenerating}
-                      className={`workspace-control-chip flex items-center gap-1 rounded-full px-2 py-1 text-xs font-medium ${showSkillsMenu ? 'is-active' : ''}`}
+                      aria-expanded={showSkillsMenu}
+                      className={`workspace-control-chip flex h-8 items-center gap-1.5 rounded-full px-2.5 text-xs font-medium ${showSkillsMenu ? 'is-active' : ''}`}
                     >
-                      <Sparkles size={12} />
+                      <span
+                        aria-hidden="true"
+                        className="inline-block h-3.5 w-3.5 shrink-0 bg-current"
+                        style={{
+                          maskImage: "url('/icons/lovart-skills.svg')",
+                          WebkitMaskImage: "url('/icons/lovart-skills.svg')",
+                          maskRepeat: 'no-repeat',
+                          WebkitMaskRepeat: 'no-repeat',
+                          maskPosition: 'center',
+                          WebkitMaskPosition: 'center',
+                          maskSize: 'contain',
+                          WebkitMaskSize: 'contain',
+                        }}
+                      />
                       <span>Skills</span>
                     </button>
                   </div>
@@ -13486,9 +13660,6 @@ export default function AIWorkspace() {
                               setShowGenerationModeMenu(false);
                               setShowChatModelSelector(false);
                               setShowImageModelSelector(false);
-                              if (option.id !== 'image') {
-                                setShowAspectRatioMenu(false);
-                              }
                             }}
                             className={`workspace-menu-item w-full rounded-xl border border-transparent px-3 py-1.5 text-left text-xs ${generationMode === option.id ? 'is-selected' : ''}`}
                           >
@@ -13498,69 +13669,167 @@ export default function AIWorkspace() {
                       </div>
                     )}
                     <button
+                      data-chat-composer-control="mode"
                       onClick={(e) => {
                         e.stopPropagation();
-                        setShowGenerationModeMenu((prev) => !prev);
+                        const nextOpen = !showGenerationModeMenu;
+                        closeChatComposerPopovers();
+                        setShowGenerationModeMenu(nextOpen);
                       }}
                       disabled={isGenerating}
-                      className={`workspace-control-chip flex items-center gap-1 rounded-full px-2 py-1 text-xs font-medium ${showGenerationModeMenu ? 'is-active' : ''}`}
+                      aria-expanded={showGenerationModeMenu}
+                      className={`workspace-control-chip flex h-8 items-center gap-1 rounded-full px-2.5 text-xs font-medium ${showGenerationModeMenu ? 'is-active' : ''}`}
                     >
                       <SlidersHorizontal size={12} />
                       <span>{generationMode === 'agent' ? 'Agent' : generationMode === 'image' ? '生图' : '对话'}</span>
                     </button>
                   </div>
-                  {generationMode === 'image' && (
-                    <div className="relative" ref={aspectRatioMenuRef}>
-                      {showAspectRatioMenu && (
-                        <div className="workspace-menu-panel absolute bottom-full left-0 z-20 mb-2 min-w-[180px] rounded-2xl p-1">
-                          {ASPECT_RATIOS.map((option) => (
-                            <button
-                              key={option.id}
-                              onClick={() => {
-                                setImageAspectRatio(option.id);
-                                setShowAspectRatioMenu(false);
-                              }}
-                              className={`workspace-menu-item w-full rounded-xl border border-transparent px-3 py-1.5 text-left text-xs ${
-                                imageAspectRatio === option.id ? 'is-selected' : ''
-                              }`}
-                            >
-                              {option.name}
-                            </button>
-                          ))}
-                        </div>
-                      )}
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setShowAspectRatioMenu((prev) => !prev);
-                        }}
-                        disabled={isGenerating}
-                        className={`workspace-control-chip flex items-center gap-1 rounded-full px-2 py-1 text-xs font-medium ${showAspectRatioMenu ? 'is-active' : ''}`}
-                      >
-                        <span>
-                          {ASPECT_RATIOS.find((item) => item.id === imageAspectRatio)?.name || imageAspectRatio}
-                        </span>
-                      </button>
-                    </div>
-                  )}
-                </div>
-                <div className="flex items-center gap-1">
                   <button
+                    type="button"
+                    data-chat-composer-control="reasoning"
+                    disabled
+                    aria-label="深度思考 · 即将支持"
+                    title="深度思考 · 即将支持"
+                    className="workspace-control-chip ml-auto inline-flex h-8 w-8 cursor-not-allowed items-center justify-center rounded-full opacity-45"
+                  >
+                    <BrainCircuit size={16} />
+                  </button>
+                  <div className="relative" ref={modelPreferenceContainerRef} data-chat-composer-control="models">
+                    {showModelPreferencePopover && (
+                      <div
+                        ref={modelPreferencePopoverRef}
+                        className="workspace-menu-panel absolute bottom-full right-0 z-30 mb-2 w-[min(360px,calc(100vw-2rem))] rounded-[20px] p-3"
+                        aria-label="模型偏好设置"
+                        role="dialog"
+                        aria-modal="false"
+                        tabIndex={-1}
+                      >
+                        <div className="mb-2 flex items-center justify-between">
+                          <div>
+                            <div className="text-xs font-semibold">模型偏好</div>
+                            <div className="workspace-text-muted mt-0.5 text-[10px]">按当前模式配置本项目</div>
+                          </div>
+                          <button
+                            type="button"
+                            className="workspace-control-chip inline-flex h-7 w-7 items-center justify-center rounded-full"
+                            onClick={() => {
+                              closeChatComposerPopovers();
+                              window.requestAnimationFrame(() => modelPreferenceButtonRef.current?.focus());
+                            }}
+                            aria-label="关闭模型偏好"
+                          >
+                            <X size={13} />
+                          </button>
+                        </div>
+                        <div className="space-y-2">
+                          {(generationMode === 'agent' || generationMode === 'chat') && (
+                            <ChatPanelModelSelector
+                              purpose="chat"
+                              providers={enabledProviderSettingsProviders}
+                              providerId={resolvedChatSelection.providerId}
+                              model={resolvedChatSelection.model}
+                              open={showChatModelSelector}
+                              disabled={isGenerating}
+                              loading={providerSettingsLoading && !providerSettingsLoaded}
+                              loadFailed={Boolean(providerSettingsError && !providerSettingsLoaded)}
+                              containerRef={chatModelSelectorRef}
+                              onToggle={() => {
+                                setShowChatModelSelector((prev) => !prev);
+                                setShowImageModelSelector(false);
+                              }}
+                              onSelect={(providerId, model) => {
+                                setChatProviderId(providerId);
+                                setChatModelId(model);
+                                setShowChatModelSelector(false);
+                              }}
+                              onOpenSettings={() => {
+                                closeChatComposerPopovers();
+                                openProviderSettingsModal();
+                              }}
+                              onRetry={() => { void loadProviderSettings(); }}
+                            />
+                          )}
+                          {(generationMode === 'agent' || generationMode === 'image') && (
+                            <ChatPanelModelSelector
+                              purpose="image"
+                              providers={enabledProviderSettingsProviders}
+                              providerId={resolvedImageSelection.providerId}
+                              model={resolvedImageSelection.model}
+                              open={showImageModelSelector}
+                              disabled={isGenerating}
+                              loading={providerSettingsLoading && !providerSettingsLoaded}
+                              loadFailed={Boolean(providerSettingsError && !providerSettingsLoaded)}
+                              align="right"
+                              containerRef={imageModelSelectorRef}
+                              onToggle={() => {
+                                setShowImageModelSelector((prev) => !prev);
+                                setShowChatModelSelector(false);
+                              }}
+                              onSelect={(providerId, model) => {
+                                setImageProviderId(providerId);
+                                setImageModelId(model);
+                                setShowImageModelSelector(false);
+                              }}
+                              onOpenSettings={() => {
+                                closeChatComposerPopovers();
+                                openProviderSettingsModal();
+                              }}
+                              onRetry={() => { void loadProviderSettings(); }}
+                            />
+                          )}
+                          {(generationMode === 'agent' || generationMode === 'image') && (
+                            <div className="rounded-xl border border-[var(--workspace-border)] p-2.5">
+                              <div className="workspace-text-muted mb-2 text-[10px] font-medium">画幅比例</div>
+                              <div className="grid grid-cols-3 gap-1">
+                                {ASPECT_RATIOS.map((option) => (
+                                  <button
+                                    key={option.id}
+                                    type="button"
+                                    onClick={() => setImageAspectRatio(option.id)}
+                                    className={`workspace-menu-item rounded-lg px-2 py-1.5 text-[11px] ${imageAspectRatio === option.id ? 'is-selected' : ''}`}
+                                  >
+                                    {option.name}
+                                  </button>
+                                ))}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
+                    <button
+                      ref={modelPreferenceButtonRef}
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        const nextOpen = !showModelPreferencePopover;
+                        closeChatComposerPopovers();
+                        setShowModelPreferencePopover(nextOpen);
+                      }}
+                      disabled={isGenerating}
+                      aria-label="模型偏好"
+                      aria-expanded={showModelPreferencePopover}
+                      title="模型偏好"
+                      className={`workspace-control-chip inline-flex h-8 w-8 items-center justify-center rounded-full ${showModelPreferencePopover ? 'is-active' : ''}`}
+                    >
+                      <Settings2 size={16} />
+                    </button>
+                  </div>
+                </div>
+                <button
+                    data-chat-composer-control="send"
                     onClick={isGenerating ? handleCancelGenerate : () => { void handleGenerate(); }}
                     disabled={!isGenerating && !chatInput.trim()}
+                    aria-label={isGenerating ? '终止任务' : '发送'}
                     title={isGenerating ? '终止任务' : '发送'}
-                    className="workspace-add-button ml-1 rounded-xl p-1.5 transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+                    className="ml-2 inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-zinc-950 text-white transition-[transform,opacity] hover:scale-[1.03] active:scale-95 disabled:cursor-not-allowed disabled:opacity-30 dark:bg-zinc-100 dark:text-zinc-950"
                   >
                     {isGenerating ? (
-                      <svg className="animate-spin" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                        <circle cx="12" cy="12" r="9" opacity="0.25" />
-                        <path d="M21 12a9 9 0 0 1-9 9" />
-                      </svg>
+                      <Square size={13} fill="currentColor" />
                     ) : (
-                      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" /></svg>
+                      <ArrowUp size={17} strokeWidth={2.4} />
                     )}
                   </button>
-                </div>
               </div>
             </div>
           </div>

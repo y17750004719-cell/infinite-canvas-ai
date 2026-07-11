@@ -94,6 +94,32 @@ export function appendGeneratedImageHistoryEntries(existingEntries, nextEntries)
   return appendMissingGeneratedHistoryEntries(existingEntries, nextEntries);
 }
 
+export function mergeGeneratedHistoryReferences(currentReferences, selectedSources, maxCount = 14) {
+  const safeMaxCount = Number.isFinite(maxCount) ? Math.max(0, Math.floor(maxCount)) : 14;
+  const mergedReferences = [];
+  const seenSources = new Set();
+
+  const appendUniqueSources = (sources) => {
+    if (!Array.isArray(sources)) {
+      return;
+    }
+
+    sources.forEach((source) => {
+      const normalizedSource = toSafeString(source);
+      if (!normalizedSource || seenSources.has(normalizedSource) || mergedReferences.length >= safeMaxCount) {
+        return;
+      }
+
+      seenSources.add(normalizedSource);
+      mergedReferences.push(normalizedSource);
+    });
+  };
+
+  appendUniqueSources(currentReferences);
+  appendUniqueSources(selectedSources);
+  return mergedReferences;
+}
+
 export function appendMissingGeneratedHistoryEntries(existingEntries, nextEntries) {
   const normalizedExisting = normalizeGeneratedImageHistory(existingEntries);
   const normalizedNext = normalizeGeneratedImageHistory(nextEntries);

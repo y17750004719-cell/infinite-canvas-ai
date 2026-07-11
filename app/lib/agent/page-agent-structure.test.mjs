@@ -4,6 +4,11 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const source = fs.readFileSync(path.resolve(import.meta.dirname, '../../page.tsx'), 'utf8');
+const skillsIconPath = path.resolve(import.meta.dirname, '../../../public/icons/lovart-skills.svg');
+
+function controlIndex(id) {
+  return source.indexOf(`data-chat-composer-control="${id}"`);
+}
 
 test('right chat defaults to agent and loads skills from the registry api', () => {
   assert.match(source, /type GenerationMode = 'agent' \| 'image' \| 'chat'/);
@@ -88,4 +93,66 @@ test('chat panel model selectors expose provider-load failure recovery', () => {
 test('switching generation mode closes both model selector popovers', () => {
   assert.match(source, /setGenerationMode\(option\.id\)[\s\S]{0,240}setShowChatModelSelector\(false\)/);
   assert.match(source, /setGenerationMode\(option\.id\)[\s\S]{0,300}setShowImageModelSelector\(false\)/);
+});
+
+test('chat composer uses the taller reference layout and ordered single-row controls', () => {
+  assert.match(source, /workspace-chat-input[^\n]*min-h-\[148px\]/);
+  assert.match(source, /minHeight:\s*'72px'/);
+  const orderedControls = ['more', 'skills', 'mode', 'reasoning', 'models', 'send'];
+  const indexes = orderedControls.map(controlIndex);
+  assert.ok(indexes.every((index) => index >= 0));
+  assert.deepEqual([...indexes].sort((a, b) => a - b), indexes);
+});
+
+test('chat composer uses the supplied Lovart skills icon as a theme-aware mask', () => {
+  assert.equal(fs.existsSync(skillsIconPath), true);
+  assert.match(source, /lovart-skills\.svg/);
+  assert.match(source, /maskImage/);
+});
+
+test('chat composer more menu exposes uploads, history selection, and disabled search', () => {
+  assert.match(source, /上传文件/);
+  assert.match(source, /从素材库选取/);
+  assert.match(source, /联网搜索/);
+  assert.match(source, /即将支持/);
+  assert.match(source, /showChatAssetPicker/);
+  assert.match(source, /selectedChatHistoryAssetIds/);
+});
+
+test('chat composer exposes disabled reasoning and one adaptive model preference popover', () => {
+  assert.match(source, /aria-label="深度思考 · 即将支持"/);
+  assert.match(source, /data-chat-composer-control="reasoning"[\s\S]{0,240}disabled/);
+  assert.match(source, /aria-label="模型偏好"/);
+  assert.match(source, /showModelPreferencePopover/);
+  assert.match(source, /generationMode === 'agent' \|\| generationMode === 'chat'/);
+  assert.match(source, /generationMode === 'agent' \|\| generationMode === 'image'/);
+  assert.match(source, /ASPECT_RATIOS\.map/);
+  assert.doesNotMatch(source, /aria-label="聊天框供应商与模型"/);
+});
+
+test('chat composer closes transient menus when a generation starts', () => {
+  assert.match(
+    source,
+    /useEffect\(\(\) => \{\s*if \(!isGenerating\) return;\s*closeChatComposerPopovers\(\);\s*setSelectedChatHistoryAssetIds\(\[\]\);\s*\}, \[closeChatComposerPopovers, isGenerating\]\)/
+  );
+});
+
+test('chat image uploads revalidate generation state and the shared reference limit after async reads', () => {
+  assert.match(source, /const isGeneratingRef = useRef\(false\)/);
+  assert.match(source, /if \(isGeneratingRef\.current\) return;/);
+  assert.match(
+    source,
+    /setChatReferenceImages\(\(currentReferences\) =>\s*mergeGeneratedHistoryReferences\(currentReferences, uploadedImages, 14\)\s*\)/
+  );
+});
+
+test('composer dialogs expose semantics, unique asset labels, and focus restoration', () => {
+  assert.match(source, /role="dialog"/);
+  assert.match(source, /aria-modal="false"/);
+  assert.match(source, /tabIndex=\{-1\}/);
+  assert.match(source, /aria-label=\{`选择历史生成素材 \$\{index \+ 1\}`\}/);
+  assert.match(source, /chatAssetPickerRef\.current\?\.focus\(\)/);
+  assert.match(source, /modelPreferencePopoverRef\.current\?\.focus\(\)/);
+  assert.match(source, /chatComposerMoreButtonRef\.current\?\.focus\(\)/);
+  assert.match(source, /modelPreferenceButtonRef\.current\?\.focus\(\)/);
 });
