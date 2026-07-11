@@ -1,0 +1,28 @@
+[
+  {
+    "id": "api-helper",
+    "name": "API 助手",
+    "description": "分析第三方 AI API 文档并生成调用方案。",
+    "triggerHints": ["API", "接口", "调用", "文档"],
+    "allowedTools": ["get_canvas_context"],
+    "enabled": true
+  },
+  {
+    "id": "brand",
+    "name": "品牌识别系统",
+    "description": "梳理品牌策略、视觉识别并生成品牌延展物料。",
+    "triggerHints": ["品牌", "VI", "视觉识别", "品牌物料"],
+    "allowedTools": ["generate_image", "get_canvas_context", "start_skill_job", "get_skill_job"],
+    "entryPrompt": "请按品牌识别系统流程开始信息收集。",
+    "enabled": true
+  },
+  {
+    "id": "logo",
+    "name": "Logo 与品牌",
+    "description": "收集品牌信息并生成 Logo 与基础视觉方向。",
+    "triggerHints": ["Logo", "标志", "品牌名称", "商标"],
+    "allowedTools": ["generate_image", "get_canvas_context", "start_skill_job", "get_skill_job"],
+    "entryPrompt": "请按 Logo 与品牌流程开始信息收集。",
+    "enabled": true
+  }
+]

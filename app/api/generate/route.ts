@@ -441,7 +441,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ status: "error", error: "Invalid JSON body" }, { status: 400 });
     }
 
-    const { messages: incomingMessages, size, quality, aspect_ratio, n, reference_images, reference_labels, skill, intent, model, executionMode, providerId, imageProviderId, chatProviderId } = body as {
+    const { messages: incomingMessages, size, quality, aspect_ratio, n, reference_images, reference_labels, skill, intent, model, executionMode, providerId, imageProviderId, chatProviderId, cancelWithRequest } = body as {
       messages: Array<{ role: "user" | "assistant" | "system"; content: string }>;
       size?: string;
       quality?: string;
@@ -456,6 +456,7 @@ export async function POST(request: NextRequest) {
       providerId?: string;
       imageProviderId?: string;
       chatProviderId?: string;
+      cancelWithRequest?: boolean;
       stream?: boolean;
     };
 
@@ -641,6 +642,7 @@ export async function POST(request: NextRequest) {
           aspect_ratio: resolvedAspectRatio || undefined,
           n: n || 1,
           executionMode: resolvedExecutionMode,
+          signal: cancelWithRequest ? request.signal : undefined,
         });
       } catch (error) {
         const message = error instanceof Error ? error.message : "Unknown edits error";
@@ -759,6 +761,7 @@ export async function POST(request: NextRequest) {
             aspect_ratio: resolvedAspectRatio || undefined,
             n: n || 1,
             executionMode: resolvedExecutionMode,
+            signal: cancelWithRequest ? request.signal : undefined,
           });
           actualSize = candidateSize;
           lastError = null;

@@ -982,6 +982,12 @@ async function generateGeminiOfficialImage(request: UnifiedImageRequest): Promis
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     const controller = new AbortController();
+    const onRequestAbort = () => controller.abort(request.signal?.reason);
+    if (request.signal?.aborted) {
+      onRequestAbort();
+    } else {
+      request.signal?.addEventListener("abort", onRequestAbort, { once: true });
+    }
     const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
     let requestStartedAt = Date.now();
 
@@ -1141,6 +1147,13 @@ async function generateGeminiOfficialImage(request: UnifiedImageRequest): Promis
 
       clearTimeout(timeoutId);
 
+      if (request.signal?.aborted) {
+        throw new ImageGenerationError("Gemini official image request cancelled", 499, {
+          failureClass: "transport",
+          isRetryable: false,
+          retryAttempt: attempt,
+        });
+      }
       if (error instanceof Error && error.name === "AbortError") {
         throw new ImageGenerationError("Gemini official image request timed out", 504, {
           failureClass: "timeout",
@@ -1171,6 +1184,7 @@ async function generateGeminiOfficialImage(request: UnifiedImageRequest): Promis
       );
     } finally {
       clearTimeout(timeoutId);
+      request.signal?.removeEventListener("abort", onRequestAbort);
     }
   }
 

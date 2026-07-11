@@ -124,6 +124,7 @@ const CHAT_PANEL_GSAP_OPEN_DURATION = 0.54;
 const CHAT_PANEL_GSAP_CLOSE_DURATION = 0.46;
 const CHAT_PANEL_GSAP_EASE = 'expo.out';
 const FLOATING_PANEL_GSAP_DURATION = 0.18;
+const PROMPT_PIPELINE_AGENT_ENABLED = process.env.NEXT_PUBLIC_PROMPT_PIPELINE_AGENT_ENABLED !== '0';
 
 const extractPlainText = (value: React.ReactNode): string =>
   React.Children.toArray(value)
@@ -278,6 +279,8 @@ interface ChatMessage {
   skillChoice?: SkillChoicePayload;
   skillChoiceDismissed?: boolean;
   skillChoiceResolved?: boolean;
+  agentProgressStage?: 'understanding' | 'optimizing' | 'rendering' | 'completed' | 'failed';
+  agentConfirmation?: { confirmationId: string; toolName: string };
 }
 
 interface SkillChoiceOption {
@@ -364,7 +367,7 @@ interface SessionLiveState {
 }
 
 type Tool = 'select' | 'text' | 'image';
-type GenerationMode = 'auto' | 'image' | 'chat';
+type GenerationMode = 'agent' | 'image' | 'chat';
 type ProviderSettingsProviderId = string;
 type ProviderSettingsSource = 'runtime' | 'env';
 type ProviderProtocol = 'openai' | 'gemini';
@@ -448,12 +451,10 @@ const tools = [
   { id: 'image', icon: ImageIcon, label: '图片' },
 ];
 
-const quickActions = [
+const DEFAULT_QUICK_ACTIONS = [
   { id: 'logo', label: 'Logo 与品牌' },
-  { id: 'social', label: '社交媒体' },
-  { id: 'illustration', label: '插画与海报' },
-  { id: 'packaging', label: '包装设计' },
   { id: 'brand', label: '品牌识别系统' },
+  { id: 'api-helper', label: 'API 助手' },
 ];
 
 const PROVIDER_SETTINGS_PRESET_OPTIONS = [
@@ -4079,7 +4080,8 @@ export default function AIWorkspace() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [chatPanelOpening, setChatPanelOpening] = useState(false);
   const [activeSkill, setActiveSkillState] = useState<{ id: string; label: string } | null>(null);
-  const [generationMode, setGenerationMode] = useState<GenerationMode>('auto');
+  const [generationMode, setGenerationMode] = useState<GenerationMode>(PROMPT_PIPELINE_AGENT_ENABLED ? 'agent' : 'chat');
+  const [quickActions, setQuickActions] = useState(DEFAULT_QUICK_ACTIONS);
   const [showGenerationModeMenu, setShowGenerationModeMenu] = useState(false);
   const [showSkillsMenu, setShowSkillsMenu] = useState(false);
   const [showAspectRatioMenu, setShowAspectRatioMenu] = useState(false);
@@ -4089,10 +4091,32 @@ export default function AIWorkspace() {
   const [chatReferenceImages, setChatReferenceImages] = useState<string[]>([]);
   const [draggingImageIndex, setDraggingImageIndex] = useState<number | null>(null);
   const [dragOverImageIndex, setDragOverImageIndex] = useState<number | null>(null);
+  const processedAgentActionsRef = useRef(new Set<string>());
+  const pendingAgentConfirmationsRef = useRef(new Set<string>());
   const [draggingPanelReference, setDraggingPanelReference] = useState<{
     targetItemId: string;
     sourceItemId: string;
   } | null>(null);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void fetch('/api/skills', { signal: controller.signal, cache: 'no-store' })
+      .then((response) => response.ok ? response.json() : Promise.reject(new Error('Failed to load skills')))
+      .then((payload: { skills?: Array<{ id?: string; name?: string }> }) => {
+        const skills = Array.isArray(payload.skills)
+          ? payload.skills
+              .filter((skill): skill is { id: string; name: string } => Boolean(skill.id && skill.name))
+              .map((skill) => ({ id: skill.id, label: skill.name }))
+          : [];
+        if (skills.length > 0) setQuickActions(skills);
+      })
+      .catch((error) => {
+        if (!(error instanceof DOMException && error.name === 'AbortError')) {
+          console.warn('Failed to load skill registry', error);
+        }
+      });
+    return () => controller.abort();
+  }, []);
 
   const getChatPanelTargetReservedWidth = useCallback((collapsed: boolean) => {
     if (collapsed || typeof window === 'undefined' || typeof window.matchMedia !== 'function') return 0;
@@ -8158,6 +8182,7 @@ export default function AIWorkspace() {
     skill?: { id: string; label: string } | null;
     referenceImagesOverride?: Array<{ id?: string; src: string; label: string; alt?: string }>;
     modelOverride?: string;
+    agentConfirmation?: { confirmationId: string; toolName: string };
   }) => {
     const currentChatInput = options?.input ?? chatInput;
     if (!currentChatInput.trim()) return;
@@ -8200,9 +8225,11 @@ export default function AIWorkspace() {
     const brandMaterialRequests = currentSkill?.id === 'brand' ? extractMaterialRequests(currentChatInput) : [];
     const isLogoConfirm =
       currentSkill?.id === 'logo' &&
+      !options?.agentConfirmation &&
       confirmPatterns.some((pattern) => normalizedInput.includes(pattern.toLowerCase()));
     const isBrandGenerate =
       currentSkill?.id === 'brand' &&
+      !options?.agentConfirmation &&
       (
         confirmPatterns.some((pattern) => normalizedInput.includes(pattern.toLowerCase())) ||
         brandMaterialRequests.length > 0
@@ -8433,8 +8460,9 @@ export default function AIWorkspace() {
     setChatMessages(prev => [...prev, userMessage, {
       id: assistantPlaceholderId,
       role: 'assistant',
-      content: '...',
+      content: generationMode === 'agent' ? '' : '...',
       taskStatus: 'running',
+      agentProgressStage: generationMode === 'agent' ? 'understanding' : undefined,
     }]);
     setChatInput('');
     setIsGenerating(true);
@@ -8600,10 +8628,29 @@ export default function AIWorkspace() {
       const controller = new AbortController();
       generateAbortRef.current = controller;
 
-      const response = await fetch('/api/generate', {
+      const agentRunId = `agent-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      const agentRequestBody = {
+        runId: agentRunId,
+        topicId: getCurrentSession()?.activeTopicId || 'default',
+        messages: messagesForAPI,
+        activeSkillId: currentSkill?.id,
+        referenceImages: referencesForRequest,
+        canvasContext: {
+          itemCount: items.length,
+          selectedItemIds: selectedIds,
+        },
+        imageOptions: {
+          model: typeof options?.modelOverride === 'string' ? options.modelOverride.trim() || undefined : undefined,
+          aspectRatio: imageAspectRatio !== 'auto' ? imageAspectRatio : undefined,
+        },
+        confirmation: options?.agentConfirmation,
+      };
+      const requestEndpoint = generationMode === 'agent' ? '/api/agent' : '/api/generate';
+
+      const response = await fetch(requestEndpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(requestBody),
+        body: JSON.stringify(generationMode === 'agent' ? agentRequestBody : requestBody),
         signal: controller.signal,
       });
       
@@ -8656,9 +8703,22 @@ export default function AIWorkspace() {
             let event: {
               type?: string;
               content?: string;
+              delta?: string;
               channel?: 'content' | 'reasoning';
               model?: string;
               error?: string;
+              message?: string;
+              intent?: 'chat' | 'image' | 'skill_action';
+              summary?: string;
+              label?: string;
+              skillId?: string;
+              action?: {
+                type?: string;
+                runId?: string;
+                assets?: Array<{ src?: string; naturalWidth?: number; naturalHeight?: number }>;
+              };
+              request?: { confirmationId?: string; toolName?: string; message?: string };
+              result?: Record<string, unknown>;
             };
             try {
               event = JSON.parse(trimmed) as {
@@ -8667,6 +8727,19 @@ export default function AIWorkspace() {
                 channel?: 'content' | 'reasoning';
                 model?: string;
                 error?: string;
+                delta?: string;
+                message?: string;
+                intent?: 'chat' | 'image' | 'skill_action';
+                summary?: string;
+                label?: string;
+                skillId?: string;
+                action?: {
+                  type?: string;
+                  runId?: string;
+                  assets?: Array<{ src?: string; naturalWidth?: number; naturalHeight?: number }>;
+                };
+                request?: { confirmationId?: string; toolName?: string; message?: string };
+                result?: Record<string, unknown>;
               };
             } catch {
               continue;
@@ -8678,6 +8751,168 @@ export default function AIWorkspace() {
                 return { ...msg, model: event.model };
               }));
               continue;
+            }
+
+            if (event.type === 'intent_resolved') {
+              if (event.intent === 'chat') {
+                updatePendingAssistantMessage((msg) => ({ ...msg, agentProgressStage: undefined }));
+              }
+              continue;
+            }
+
+            if (event.type === 'skill_selected' && event.label && !currentSkill) {
+              updatePendingAssistantMessage((msg) => ({
+                ...msg,
+                skill: { id: event.skillId || 'auto', label: event.label || 'Skill' },
+              }));
+              continue;
+            }
+
+            if (event.type === 'prompt_optimization_start') {
+              updatePendingAssistantMessage((msg) => ({ ...msg, agentProgressStage: 'optimizing' }));
+              continue;
+            }
+
+            if (event.type === 'prompt_optimization_done') {
+              updatePendingAssistantMessage((msg) => ({ ...msg, agentProgressStage: 'rendering' }));
+              continue;
+            }
+
+            if (event.type === 'tool_update') {
+              updatePendingAssistantMessage((msg) => ({ ...msg, agentProgressStage: 'rendering' }));
+              continue;
+            }
+
+            if (event.type === 'confirmation_required') {
+              updatePendingAssistantMessage((msg) => ({
+                ...msg,
+                content: event.request?.message || '此操作需要你的确认。',
+                taskStatus: undefined,
+                agentProgressStage: undefined,
+                agentConfirmation: event.request?.confirmationId && event.request?.toolName
+                  ? { confirmationId: event.request.confirmationId, toolName: event.request.toolName }
+                  : undefined,
+              }));
+              continue;
+            }
+
+            if (event.type === 'tool_result' && typeof event.result?.jobId === 'string') {
+              const skillType = event.result.skillType === 'brand' ? 'brand' : 'logo';
+              const total = typeof event.result.total === 'number' ? event.result.total : 0;
+              const completed = typeof event.result.completed === 'number' ? event.result.completed : 0;
+              const failed = typeof event.result.failed === 'number' ? event.result.failed : 0;
+              const items = Array.isArray(event.result.items)
+                ? event.result.items.map((item) => {
+                    const row = item && typeof item === 'object' ? item as Record<string, unknown> : {};
+                    return {
+                      component: String(row.key || row.component || ''),
+                      name: String(row.name || ''),
+                      status: String(row.status || 'queued'),
+                    };
+                  })
+                : [];
+              setActiveSkillJobId(event.result.jobId);
+              setActiveSkillJobType(skillType);
+              setActiveSkillJobStatus({ completed, failed, total, items });
+              updatePendingAssistantMessage((msg) => ({
+                ...msg,
+                content: `已启动 ${total} 个${skillType === 'brand' ? '品牌物料' : '视觉素材'}任务。`,
+                taskStatus: 'running',
+                agentProgressStage: undefined,
+                agentConfirmation: undefined,
+              }));
+              continue;
+            }
+
+            if (event.type === 'assistant_delta' && event.delta) {
+              updatePendingAssistantMessage((msg) => ({ ...msg, agentProgressStage: undefined }));
+              if (event.channel === 'reasoning') {
+                setChatMessages(prev => prev.map((msg) => msg.id === assistantId
+                  ? { ...msg, reasoningContent: `${msg.reasoningContent || ''}${event.delta || ''}` }
+                  : msg));
+              } else {
+                enqueueStreamDelta(assistantId, event.delta);
+              }
+              continue;
+            }
+
+            if (event.type === 'client_action' && event.action?.type === 'add_generated_assets') {
+              const actionRunId = event.action.runId || agentRunId;
+              const assets = (event.action.assets || []).filter(
+                (asset): asset is { src: string; naturalWidth?: number; naturalHeight?: number } => Boolean(asset.src)
+              );
+              const freshAssets = assets.filter((asset) => {
+                const key = `${actionRunId}:${asset.src}`;
+                if (processedAgentActionsRef.current.has(key)) return false;
+                processedAgentActionsRef.current.add(key);
+                return true;
+              });
+              if (freshAssets.length > 0) {
+                let loadedAssetCount = 0;
+                const imageMessages: ChatMessage[] = freshAssets.map((asset, index) => ({
+                  id: `${assistantId}-asset-${index}-${Date.now()}`,
+                  role: 'assistant',
+                  content: '',
+                  imageUrl: asset.src,
+                  imageName: 'agent-generated-image',
+                }));
+                setChatMessages(prev => [...prev, ...imageMessages]);
+                setImageCount((prev) => prev + freshAssets.length);
+                freshAssets.forEach((asset, index) => {
+                  const img = new window.Image();
+                  img.crossOrigin = 'anonymous';
+                  img.onload = () => {
+                    const naturalWidth = asset.naturalWidth || img.width;
+                    const naturalHeight = asset.naturalHeight || img.height;
+                    const displaySize = getConstrainedImageDisplaySize(naturalWidth, naturalHeight);
+                    const spawnPosition = getSpawnPosition(displaySize, index, currentViewport);
+                    const item = createImageCanvasItem({
+                      id: `${actionRunId}-asset-${index}`,
+                      src: asset.src,
+                      naturalWidth,
+                      naturalHeight,
+                      x: spawnPosition.x,
+                      y: spawnPosition.y,
+                    });
+                    appendGeneratedImageHistoryForSession(generationSessionId, [
+                      createGeneratedImageHistoryEntry({
+                        src: asset.src,
+                        naturalWidth,
+                        naturalHeight,
+                        source: 'chat',
+                        messageId: imageMessages[index]?.id,
+                      }),
+                    ]);
+                    recordCurrentCanvasUndoSnapshot();
+                    setItems(prev => [...prev, item]);
+                    loadedAssetCount += 1;
+                    if (loadedAssetCount === freshAssets.length) {
+                      updatePendingAssistantMessage((msg) => ({
+                        ...msg,
+                        content: '✨ 已完成设计生成',
+                        taskStatus: undefined,
+                        agentProgressStage: 'completed',
+                      }));
+                    }
+                  };
+                  img.onerror = () => {
+                    processedAgentActionsRef.current.delete(`${actionRunId}:${asset.src}`);
+                    updatePendingAssistantMessage((msg) => ({
+                      ...msg,
+                      content: '图片已生成，但加载到画布失败。',
+                      taskStatus: 'failed',
+                      agentProgressStage: 'failed',
+                    }));
+                  };
+                  img.src = asset.src;
+                });
+              }
+              continue;
+            }
+
+            if (event.type === 'agent_error') {
+              updatePendingAssistantMessage((msg) => ({ ...msg, agentProgressStage: 'failed' }));
+              throw new Error(event.message || event.error || 'Agent 运行失败');
             }
 
             if (event.type === 'delta' && event.content) {
@@ -12577,6 +12812,54 @@ export default function AIWorkspace() {
                           )}
                         </button>
                       )}
+                      {msg.agentProgressStage && msg.agentProgressStage !== 'completed' && (
+                        <div className="mb-2 space-y-1 py-0.5 text-[11px]" role="status" aria-live="polite">
+                          {[
+                            { id: 'understanding', label: '🧠 AI 正在理解你的设计意图…' },
+                            { id: 'optimizing', label: '🎨 正在优化构图、材质与光影语言…' },
+                            { id: 'rendering', label: '🚀 正在渲染高分辨率画面…' },
+                          ].map((step, index, steps) => {
+                            const currentIndex = Math.max(0, steps.findIndex((item) => item.id === msg.agentProgressStage));
+                            const isCurrent = step.id === msg.agentProgressStage;
+                            const isComplete = index < currentIndex;
+                            return (
+                              <div
+                                key={step.id}
+                                className={`flex items-center gap-2 transition-opacity ${
+                                  isCurrent
+                                    ? 'workspace-text-primary animate-pulse motion-reduce:animate-none'
+                                    : isComplete
+                                      ? 'workspace-text-muted opacity-60'
+                                      : 'workspace-text-muted opacity-30'
+                                }`}
+                              >
+                                <span>{step.label}</span>
+                                {isComplete && <span aria-hidden="true">✓</span>}
+                              </div>
+                            );
+                          })}
+                          {msg.agentProgressStage === 'failed' && (
+                            <div className="flex items-center gap-2 text-red-600 dark:text-red-300">
+                              <span>生成流程中断，请重试。</span>
+                              <button
+                                type="button"
+                                className="workspace-control-chip rounded-md px-2 py-0.5 text-[11px]"
+                                onClick={() => {
+                                  const messageIndex = chatMessages.findIndex((item) => item.id === msg.id);
+                                  const sourceMessage = [...chatMessages.slice(0, messageIndex)]
+                                    .reverse()
+                                    .find((item) => item.role === 'user');
+                                  if (sourceMessage) {
+                                    void handleGenerate({ input: sourceMessage.content, skill: sourceMessage.skill });
+                                  }
+                                }}
+                              >
+                                重试
+                              </button>
+                            </div>
+                          )}
+                        </div>
+                      )}
                       {msg.taskStatus && (
                         <div className="mb-1.5">
                           {msg.taskStatus === 'queued' && (
@@ -12624,6 +12907,35 @@ export default function AIWorkspace() {
                             />
                           </div>
                         )
+                      )}
+                      {msg.agentConfirmation && (
+                        <div className="mt-2 flex items-center gap-2">
+                          <button
+                            type="button"
+                            className="workspace-control-chip rounded-lg px-3 py-1.5 text-xs font-medium"
+                            onClick={() => {
+                              const confirmationId = msg.agentConfirmation?.confirmationId;
+                              if (!confirmationId || pendingAgentConfirmationsRef.current.has(confirmationId)) return;
+                              const messageIndex = chatMessages.findIndex((item) => item.id === msg.id);
+                              const sourceMessage = [...chatMessages.slice(0, messageIndex)]
+                                .reverse()
+                                .find((item) => item.role === 'user');
+                              if (sourceMessage) {
+                                pendingAgentConfirmationsRef.current.add(confirmationId);
+                                setChatMessages((prev) => prev.map((item) => item.id === msg.id
+                                  ? { ...item, content: '正在确认并启动任务…', agentConfirmation: undefined, taskStatus: 'running' }
+                                  : item));
+                                void handleGenerate({
+                                  input: sourceMessage.content,
+                                  skill: sourceMessage.skill,
+                                  agentConfirmation: msg.agentConfirmation,
+                                }).finally(() => pendingAgentConfirmationsRef.current.delete(confirmationId));
+                              }
+                            }}
+                          >
+                            确认执行
+                          </button>
+                        </div>
                       )}
                       {msg.skillChoice && !msg.skillChoiceResolved && (
                         <div className="mt-2.5">
@@ -12795,7 +13107,7 @@ export default function AIWorkspace() {
                     {showGenerationModeMenu && (
                       <div className="workspace-menu-panel absolute bottom-full left-0 z-20 mb-2 min-w-[80px] rounded-2xl p-1">
                         {[
-                          { id: 'auto' as const, label: '默认' },
+                          { id: 'agent' as const, label: 'Agent' },
                           { id: 'image' as const, label: '生图' },
                           { id: 'chat' as const, label: '对话' },
                         ].map((option) => (
@@ -12824,7 +13136,7 @@ export default function AIWorkspace() {
                       className={`workspace-control-chip flex items-center gap-1 rounded-full px-2 py-1 text-xs font-medium ${showGenerationModeMenu ? 'is-active' : ''}`}
                     >
                       <SlidersHorizontal size={12} />
-                      <span>{generationMode === 'auto' ? '默认' : generationMode === 'image' ? '生图' : '对话'}</span>
+                      <span>{generationMode === 'agent' ? 'Agent' : generationMode === 'image' ? '生图' : '对话'}</span>
                     </button>
                   </div>
                   {generationMode === 'image' && (
