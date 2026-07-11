@@ -3,6 +3,8 @@ import path from "path";
 import { runImageTask } from "./api-client";
 import { buildRuntimeAssetUrl, LOCAL_ASSET_ALLOWED_EXTENSIONS, resolveLocalAssetDataUrl } from "./local-assets.mjs";
 import { createLogger, serializeError } from "./logger";
+import { readProviderRegistry } from "./provider-config.mjs";
+import { resolveProviderModelSelection } from "./provider-model-selection.mjs";
 
 const LOG_LEVEL = (process.env.LOG_LEVEL || "basic").toLowerCase();
 const LOG_ENABLED = LOG_LEVEL !== "off";
@@ -137,6 +139,18 @@ interface BrandJobMetadata {
   userRequirement: string;
   logoReferenceHint: string;
   concurrency: number;
+}
+
+function normalizeOptionalText(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function imageSelectionMetadata(payload: Record<string, unknown>): Record<string, unknown> {
+  return {
+    providerId: normalizeOptionalText(payload.providerId),
+    model: normalizeOptionalText(payload.model),
+    modelSelectionRequested: Boolean(normalizeOptionalText(payload.providerId) || normalizeOptionalText(payload.model)),
+  };
 }
 
 function getReferenceType(input: string): "data" | "http" | "local" | "unknown" {
@@ -476,6 +490,7 @@ function buildLogoJob(payload: Record<string, unknown>): SkillJob {
       styleKeywords: style.keywords.join(", "),
       colorScheme: style.colors.join(", "),
       concurrency: logoConfig.concurrency,
+      ...imageSelectionMetadata(payload),
     },
     items,
     createdAt,
@@ -534,6 +549,7 @@ function buildBrandJob(payload: Record<string, unknown>): SkillJob {
     userRequirement,
     logoReferenceHint,
     concurrency: 1,
+    ...imageSelectionMetadata(payload),
   };
 
   return {
@@ -608,6 +624,47 @@ async function processJob(jobId: string): Promise<void> {
   job.updatedAt = Date.now();
   skillJobControllers.set(jobId, new Set<AbortController>());
 
+  let selection: { providerId: string | null; model: string };
+  try {
+    const registry = await readProviderRegistry();
+    const requested = job.metadata.modelSelectionRequested === true;
+    const requestedProviderId = normalizeOptionalText(job.metadata.providerId);
+    const requestedModel = normalizeOptionalText(job.metadata.model);
+    const resolved = resolveProviderModelSelection({
+      providers: registry.providers,
+      purpose: "image",
+      requestedProviderId,
+      requestedModel: requestedModel || IMAGE_MODEL,
+    });
+
+    if (requested) {
+      if (!resolved.providerId || !resolved.model) {
+        throw new Error("No enabled image provider and model are configured");
+      }
+      selection = { providerId: resolved.providerId, model: resolved.model };
+    } else {
+      const primaryProvider = registry.providers.find((provider) => provider.enabled !== false && provider.primary)
+        || registry.providers.find((provider) => provider.enabled !== false);
+      selection = {
+        providerId: resolved.model === IMAGE_MODEL ? resolved.providerId : primaryProvider?.id || null,
+        model: IMAGE_MODEL,
+      };
+    }
+
+    job.metadata.providerId = selection.providerId;
+    job.metadata.model = selection.model;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unable to resolve image provider and model";
+    job.status = "failed";
+    job.items.forEach((item) => {
+      item.status = "failed";
+      item.error = message;
+    });
+    job.updatedAt = Date.now();
+    skillJobControllers.delete(jobId);
+    return;
+  }
+
   const concurrency =
     typeof job.metadata.concurrency === "number" && job.metadata.concurrency > 0
       ? Math.floor(job.metadata.concurrency)
@@ -659,7 +716,8 @@ async function processJob(jobId: string): Promise<void> {
         }
 
         const result = await runImageTask({
-          model: IMAGE_MODEL,
+          providerId: selection.providerId || undefined,
+          model: selection.model,
           prompt: resolvedPrompt,
           size: item.size,
           images: normalizedReferenceImages,

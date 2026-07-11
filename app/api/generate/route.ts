@@ -8,6 +8,7 @@ import { getImageDimensionsFromBuffer } from "../../lib/image-metadata.mjs";
 import { buildRuntimeAssetUrl, LOCAL_ASSET_ALLOWED_EXTENSIONS, resolveLocalAssetPath } from "../../lib/local-assets.mjs";
 import { getImageModelCapability, normalizeImageModelCapabilityId, supportsImageModelExactSize } from "../../lib/image-model-capabilities.mjs";
 import { readProviderRegistry } from "../../lib/provider-config.mjs";
+import { resolveProviderModelSelection } from "../../lib/provider-model-selection.mjs";
 import {
   aspectRatioFromSize,
   buildGenerateRouteErrorMeta,
@@ -566,6 +567,56 @@ export async function POST(request: NextRequest) {
         Array.isArray(provider.imageModels) ? provider.imageModels.filter((model): model is string => typeof model === "string") : []
       )
     );
+    const requestedImageProviderId = imageProviderId || providerId;
+    const hasRequestedImageSelection = Boolean(requestedImageProviderId?.trim());
+    const legacyImageModel = resolveGenerateImageModelFromAllowedModels(model, allowedProviderModelIds);
+    const resolvedImageSelection = hasRequestedImageSelection
+      ? resolveProviderModelSelection({
+          providers: providerRegistry.providers,
+          purpose: "image",
+          requestedProviderId: requestedImageProviderId,
+          requestedModel: model,
+        })
+      : {
+          providerId: requestedImageProviderId || null,
+          model: legacyImageModel,
+          fallback: false,
+          reason: "legacy_default",
+        };
+    const requestedChatProviderId = chatProviderId || providerId;
+    const hasRequestedChatSelection = Boolean(requestedChatProviderId?.trim());
+    const legacyChatModel = resolveTextPanelChatModel(model, AGENT_MODEL);
+    const resolvedChatSelection = hasRequestedChatSelection
+      ? resolveProviderModelSelection({
+          providers: providerRegistry.providers,
+          purpose: "chat",
+          requestedProviderId: requestedChatProviderId,
+          requestedModel: model,
+        })
+      : {
+          providerId: requestedChatProviderId || null,
+          model: legacyChatModel,
+          fallback: false,
+          reason: "legacy_default",
+        };
+
+    if (
+      resolved.intent === "image" &&
+      (!resolvedImageSelection.model || (hasRequestedImageSelection && !resolvedImageSelection.providerId))
+    ) {
+      await logResponse(400, { mode: "image", reason: "no_capable_provider_model" });
+      return NextResponse.json(
+        { status: "error", error: "No enabled image provider and model are configured" },
+        { status: 400 }
+      );
+    }
+    if (resolved.intent === "chat" && hasRequestedChatSelection && (!resolvedChatSelection.providerId || !resolvedChatSelection.model)) {
+      await logResponse(400, { mode: "chat", reason: "no_capable_provider_model" });
+      return NextResponse.json(
+        { status: "error", error: "No enabled chat provider and model are configured" },
+        { status: 400 }
+      );
+    }
 
     if (resolved.intent === "chat" && hasReferenceImages) {
       const normalizedChatImages = reference_images
@@ -583,7 +634,7 @@ export async function POST(request: NextRequest) {
     }
 
     if (resolved.intent === "image" && hasReferenceImages) {
-      const resolvedImageModel = resolveGenerateImageModelFromAllowedModels(model, allowedProviderModelIds);
+      const resolvedImageModel = resolvedImageSelection.model!;
       const imageSize = resolveImageSize(size, resolvedImageModel);
       const supportsAspectRatio = getImageModelCapability(resolvedImageModel).supportsAspectRatio;
       const requestedAspectRatio = normalizeAspectRatio(aspect_ratio);
@@ -633,7 +684,7 @@ export async function POST(request: NextRequest) {
       let imageResult;
       try {
         imageResult = await runImageTask({
-          providerId: imageProviderId || providerId,
+          providerId: resolvedImageSelection.providerId || undefined,
           model: resolvedImageModel,
           prompt: resolved.prompt,
           images: normalizedReferenceImages,
@@ -721,7 +772,7 @@ export async function POST(request: NextRequest) {
     }
 
     if (resolved.intent === "image") {
-      const resolvedImageModel = resolveGenerateImageModelFromAllowedModels(model, allowedProviderModelIds);
+      const resolvedImageModel = resolvedImageSelection.model!;
       const requestedSize = typeof size === "string" ? size : "";
       const imageSize = resolveImageSize(size, resolvedImageModel);
       const supportsAspectRatio = getImageModelCapability(resolvedImageModel).supportsAspectRatio;
@@ -753,7 +804,7 @@ export async function POST(request: NextRequest) {
 
         try {
           imageResult = await runImageTask({
-            providerId: imageProviderId || providerId,
+            providerId: resolvedImageSelection.providerId || undefined,
             model: resolvedImageModel,
             prompt: resolved.prompt,
             size: candidateSize,
@@ -867,13 +918,13 @@ export async function POST(request: NextRequest) {
     }
 
     if (body.stream === true) {
-      const resolvedChatModel = resolveTextPanelChatModel(model, AGENT_MODEL);
+      const resolvedChatModel = resolvedChatSelection.model || legacyChatModel;
       const encoder = new TextEncoder();
       const stream = new ReadableStream({
         async start(controller) {
           try {
             for await (const event of chatStream({
-              providerId: chatProviderId || providerId,
+              providerId: resolvedChatSelection.providerId || undefined,
               model: resolvedChatModel,
               messages,
               signal: request.signal,
@@ -901,9 +952,9 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    const resolvedChatModel = resolveTextPanelChatModel(model, AGENT_MODEL);
+    const resolvedChatModel = resolvedChatSelection.model || legacyChatModel;
     const chatResult = await chat({
-      providerId: chatProviderId || providerId,
+      providerId: resolvedChatSelection.providerId || undefined,
       model: resolvedChatModel,
       messages,
       signal: request.signal,

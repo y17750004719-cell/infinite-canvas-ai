@@ -12,6 +12,8 @@ import {
 import { resolveAgentIntent } from '../../lib/agent/prompt-optimizer.mjs';
 import { createAgentToolRegistry, executeAgentTool } from '../../lib/agent/tool-registry.mjs';
 import { createSkillJob, getSkillJob, toJobSummary } from '../../lib/skill-jobs';
+import { readProviderRegistry } from '../../lib/provider-config.mjs';
+import { resolveProviderModelSelection } from '../../lib/provider-model-selection.mjs';
 import type { AgentEvent } from '../../lib/agent/events';
 
 export const runtime = 'nodejs';
@@ -28,6 +30,7 @@ type ConfirmationRecord = {
   userMessage: string;
   referenceImages: string[];
   canvasContext?: Record<string, unknown>;
+  imageOptions?: AgentRequestBody['imageOptions'];
   expiresAt: number;
   execution?: Promise<Record<string, unknown>>;
   result?: Record<string, unknown>;
@@ -46,6 +49,10 @@ type AgentRequestBody = {
   activeSkillId?: string;
   referenceImages?: string[];
   canvasContext?: Record<string, unknown>;
+  chatOptions?: {
+    providerId?: string;
+    model?: string;
+  };
   imageOptions?: {
     providerId?: string;
     model?: string;
@@ -126,6 +133,22 @@ export async function POST(request: NextRequest) {
         if (selectedSkill) {
           writeEvent(controller, { type: 'skill_selected', skillId: selectedSkill.id, label: selectedSkill.name });
         }
+        const requestedChatModel = body.chatOptions?.model || process.env.AGENT_CHAT_MODEL || DEFAULT_AGENT_MODEL;
+        const hasRequestedChatSelection = Boolean(body.chatOptions?.providerId?.trim() || body.chatOptions?.model?.trim());
+        const resolvedChatSelection = intent === 'chat' && hasRequestedChatSelection
+          ? resolveProviderModelSelection({
+              providers: (await readProviderRegistry()).providers,
+              purpose: 'chat',
+              requestedProviderId: body.chatOptions?.providerId,
+              requestedModel: requestedChatModel,
+            })
+          : {
+              providerId: process.env.AGENT_CHAT_PROVIDER_ID || null,
+              model: requestedChatModel,
+            };
+        if (intent === 'chat' && (!resolvedChatSelection.model || (hasRequestedChatSelection && !resolvedChatSelection.providerId))) {
+          throw new Error('No enabled chat provider and model are configured');
+        }
 
         if (intent === 'skill_action') {
           if (!selectedSkill?.allowedTools.includes('start_skill_job')) {
@@ -140,6 +163,7 @@ export async function POST(request: NextRequest) {
               userMessage: latestUserMessage,
               referenceImages: [...(body.referenceImages || [])],
               canvasContext: body.canvasContext ? structuredClone(body.canvasContext) : undefined,
+              imageOptions: body.imageOptions ? structuredClone(body.imageOptions) : undefined,
               expiresAt: Date.now() + CONFIRMATION_TTL_MS,
             });
             writeEvent(controller, {
@@ -171,6 +195,8 @@ export async function POST(request: NextRequest) {
                 payload: {
                   userRequirement: confirmationRecord.userMessage,
                   logoReferenceImages: confirmationRecord.referenceImages,
+                  providerId: confirmationRecord.imageOptions?.providerId,
+                  model: confirmationRecord.imageOptions?.model,
                 },
               }, {
                 allowedTools: selectedSkill.allowedTools,
@@ -278,8 +304,8 @@ export async function POST(request: NextRequest) {
               intent: 'chat',
               skill: selectedSkill?.id,
               reference_images: body.referenceImages,
-              chatProviderId: process.env.AGENT_CHAT_PROVIDER_ID,
-              model: process.env.AGENT_CHAT_MODEL || DEFAULT_AGENT_MODEL,
+              chatProviderId: resolvedChatSelection.providerId || undefined,
+              model: resolvedChatSelection.model,
               cancelWithRequest: true,
             }),
           });
@@ -311,9 +337,9 @@ export async function POST(request: NextRequest) {
           ...(skillContent ? [{ role: 'system' as const, content: skillContent }] : []),
           ...body.messages.map((message) => ({ role: message.role, content: message.content })),
         ];
-        const model = process.env.AGENT_CHAT_MODEL || DEFAULT_AGENT_MODEL;
+        const model = resolvedChatSelection.model!;
         for await (const event of chatStream({
-          providerId: process.env.AGENT_CHAT_PROVIDER_ID,
+          providerId: resolvedChatSelection.providerId || undefined,
           model,
           messages: chatMessages,
           signal: runSignal,

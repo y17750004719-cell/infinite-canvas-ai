@@ -9,6 +9,9 @@ const cloneValue = (value) => {
   return JSON.parse(JSON.stringify(value));
 };
 
+const normalizeOptionalId = (value) =>
+  typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
+
 const normalizeConnections = (connections, items) => {
   if (!Array.isArray(connections)) return [];
 
@@ -206,6 +209,10 @@ export function normalizeProjectSession(session) {
     imageCardQualityById: normalizeImageCardQualityById(session?.imageCardQualityById, normalizedItems),
     imageCardCountById: normalizeImageCardCountById(session?.imageCardCountById, normalizedItems),
     imageCardAspectRatioById: normalizeImageCardAspectRatioById(session?.imageCardAspectRatioById, normalizedItems),
+    chatProviderId: normalizeOptionalId(session?.chatProviderId),
+    chatModelId: normalizeOptionalId(session?.chatModelId),
+    imageProviderId: normalizeOptionalId(session?.imageProviderId),
+    imageModelId: normalizeOptionalId(session?.imageModelId),
     generatedImageHistory: normalizeGeneratedImageHistory(session?.generatedImageHistory),
   };
 }
@@ -266,6 +273,10 @@ export function buildPersistedSession(session, patch) {
     imageCardQualityById: normalizedImageCardQualityById,
     imageCardCountById: normalizedImageCardCountById,
     imageCardAspectRatioById: normalizedImageCardAspectRatioById,
+    chatProviderId: normalizeOptionalId(nextSession.chatProviderId),
+    chatModelId: normalizeOptionalId(nextSession.chatModelId),
+    imageProviderId: normalizeOptionalId(nextSession.imageProviderId),
+    imageModelId: normalizeOptionalId(nextSession.imageModelId),
     generatedImageHistory: normalizedGeneratedImageHistory,
     viewport: isRecord(nextSession.viewport) ? cloneValue(nextSession.viewport) : nextSession.viewport,
     messages: Array.isArray(nextSession.messages) ? cloneValue(nextSession.messages) : nextSession.messages,

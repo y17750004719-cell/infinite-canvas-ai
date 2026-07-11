@@ -31,6 +31,39 @@ test('buildPersistedSession stores connections in the saved session', () => {
   assert.deepEqual(result.connections, [{ id: 'conn-1', fromItemId: 'a', toItemId: 'b' }]);
 });
 
+test('project sessions normalize and persist chat panel provider model selections', () => {
+  const session = {
+    id: 'session-models',
+    name: 'Model selections',
+    createdAt: 1,
+    updatedAt: 1,
+    items: [],
+    messages: [],
+    viewport: { x: 0, y: 0, scale: 1 },
+    chatProviderId: '  chat-provider  ',
+    chatModelId: '  chat-model  ',
+    imageProviderId: '  image-provider  ',
+    imageModelId: '  image-model  ',
+  };
+
+  const normalized = normalizeProjectSession(session);
+  assert.equal(normalized.chatProviderId, 'chat-provider');
+  assert.equal(normalized.chatModelId, 'chat-model');
+  assert.equal(normalized.imageProviderId, 'image-provider');
+  assert.equal(normalized.imageModelId, 'image-model');
+
+  const persisted = buildPersistedSession(session, {
+    chatProviderId: 'next-chat-provider',
+    chatModelId: 'next-chat-model',
+    imageProviderId: 'next-image-provider',
+    imageModelId: 'next-image-model',
+  });
+  assert.equal(persisted.chatProviderId, 'next-chat-provider');
+  assert.equal(persisted.chatModelId, 'next-chat-model');
+  assert.equal(persisted.imageProviderId, 'next-image-provider');
+  assert.equal(persisted.imageModelId, 'next-image-model');
+});
+
 test('buildPersistedSession preserves normalized generated image history entries', () => {
   const session = {
     id: 'session-1',

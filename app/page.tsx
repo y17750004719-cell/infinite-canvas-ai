@@ -10,7 +10,7 @@ import { useGSAP } from '@gsap/react';
 import { 
   MousePointer2, Type, Image as ImageIcon,
   Share2, History, Settings, Paperclip,
-  Send, Sparkles, X, ChevronDown, ChevronLeft, ChevronRight, Trash2, Edit3, ArrowLeft, Plus, SlidersHorizontal, Copy, Check, Video, Pencil, Package2, Workflow, Clock3, Eye, EyeOff, Moon, Sun
+  Send, Sparkles, X, ChevronDown, ChevronLeft, ChevronRight, Trash2, Edit3, ArrowLeft, Plus, SlidersHorizontal, Copy, Check, Video, Pencil, Package2, Workflow, Clock3, Eye, EyeOff, Moon, Sun, MessageCircle
 } from 'lucide-react';
 import { GeneratedImageHistoryEntry, ProjectSession } from './lib/db';
 import { ASPECT_RATIOS } from './lib/aspect-ratios';
@@ -26,6 +26,7 @@ import {
   normalizeProjectSession,
 } from './lib/session-persistence.mjs';
 import { resolveStateUpdate } from './lib/state-update.mjs';
+import { resolveProviderModelSelection } from './lib/provider-model-selection.mjs';
 import {
   areCanvasUndoSnapshotsEqual,
   createCanvasUndoSnapshot,
@@ -362,6 +363,10 @@ interface SessionLiveState {
   imageCardAspectRatioById: Record<string, string>;
   chatMessages: ChatMessage[];
   activeSkill: { id: string; label: string } | null;
+  chatProviderId: string;
+  chatModelId: string;
+  imageProviderId: string;
+  imageModelId: string;
   generatedImageHistoryBySession: Record<string, GeneratedImageHistoryEntry[]>;
   viewport: { x: number; y: number; scale: number };
 }
@@ -444,6 +449,161 @@ interface WorkspaceModelOption {
   providerId: string;
   providerName: string;
 }
+
+type ChatPanelModelPurpose = 'chat' | 'image';
+
+interface ChatPanelModelSelectorProps {
+  purpose: ChatPanelModelPurpose;
+  providers: ProviderSettingsItem[];
+  providerId: string | null;
+  model: string | null;
+  open: boolean;
+  disabled: boolean;
+  loading: boolean;
+  loadFailed: boolean;
+  align?: 'left' | 'right';
+  containerRef: React.RefObject<HTMLDivElement>;
+  onToggle: () => void;
+  onSelect: (providerId: string, model: string) => void;
+  onOpenSettings: () => void;
+  onRetry: () => void;
+}
+
+const ChatPanelModelSelector = memo(function ChatPanelModelSelector({
+  purpose,
+  providers,
+  providerId,
+  model,
+  open,
+  disabled,
+  loading,
+  loadFailed,
+  align = 'left',
+  containerRef,
+  onToggle,
+  onSelect,
+  onOpenSettings,
+  onRetry,
+}: ChatPanelModelSelectorProps) {
+  const modelsKey = purpose === 'chat' ? 'chatModels' : 'imageModels';
+  const label = purpose === 'chat' ? '对话' : '生图';
+  const emptyLabel = loadFailed
+    ? '供应商加载失败'
+    : loading
+      ? '正在加载供应商…'
+      : purpose === 'chat'
+        ? '未配置聊天模型'
+        : '未配置生图模型';
+  const selectedProvider = providers.find((provider) => provider.id === providerId) || null;
+  const selectedProviderName = selectedProvider?.name || selectedProvider?.id || '';
+  const hasSelection = Boolean(selectedProvider && model);
+  const availableProviders = providers.filter((provider) => provider[modelsKey].length > 0);
+  const [draftProviderId, setDraftProviderId] = useState(providerId || '');
+  const activeProvider =
+    availableProviders.find((provider) => provider.id === draftProviderId) ||
+    selectedProvider ||
+    availableProviders[0] ||
+    null;
+
+  return (
+    <div ref={containerRef} className="relative min-w-0">
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={(event) => {
+          event.stopPropagation();
+          if (!open) {
+            setDraftProviderId(providerId || availableProviders[0]?.id || '');
+          }
+          onToggle();
+        }}
+        aria-expanded={open}
+        aria-haspopup="listbox"
+        aria-label={`${label}供应商与模型：${hasSelection ? `${selectedProviderName} / ${model}` : emptyLabel}`}
+        title={hasSelection ? `${selectedProviderName} / ${model}` : emptyLabel}
+        className={`workspace-control-chip flex h-9 w-full min-w-0 items-center gap-2 rounded-xl px-2.5 text-left ${open ? 'is-active' : ''}`}
+      >
+        {purpose === 'chat' ? <MessageCircle size={13} /> : <ImageIcon size={13} />}
+        <span className="min-w-0 flex-1 truncate text-[11px] font-medium tracking-[-0.01em]">
+          <span className="workspace-text-muted">{purpose === 'chat' ? '对话 · ' : '生图 · '}</span>
+          {hasSelection ? `${selectedProviderName} / ${model}` : emptyLabel}
+        </span>
+        <ChevronDown size={12} className={`shrink-0 transition-transform ${open ? 'rotate-180' : ''}`} />
+      </button>
+
+      {open && (
+        <div
+          className={`workspace-menu-panel absolute bottom-full z-30 mb-2 w-[min(340px,calc(100vw-2rem))] overflow-hidden rounded-2xl ${align === 'right' ? 'right-0' : 'left-0'}`}
+          role="listbox"
+          aria-label={`${label}供应商与模型`}
+        >
+          {availableProviders.length > 0 ? (
+            <div className="grid max-h-[300px] grid-cols-[112px_minmax(0,1fr)]">
+              <div className="workspace-subtle-divider border-r p-1.5">
+                <div className="workspace-text-muted px-2 py-1 text-[10px] font-medium">供应商</div>
+                {availableProviders.map((provider) => {
+                  const selected = provider.id === activeProvider?.id;
+                  return (
+                    <button
+                      key={provider.id}
+                      type="button"
+                      className={`workspace-menu-item flex w-full items-center justify-between gap-2 rounded-xl px-2 py-1.5 text-left text-xs ${selected ? 'is-selected' : ''}`}
+                      onClick={() => setDraftProviderId(provider.id)}
+                    >
+                      <span className="truncate">{provider.name || provider.id}</span>
+                      {selected && <Check size={11} className="shrink-0" />}
+                    </button>
+                  );
+                })}
+              </div>
+              <div className="min-w-0 p-1.5">
+                <div className="workspace-text-muted px-2 py-1 text-[10px] font-medium">模型</div>
+                <div className="panel-scrollbar max-h-[250px] overflow-y-auto">
+                  {(activeProvider?.[modelsKey] || []).map((modelId) => {
+                    const selected = activeProvider?.id === providerId && modelId === model;
+                    return (
+                      <button
+                        key={`${activeProvider?.id}-${modelId}`}
+                        type="button"
+                        title={modelId}
+                        className={`workspace-menu-item flex w-full items-center justify-between gap-2 rounded-xl px-2 py-1.5 text-left text-xs ${selected ? 'is-selected' : ''}`}
+                        onClick={() => activeProvider && onSelect(activeProvider.id, modelId)}
+                      >
+                        <span className="truncate">{modelId}</span>
+                        {selected && <Check size={11} className="shrink-0" />}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="p-3">
+              <div className="workspace-text-muted px-1 pb-2 text-xs">{emptyLabel}</div>
+              {loadFailed ? (
+                <button
+                  type="button"
+                  className="workspace-menu-item w-full rounded-xl px-3 py-2 text-left text-xs"
+                  onClick={onRetry}
+                >
+                  重新加载
+                </button>
+              ) : !loading ? (
+                <button
+                  type="button"
+                  className="workspace-menu-item w-full rounded-xl px-3 py-2 text-left text-xs"
+                  onClick={onOpenSettings}
+                >
+                  打开供应商设置
+                </button>
+              ) : null}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+});
 
 const tools = [
   { id: 'select', icon: MousePointer2, label: '选择' },
@@ -4081,6 +4241,13 @@ export default function AIWorkspace() {
   const [chatPanelOpening, setChatPanelOpening] = useState(false);
   const [activeSkill, setActiveSkillState] = useState<{ id: string; label: string } | null>(null);
   const [generationMode, setGenerationMode] = useState<GenerationMode>(PROMPT_PIPELINE_AGENT_ENABLED ? 'agent' : 'chat');
+  const [chatProviderId, setChatProviderIdState] = useState('');
+  const [chatModelId, setChatModelIdState] = useState('');
+  const [imageProviderId, setImageProviderIdState] = useState('');
+  const [imageModelId, setImageModelIdState] = useState('');
+  const [showChatModelSelector, setShowChatModelSelector] = useState(false);
+  const [showImageModelSelector, setShowImageModelSelector] = useState(false);
+  const [modelSelectionNotice, setModelSelectionNotice] = useState<string | null>(null);
   const [quickActions, setQuickActions] = useState(DEFAULT_QUICK_ACTIONS);
   const [showGenerationModeMenu, setShowGenerationModeMenu] = useState(false);
   const [showSkillsMenu, setShowSkillsMenu] = useState(false);
@@ -4221,6 +4388,7 @@ export default function AIWorkspace() {
   const [showGeneratedImageHistoryPanel, setShowGeneratedImageHistoryPanel] = useState(false);
   const [showProviderSettingsModal, setShowProviderSettingsModal] = useState(false);
   const [providerSettingsLoading, setProviderSettingsLoading] = useState(false);
+  const [providerSettingsLoaded, setProviderSettingsLoaded] = useState(false);
   const [providerSettingsSaving, setProviderSettingsSaving] = useState(false);
   const [providerSettingsTesting, setProviderSettingsTesting] = useState(false);
   const [providerSettingsFetchingModels, setProviderSettingsFetchingModels] = useState(false);
@@ -4262,6 +4430,8 @@ export default function AIWorkspace() {
   const addNodeMenuRef = useRef<HTMLDivElement>(null);
   const generatedImageHistoryPanelRef = useRef<HTMLDivElement>(null);
   const generationModeMenuRef = useRef<HTMLDivElement>(null);
+  const chatModelSelectorRef = useRef<HTMLDivElement>(null);
+  const imageModelSelectorRef = useRef<HTMLDivElement>(null);
   const skillsMenuRef = useRef<HTMLDivElement>(null);
   const aspectRatioMenuRef = useRef<HTMLDivElement>(null);
   const textPanelModelMenuRef = useRef<HTMLDivElement>(null);
@@ -4289,6 +4459,7 @@ export default function AIWorkspace() {
   const latestChatInputRef = useRef('');
   const isHydratingSessionRef = useRef(false);
   const imageToolbarNoticeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const modelSelectionNoticeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const canvasClipboardRef = useRef<{
     snapshot: CanvasClipboardSnapshot | null;
     pasteCount: number;
@@ -4350,6 +4521,10 @@ export default function AIWorkspace() {
     imageCardAspectRatioById,
     chatMessages,
     activeSkill,
+    chatProviderId,
+    chatModelId,
+    imageProviderId,
+    imageModelId,
     generatedImageHistoryBySession,
     viewport,
   });
@@ -4449,6 +4624,36 @@ export default function AIWorkspace() {
       applySessionLiveStateUpdate('activeSkill', value, setActiveSkillState),
     [applySessionLiveStateUpdate]
   );
+  const setChatProviderId = useCallback(
+    (value: React.SetStateAction<string>) =>
+      applySessionLiveStateUpdate('chatProviderId', value, setChatProviderIdState),
+    [applySessionLiveStateUpdate]
+  );
+  const setChatModelId = useCallback(
+    (value: React.SetStateAction<string>) =>
+      applySessionLiveStateUpdate('chatModelId', value, setChatModelIdState),
+    [applySessionLiveStateUpdate]
+  );
+  const setImageProviderId = useCallback(
+    (value: React.SetStateAction<string>) =>
+      applySessionLiveStateUpdate('imageProviderId', value, setImageProviderIdState),
+    [applySessionLiveStateUpdate]
+  );
+  const setImageModelId = useCallback(
+    (value: React.SetStateAction<string>) =>
+      applySessionLiveStateUpdate('imageModelId', value, setImageModelIdState),
+    [applySessionLiveStateUpdate]
+  );
+  const showModelSelectionNoticeWithTimeout = useCallback((message: string) => {
+    setModelSelectionNotice(message);
+    if (modelSelectionNoticeTimeoutRef.current) {
+      clearTimeout(modelSelectionNoticeTimeoutRef.current);
+    }
+    modelSelectionNoticeTimeoutRef.current = setTimeout(() => {
+      setModelSelectionNotice(null);
+      modelSelectionNoticeTimeoutRef.current = null;
+    }, 3200);
+  }, []);
   const setGeneratedImageHistoryBySession = useCallback(
     (value: React.SetStateAction<Record<string, GeneratedImageHistoryEntry[]>>) =>
       applySessionLiveStateUpdate(
@@ -4547,6 +4752,46 @@ export default function AIWorkspace() {
     () => enabledProviderSettingsProviders.filter((provider) => provider.imageModels.length > 0),
     [enabledProviderSettingsProviders]
   );
+  const resolvedChatSelection = React.useMemo(
+    () => resolveProviderModelSelection({
+      providers: providerSettingsProviders,
+      purpose: 'chat',
+      requestedProviderId: chatProviderId,
+      requestedModel: chatModelId,
+    }),
+    [chatModelId, chatProviderId, providerSettingsProviders]
+  );
+  const resolvedImageSelection = React.useMemo(
+    () => resolveProviderModelSelection({
+      providers: providerSettingsProviders,
+      purpose: 'image',
+      requestedProviderId: imageProviderId,
+      requestedModel: imageModelId,
+    }),
+    [imageModelId, imageProviderId, providerSettingsProviders]
+  );
+
+  useEffect(() => {
+    if (!providerSettingsLoaded || !resolvedChatSelection.providerId || !resolvedChatSelection.model) return;
+    if (resolvedChatSelection.providerId === chatProviderId && resolvedChatSelection.model === chatModelId) return;
+    const hadSavedSelection = Boolean(chatProviderId || chatModelId);
+    setChatProviderId(resolvedChatSelection.providerId);
+    setChatModelId(resolvedChatSelection.model);
+    if (hadSavedSelection) {
+      showModelSelectionNoticeWithTimeout(`对话模型已切换为 ${resolvedChatSelection.model}`);
+    }
+  }, [chatModelId, chatProviderId, providerSettingsLoaded, resolvedChatSelection, setChatModelId, setChatProviderId, showModelSelectionNoticeWithTimeout]);
+
+  useEffect(() => {
+    if (!providerSettingsLoaded || !resolvedImageSelection.providerId || !resolvedImageSelection.model) return;
+    if (resolvedImageSelection.providerId === imageProviderId && resolvedImageSelection.model === imageModelId) return;
+    const hadSavedSelection = Boolean(imageProviderId || imageModelId);
+    setImageProviderId(resolvedImageSelection.providerId);
+    setImageModelId(resolvedImageSelection.model);
+    if (hadSavedSelection) {
+      showModelSelectionNoticeWithTimeout(`生图模型已切换为 ${resolvedImageSelection.model}`);
+    }
+  }, [imageModelId, imageProviderId, providerSettingsLoaded, resolvedImageSelection, setImageModelId, setImageProviderId, showModelSelectionNoticeWithTimeout]);
   const workspaceImageModelOptions = React.useMemo(
     () => createWorkspaceModelOptions(enabledProviderSettingsProviders, 'image', IMAGE_CARD_MODEL_OPTIONS, getProviderSettingsProviderLabel),
     [enabledProviderSettingsProviders]
@@ -4989,6 +5234,9 @@ export default function AIWorkspace() {
     return () => {
       if (imageToolbarNoticeTimeoutRef.current) {
         clearTimeout(imageToolbarNoticeTimeoutRef.current);
+      }
+      if (modelSelectionNoticeTimeoutRef.current) {
+        clearTimeout(modelSelectionNoticeTimeoutRef.current);
       }
     };
   }, []);
@@ -8194,6 +8442,10 @@ export default function AIWorkspace() {
       ? [...overrideReferencePayload.referenceImages]
       : [...chatReferenceImages];
     const currentSkill = options?.skill ?? activeSkill;
+    const selectedChatProviderId = resolvedChatSelection.providerId || chatProviderId || undefined;
+    const selectedChatModelId = resolvedChatSelection.model || chatModelId || undefined;
+    const selectedImageProviderId = resolvedImageSelection.providerId || imageProviderId || undefined;
+    const selectedImageModelId = resolvedImageSelection.model || imageModelId || undefined;
     const currentViewport = { ...viewport };
     const currentImageCount = imageCount;
     const generationSessionId = currentSessionIdRef.current;
@@ -8279,7 +8531,12 @@ export default function AIWorkspace() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             skillType: 'logo',
-            payload: { brandName, industry },
+            payload: {
+              brandName,
+              industry,
+              providerId: selectedImageProviderId,
+              model: selectedImageModelId,
+            },
           }),
         });
         
@@ -8307,7 +8564,7 @@ export default function AIWorkspace() {
             role: 'assistant',
             content: `${item.name} 生成中...`,
             imageName: item.name,
-            model: 'gemini-3.1-flash-image-preview',
+            model: selectedImageModelId,
             taskKey: `logo:${itemKey}`,
             taskStatus: 'running',
           };
@@ -8385,6 +8642,8 @@ export default function AIWorkspace() {
               brandBrief,
               viGuide,
               logoReferenceHint: logoHint,
+              providerId: selectedImageProviderId,
+              model: selectedImageModelId,
             },
           }),
         });
@@ -8412,7 +8671,7 @@ export default function AIWorkspace() {
             role: 'assistant',
             content: `${item.name} 生成中...`,
             imageName: item.name,
-            model: 'gemini-3.1-flash-image-preview',
+            model: selectedImageModelId,
             taskKey: `brand:${itemKey}`,
             taskStatus: 'running',
           };
@@ -8492,7 +8751,7 @@ export default function AIWorkspace() {
           role: 'assistant',
           content: '品牌识别系统：未检测到 logo，正在为你生成基础 logo... ',
           taskStatus: 'running',
-          model: 'gemini-3.1-flash-image-preview',
+          model: selectedImageModelId,
         }]);
 
         try {
@@ -8503,6 +8762,8 @@ export default function AIWorkspace() {
               messages: [{ role: 'user', content: logoPrompt }],
               size: '1024x1024',
               intent: 'image',
+              imageProviderId: selectedImageProviderId,
+              model: selectedImageModelId,
             }),
           });
 
@@ -8534,7 +8795,7 @@ export default function AIWorkspace() {
                 role: 'assistant',
                 content: '',
                 imageUrl: logoUrl,
-                model: 'gemini-3.1-flash-image-preview',
+                model: selectedImageModelId,
                 imageName: 'brand-logo',
               },
             ];
@@ -8591,15 +8852,23 @@ export default function AIWorkspace() {
         messages: messagesForAPI,
         intent: generationMode,
       };
-      if (typeof options?.modelOverride === 'string' && options.modelOverride.trim()) {
-        requestBody.model = options.modelOverride.trim();
-      }
       if (generationMode === 'image' && imageAspectRatio !== 'auto') {
         requestBody.aspect_ratio = imageAspectRatio;
       }
 
       if (currentSkill?.id === 'brand') {
         requestBody.intent = 'chat';
+      }
+      const directRequestUsesImageModel = requestBody.intent === 'image';
+      requestBody.model = typeof options?.modelOverride === 'string' && options.modelOverride.trim()
+        ? options.modelOverride.trim()
+        : directRequestUsesImageModel
+          ? selectedImageModelId
+          : selectedChatModelId;
+      if (directRequestUsesImageModel) {
+        requestBody.imageProviderId = selectedImageProviderId;
+      } else {
+        requestBody.chatProviderId = selectedChatProviderId;
       }
       const referencesForRequest = currentSkill?.id === 'brand'
         ? mergedBrandLogoReferences
@@ -8639,8 +8908,13 @@ export default function AIWorkspace() {
           itemCount: items.length,
           selectedItemIds: selectedIds,
         },
+        chatOptions: {
+          providerId: selectedChatProviderId,
+          model: selectedChatModelId,
+        },
         imageOptions: {
-          model: typeof options?.modelOverride === 'string' ? options.modelOverride.trim() || undefined : undefined,
+          providerId: selectedImageProviderId,
+          model: selectedImageModelId,
           aspectRatio: imageAspectRatio !== 'auto' ? imageAspectRatio : undefined,
         },
         confirmation: options?.agentConfirmation,
@@ -9281,6 +9555,10 @@ export default function AIWorkspace() {
       imageCardAspectRatioById: liveState.imageCardAspectRatioById,
       connections: liveState.connections,
       messages: liveState.chatMessages,
+      chatProviderId: liveState.chatProviderId,
+      chatModelId: liveState.chatModelId,
+      imageProviderId: liveState.imageProviderId,
+      imageModelId: liveState.imageModelId,
       topics,
       activeTopicId: activeId,
       generatedImageHistory:
@@ -9309,6 +9587,10 @@ export default function AIWorkspace() {
       connections: resolvedState.connections || [],
       chatMessages: resolvedState.chatMessages || [],
       activeSkill: resolvedState.activeSkill || null,
+      chatProviderId: resolvedState.normalizedSession?.chatProviderId || '',
+      chatModelId: resolvedState.normalizedSession?.chatModelId || '',
+      imageProviderId: resolvedState.normalizedSession?.imageProviderId || '',
+      imageModelId: resolvedState.normalizedSession?.imageModelId || '',
       textCardPanelDrafts: resolvedState.normalizedSession?.textCardPanelDrafts || {},
       textCardProviderById: resolvedState.normalizedSession?.textCardProviderById || {},
       textCardModelById: resolvedState.normalizedSession?.textCardModelById || {},
@@ -9325,6 +9607,10 @@ export default function AIWorkspace() {
     setConnectionsState(resolvedState.connections || []);
     setChatMessagesState(resolvedState.chatMessages || []);
     setActiveSkillState(resolvedState.activeSkill || null);
+    setChatProviderIdState(resolvedState.normalizedSession?.chatProviderId || '');
+    setChatModelIdState(resolvedState.normalizedSession?.chatModelId || '');
+    setImageProviderIdState(resolvedState.normalizedSession?.imageProviderId || '');
+    setImageModelIdState(resolvedState.normalizedSession?.imageModelId || '');
     setEditingTextCardId(null);
     setSelectedConnectionIds([]);
     setConnectionSnapTargetId(null);
@@ -9365,12 +9651,16 @@ export default function AIWorkspace() {
       imageCardAspectRatioById,
       connections,
       chatMessages,
+      chatProviderId,
+      chatModelId,
+      imageProviderId,
+      imageModelId,
       viewport,
       imageCount,
       activeSkill,
       generatedImageHistoryBySession,
     }),
-    [activeSkill, chatMessages, connections, generatedImageHistoryBySession, imageCardAspectRatioById, imageCardCountById, imageCardModelById, imageCardPanelDrafts, imageCardProviderById, imageCardQualityById, imageCardSizeById, imageCount, items, textCardPanelDrafts, viewport]
+    [activeSkill, chatMessages, chatModelId, chatProviderId, connections, generatedImageHistoryBySession, imageCardAspectRatioById, imageCardCountById, imageCardModelById, imageCardPanelDrafts, imageCardProviderById, imageCardQualityById, imageCardSizeById, imageCount, imageModelId, imageProviderId, items, textCardPanelDrafts, viewport]
   );
 
   const {
@@ -9803,6 +10093,7 @@ export default function AIWorkspace() {
         return;
       }
       applyProviderSettingsResponse(data);
+      setProviderSettingsLoaded(true);
     } catch (error) {
       if (providerSettingsLoadRequestIdRef.current !== requestId) {
         return;
@@ -10777,6 +11068,12 @@ export default function AIWorkspace() {
       if (generationModeMenuRef.current && !generationModeMenuRef.current.contains(e.target as Node)) {
         setShowGenerationModeMenu(false);
       }
+      if (chatModelSelectorRef.current && !chatModelSelectorRef.current.contains(e.target as Node)) {
+        setShowChatModelSelector(false);
+      }
+      if (imageModelSelectorRef.current && !imageModelSelectorRef.current.contains(e.target as Node)) {
+        setShowImageModelSelector(false);
+      }
       if (skillsMenuRef.current && !skillsMenuRef.current.contains(e.target as Node)) {
         setShowSkillsMenu(false);
       }
@@ -10810,11 +11107,22 @@ export default function AIWorkspace() {
       setShowAvatarMenu(false);
       setShowHistoryPanel(false);
     };
-    if (showAvatarMenu || showProjectMenu || showAddNodeMenu || showGeneratedImageHistoryPanel || showHistoryPanel || showGenerationModeMenu || showSkillsMenu || showAspectRatioMenu || showTextPanelProviderMenu || showImageCardProviderMenu || showImageCardModelMenu || showImageCardSettingsMenu || showTextPanelModelMenu) {
+    if (showAvatarMenu || showProjectMenu || showAddNodeMenu || showGeneratedImageHistoryPanel || showHistoryPanel || showGenerationModeMenu || showChatModelSelector || showImageModelSelector || showSkillsMenu || showAspectRatioMenu || showTextPanelProviderMenu || showImageCardProviderMenu || showImageCardModelMenu || showImageCardSettingsMenu || showTextPanelModelMenu) {
       document.addEventListener('pointerdown', handlePointerDownOutside);
       return () => document.removeEventListener('pointerdown', handlePointerDownOutside);
     }
-  }, [showAvatarMenu, showProjectMenu, showAddNodeMenu, showGeneratedImageHistoryPanel, showHistoryPanel, showGenerationModeMenu, showSkillsMenu, showAspectRatioMenu, showTextPanelProviderMenu, showImageCardProviderMenu, showImageCardModelMenu, showImageCardSettingsMenu, showTextPanelModelMenu, editingSessionId, hasActiveAssistantTextSelection, isNodeInsideAssistantSelectable]);
+  }, [showAvatarMenu, showProjectMenu, showAddNodeMenu, showGeneratedImageHistoryPanel, showHistoryPanel, showGenerationModeMenu, showChatModelSelector, showImageModelSelector, showSkillsMenu, showAspectRatioMenu, showTextPanelProviderMenu, showImageCardProviderMenu, showImageCardModelMenu, showImageCardSettingsMenu, showTextPanelModelMenu, editingSessionId, hasActiveAssistantTextSelection, isNodeInsideAssistantSelectable]);
+
+  useEffect(() => {
+    if (!showChatModelSelector && !showImageModelSelector) return;
+    const closeModelSelectorsOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      setShowChatModelSelector(false);
+      setShowImageModelSelector(false);
+    };
+    window.addEventListener('keydown', closeModelSelectorsOnEscape);
+    return () => window.removeEventListener('keydown', closeModelSelectorsOnEscape);
+  }, [showChatModelSelector, showImageModelSelector]);
 
   useEffect(() => {
     const handleSelectionChange = () => {
@@ -12469,13 +12777,13 @@ export default function AIWorkspace() {
           document.body
         )}
 
-      {imageToolbarNotice && (
+      {(modelSelectionNotice || imageToolbarNotice) && (
         <div
           className="pointer-events-none fixed inset-x-0 top-4 flex justify-center px-4"
           style={{ zIndex: GLOBAL_NOTICE_Z }}
         >
           <div className="workspace-floating-control rounded-full px-4 py-2 text-[12px] font-medium tracking-[-0.02em] backdrop-blur-xl">
-            {imageToolbarNotice}
+            {modelSelectionNotice || imageToolbarNotice}
           </div>
         </div>
       )}
@@ -13058,6 +13366,66 @@ export default function AIWorkspace() {
                   )}
                 </div>
               </div>
+              <div
+                className={`workspace-subtle-divider grid gap-2 border-t px-4 py-2 ${generationMode === 'agent' ? 'grid-cols-2' : 'grid-cols-1'}`}
+                aria-label="聊天框供应商与模型"
+              >
+                {(generationMode === 'agent' || generationMode === 'chat') && (
+                  <ChatPanelModelSelector
+                    purpose="chat"
+                    providers={enabledProviderSettingsProviders}
+                    providerId={resolvedChatSelection.providerId}
+                    model={resolvedChatSelection.model}
+                    open={showChatModelSelector}
+                    disabled={isGenerating}
+                    loading={providerSettingsLoading && !providerSettingsLoaded}
+                    loadFailed={Boolean(providerSettingsError && !providerSettingsLoaded)}
+                    containerRef={chatModelSelectorRef}
+                    onToggle={() => {
+                      setShowChatModelSelector((prev) => !prev);
+                      setShowImageModelSelector(false);
+                    }}
+                    onSelect={(providerId, model) => {
+                      setChatProviderId(providerId);
+                      setChatModelId(model);
+                      setShowChatModelSelector(false);
+                    }}
+                    onOpenSettings={() => {
+                      setShowChatModelSelector(false);
+                      openProviderSettingsModal();
+                    }}
+                    onRetry={() => { void loadProviderSettings(); }}
+                  />
+                )}
+                {(generationMode === 'agent' || generationMode === 'image') && (
+                  <ChatPanelModelSelector
+                    purpose="image"
+                    providers={enabledProviderSettingsProviders}
+                    providerId={resolvedImageSelection.providerId}
+                    model={resolvedImageSelection.model}
+                    open={showImageModelSelector}
+                    disabled={isGenerating}
+                    loading={providerSettingsLoading && !providerSettingsLoaded}
+                    loadFailed={Boolean(providerSettingsError && !providerSettingsLoaded)}
+                    align={generationMode === 'agent' ? 'right' : 'left'}
+                    containerRef={imageModelSelectorRef}
+                    onToggle={() => {
+                      setShowImageModelSelector((prev) => !prev);
+                      setShowChatModelSelector(false);
+                    }}
+                    onSelect={(providerId, model) => {
+                      setImageProviderId(providerId);
+                      setImageModelId(model);
+                      setShowImageModelSelector(false);
+                    }}
+                    onOpenSettings={() => {
+                      setShowImageModelSelector(false);
+                      openProviderSettingsModal();
+                    }}
+                    onRetry={() => { void loadProviderSettings(); }}
+                  />
+                )}
+              </div>
               <div className="workspace-subtle-divider flex items-center justify-between rounded-b-[24px] border-t px-4 py-2">
                 <div className="flex items-center gap-2">
                   <button className="workspace-control-chip inline-flex h-7 w-7 items-center justify-center rounded-full" onClick={() => chatFileInputRef.current?.click()} title="上传参考图">
@@ -13116,6 +13484,8 @@ export default function AIWorkspace() {
                             onClick={() => {
                               setGenerationMode(option.id);
                               setShowGenerationModeMenu(false);
+                              setShowChatModelSelector(false);
+                              setShowImageModelSelector(false);
                               if (option.id !== 'image') {
                                 setShowAspectRatioMenu(false);
                               }

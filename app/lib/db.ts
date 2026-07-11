@@ -88,6 +88,10 @@ export interface ProjectSession {
   messages: ChatMessage[]; // 保持兼容性
   topics?: ChatTopic[];    // 新增：对话项目列表
   activeTopicId?: string; // 新增：当前对话 ID
+  chatProviderId?: string;
+  chatModelId?: string;
+  imageProviderId?: string;
+  imageModelId?: string;
   generatedImageHistory?: GeneratedImageHistoryEntry[];
   viewport: { x: number; y: number; scale: number };
 }

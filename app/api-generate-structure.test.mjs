@@ -52,8 +52,8 @@ test('generate route accepts request-level provider routing fields and forwards 
   assert.equal(routeSource.includes('providerId?: string;'), true);
   assert.equal(routeSource.includes('imageProviderId?: string;'), true);
   assert.equal(routeSource.includes('chatProviderId?: string;'), true);
-  assert.equal(routeSource.includes('providerId: imageProviderId || providerId,'), true);
-  assert.equal(routeSource.includes('providerId: chatProviderId || providerId,'), true);
+  assert.equal(routeSource.includes('providerId: resolvedImageSelection.providerId || undefined,'), true);
+  assert.equal(routeSource.includes('providerId: resolvedChatSelection.providerId || undefined,'), true);
   assert.equal(routeSource.includes('imageProviderId: typeof imageProviderId === "string" ? imageProviderId : null,'), true);
   assert.equal(routeSource.includes('chatProviderId: typeof chatProviderId === "string" ? chatProviderId : null,'), true);
 });
@@ -169,7 +169,7 @@ test('generate route keeps provider-returned gpt-image-2 variants on the gpt-ima
     true
   );
   assert.equal(
-    routeSource.includes('const resolvedImageModel = resolveGenerateImageModelFromAllowedModels(model, allowedProviderModelIds);'),
+    routeSource.includes('const legacyImageModel = resolveGenerateImageModelFromAllowedModels(model, allowedProviderModelIds);'),
     true
   );
 });
@@ -188,7 +188,7 @@ test('generate route preserves provider-saved Gemini image variants instead of f
     true
   );
   assert.equal(
-    routeSource.includes('const resolvedImageModel = resolveGenerateImageModelFromAllowedModels(model, allowedProviderModelIds);'),
+    routeSource.includes('const legacyImageModel = resolveGenerateImageModelFromAllowedModels(model, allowedProviderModelIds);'),
     true
   );
 });
