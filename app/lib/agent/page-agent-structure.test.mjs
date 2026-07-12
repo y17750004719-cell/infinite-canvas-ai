@@ -18,6 +18,8 @@ test('right chat defaults to agent and loads skills from the registry api', () =
 
 test('agent mode posts to the agent route and handles agent events', () => {
   assert.match(source, /generationMode === 'agent' \? '\/api\/agent' : '\/api\/generate'/);
+  assert.match(source, /routing_start/);
+  assert.match(source, /clarification_required/);
   assert.match(source, /prompt_optimization_start/);
   assert.match(source, /prompt_optimization_done/);
   assert.match(source, /client_action/);

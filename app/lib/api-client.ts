@@ -1770,18 +1770,43 @@ export async function runImageTask(request: UnifiedImageRequest): Promise<Genera
   throw new ImageGenerationError(`Image generation failed: model "${request.model}" is not supported`, 400);
 }
 
+export interface ChatToolDefinition {
+  type: 'function';
+  function: {
+    name: string;
+    description?: string;
+    parameters?: Record<string, unknown>;
+  };
+}
+
+export interface ChatToolCall {
+  id: string;
+  type: 'function';
+  function: {
+    name: string;
+    arguments: string;
+  };
+}
+
+export interface ChatMessage {
+  role: 'user' | 'assistant' | 'system' | 'tool';
+  content:
+    | string
+    | Array<
+        | { type: 'text'; text: string }
+        | { type: 'image_url'; image_url: { url: string } }
+      >;
+  tool_calls?: ChatToolCall[];
+  tool_call_id?: string;
+  name?: string;
+}
+
 export interface ChatRequest {
   model: string;
   providerId?: string;
-  messages: Array<{
-    role: 'user' | 'assistant' | 'system';
-    content:
-      | string
-      | Array<
-          | { type: 'text'; text: string }
-          | { type: 'image_url'; image_url: { url: string } }
-        >;
-  }>;
+  messages: ChatMessage[];
+  tools?: ChatToolDefinition[];
+  toolChoice?: 'auto' | 'none';
   signal?: AbortSignal;
 }
 
@@ -1794,6 +1819,7 @@ export interface ChatResponse {
     message: {
       content: string;
       reasoning_content?: string;
+      tool_calls?: ChatToolCall[];
     };
   }>;
 }
@@ -1814,6 +1840,7 @@ type SupplierChatStreamPayload = {
 type GeminiContentPart = {
   text?: string;
   thought?: boolean;
+  functionCall?: { name?: string; args?: Record<string, unknown> };
 };
 
 type GeminiGenerateContentPayload = {
@@ -1873,7 +1900,7 @@ async function convertChatMessagesToGeminiRequest(
   signal?: AbortSignal
 ): Promise<{
   systemInstruction?: { parts: Array<{ text: string }> };
-  contents: Array<{ role: "user" | "model"; parts: Array<{ text: string } | { inline_data: { mime_type: string; data: string } }> }>;
+  contents: Array<{ role: "user" | "model"; parts: Array<Record<string, unknown>> }>;
 }> {
   const systemTexts = messages
     .filter((msg) => msg.role === "system")
@@ -1887,27 +1914,59 @@ async function convertChatMessagesToGeminiRequest(
     })
     .filter(Boolean);
 
-  const contents = await Promise.all(
-    messages
-      .filter((msg) => msg.role !== "system")
-      .map(async (msg) => {
-        const parts = typeof msg.content === "string"
-          ? [{ text: msg.content }]
-          : await Promise.all(
-              msg.content.map(async (part) => {
-                if (part.type === "text") {
-                  return { text: part.text };
-                }
-                return referenceToInlineData(part.image_url.url, signal);
-              })
-            );
+  const contents: Array<{ role: "user" | "model"; parts: Array<Record<string, unknown>> }> = [];
+  let pendingToolResponses: Array<Record<string, unknown>> = [];
+  const flushToolResponses = () => {
+    if (pendingToolResponses.length === 0) return;
+    contents.push({ role: "user", parts: pendingToolResponses });
+    pendingToolResponses = [];
+  };
 
-        return {
-          role: msg.role === "assistant" ? ("model" as const) : ("user" as const),
-          parts,
-        };
-      })
-  );
+  for (const msg of messages.filter((message) => message.role !== "system")) {
+      if (msg.role === "tool") {
+        let response: unknown = msg.content;
+        if (typeof msg.content === "string") {
+          try {
+            response = JSON.parse(msg.content);
+          } catch {
+            response = { content: msg.content };
+          }
+        }
+        pendingToolResponses.push({
+          functionResponse: {
+            name: msg.name || "tool",
+            response: response && typeof response === "object" ? response : { result: response },
+          },
+        });
+        continue;
+      }
+
+      flushToolResponses();
+
+      const parts: Array<Record<string, unknown>> = typeof msg.content === "string"
+        ? (msg.content ? [{ text: msg.content }] : [])
+        : await Promise.all(msg.content.map(async (part) => {
+            if (part.type === "text") return { text: part.text };
+            return referenceToInlineData(part.image_url.url, signal);
+          }));
+      if (msg.role === "assistant" && Array.isArray(msg.tool_calls)) {
+        for (const toolCall of msg.tool_calls) {
+          let args: Record<string, unknown> = {};
+          try {
+            const parsed = JSON.parse(toolCall.function.arguments || "{}");
+            if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) args = parsed;
+          } catch {
+            args = {};
+          }
+          parts.push({ functionCall: { name: toolCall.function.name, args } });
+        }
+      }
+      contents.push({
+        role: msg.role === "assistant" ? ("model" as const) : ("user" as const),
+        parts,
+      });
+  }
+  flushToolResponses();
 
   return {
     systemInstruction: systemTexts.length > 0
@@ -1919,26 +1978,36 @@ async function convertChatMessagesToGeminiRequest(
   };
 }
 
-function extractGeminiTextResponse(payload: GeminiGenerateContentPayload): { content: string; reasoning: string } {
+function extractGeminiTextResponse(payload: GeminiGenerateContentPayload): {
+  content: string;
+  reasoning: string;
+  toolCalls: ChatToolCall[];
+} {
   const parts = Array.isArray(payload.candidates?.[0]?.content?.parts)
     ? payload.candidates?.[0]?.content?.parts || []
     : [];
   let content = "";
   let reasoning = "";
+  const toolCalls: ChatToolCall[] = [];
 
-  for (const part of parts) {
-    if (!part || typeof part.text !== "string" || !part.text) {
-      continue;
+  for (const [index, part] of parts.entries()) {
+    if (part?.functionCall?.name) {
+      toolCalls.push({
+        id: `gemini-tool-${index + 1}`,
+        type: "function",
+        function: {
+          name: part.functionCall.name,
+          arguments: JSON.stringify(part.functionCall.args || {}),
+        },
+      });
     }
-
-    if (part.thought) {
-      reasoning += part.text;
-    } else {
-      content += part.text;
+    if (typeof part?.text === "string" && part.text) {
+      if (part.thought) reasoning += part.text;
+      else content += part.text;
     }
   }
 
-  return { content, reasoning };
+  return { content, reasoning, toolCalls };
 }
 
 export async function chat(
@@ -1979,8 +2048,35 @@ export async function chat(
     });
 
     const requestBody = isGeminiModel
-      ? await convertChatMessagesToGeminiRequest(request.messages, request.signal)
-      : { model, messages: request.messages };
+      ? {
+          ...await convertChatMessagesToGeminiRequest(request.messages, request.signal),
+          ...(request.tools?.length
+            ? {
+                tools: [{
+                  functionDeclarations: request.tools.map((tool) => ({
+                    name: tool.function.name,
+                    description: tool.function.description,
+                    parameters: tool.function.parameters || { type: "object", properties: {} },
+                  })),
+                }],
+                toolConfig: {
+                  functionCallingConfig: {
+                    mode: request.toolChoice === "none" ? "NONE" : "AUTO",
+                  },
+                },
+              }
+            : {}),
+        }
+      : {
+          model,
+          messages: request.messages,
+          ...(request.tools?.length
+            ? {
+                tools: request.tools,
+                tool_choice: request.toolChoice || "auto",
+              }
+            : {}),
+        };
 
     const response = await fetch(endpoint, {
       method: "POST",
@@ -2020,6 +2116,7 @@ export async function chat(
           message: {
             content: geminiResponse.content,
             reasoning_content: geminiResponse.reasoning || undefined,
+            tool_calls: geminiResponse.toolCalls.length > 0 ? geminiResponse.toolCalls : undefined,
           },
         },
       ],

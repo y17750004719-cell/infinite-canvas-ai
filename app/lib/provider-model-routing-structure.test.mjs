@@ -16,11 +16,11 @@ test('agent routes user-selected chat and image models independently', () => {
   assert.match(agentSource, /providerId:\s*resolvedChatSelection\.providerId/);
   assert.match(agentSource, /model:\s*resolvedChatSelection\.model/);
   assert.match(agentSource, /requestedProviderId:\s*body\.chatOptions\?\.providerId/);
-  assert.match(agentSource, /chatProviderId:\s*resolvedChatSelection\.providerId\s*\|\|\s*undefined/);
   assert.match(agentSource, /providerId:\s*resolvedChatSelection\.providerId\s*\|\|\s*undefined/);
+  assert.match(agentSource, /referenceImages:\s*body\.referenceImages/);
   assert.match(agentSource, /imageOptions:\s*body\.imageOptions\s*\?\s*structuredClone/);
-  assert.match(agentSource, /providerId:\s*confirmationRecord\.imageOptions\?\.providerId/);
-  assert.match(agentSource, /model:\s*confirmationRecord\.imageOptions\?\.model/);
+  assert.match(agentSource, /generateImagePayload\([\s\S]{0,240}confirmationRecord\.imageOptions/);
+  assert.match(agentSource, /generateImagePayload\([\s\S]{0,320}confirmationRecord\.referenceImages/);
 });
 
 test('generate route resolves a valid provider and model pair for each purpose', () => {
@@ -33,9 +33,11 @@ test('generate route resolves a valid provider and model pair for each purpose',
   assert.match(generateSource, /hasRequestedImageSelection\s*=\s*Boolean/);
 });
 
-test('agent validates partial chat selections instead of bypassing provider pairing', () => {
-  assert.match(agentSource, /hasRequestedChatSelection\s*=\s*Boolean/);
-  assert.match(agentSource, /hasRequestedChatSelection[\s\S]{0,80}\?\s*resolveProviderModelSelection/);
+test('agent validates default environment and request chat selections through one resolver', () => {
+  assert.match(agentSource, /const resolvedChatSelection = resolveProviderModelSelection\(\{/);
+  assert.match(agentSource, /requestedProviderId:\s*body\.chatOptions\?\.providerId\s*\|\|\s*process\.env\.AGENT_CHAT_PROVIDER_ID/);
+  assert.match(agentSource, /requestedModel:\s*requestedChatModel/);
+  assert.doesNotMatch(agentSource, /const resolvedChatSelection = hasRequestedChatSelection/);
 });
 
 test('skill jobs persist and execute with the revalidated image selection', () => {

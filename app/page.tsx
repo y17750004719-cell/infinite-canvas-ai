@@ -9007,6 +9007,7 @@ export default function AIWorkspace() {
               summary?: string;
               label?: string;
               skillId?: string;
+              source?: 'manual' | 'auto';
               action?: {
                 type?: string;
                 runId?: string;
@@ -9028,6 +9029,7 @@ export default function AIWorkspace() {
                 summary?: string;
                 label?: string;
                 skillId?: string;
+                source?: 'manual' | 'auto';
                 action?: {
                   type?: string;
                   runId?: string;
@@ -9052,6 +9054,16 @@ export default function AIWorkspace() {
               if (event.intent === 'chat') {
                 updatePendingAssistantMessage((msg) => ({ ...msg, agentProgressStage: undefined }));
               }
+              continue;
+            }
+
+            if (event.type === 'routing_start') {
+              updatePendingAssistantMessage((msg) => ({ ...msg, agentProgressStage: 'understanding' }));
+              continue;
+            }
+
+            if (event.type === 'clarification_required') {
+              updatePendingAssistantMessage((msg) => ({ ...msg, agentProgressStage: undefined }));
               continue;
             }
 

@@ -8,8 +8,10 @@ export type AgentClientAction = {
 
 export type AgentEvent =
   | { type: 'agent_start'; runId: string }
+  | { type: 'routing_start' }
   | { type: 'intent_resolved'; intent: AgentIntent }
-  | { type: 'skill_selected'; skillId: string; label: string }
+  | { type: 'skill_selected'; skillId: string; label: string; source: 'manual' | 'auto' }
+  | { type: 'clarification_required'; message: string }
   | { type: 'prompt_optimization_start' }
   | { type: 'prompt_optimization_done'; summary: string; optimized: boolean }
   | { type: 'tool_start'; toolCallId: string; toolName: string }

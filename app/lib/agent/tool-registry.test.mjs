@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { createAgentToolRegistry, executeAgentTool } from './tool-registry.mjs';
+import { createAgentToolRegistry, executeAgentTool, getAgentModelTools } from './tool-registry.mjs';
 
 test('tool registry exposes the v1 domain tools and risk levels', () => {
   const registry = createAgentToolRegistry({
@@ -11,6 +11,15 @@ test('tool registry exposes the v1 domain tools and risk levels', () => {
   assert.deepEqual([...registry.keys()], ['generate_image', 'get_canvas_context', 'start_skill_job', 'get_skill_job']);
   assert.equal(registry.get('start_skill_job').requiresConfirmation, true);
   assert.equal(registry.get('get_canvas_context').requiresConfirmation, false);
+  assert.equal(registry.get('get_canvas_context').readOnly, true);
+  assert.equal(registry.get('get_skill_job').readOnly, true);
+  assert.equal(registry.get('generate_image').readOnly, false);
+});
+
+test('tool registry only exposes schemas for allowed tools', () => {
+  const registry = createAgentToolRegistry({ createSkillJob: () => null, getSkillJob: () => null });
+  const definitions = getAgentModelTools(registry, ['get_canvas_context', 'unknown']);
+  assert.deepEqual(definitions.map((tool) => tool.function.name), ['get_canvas_context']);
 });
 
 test('executeAgentTool enforces skill allowlists and confirmation', async () => {
