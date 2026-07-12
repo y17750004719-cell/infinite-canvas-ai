@@ -13679,7 +13679,7 @@ export default function AIWorkspace() {
                       }}
                       disabled={isGenerating}
                       aria-expanded={showGenerationModeMenu}
-                      className={`workspace-control-chip flex h-8 items-center gap-1 rounded-full px-2.5 text-xs font-medium ${showGenerationModeMenu ? 'is-active' : ''}`}
+                      className={`workspace-chat-icon-control flex h-8 items-center gap-1 rounded-lg px-2.5 text-xs font-medium ${showGenerationModeMenu ? 'is-active' : ''}`}
                     >
                       <SlidersHorizontal size={12} />
                       <span>{generationMode === 'agent' ? 'Agent' : generationMode === 'image' ? '生图' : '对话'}</span>

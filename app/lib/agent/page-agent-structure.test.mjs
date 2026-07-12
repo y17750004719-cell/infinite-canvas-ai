@@ -159,11 +159,15 @@ test('composer dialogs expose semantics, unique asset labels, and focus restorat
 
 test('chat composer keeps utility icons borderless and hides the Skills label', () => {
   assert.doesNotMatch(source, /<span>Skills<\/span>/);
-  for (const control of ['more', 'skills', 'reasoning', 'models']) {
+  for (const control of ['more', 'skills', 'mode', 'reasoning', 'models']) {
     const start = controlIndex(control);
     assert.ok(start >= 0, `missing ${control} composer control`);
     assert.match(source.slice(start, start + 10_000), /workspace-chat-icon-control/);
   }
+  assert.match(
+    source,
+    /data-chat-composer-control="mode"[\s\S]{0,700}className=\{`workspace-chat-icon-control/
+  );
 
   const styles = fs.readFileSync(path.resolve(import.meta.dirname, '../../globals.css'), 'utf8');
   assert.match(styles, /\.workspace-chat-icon-control\s*\{[\s\S]*?border:\s*0;/);
