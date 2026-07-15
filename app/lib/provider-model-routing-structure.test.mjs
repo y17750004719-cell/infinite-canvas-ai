@@ -17,8 +17,11 @@ test('agent routes user-selected chat and image models independently', () => {
   assert.match(agentSource, /model:\s*resolvedChatSelection\.model/);
   assert.match(agentSource, /requestedProviderId:\s*body\.chatOptions\?\.providerId/);
   assert.match(agentSource, /providerId:\s*resolvedChatSelection\.providerId\s*\|\|\s*undefined/);
-  assert.match(agentSource, /referenceImages:\s*body\.referenceImages/);
-  assert.match(agentSource, /imageOptions:\s*body\.imageOptions\s*\?\s*structuredClone/);
+  assert.match(agentSource, /referenceImages:\s*executionReferenceImages/);
+  assert.match(
+    agentSource,
+    /imageOptions:\s*\{\s*\.\.\.structuredClone\(body\.imageOptions \|\| \{\}\),\s*count:\s*requestedImageCount\s*\}/
+  );
   assert.match(agentSource, /generateImagePayload\([\s\S]{0,240}confirmationRecord\.imageOptions/);
   assert.match(agentSource, /generateImagePayload\([\s\S]{0,320}confirmationRecord\.referenceImages/);
 });

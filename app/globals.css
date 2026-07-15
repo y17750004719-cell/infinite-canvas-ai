@@ -36,6 +36,8 @@
   --workspace-control-active: rgba(23, 23, 23, 0.09);
   --workspace-inverse-bg: #171717;
   --workspace-inverse-fg: #fafafa;
+  --workspace-message-user-bg: #f1f1ef;
+  --workspace-message-user-fg: #262626;
   --workspace-preview-bg: #e7e5e4;
   --workspace-radius-lg: 1.5rem;
 }
@@ -74,6 +76,8 @@
   --workspace-control-active: rgba(255, 255, 255, 0.12);
   --workspace-inverse-bg: #343434;
   --workspace-inverse-fg: #f5f5f5;
+  --workspace-message-user-bg: #343434;
+  --workspace-message-user-fg: #f5f5f5;
   --workspace-preview-bg: rgba(255, 255, 255, 0.06);
 }
 
@@ -364,12 +368,33 @@ body {
 }
 
 .workspace-message-user {
-  background: var(--workspace-inverse-bg);
-  color: var(--workspace-inverse-fg);
+  background: var(--workspace-message-user-bg);
+  color: var(--workspace-message-user-fg);
 }
 
 .workspace-chat-input {
   background: var(--workspace-surface-elevated);
+}
+
+@keyframes agent-progress-enter {
+  from {
+    opacity: 0;
+    transform: translateY(2px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.agent-progress-enter {
+  animation: agent-progress-enter 180ms ease-out both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-progress-enter {
+    animation: none;
+  }
 }
 
 .workspace-menu-panel {
@@ -478,23 +503,23 @@ body {
   color: var(--workspace-text-muted);
 }
 
-[data-workspace-theme="light"] .workspace-editor-shell .text-zinc-50,
-[data-workspace-theme="light"] .workspace-editor-shell .text-zinc-100,
-[data-workspace-theme="light"] .workspace-editor-shell .text-zinc-200,
-[data-workspace-theme="light"] .workspace-editor-shell .text-zinc-300 {
+[data-workspace-theme="light"] :is(.workspace-editor-shell, .workspace-chat-panel) .text-zinc-50,
+[data-workspace-theme="light"] :is(.workspace-editor-shell, .workspace-chat-panel) .text-zinc-100,
+[data-workspace-theme="light"] :is(.workspace-editor-shell, .workspace-chat-panel) .text-zinc-200,
+[data-workspace-theme="light"] :is(.workspace-editor-shell, .workspace-chat-panel) .text-zinc-300 {
   color: var(--workspace-text-primary) !important;
 }
 
-[data-workspace-theme="light"] .workspace-editor-shell .text-zinc-400,
-[data-workspace-theme="light"] .workspace-editor-shell .text-zinc-500,
-[data-workspace-theme="light"] .workspace-editor-shell .text-zinc-600,
-[data-workspace-theme="light"] .workspace-editor-shell .text-zinc-700 {
+[data-workspace-theme="light"] :is(.workspace-editor-shell, .workspace-chat-panel) .text-zinc-400,
+[data-workspace-theme="light"] :is(.workspace-editor-shell, .workspace-chat-panel) .text-zinc-500,
+[data-workspace-theme="light"] :is(.workspace-editor-shell, .workspace-chat-panel) .text-zinc-600,
+[data-workspace-theme="light"] :is(.workspace-editor-shell, .workspace-chat-panel) .text-zinc-700 {
   color: var(--workspace-text-muted) !important;
 }
 
-[data-workspace-theme="light"] .workspace-editor-shell .bg-white\/5,
-[data-workspace-theme="light"] .workspace-editor-shell .bg-white\/\[0\.03\],
-[data-workspace-theme="light"] .workspace-editor-shell .bg-white\/\[0\.04\] {
+[data-workspace-theme="light"] :is(.workspace-editor-shell, .workspace-chat-panel) .bg-white\/5,
+[data-workspace-theme="light"] :is(.workspace-editor-shell, .workspace-chat-panel) .bg-white\/\[0\.03\],
+[data-workspace-theme="light"] :is(.workspace-editor-shell, .workspace-chat-panel) .bg-white\/\[0\.04\] {
   background: var(--workspace-surface-soft) !important;
 }
 

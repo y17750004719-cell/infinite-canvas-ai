@@ -1,3 +1,5 @@
+import type { AgentContextEntity, AgentProposal } from './agent/context-reference.types';
+
 const DB_NAME = 'zo-design-db';
 const DB_VERSION = 1;
 const STORE_NAME = 'sessions';
@@ -38,11 +40,60 @@ export interface ChatMessage {
   role: 'user' | 'assistant' | 'skill';
   content: string;
   reasoningContent?: string;
+  agentRunProgress?: import('./agent/run-progress.types').AgentRunProgress;
   imageUrl?: string;
   skill?: { id: string; label: string };
   referenceImages?: string[];
   model?: string;
   imageName?: string;
+  agentClarification?: {
+    request: {
+      id: string;
+      taskId: string;
+      question: string;
+      dimension: string;
+      options: Array<{ id: string; label: string; answer: string; description?: string }>;
+      allowCustom: true;
+      allowProceed: true;
+      failed?: boolean;
+    };
+    state: {
+      taskId: string;
+      operationId?: string;
+      skillSource?: 'manual' | 'auto' | null;
+      lastSequence?: number;
+      intent: 'image' | 'skill_action';
+      skillId?: string;
+      originalRequest: string;
+      workingBrief: string;
+      askedDimensions: string[];
+      answers: Array<{ dimension: string; question: string; answer: string }>;
+      referenceImages?: string[];
+      contextCandidates?: AgentContextEntity[];
+    };
+  };
+  agentClarificationResponsePayload?: {
+    clarification: NonNullable<ChatMessage['agentClarification']>;
+    response: {
+      requestId: string;
+      selectedOptionId?: string;
+      customText?: string;
+      proceedWithCurrent?: boolean;
+      retry?: boolean;
+    };
+  };
+  agentClarificationDismissed?: boolean;
+  agentClarificationResolved?: boolean;
+  agentProposal?: AgentProposal;
+  agentProposalDismissed?: boolean;
+  agentProposalResolved?: boolean;
+  resolvedContext?: {
+    entityIds: string[];
+    labels: string[];
+    kind: string;
+    confidence: 'high' | 'medium';
+  };
+  executionBriefSummary?: string;
 }
 
 export interface ChatTopic {

@@ -30,6 +30,22 @@ import {
 import { resolveStateUpdate } from './lib/state-update.mjs';
 import { resolveProviderModelSelection } from './lib/provider-model-selection.mjs';
 import {
+  createInitialAgentRunProgress,
+  createAgentProgressEventRouter,
+  formatAgentProgressLabel,
+  reduceAgentRunProgress,
+  routeAgentProgressEvent,
+  shouldShowAgentRunProgress,
+} from './lib/agent/run-progress.mjs';
+import { preloadGeneratedAssets } from './lib/agent/preload-generated-assets.mjs';
+import { buildAgentContextEntities } from './lib/agent/context-reference.mjs';
+import type { AgentContextEntity, AgentProposal } from './lib/agent/context-reference.types';
+import type {
+  AgentRunProgress,
+  AgentRunProgressEvent,
+  AgentRunProgressStep,
+} from './lib/agent/run-progress.types';
+import {
   areCanvasUndoSnapshotsEqual,
   createCanvasUndoSnapshot,
   createEmptySessionCanvasHistoryState,
@@ -128,6 +144,8 @@ const CHAT_PANEL_GSAP_CLOSE_DURATION = 0.46;
 const CHAT_PANEL_GSAP_EASE = 'expo.out';
 const FLOATING_PANEL_GSAP_DURATION = 0.18;
 const PROMPT_PIPELINE_AGENT_ENABLED = process.env.NEXT_PUBLIC_PROMPT_PIPELINE_AGENT_ENABLED !== '0';
+const GENERATED_IMAGE_HISTORY_PLACEHOLDER_PATTERN = /\[(?:Generated image[^\]]*omitted from chat history|聊天记录中省略了代理生成的图像)\]/gi;
+const AGENT_RETRY_CONFIRMATION_PATTERN = /^(?:同意|确认|可以|没问题|按(?:这个|此|上述)(?:方案)?来|就按(?:这个|此|上述)(?:方案)?|继续|开始吧)(?:[\s，,。.!！?？]*(?:(?:请)?(?:给我|帮我)?(?:继续)?(?:生成|制作|执行|出图)(?:这张|该张|图片|图像|封面|海报|任务)?))?[\s，,。.!！?？]*$/i;
 
 const extractPlainText = (value: React.ReactNode): string =>
   React.Children.toArray(value)
@@ -282,9 +300,50 @@ interface ChatMessage {
   skillChoice?: SkillChoicePayload;
   skillChoiceDismissed?: boolean;
   skillChoiceResolved?: boolean;
-  agentProgressStage?: 'understanding' | 'optimizing' | 'rendering' | 'completed' | 'failed';
+  agentRunProgress?: AgentRunProgress;
   agentConfirmation?: { confirmationId: string; toolName: string };
+  agentClarification?: AgentClarificationPayload;
+  agentClarificationResponsePayload?: {
+    clarification: AgentClarificationPayload;
+    response: AgentClarificationResponse;
+  };
+  agentClarificationDismissed?: boolean;
+  agentClarificationResolved?: boolean;
+  agentProposal?: AgentProposal;
+  agentProposalDismissed?: boolean;
+  agentProposalResolved?: boolean;
+  resolvedContext?: { entityIds: string[]; labels: string[]; kind: string; confidence: 'high' | 'medium' };
+  executionBriefSummary?: string;
 }
+
+const updateAgentRunProgress = (
+  message: ChatMessage,
+  event: AgentRunProgressEvent,
+): ChatMessage => {
+  const nextProgress = reduceAgentRunProgress(message.agentRunProgress || null, event);
+  if (nextProgress) return { ...message, agentRunProgress: nextProgress };
+  return message.agentRunProgress ? { ...message, agentRunProgress: undefined } : message;
+};
+
+const applyAgentRunProgressEvents = (
+  message: ChatMessage,
+  events: AgentRunProgressEvent[],
+) => events.reduce(updateAgentRunProgress, message);
+
+const getAgentProgressMarker = (
+  status: AgentRunProgressStep['status'] | AgentRunProgress['outcome'],
+) => status === 'completed' ? '✓' : status === 'waiting' ? '⏸' : status === 'active' || status === 'running' ? '○' : '!';
+
+const getAgentProgressCompletionLabel = (progress: AgentRunProgress) => {
+  if (progress.outcome === 'warning') {
+    return `⚠️ 部分完成（${progress.assets.succeeded}/${progress.assets.expected} 张资产可用）`;
+  }
+  if (progress.outcome === 'failed') return '❌ 任务失败，请重试';
+  if (progress.outcome !== 'completed') return '⏳ 正在结算生成资产';
+  if (progress.intent === 'chat') return '✍️ 回复已完成';
+  if (progress.intent === 'image') return '🖼️ 设计生成已完成';
+  return '⚙️ 任务已完成';
+};
 
 interface SkillChoiceOption {
   label: string;
@@ -296,6 +355,52 @@ interface SkillChoicePayload {
   title: string;
   message: string;
   options: SkillChoiceOption[];
+}
+
+interface AgentClarificationOption {
+  id: string;
+  label: string;
+  answer: string;
+  description?: string;
+}
+
+interface AgentClarificationState {
+  taskId: string;
+  operationId?: string;
+  skillSource?: 'manual' | 'auto' | null;
+  lastSequence?: number;
+  intent: 'image' | 'skill_action';
+  skillId?: string;
+  originalRequest: string;
+  workingBrief: string;
+  askedDimensions: string[];
+  answers: Array<{ dimension: string; question: string; answer: string }>;
+  referenceImages?: string[];
+  contextCandidates?: AgentContextEntity[];
+}
+
+interface AgentClarificationRequest {
+  id: string;
+  taskId: string;
+  question: string;
+  dimension: string;
+  options: AgentClarificationOption[];
+  allowCustom: true;
+  allowProceed: true;
+  failed?: boolean;
+}
+
+interface AgentClarificationPayload {
+  request: AgentClarificationRequest;
+  state: AgentClarificationState;
+}
+
+interface AgentClarificationResponse {
+  requestId: string;
+  selectedOptionId?: string;
+  customText?: string;
+  proceedWithCurrent?: boolean;
+  retry?: boolean;
 }
 
 interface AssistantTextSelectionSession {
@@ -4258,6 +4363,8 @@ export default function AIWorkspace() {
   const [selectedChatHistoryAssetIds, setSelectedChatHistoryAssetIds] = useState<string[]>([]);
   const [showModelPreferencePopover, setShowModelPreferencePopover] = useState(false);
   const [imageAspectRatio, setImageAspectRatio] = useState('auto');
+  const [agentImageAspectRatio, setAgentImageAspectRatio] = useState('3:4');
+  const activeChatImageAspectRatio = generationMode === 'agent' ? agentImageAspectRatio : imageAspectRatio;
   const [hideWelcomeByCenterSkillPick, setHideWelcomeByCenterSkillPick] = useState(false);
   const [referenceImages, setReferenceImages] = useState<string[]>([]);
   const [chatReferenceImages, setChatReferenceImages] = useState<string[]>([]);
@@ -4450,6 +4557,8 @@ export default function AIWorkspace() {
   const chatFileInputRef = useRef<HTMLInputElement>(null);
   const chatInputEditorRef = useRef<HTMLDivElement>(null);
   const chatContainerRef = useRef<HTMLDivElement>(null);
+  const agentClarificationDialogRef = useRef<HTMLDivElement>(null);
+  const activeSkillJobMessageIdRef = useRef<string | null>(null);
   const generateAbortRef = useRef<AbortController | null>(null);
   const isGeneratingRef = useRef(false);
   isGeneratingRef.current = isGenerating;
@@ -4488,6 +4597,12 @@ export default function AIWorkspace() {
   });
   const [pendingSkillChoice, setPendingSkillChoice] = useState<SkillChoicePayload | null>(null);
   const [showSkillChoiceModal, setShowSkillChoiceModal] = useState(false);
+  const [pendingAgentProposal, setPendingAgentProposal] = useState<AgentProposal | null>(null);
+  const [showAgentProposalModal, setShowAgentProposalModal] = useState(false);
+  const [pendingAgentClarification, setPendingAgentClarification] = useState<AgentClarificationPayload | null>(null);
+  const [showAgentClarificationModal, setShowAgentClarificationModal] = useState(false);
+  const [agentClarificationSelectedOptionId, setAgentClarificationSelectedOptionId] = useState('');
+  const [agentClarificationCustomText, setAgentClarificationCustomText] = useState('');
   const [chatInputFocused, setChatInputFocused] = useState(false);
   const [chatInputHeight, setChatInputHeight] = useState(72);
   const [copiedAssistantMessageId, setCopiedAssistantMessageId] = useState<string | null>(null);
@@ -5527,6 +5642,43 @@ export default function AIWorkspace() {
     }
   }, [chatMessages, pendingSkillChoice]);
 
+  useEffect(() => {
+    const pendingMessage = [...chatMessages].reverse().find((message) => (
+      message.role === 'assistant'
+      && message.agentProposal?.requiresSelection
+      && !message.agentProposalResolved
+    ));
+    if (!pendingMessage?.agentProposal) {
+      setPendingAgentProposal(null);
+      setShowAgentProposalModal(false);
+      return;
+    }
+    setPendingAgentProposal(pendingMessage.agentProposal);
+    if (!pendingMessage.agentProposalDismissed) setShowAgentProposalModal(true);
+  }, [chatMessages]);
+
+  useEffect(() => {
+    const pendingMessage = [...chatMessages].reverse().find((message) =>
+      message.role === 'assistant'
+      && message.agentClarification
+      && !message.agentClarificationResolved
+    );
+    if (!pendingMessage?.agentClarification) {
+      setPendingAgentClarification(null);
+      setShowAgentClarificationModal(false);
+      return;
+    }
+    setPendingAgentClarification(pendingMessage.agentClarification);
+    if (!pendingMessage.agentClarificationDismissed) {
+      setShowAgentClarificationModal(true);
+    }
+  }, [chatMessages]);
+
+  useEffect(() => {
+    if (!showAgentClarificationModal) return;
+    requestAnimationFrame(() => agentClarificationDialogRef.current?.focus());
+  }, [showAgentClarificationModal]);
+
   const stopStreamTypewriter = () => {
     if (streamTimerRef.current) {
       clearInterval(streamTimerRef.current);
@@ -5609,15 +5761,22 @@ export default function AIWorkspace() {
     }));
   };
 
+  const updateChatMessageById = (
+    messageId: string,
+    updater: (msg: ChatMessage) => ChatMessage
+  ) => {
+    setChatMessages((prev) => prev.map((msg) => {
+      if (msg.id !== messageId) return msg;
+      return updater(msg);
+    }));
+  };
+
   const updatePendingAssistantMessage = (
     updater: (msg: ChatMessage) => ChatMessage
   ) => {
     const messageId = pendingAssistantMessageIdRef.current;
     if (!messageId) return;
-    setChatMessages((prev) => prev.map((msg) => {
-      if (msg.id !== messageId) return msg;
-      return updater(msg);
-    }));
+    updateChatMessageById(messageId, updater);
   };
 
   const readAsDataURL = (file: File) => {
@@ -8286,10 +8445,14 @@ export default function AIWorkspace() {
 
   const handleCancelGenerate = async () => {
     updateActiveStreamMessageStatus('cancelled', '任务已终止');
-    updatePendingAssistantMessage((msg) => ({
+    const activeMessageId = activeSkillJobMessageIdRef.current || pendingAssistantMessageIdRef.current;
+    if (activeMessageId) updateChatMessageById(activeMessageId, (msg) => ({
       ...msg,
       taskStatus: 'cancelled',
       content: '任务已终止',
+      agentRunProgress: msg.agentRunProgress
+        ? reduceAgentRunProgress(msg.agentRunProgress, { type: 'agent_error' }) || undefined
+        : undefined,
     }));
     stopStreamTypewriter();
 
@@ -8315,6 +8478,7 @@ export default function AIWorkspace() {
       setActiveSkillJobId(null);
       setActiveSkillJobType(null);
       setIsGenerating(false);
+      activeSkillJobMessageIdRef.current = null;
       pendingAssistantMessageIdRef.current = null;
       return;
     }
@@ -8452,9 +8616,34 @@ export default function AIWorkspace() {
     referenceImagesOverride?: Array<{ id?: string; src: string; label: string; alt?: string }>;
     modelOverride?: string;
     agentConfirmation?: { confirmationId: string; toolName: string };
+    agentClarification?: AgentClarificationPayload;
+    agentClarificationResponse?: AgentClarificationResponse;
+    selectedContextEntityIds?: string[];
   }) => {
     const currentChatInput = options?.input ?? chatInput;
     if (!currentChatInput.trim()) return;
+
+    const latestConversationMessageIndex = chatMessages.findLastIndex(
+      (message) => message.role === 'user' || message.role === 'assistant'
+    );
+    const latestConversationMessage = latestConversationMessageIndex >= 0
+      ? chatMessages[latestConversationMessageIndex]
+      : null;
+    const retrySourceMessage = !options?.agentClarification
+      && AGENT_RETRY_CONFIRMATION_PATTERN.test(currentChatInput)
+      && latestConversationMessage?.role === 'assistant'
+      && (
+        latestConversationMessage.taskStatus === 'failed'
+        || latestConversationMessage.agentRunProgress?.outcome === 'failed'
+      )
+      ? [...chatMessages.slice(0, latestConversationMessageIndex)]
+          .reverse()
+          .find((message) => message.role === 'user' && message.agentClarificationResponsePayload)
+      : undefined;
+    const effectiveAgentClarification = options?.agentClarification
+      || retrySourceMessage?.agentClarificationResponsePayload?.clarification;
+    const effectiveAgentClarificationResponse = options?.agentClarificationResponse
+      || retrySourceMessage?.agentClarificationResponsePayload?.response;
 
     const overrideReferencePayload = options?.referenceImagesOverride
       ? buildReferenceImageRequestPayload(options.referenceImagesOverride)
@@ -8462,7 +8651,7 @@ export default function AIWorkspace() {
     const currentReferenceImages = overrideReferencePayload
       ? [...overrideReferencePayload.referenceImages]
       : [...chatReferenceImages];
-    const currentSkill = options?.skill ?? activeSkill;
+    const currentSkill = options?.skill ?? retrySourceMessage?.skill ?? activeSkill;
     const selectedChatProviderId = resolvedChatSelection.providerId || chatProviderId || undefined;
     const selectedChatModelId = resolvedChatSelection.model || chatModelId || undefined;
     const selectedImageProviderId = resolvedImageSelection.providerId || imageProviderId || undefined;
@@ -8470,6 +8659,16 @@ export default function AIWorkspace() {
     const currentViewport = { ...viewport };
     const currentImageCount = imageCount;
     const generationSessionId = currentSessionIdRef.current;
+    const currentTopicId = getCurrentSession()?.activeTopicId || 'default';
+    const topicGeneratedImages = (generationSessionId
+      ? generatedImageHistoryBySession[generationSessionId] || []
+      : []).filter((entry) => !entry.topicId || entry.topicId === currentTopicId);
+    const contextEntities = buildAgentContextEntities({
+      messages: chatMessages,
+      canvasItems: items,
+      selectedItemIds: selectedIds,
+      generatedImages: topicGeneratedImages,
+    }) as AgentContextEntity[];
     const uploadedLogoRefs = extractUploadedLogoReferences();
     const existingBrandLogoUrl = [...chatMessages]
       .reverse()
@@ -8499,10 +8698,12 @@ export default function AIWorkspace() {
     const isLogoConfirm =
       currentSkill?.id === 'logo' &&
       !options?.agentConfirmation &&
+      !effectiveAgentClarification &&
       confirmPatterns.some((pattern) => normalizedInput.includes(pattern.toLowerCase()));
     const isBrandGenerate =
       currentSkill?.id === 'brand' &&
       !options?.agentConfirmation &&
+      !effectiveAgentClarification &&
       (
         confirmPatterns.some((pattern) => normalizedInput.includes(pattern.toLowerCase())) ||
         brandMaterialRequests.length > 0
@@ -8725,15 +8926,28 @@ export default function AIWorkspace() {
       content: currentChatInput,
       referenceImages: currentReferenceImages.length > 0 ? currentReferenceImages : undefined,
       skill: currentSkill || undefined,
+      agentClarificationResponsePayload: effectiveAgentClarification && effectiveAgentClarificationResponse
+        ? {
+            clarification: effectiveAgentClarification,
+            response: effectiveAgentClarificationResponse,
+          }
+        : undefined,
     };
     const assistantPlaceholderId = `msg-${Date.now()}-assistant-pending`;
+    const agentRunId = `agent-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     
     const messagesForAPI = chatMessages
       .filter(msg => msg.role === 'user' || msg.role === 'assistant')
-      .map(msg => ({
-        role: msg.role === 'user' ? 'user' : 'assistant',
-        content: msg.content || msg.imageUrl || ''
-      }));
+      .flatMap(msg => {
+        const content = (msg.content || '')
+          .replace(GENERATED_IMAGE_HISTORY_PLACEHOLDER_PATTERN, '')
+          .trim();
+        if (msg.imageUrl && !content) return [];
+        return [{
+          role: msg.role === 'user' ? 'user' as const : 'assistant' as const,
+          content,
+        }];
+      });
     messagesForAPI.push({ role: 'user', content: currentChatInput });
     
     pendingAssistantMessageIdRef.current = assistantPlaceholderId;
@@ -8742,12 +8956,16 @@ export default function AIWorkspace() {
       role: 'assistant',
       content: generationMode === 'agent' ? '' : '...',
       taskStatus: 'running',
-      agentProgressStage: generationMode === 'agent' ? 'understanding' : undefined,
+      agentRunProgress: generationMode === 'agent'
+        ? createInitialAgentRunProgress(agentRunId)
+        : undefined,
     }]);
     setChatInput('');
     setIsGenerating(true);
     setHasStartedChat(true);
     setChatReferenceImages([]);
+    const processedAgentActionKeysForRun = new Set<string>();
+    let runController: AbortController | null = null;
 
     try {
       const isBrandBootstrapPrompt =
@@ -8891,16 +9109,21 @@ export default function AIWorkspace() {
       } else {
         requestBody.chatProviderId = selectedChatProviderId;
       }
+      const clarificationReferenceImages = effectiveAgentClarification?.state.referenceImages || [];
       const referencesForRequest = currentSkill?.id === 'brand'
         ? mergedBrandLogoReferences
-        : overrideReferencePayload
-          ? overrideReferencePayload.referenceImages
-          : currentReferenceImages;
+        : clarificationReferenceImages.length > 0
+          ? clarificationReferenceImages
+          : overrideReferencePayload
+            ? overrideReferencePayload.referenceImages
+            : currentReferenceImages;
       const referenceLabelsForRequest = currentSkill?.id === 'brand'
         ? mergedBrandLogoReferences.map((_, index) => `image${index + 1}`)
-        : overrideReferencePayload
-          ? overrideReferencePayload.referenceLabels
-          : currentReferenceImages.map((_, index) => `image${index + 1}`);
+        : clarificationReferenceImages.length > 0
+          ? clarificationReferenceImages.map((_, index) => `image${index + 1}`)
+          : overrideReferencePayload
+            ? overrideReferencePayload.referenceLabels
+            : currentReferenceImages.map((_, index) => `image${index + 1}`);
       const shouldRequestStream = generationMode !== 'image' && referencesForRequest.length === 0;
       if (shouldRequestStream) {
         requestBody.stream = true;
@@ -8916,13 +9139,15 @@ export default function AIWorkspace() {
       }
       
       const controller = new AbortController();
+      runController = controller;
       generateAbortRef.current = controller;
 
-      const agentRunId = `agent-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
       const agentRequestBody = {
         runId: agentRunId,
         topicId: getCurrentSession()?.activeTopicId || 'default',
         messages: messagesForAPI,
+        contextEntities,
+        selectedContextEntityIds: options?.selectedContextEntityIds,
         activeSkillId: currentSkill?.id,
         referenceImages: referencesForRequest,
         canvasContext: {
@@ -8936,9 +9161,15 @@ export default function AIWorkspace() {
         imageOptions: {
           providerId: selectedImageProviderId,
           model: selectedImageModelId,
-          aspectRatio: imageAspectRatio !== 'auto' ? imageAspectRatio : undefined,
+          aspectRatio: agentImageAspectRatio,
+          size: '2048x2048',
+          quality: 'auto',
+          count: 1,
         },
         confirmation: options?.agentConfirmation,
+        clarificationState: effectiveAgentClarification?.state,
+        clarificationRequest: effectiveAgentClarification?.request,
+        clarificationResponse: effectiveAgentClarificationResponse,
       };
       const requestEndpoint = generationMode === 'agent' ? '/api/agent' : '/api/generate';
 
@@ -8973,7 +9204,6 @@ export default function AIWorkspace() {
         updatePendingAssistantMessage((msg) => ({
           ...msg,
           content: '',
-          model: 'gemini-3.1-flash-lite-preview-thinking-medium',
           taskStatus: 'running',
         }));
 
@@ -8982,6 +9212,10 @@ export default function AIWorkspace() {
         let buffer = '';
 
         let doneReceived = false;
+        let generatedAssetFailureCount = 0;
+        let generatedAssetModel = '';
+        let nextGeneratedImageNumber = currentImageCount + 1;
+        let progressEventRouter = createAgentProgressEventRouter();
 
         while (true) {
           const { done, value } = await reader.read();
@@ -9008,13 +9242,42 @@ export default function AIWorkspace() {
               label?: string;
               skillId?: string;
               source?: 'manual' | 'auto';
+              runId?: string;
+              operationId?: string;
+              sequence?: number;
+              stepId?: string;
+              phase?: string;
+              status?: 'active' | 'waiting' | 'completed' | 'failed';
+              toolCallId?: string;
+              toolName?: string;
               action?: {
                 type?: string;
                 runId?: string;
-                assets?: Array<{ src?: string; naturalWidth?: number; naturalHeight?: number }>;
+                model?: string;
+                assets?: Array<{ src?: string; naturalWidth?: number; naturalHeight?: number; model?: string }>;
               };
-              request?: { confirmationId?: string; toolName?: string; message?: string };
+              request?: {
+                confirmationId?: string;
+                toolName?: string;
+                message?: string;
+                id?: string;
+                taskId?: string;
+                question?: string;
+                dimension?: string;
+                options?: AgentClarificationOption[];
+                allowCustom?: true;
+                allowProceed?: true;
+                failed?: boolean;
+              };
+              state?: AgentClarificationState;
               result?: Record<string, unknown>;
+              proposal?: AgentProposal;
+              entityIds?: string[];
+              labels?: string[];
+              kind?: string;
+              confidence?: 'high' | 'medium';
+              resolvedEntityIds?: string[];
+              mustPreserveCount?: number;
             };
             try {
               event = JSON.parse(trimmed) as {
@@ -9030,13 +9293,42 @@ export default function AIWorkspace() {
                 label?: string;
                 skillId?: string;
                 source?: 'manual' | 'auto';
+                runId?: string;
+                operationId?: string;
+                sequence?: number;
+                stepId?: string;
+                phase?: string;
+                status?: 'active' | 'waiting' | 'completed' | 'failed';
+                toolCallId?: string;
+                toolName?: string;
                 action?: {
                   type?: string;
                   runId?: string;
-                  assets?: Array<{ src?: string; naturalWidth?: number; naturalHeight?: number }>;
+                  model?: string;
+                  assets?: Array<{ src?: string; naturalWidth?: number; naturalHeight?: number; model?: string }>;
                 };
-                request?: { confirmationId?: string; toolName?: string; message?: string };
+                request?: {
+                  confirmationId?: string;
+                  toolName?: string;
+                  message?: string;
+                  id?: string;
+                  taskId?: string;
+                  question?: string;
+                  dimension?: string;
+                  options?: AgentClarificationOption[];
+                  allowCustom?: true;
+                  allowProceed?: true;
+                  failed?: boolean;
+                };
+                state?: AgentClarificationState;
                 result?: Record<string, unknown>;
+                proposal?: AgentProposal;
+                entityIds?: string[];
+                labels?: string[];
+                kind?: string;
+                confidence?: 'high' | 'medium';
+                resolvedEntityIds?: string[];
+                mustPreserveCount?: number;
               };
             } catch {
               continue;
@@ -9045,25 +9337,111 @@ export default function AIWorkspace() {
             if (event.type === 'start' && event.model) {
               setChatMessages(prev => prev.map((msg) => {
                 if (msg.id !== assistantId) return msg;
-                return { ...msg, model: event.model };
+                return { ...msg, model: msg.model || event.model };
               }));
               continue;
             }
 
+            if (event.type === 'proposal_presented' && event.proposal) {
+              updatePendingAssistantMessage((msg) => ({
+                ...msg,
+                agentProposal: event.proposal,
+                agentProposalDismissed: false,
+                agentProposalResolved: false,
+              }));
+              if (event.proposal.requiresSelection) {
+                setPendingAgentProposal(event.proposal);
+                setShowAgentProposalModal(true);
+              }
+              continue;
+            }
+
+            if (event.type === 'context_resolved' && event.entityIds?.length && event.labels?.length) {
+              updatePendingAssistantMessage((msg) => ({
+                ...msg,
+                resolvedContext: {
+                  entityIds: event.entityIds || [],
+                  labels: event.labels || [],
+                  kind: event.kind || 'context',
+                  confidence: event.confidence || 'high',
+                },
+              }));
+              continue;
+            }
+
+            if (event.type === 'brief_compiled' && event.summary) {
+              updatePendingAssistantMessage((msg) => ({ ...msg, executionBriefSummary: event.summary }));
+              continue;
+            }
+
+            if (event.type === 'progress_update') {
+              const routed = routeAgentProgressEvent(progressEventRouter, event);
+              progressEventRouter = routed.router;
+              if (routed.events.length > 0) {
+                updatePendingAssistantMessage((msg) => applyAgentRunProgressEvents(
+                  msg,
+                  routed.events as AgentRunProgressEvent[],
+                ));
+              }
+              continue;
+            }
+
             if (event.type === 'intent_resolved') {
-              if (event.intent === 'chat') {
-                updatePendingAssistantMessage((msg) => ({ ...msg, agentProgressStage: undefined }));
+              const intent = event.intent || 'chat';
+              const routed = routeAgentProgressEvent(progressEventRouter, {
+                type: 'intent_resolved',
+                intent,
+              });
+              progressEventRouter = routed.router;
+              updatePendingAssistantMessage((msg) => applyAgentRunProgressEvents(msg, [
+                { type: 'intent_resolved', intent },
+                ...(routed.events as AgentRunProgressEvent[]),
+              ]));
+              if (effectiveAgentClarification) {
+                resolveAgentClarificationMessage(effectiveAgentClarification.request.id);
               }
               continue;
             }
 
             if (event.type === 'routing_start') {
-              updatePendingAssistantMessage((msg) => ({ ...msg, agentProgressStage: 'understanding' }));
               continue;
             }
 
             if (event.type === 'clarification_required') {
-              updatePendingAssistantMessage((msg) => ({ ...msg, agentProgressStage: undefined }));
+              const requestPayload = event.request;
+              if (
+                requestPayload?.id
+                && requestPayload.taskId
+                && requestPayload.question
+                && requestPayload.dimension
+                && event.state
+              ) {
+                const clarificationPayload: AgentClarificationPayload = {
+                  request: {
+                    id: requestPayload.id,
+                    taskId: requestPayload.taskId,
+                    question: requestPayload.question,
+                    dimension: requestPayload.dimension,
+                    options: Array.isArray(requestPayload.options) ? requestPayload.options : [],
+                    allowCustom: true,
+                    allowProceed: true,
+                    failed: requestPayload.failed,
+                  },
+                  state: event.state,
+                };
+                updatePendingAssistantMessage((msg) => ({
+                  ...msg,
+                  content: event.message || requestPayload.question || '需要补充一项关键信息。',
+                  taskStatus: undefined,
+                  agentClarification: clarificationPayload,
+                  agentClarificationDismissed: false,
+                  agentClarificationResolved: false,
+                }));
+                setPendingAgentClarification(clarificationPayload);
+                setAgentClarificationSelectedOptionId('');
+                setAgentClarificationCustomText('');
+                setShowAgentClarificationModal(true);
+              }
               continue;
             }
 
@@ -9075,18 +9453,11 @@ export default function AIWorkspace() {
               continue;
             }
 
-            if (event.type === 'prompt_optimization_start') {
-              updatePendingAssistantMessage((msg) => ({ ...msg, agentProgressStage: 'optimizing' }));
-              continue;
-            }
-
-            if (event.type === 'prompt_optimization_done') {
-              updatePendingAssistantMessage((msg) => ({ ...msg, agentProgressStage: 'rendering' }));
-              continue;
-            }
-
-            if (event.type === 'tool_update') {
-              updatePendingAssistantMessage((msg) => ({ ...msg, agentProgressStage: 'rendering' }));
+            if (
+              event.type === 'prompt_optimization_start'
+              || event.type === 'prompt_optimization_done'
+              || event.type === 'tool_update'
+            ) {
               continue;
             }
 
@@ -9095,7 +9466,6 @@ export default function AIWorkspace() {
                 ...msg,
                 content: event.request?.message || '此操作需要你的确认。',
                 taskStatus: undefined,
-                agentProgressStage: undefined,
                 agentConfirmation: event.request?.confirmationId && event.request?.toolName
                   ? { confirmationId: event.request.confirmationId, toolName: event.request.toolName }
                   : undefined,
@@ -9121,23 +9491,47 @@ export default function AIWorkspace() {
               setActiveSkillJobId(event.result.jobId);
               setActiveSkillJobType(skillType);
               setActiveSkillJobStatus({ completed, failed, total, items });
-              updatePendingAssistantMessage((msg) => ({
+              activeSkillJobMessageIdRef.current = assistantId;
+              updateChatMessageById(assistantId, (msg) => applyAgentRunProgressEvents({
                 ...msg,
                 content: `已启动 ${total} 个${skillType === 'brand' ? '品牌物料' : '视觉素材'}任务。`,
                 taskStatus: 'running',
-                agentProgressStage: undefined,
                 agentConfirmation: undefined,
-              }));
+              }, [
+                { type: 'assets_pending', count: total },
+                { type: 'assets_progress', total, succeeded: completed, failed },
+              ]));
+              continue;
+            }
+
+            if (event.type === 'tool_result' && event.result?.kind === 'image_generation') {
+              const requestStats = event.result.requestStats && typeof event.result.requestStats === 'object'
+                ? event.result.requestStats as Record<string, unknown>
+                : {};
+              generatedAssetFailureCount = typeof requestStats.failed === 'number'
+                ? Math.max(0, requestStats.failed)
+                : 0;
+              const resolvedImageOptions = event.result.resolvedImageOptions && typeof event.result.resolvedImageOptions === 'object'
+                ? event.result.resolvedImageOptions as Record<string, unknown>
+                : {};
+              generatedAssetModel = typeof event.result.model === 'string'
+                ? event.result.model
+                : typeof resolvedImageOptions.model === 'string'
+                  ? resolvedImageOptions.model
+                  : generatedAssetModel;
               continue;
             }
 
             if (event.type === 'assistant_delta' && event.delta) {
-              updatePendingAssistantMessage((msg) => ({ ...msg, agentProgressStage: undefined }));
               if (event.channel === 'reasoning') {
-                setChatMessages(prev => prev.map((msg) => msg.id === assistantId
-                  ? { ...msg, reasoningContent: `${msg.reasoningContent || ''}${event.delta || ''}` }
-                  : msg));
+                continue;
               } else {
+                if (event.model) {
+                  updatePendingAssistantMessage((msg) => ({
+                    ...msg,
+                    model: msg.model || event.model,
+                  }));
+                }
                 enqueueStreamDelta(assistantId, event.delta);
               }
               continue;
@@ -9146,93 +9540,107 @@ export default function AIWorkspace() {
             if (event.type === 'client_action' && event.action?.type === 'add_generated_assets') {
               const actionRunId = event.action.runId || agentRunId;
               const assets = (event.action.assets || []).filter(
-                (asset): asset is { src: string; naturalWidth?: number; naturalHeight?: number } => Boolean(asset.src)
+                (asset): asset is { src: string; naturalWidth?: number; naturalHeight?: number; model?: string } => Boolean(asset.src)
               );
               const freshAssets = assets.filter((asset) => {
                 const key = `${actionRunId}:${asset.src}`;
                 if (processedAgentActionsRef.current.has(key)) return false;
                 processedAgentActionsRef.current.add(key);
+                processedAgentActionKeysForRun.add(key);
                 return true;
               });
               if (freshAssets.length > 0) {
-                let loadedAssetCount = 0;
-                const imageMessages: ChatMessage[] = freshAssets.map((asset, index) => ({
-                  id: `${assistantId}-asset-${index}-${Date.now()}`,
-                  role: 'assistant',
-                  content: '',
-                  imageUrl: asset.src,
-                  imageName: 'agent-generated-image',
+                updateChatMessageById(assistantId, (msg) => updateAgentRunProgress(msg, {
+                  type: 'assets_pending',
+                  count: freshAssets.length + generatedAssetFailureCount,
                 }));
-                setChatMessages(prev => [...prev, ...imageMessages]);
-                setImageCount((prev) => prev + freshAssets.length);
-                freshAssets.forEach((asset, index) => {
-                  const img = new window.Image();
-                  img.crossOrigin = 'anonymous';
-                  img.onload = () => {
-                    const naturalWidth = asset.naturalWidth || img.width;
-                    const naturalHeight = asset.naturalHeight || img.height;
+                const preloadedAssets = await preloadGeneratedAssets(freshAssets, { timeoutMs: 15_000 });
+                if (
+                  currentSessionIdRef.current !== generationSessionId
+                  || generateAbortRef.current !== controller
+                  || controller.signal.aborted
+                ) {
+                  for (const asset of freshAssets) {
+                    const key = `${actionRunId}:${asset.src}`;
+                    processedAgentActionsRef.current.delete(key);
+                    processedAgentActionKeysForRun.delete(key);
+                  }
+                  continue;
+                }
+                const loadedAssets = preloadedAssets.fulfilled;
+                preloadedAssets.failed.forEach(({ asset }) => {
+                  const key = `${actionRunId}:${asset.src}`;
+                  processedAgentActionsRef.current.delete(key);
+                  processedAgentActionKeysForRun.delete(key);
+                });
+                const preloadFailureCount = preloadedAssets.failed.length;
+                if (loadedAssets.length > 0) {
+                  const firstImageNumber = nextGeneratedImageNumber;
+                  nextGeneratedImageNumber += loadedAssets.length;
+                  const resolvedModel = event.action.model
+                    || loadedAssets.find(({ asset }) => asset.model)?.asset.model
+                    || generatedAssetModel
+                    || selectedImageModelId;
+                  const imageMessages: ChatMessage[] = loadedAssets.map(({ asset }, index) => ({
+                    id: `${assistantId}-asset-${index}-${Date.now()}`,
+                    role: 'assistant',
+                    content: '',
+                    imageUrl: asset.src,
+                    imageName: `image ${firstImageNumber + index}`,
+                    model: asset.model || resolvedModel,
+                  }));
+                  const canvasItems = loadedAssets.map(({ asset, naturalWidth, naturalHeight }, index) => {
                     const displaySize = getConstrainedImageDisplaySize(naturalWidth, naturalHeight);
                     const spawnPosition = getSpawnPosition(displaySize, index, currentViewport);
-                    const item = createImageCanvasItem({
-                      id: `${actionRunId}-asset-${index}`,
+                    return createImageCanvasItem({
+                      id: `${actionRunId}-asset-${Date.now()}-${index}`,
                       src: asset.src,
                       naturalWidth,
                       naturalHeight,
                       x: spawnPosition.x,
                       y: spawnPosition.y,
                     });
-                    appendGeneratedImageHistoryForSession(generationSessionId, [
-                      createGeneratedImageHistoryEntry({
-                        src: asset.src,
-                        naturalWidth,
-                        naturalHeight,
-                        source: 'chat',
-                        messageId: imageMessages[index]?.id,
-                      }),
-                    ]);
-                    recordCurrentCanvasUndoSnapshot();
-                    setItems(prev => [...prev, item]);
-                    loadedAssetCount += 1;
-                    if (loadedAssetCount === freshAssets.length) {
-                      updatePendingAssistantMessage((msg) => ({
-                        ...msg,
-                        content: '✨ 已完成设计生成',
-                        taskStatus: undefined,
-                        agentProgressStage: 'completed',
-                      }));
-                    }
-                  };
-                  img.onerror = () => {
-                    processedAgentActionsRef.current.delete(`${actionRunId}:${asset.src}`);
-                    updatePendingAssistantMessage((msg) => ({
-                      ...msg,
-                      content: '图片已生成，但加载到画布失败。',
-                      taskStatus: 'failed',
-                      agentProgressStage: 'failed',
-                    }));
-                  };
-                  img.src = asset.src;
-                });
+                  });
+                  appendGeneratedImageHistoryForSession(
+                    generationSessionId,
+                    loadedAssets.map(({ asset, naturalWidth, naturalHeight }, index) => createGeneratedImageHistoryEntry({
+                      src: asset.src,
+                      naturalWidth,
+                      naturalHeight,
+                      source: 'chat',
+                      messageId: imageMessages[index]?.id,
+                    })),
+                  );
+                  recordCurrentCanvasUndoSnapshot();
+                  setChatMessages(prev => [...prev, ...imageMessages]);
+                  setItems(prev => [...prev, ...canvasItems]);
+                  setImageCount((prev) => prev + loadedAssets.length);
+                }
+                updateChatMessageById(assistantId, (msg) => updateAgentRunProgress(msg, {
+                  type: 'assets_settled',
+                  succeeded: loadedAssets.length,
+                  failed: generatedAssetFailureCount + preloadFailureCount,
+                }));
               }
               continue;
             }
 
             if (event.type === 'agent_error') {
-              updatePendingAssistantMessage((msg) => ({ ...msg, agentProgressStage: 'failed' }));
+              updatePendingAssistantMessage((msg) => ({
+                ...updateAgentRunProgress(msg, { type: 'agent_error' }),
+                taskStatus: 'failed',
+              }));
               throw new Error(event.message || event.error || 'Agent 运行失败');
+            }
+
+            if (event.type === 'agent_done') {
+              updatePendingAssistantMessage((msg) => updateAgentRunProgress(msg, { type: 'agent_done' }));
+              continue;
             }
 
             if (event.type === 'delta' && event.content) {
               const channel = event.channel || 'content';
-              if (channel === 'reasoning') {
-                setChatMessages(prev => prev.map((msg) => {
-                  if (msg.id !== assistantId) return msg;
-                  return {
-                    ...msg,
-                    reasoningContent: `${msg.reasoningContent || ''}${event.content || ''}`,
-                  };
-                }));
-              } else {
+              if (channel !== 'reasoning') {
                 enqueueStreamDelta(assistantId, event.content);
               }
               continue;
@@ -9258,15 +9666,7 @@ export default function AIWorkspace() {
             };
             if (event.type === 'delta' && event.content) {
               const channel = event.channel || 'content';
-              if (channel === 'reasoning') {
-                setChatMessages(prev => prev.map((msg) => {
-                  if (msg.id !== assistantId) return msg;
-                  return {
-                    ...msg,
-                    reasoningContent: `${msg.reasoningContent || ''}${event.content || ''}`,
-                  };
-                }));
-              } else {
+              if (channel !== 'reasoning') {
                 enqueueStreamDelta(assistantId, event.content);
               }
             }
@@ -9412,7 +9812,7 @@ export default function AIWorkspace() {
       if (error instanceof Error && error.name === 'AbortError') {
         updateActiveStreamMessageStatus('cancelled', '任务已终止');
         updatePendingAssistantMessage((msg) => ({
-          ...msg,
+          ...updateAgentRunProgress(msg, { type: 'agent_error' }),
           taskStatus: 'cancelled',
           content: '任务已终止',
         }));
@@ -9420,17 +9820,30 @@ export default function AIWorkspace() {
       }
 
       updateActiveStreamMessageStatus('failed', '生成失败，请重试');
-      updatePendingAssistantMessage((msg) => ({
-        ...msg,
-        taskStatus: 'failed',
-        content: `生成失败: ${error instanceof Error ? error.message : '未知错误'}`,
-      }));
+      updatePendingAssistantMessage((msg) => generationMode === 'agent'
+        ? {
+            ...updateAgentRunProgress(msg, { type: 'agent_error' }),
+            taskStatus: 'failed',
+            content: `生成失败: ${error instanceof Error ? error.message : '未知错误'}`,
+          }
+        : {
+            ...msg,
+            taskStatus: 'failed',
+            content: `生成失败: ${error instanceof Error ? error.message : '未知错误'}`,
+          });
     } finally {
       stopStreamTypewriter();
-      generateAbortRef.current = null;
-      setIsGenerating(false);
-      if (!activeSkillJobId) {
-        pendingAssistantMessageIdRef.current = null;
+      for (const key of processedAgentActionKeysForRun) {
+        processedAgentActionsRef.current.delete(key);
+      }
+      if (!runController || generateAbortRef.current === runController) {
+        if (runController) generateAbortRef.current = null;
+        if (!activeSkillJobMessageIdRef.current) {
+          setIsGenerating(false);
+          if (pendingAssistantMessageIdRef.current === assistantPlaceholderId) {
+            pendingAssistantMessageIdRef.current = null;
+          }
+        }
       }
     }
   };
@@ -9489,6 +9902,35 @@ export default function AIWorkspace() {
     selectedImageCardPanelSize,
   ]);
 
+  const openAgentProposalModal = (proposal: AgentProposal) => {
+    setPendingAgentProposal(proposal);
+    setShowAgentProposalModal(true);
+    setChatMessages((prev) => prev.map((message) => message.agentProposal?.id === proposal.id
+      ? { ...message, agentProposalDismissed: false }
+      : message));
+  };
+
+  const closeAgentProposalModal = () => {
+    if (pendingAgentProposal) {
+      setChatMessages((prev) => prev.map((message) => message.agentProposal?.id === pendingAgentProposal.id
+        ? { ...message, agentProposalDismissed: true }
+        : message));
+    }
+    setShowAgentProposalModal(false);
+  };
+
+  const submitAgentProposal = (proposal: AgentProposal, option: AgentProposal['options'][number]) => {
+    setChatMessages((prev) => prev.map((message) => message.agentProposal?.id === proposal.id
+      ? { ...message, agentProposalResolved: true, agentProposalDismissed: false }
+      : message));
+    setPendingAgentProposal(null);
+    setShowAgentProposalModal(false);
+    void handleGenerate({
+      input: `选择 ${option.label}，按该方案继续执行。`,
+      selectedContextEntityIds: [option.entityId],
+    });
+  };
+
   const openSkillChoiceModal = (choice: SkillChoicePayload) => {
     setPendingSkillChoice(choice);
     setShowSkillChoiceModal(true);
@@ -9528,6 +9970,89 @@ export default function AIWorkspace() {
     void handleGenerate({
       input: option.submitText,
       skill: activeSkill || { id: 'brand', label: '品牌识别系统' },
+    });
+  };
+
+  const openAgentClarificationModal = (clarification: AgentClarificationPayload) => {
+    setPendingAgentClarification(clarification);
+    setAgentClarificationSelectedOptionId('');
+    setAgentClarificationCustomText('');
+    setShowAgentClarificationModal(true);
+    setChatMessages((prev) => prev.map((message) => message.agentClarification?.request.id === clarification.request.id
+      ? { ...message, agentClarificationDismissed: false }
+      : message));
+  };
+
+  const closeAgentClarificationModal = () => {
+    if (pendingAgentClarification) {
+      setChatMessages((prev) => prev.map((message) =>
+        message.agentClarification?.request.id === pendingAgentClarification.request.id
+          ? { ...message, agentClarificationDismissed: true }
+          : message));
+    }
+    setShowAgentClarificationModal(false);
+  };
+
+  const resolveAgentClarificationMessage = (requestId: string) => {
+    setChatMessages((prev) => prev.map((message) =>
+      message.agentClarification?.request.id === requestId
+        ? {
+            ...message,
+            agentClarificationResolved: true,
+            agentClarificationDismissed: false,
+          }
+        : message));
+  };
+
+  const submitAgentClarification = (proceedWithCurrent = false) => {
+    const clarification = pendingAgentClarification;
+    if (!clarification || isGenerating) return;
+    const selectedOption = clarification.request.options.find(
+      (option) => option.id === agentClarificationSelectedOptionId
+    );
+    const customText = agentClarificationCustomText.trim();
+    if (!proceedWithCurrent && !selectedOption && !customText) return;
+    const answer = proceedWithCurrent
+      ? '按当前信息开始制作，其余创作细节由 Agent 决定。'
+      : [selectedOption?.answer, customText].filter(Boolean).join('；');
+    const response: AgentClarificationResponse = {
+      requestId: clarification.request.id,
+      ...(selectedOption ? { selectedOptionId: selectedOption.id } : {}),
+      ...(customText ? { customText } : {}),
+      ...(proceedWithCurrent ? { proceedWithCurrent: true } : {}),
+    };
+    setChatMessages((prev) => prev.map((message) =>
+      message.agentClarification?.request.id === clarification.request.id
+        ? {
+            ...message,
+            agentClarificationResolved: false,
+            agentClarificationDismissed: true,
+          }
+        : message));
+    setPendingAgentClarification(null);
+    setShowAgentClarificationModal(false);
+    setAgentClarificationSelectedOptionId('');
+    setAgentClarificationCustomText('');
+    void handleGenerate({
+      input: answer,
+      agentClarification: clarification,
+      agentClarificationResponse: response,
+    });
+  };
+
+  const retryAgentClarification = () => {
+    const clarification = pendingAgentClarification;
+    if (!clarification || isGenerating) return;
+    resolveAgentClarificationMessage(clarification.request.id);
+    setPendingAgentClarification(null);
+    setShowAgentClarificationModal(false);
+    void handleGenerate({
+      input: '重新分析需求',
+      agentClarification: clarification,
+      agentClarificationResponse: {
+        requestId: clarification.request.id,
+        retry: true,
+      },
     });
   };
 
@@ -11277,6 +11802,7 @@ export default function AIWorkspace() {
   useEffect(() => {
     if (!activeSkillJobId) return;
 
+    const skillJobMessageId = activeSkillJobMessageIdRef.current;
     let stopped = false;
     let pollCount = 0;
     let timer: ReturnType<typeof setTimeout> | null = null;
@@ -11293,14 +11819,17 @@ export default function AIWorkspace() {
             stopped = true;
             const errorPayload = await response.json().catch(() => ({}));
             const reason = typeof errorPayload?.error === 'string' ? errorPayload.error : '任务不存在';
-            updatePendingAssistantMessage((msg) => ({
-              ...msg,
-              content: `⚠️ 任务状态丢失（${reason}），请重新发起一次出图。`,
-              taskStatus: 'failed',
-            }));
+            if (skillJobMessageId) {
+              updateChatMessageById(skillJobMessageId, (msg) => ({
+                ...updateAgentRunProgress(msg, { type: 'agent_error' }),
+                content: `⚠️ 任务状态丢失（${reason}），请重新发起一次出图。`,
+                taskStatus: 'failed',
+              }));
+            }
             setActiveSkillJobId(null);
             setActiveSkillJobType(null);
             setIsGenerating(false);
+            activeSkillJobMessageIdRef.current = null;
             pendingAssistantMessageIdRef.current = null;
             return;
           }
@@ -11317,6 +11846,14 @@ export default function AIWorkspace() {
           total: data.total,
           items: data.items,
         });
+        if (skillJobMessageId) {
+          updateChatMessageById(skillJobMessageId, (msg) => updateAgentRunProgress(msg, {
+            type: 'assets_progress',
+            total: data.total,
+            succeeded: data.completed,
+            failed: data.failed,
+          }));
+        }
 
         const skillPrefix = `${activeSkillJobType || 'logo'}:`;
         const skillLabel = activeSkillJobType === 'brand' ? '品牌物料' : 'VI 素材';
@@ -11425,14 +11962,21 @@ export default function AIWorkspace() {
             summaryText = `❌ 生成失败，请重试`;
           }
           
-          updatePendingAssistantMessage((msg) => ({
-            ...msg,
-            content: summaryText,
-            taskStatus: data.status === 'failed' ? 'failed' : data.status === 'cancelled' ? 'cancelled' : 'completed',
-          }));
+          if (skillJobMessageId) {
+            updateChatMessageById(skillJobMessageId, (msg) => ({
+              ...updateAgentRunProgress(msg, {
+                type: 'assets_settled',
+                succeeded: data.completed,
+                failed: Math.max(data.failed, data.total - data.completed - data.failed),
+              }),
+              content: summaryText,
+              taskStatus: data.status === 'failed' ? 'failed' : data.status === 'cancelled' ? 'cancelled' : 'completed',
+            }));
+          }
           setActiveSkillJobId(null);
           setActiveSkillJobType(null);
           setIsGenerating(false);
+          activeSkillJobMessageIdRef.current = null;
           pendingAssistantMessageIdRef.current = null;
           return;
         }
@@ -13122,8 +13666,11 @@ export default function AIWorkspace() {
           {chatMessages.length > 0 && (
             <div ref={chatContainerRef} className="panel-scrollbar flex-1 overflow-y-auto px-6 py-4">
               <div className="space-y-4">
-                {chatMessages.map((msg) => (
-                <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                {chatMessages.map((msg) => {
+                  const isAgentProgressMessage = msg.role === 'assistant'
+                    && shouldShowAgentRunProgress(msg.agentRunProgress);
+                  return (
+                    <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                   {msg.role === 'user' ? (
                     <div className="flex flex-col items-end max-w-[90%]">
                       {msg.skill && (
@@ -13179,8 +13726,8 @@ export default function AIWorkspace() {
                       </button>
                     </div>
                   ) : (
-                    <div className="workspace-message-assistant group relative max-w-[90%] rounded-[22px] px-3.5 py-3">
-                      {msg.content && !(msg.content === '...' && msg.taskStatus === 'running') && (
+                    <div className={`group relative max-w-[90%] ${isAgentProgressMessage ? 'py-1' : 'workspace-message-assistant rounded-[22px] px-3.5 py-3'}`}>
+                      {!isAgentProgressMessage && msg.content && !(msg.content === '...' && msg.taskStatus === 'running') && (
                         <button
                           type="button"
                           onPointerDown={(e) => {
@@ -13210,55 +13757,94 @@ export default function AIWorkspace() {
                           )}
                         </button>
                       )}
-                      {msg.agentProgressStage && msg.agentProgressStage !== 'completed' && (
-                        <div className="mb-2 space-y-1 py-0.5 text-[11px]" role="status" aria-live="polite">
-                          {[
-                            { id: 'understanding', label: '🧠 AI 正在理解你的设计意图…' },
-                            { id: 'optimizing', label: '🎨 正在优化构图、材质与光影语言…' },
-                            { id: 'rendering', label: '🚀 正在渲染高分辨率画面…' },
-                          ].map((step, index, steps) => {
-                            const currentIndex = Math.max(0, steps.findIndex((item) => item.id === msg.agentProgressStage));
-                            const isCurrent = step.id === msg.agentProgressStage;
-                            const isComplete = index < currentIndex;
-                            return (
-                              <div
-                                key={step.id}
-                                className={`flex items-center gap-2 transition-opacity ${
-                                  isCurrent
-                                    ? 'workspace-text-primary animate-pulse motion-reduce:animate-none'
-                                    : isComplete
-                                      ? 'workspace-text-muted opacity-60'
-                                      : 'workspace-text-muted opacity-30'
-                                }`}
-                              >
-                                <span>{step.label}</span>
-                                {isComplete && <span aria-hidden="true">✓</span>}
-                              </div>
-                            );
-                          })}
-                          {msg.agentProgressStage === 'failed' && (
-                            <div className="flex items-center gap-2 text-red-600 dark:text-red-300">
-                              <span>生成流程中断，请重试。</span>
+                      {msg.resolvedContext && (
+                        <div className="workspace-token-chip mb-2 inline-flex items-center gap-1 rounded-full px-2 py-1 text-[11px]">
+                          <span aria-hidden="true">🔗</span>
+                          <span>{`已采用：${msg.resolvedContext.labels.join('、')}`}</span>
+                        </div>
+                      )}
+                      {isAgentProgressMessage && msg.agentRunProgress && (
+                        <div
+                          className="space-y-1 py-0.5 text-[13px] leading-5"
+                          role="status"
+                          aria-live="polite"
+                        >
+                          {msg.agentRunProgress.steps.map((step) => (
+                            <div
+                              key={`${step.stepId}:${step.toolCallId || ''}`}
+                              className={`agent-progress-enter flex min-h-7 items-center gap-2.5 ${
+                                step.status === 'failed'
+                                  ? 'text-red-600 dark:text-red-300'
+                                  : step.status === 'completed'
+                                    ? 'workspace-text-muted'
+                                    : 'workspace-text-primary'
+                              }`}
+                            >
+                              <span className="w-3 flex-none text-center text-[12px]" aria-hidden="true">
+                                {getAgentProgressMarker(step.status)}
+                              </span>
+                              <span>{formatAgentProgressLabel(step)}</span>
+                            </div>
+                          ))}
+                          {['completed', 'warning', 'failed'].includes(msg.agentRunProgress.outcome) && (
+                            <div className={`agent-progress-enter flex min-h-7 items-center gap-2.5 ${
+                              msg.agentRunProgress.outcome === 'failed'
+                                ? 'text-red-600 dark:text-red-300'
+                                : msg.agentRunProgress.outcome === 'warning'
+                                  ? 'text-amber-600 dark:text-amber-300'
+                                  : 'workspace-text-primary'
+                            }`}>
+                              <span className="w-3 flex-none text-center text-[12px]" aria-hidden="true">
+                                {getAgentProgressMarker(msg.agentRunProgress.outcome)}
+                              </span>
+                              <span>
+                                {getAgentProgressCompletionLabel(msg.agentRunProgress)}
+                              </span>
+                              {msg.agentRunProgress.outcome === 'failed' && (
                               <button
                                 type="button"
-                                className="workspace-control-chip rounded-md px-2 py-0.5 text-[11px]"
+                                className="workspace-control-chip ml-1 rounded-md px-2 py-0.5 text-[11px]"
                                 onClick={() => {
                                   const messageIndex = chatMessages.findIndex((item) => item.id === msg.id);
                                   const sourceMessage = [...chatMessages.slice(0, messageIndex)]
                                     .reverse()
                                     .find((item) => item.role === 'user');
-                                  if (sourceMessage) {
-                                    void handleGenerate({ input: sourceMessage.content, skill: sourceMessage.skill });
+                                  if (sourceMessage && !isGenerating) {
+                                    if (sourceMessage.agentClarificationResponsePayload) {
+                                      void handleGenerate({
+                                        input: sourceMessage.content,
+                                        skill: sourceMessage.skill,
+                                        agentClarification: sourceMessage.agentClarificationResponsePayload.clarification,
+                                        agentClarificationResponse: sourceMessage.agentClarificationResponsePayload.response,
+                                      });
+                                      return;
+                                    }
+                                    void handleGenerate({
+                                      input: sourceMessage.content,
+                                      skill: sourceMessage.skill,
+                                    });
                                   }
                                 }}
                               >
-                                重试
+                                {msg.agentRunProgress.intent === 'image' ? '重试生成' : '重试'}
                               </button>
+                              )}
                             </div>
                           )}
                         </div>
                       )}
-                      {msg.taskStatus && (
+                      {isAgentProgressMessage && msg.content && (
+                        <div className="workspace-message-assistant mt-2 rounded-[22px] px-3.5 py-3">
+                          <MarkdownMessage
+                            content={msg.content}
+                            onPointerDown={handleAssistantSelectablePointerDown}
+                            onMouseDown={handleAssistantSelectableMouseDown}
+                            onClick={handleAssistantSelectableClick}
+                          />
+                          {msg.model && <div className="mt-1.5 text-xs text-zinc-500">模型: {msg.model}</div>}
+                        </div>
+                      )}
+                      {!isAgentProgressMessage && msg.taskStatus && (
                         <div className="mb-1.5">
                           {msg.taskStatus === 'queued' && (
                             <span className="workspace-status-pill inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px]">排队中</span>
@@ -13274,21 +13860,7 @@ export default function AIWorkspace() {
                           )}
                         </div>
                       )}
-                      {msg.reasoningContent && (
-                        <details className="mb-1.5 text-[11px] text-zinc-500">
-                          <summary className="cursor-pointer select-none">模型推理</summary>
-                          <div
-                            data-assistant-selectable="true"
-                            className="assistant-selectable relative z-[1] mt-0.5 pointer-events-auto"
-                            onPointerDown={handleAssistantSelectablePointerDown}
-                            onMouseDown={handleAssistantSelectableMouseDown}
-                            onClick={handleAssistantSelectableClick}
-                          >
-                            <p className="whitespace-pre-wrap">{msg.reasoningContent}</p>
-                          </div>
-                        </details>
-                      )}
-                      {msg.content === '...' && msg.taskStatus === 'running' ? (
+                      {!isAgentProgressMessage && (msg.content === '...' && msg.taskStatus === 'running' ? (
                         <p className="text-sm whitespace-pre-wrap inline-flex items-center gap-1" aria-label="加载中">
                           <span className="w-1.5 h-1.5 rounded-full bg-zinc-400 animate-bounce [animation-delay:0ms]" />
                           <span className="w-1.5 h-1.5 rounded-full bg-zinc-400 animate-bounce [animation-delay:150ms]" />
@@ -13305,7 +13877,7 @@ export default function AIWorkspace() {
                             />
                           </div>
                         )
-                      )}
+                      ))}
                       {msg.agentConfirmation && (
                         <div className="mt-2 flex items-center gap-2">
                           <button
@@ -13345,6 +13917,28 @@ export default function AIWorkspace() {
                           </button>
                         </div>
                       )}
+                      {msg.agentProposal?.requiresSelection && !msg.agentProposalResolved && (
+                        <div className="mt-2.5">
+                          <button
+                            type="button"
+                            onClick={() => openAgentProposalModal(msg.agentProposal as AgentProposal)}
+                            className="workspace-control-chip inline-flex items-center rounded-full px-3 py-1 text-xs"
+                          >
+                            选择方案
+                          </button>
+                        </div>
+                      )}
+                      {msg.agentClarification && !msg.agentClarificationResolved && (
+                        <div className="mt-2.5">
+                          <button
+                            type="button"
+                            onClick={() => openAgentClarificationModal(msg.agentClarification as AgentClarificationPayload)}
+                            className="workspace-control-chip inline-flex items-center rounded-full px-3 py-1 text-xs"
+                          >
+                            重新回答
+                          </button>
+                        </div>
+                      )}
                       {msg.imageName && <div className="mb-1.5 text-sm font-medium text-zinc-200">{msg.imageName}</div>}
                       {msg.imageUrl && (
                         <Image
@@ -13357,11 +13951,177 @@ export default function AIWorkspace() {
                           className="h-auto w-full rounded-lg"
                         />
                       )}
-                      {msg.model && <div className="mt-1.5 text-xs text-zinc-500">模型: {msg.model}</div>}
+                      {!isAgentProgressMessage && msg.model && <div className="mt-1.5 text-xs text-zinc-500">模型: {msg.model}</div>}
                     </div>
                   )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
+          {showAgentProposalModal && pendingAgentProposal && (
+            <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/20 px-4">
+              <div
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="agent-proposal-title"
+                className="agent-clarification-panel flex max-h-[80vh] w-full max-w-md flex-col rounded-[24px] border border-[var(--workspace-border)] bg-[var(--workspace-surface-elevated)] p-5 outline-none"
+              >
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <div id="agent-proposal-title" className="text-base font-semibold">{pendingAgentProposal.title}</div>
+                    <p className="workspace-text-muted mt-1 text-sm leading-5">选择一个方案后，Agent 会使用完整 Brief 继续执行。</p>
+                  </div>
+                  <button
+                    type="button"
+                    aria-label="关闭方案选择"
+                    onClick={closeAgentProposalModal}
+                    className="workspace-chat-icon-control flex h-8 w-8 flex-none items-center justify-center rounded-lg"
+                  >
+                    <X size={15} />
+                  </button>
                 </div>
-                ))}
+                <div className="panel-scrollbar mt-4 space-y-2 overflow-y-auto">
+                  {pendingAgentProposal.options.map((option) => (
+                    <button
+                      key={option.entityId}
+                      type="button"
+                      onClick={() => submitAgentProposal(pendingAgentProposal, option)}
+                      className="w-full rounded-xl border border-[var(--workspace-border)] px-3 py-2.5 text-left transition-colors hover:bg-[var(--workspace-control-hover)]"
+                    >
+                      <span className="block text-sm font-medium">{`${option.index}. ${option.label}`}</span>
+                      {option.summary && <span className="workspace-text-muted mt-0.5 block text-xs leading-4">{option.summary}</span>}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {showAgentClarificationModal && pendingAgentClarification && (
+            <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/20 px-4">
+              <div
+                ref={agentClarificationDialogRef}
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="agent-clarification-title"
+                tabIndex={-1}
+                onKeyDown={(event) => {
+                  if (event.key === 'Escape') closeAgentClarificationModal();
+                }}
+                className="agent-clarification-panel w-full max-w-md rounded-[24px] border border-[var(--workspace-border)] bg-[var(--workspace-surface-elevated)] p-5 outline-none"
+              >
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <div id="agent-clarification-title" className="text-base font-semibold">
+                      {pendingAgentClarification.request.failed ? '需要你的决定' : '确认一个关键方向'}
+                    </div>
+                    <p className="workspace-text-muted mt-1 whitespace-pre-wrap text-sm leading-5">
+                      {pendingAgentClarification.request.question}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    aria-label="关闭需求澄清"
+                    onClick={closeAgentClarificationModal}
+                    className="workspace-chat-icon-control flex h-8 w-8 flex-none items-center justify-center rounded-lg"
+                  >
+                    <X size={15} />
+                  </button>
+                </div>
+
+                {!pendingAgentClarification.request.failed && (
+                  <>
+                    <div className="mt-4 space-y-2" role="radiogroup" aria-label="Agent 建议方向">
+                      {pendingAgentClarification.request.options.map((option) => {
+                        const selected = agentClarificationSelectedOptionId === option.id;
+                        return (
+                          <button
+                            key={option.id}
+                            type="button"
+                            role="radio"
+                            aria-checked={selected}
+                            onClick={() => setAgentClarificationSelectedOptionId(option.id)}
+                            className={`w-full rounded-xl border px-3 py-2.5 text-left transition-colors ${
+                              selected
+                                ? 'border-[var(--workspace-text-primary)] bg-[var(--workspace-control-hover)]'
+                                : 'border-[var(--workspace-border)] hover:bg-[var(--workspace-control-hover)]'
+                            }`}
+                          >
+                            <span className="block text-sm font-medium">{option.label}</span>
+                            {option.description && (
+                              <span className="workspace-text-muted mt-0.5 block text-xs leading-4">{option.description}</span>
+                            )}
+                          </button>
+                        );
+                      })}
+                      <button
+                        type="button"
+                        role="radio"
+                        aria-checked={agentClarificationSelectedOptionId === 'custom'}
+                        onClick={() => setAgentClarificationSelectedOptionId('custom')}
+                        className={`w-full rounded-xl border px-3 py-2.5 text-left text-sm font-medium transition-colors ${
+                          agentClarificationSelectedOptionId === 'custom'
+                            ? 'border-[var(--workspace-text-primary)] bg-[var(--workspace-control-hover)]'
+                            : 'border-[var(--workspace-border)] hover:bg-[var(--workspace-control-hover)]'
+                        }`}
+                      >
+                        自定义
+                      </button>
+                    </div>
+
+                    <label className="mt-4 block text-xs font-medium" htmlFor="agent-clarification-custom">
+                      {agentClarificationSelectedOptionId === 'custom' ? '自定义方向' : '补充或调整（可选）'}
+                    </label>
+                    <textarea
+                      id="agent-clarification-custom"
+                      value={agentClarificationCustomText}
+                      onChange={(event) => {
+                        setAgentClarificationCustomText(event.target.value);
+                        if (!agentClarificationSelectedOptionId) setAgentClarificationSelectedOptionId('custom');
+                      }}
+                      placeholder="输入你希望调整的方向…"
+                      rows={3}
+                      className="panel-scrollbar mt-2 w-full resize-none rounded-xl border border-[var(--workspace-border)] bg-transparent px-3 py-2.5 text-sm outline-none focus:border-[var(--workspace-text-muted)]"
+                    />
+                  </>
+                )}
+
+                <div className="mt-5 flex flex-wrap items-center justify-end gap-2">
+                  {pendingAgentClarification.request.failed && (
+                    <button
+                      type="button"
+                      onClick={retryAgentClarification}
+                      className="workspace-control-chip rounded-lg px-3 py-2 text-xs font-medium"
+                    >
+                      重新分析需求
+                    </button>
+                  )}
+                  {!['creative_direction', 'context_reference'].includes(pendingAgentClarification.request.dimension) && (
+                    <button
+                      type="button"
+                      onClick={() => submitAgentClarification(true)}
+                      className="workspace-control-chip rounded-lg px-3 py-2 text-xs font-medium"
+                    >
+                      按当前信息开始制作
+                    </button>
+                  )}
+                  {!pendingAgentClarification.request.failed && (
+                    <button
+                      type="button"
+                      disabled={
+                        (!agentClarificationSelectedOptionId && !agentClarificationCustomText.trim())
+                        || (agentClarificationSelectedOptionId === 'custom' && !agentClarificationCustomText.trim())
+                      }
+                      onClick={() => submitAgentClarification(false)}
+                      className="rounded-lg bg-[var(--workspace-text-primary)] px-4 py-2 text-xs font-medium text-[var(--workspace-surface)] disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      确认并开始生成
+                    </button>
+                  )}
+                </div>
               </div>
             </div>
           )}
@@ -13794,16 +14554,20 @@ export default function AIWorkspace() {
                             <div className="rounded-xl border border-[var(--workspace-border)] p-2.5">
                               <div className="workspace-text-muted mb-2 text-[10px] font-medium">画幅比例</div>
                               <div className="grid grid-cols-3 gap-1">
-                                {ASPECT_RATIOS.map((option) => (
+                                {ASPECT_RATIOS
+                                  .filter((option) => generationMode !== 'agent' || option.id !== 'auto')
+                                  .map((option) => (
                                   <button
                                     key={option.id}
                                     type="button"
-                                    onClick={() => setImageAspectRatio(option.id)}
-                                    className={`workspace-menu-item rounded-lg px-2 py-1.5 text-[11px] ${imageAspectRatio === option.id ? 'is-selected' : ''}`}
+                                    onClick={() => generationMode === 'agent'
+                                      ? setAgentImageAspectRatio(option.id)
+                                      : setImageAspectRatio(option.id)}
+                                    className={`workspace-menu-item rounded-lg px-2 py-1.5 text-[11px] ${activeChatImageAspectRatio === option.id ? 'is-selected' : ''}`}
                                   >
                                     {option.name}
                                   </button>
-                                ))}
+                                  ))}
                               </div>
                             </div>
                           )}

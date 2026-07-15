@@ -3,18 +3,59 @@ import { randomUUID } from 'node:crypto';
 import { POST as generatePost } from '../generate/route';
 import { chat, chatStream } from '../../lib/api-client';
 import { optimizeImagePrompt } from '../../lib/agent/image-pipeline.mjs';
+import { resolveAgentConversationIntent } from '../../lib/agent/prompt-optimizer.mjs';
 import {
   listSkillManifests,
   loadSkillContent,
 } from '../../lib/agent/skill-registry.mjs';
 import { buildMainAgentMessages } from '../../lib/agent/main-agent.mjs';
 import { routeAgentRequest } from '../../lib/agent/skill-router.mjs';
-import { runAgentLoop } from '../../lib/agent/agent-loop.mjs';
+import {
+  applyClarificationResponse,
+  isPotentialDesignExecutionRequest,
+  resolveBriefClarification,
+  shouldAskClarification,
+} from '../../lib/agent/brief-clarifier.mjs';
+import {
+  createAgentProgressTracker,
+  createAgentToolResultEvents,
+  createAgentToolResultViews,
+  runAgentLoop,
+} from '../../lib/agent/agent-loop.mjs';
 import { createAgentToolRegistry, executeAgentTool, getAgentModelTools } from '../../lib/agent/tool-registry.mjs';
 import { createSkillJob, getSkillJob, toJobSummary } from '../../lib/skill-jobs';
 import { readProviderRegistry } from '../../lib/provider-config.mjs';
 import { resolveProviderModelSelection } from '../../lib/provider-model-selection.mjs';
-import type { AgentEvent } from '../../lib/agent/events';
+import { createLogger } from '../../lib/logger';
+import { buildProviderImageOptionProfiles } from '../../lib/image-provider-option-profiles.mjs';
+import {
+  buildAgentImageGenerationRequests,
+  normalizeAgentImageCount,
+} from '../../lib/agent/image-options.mjs';
+import {
+  buildCanvasImageGenerationFailureMessage,
+  resolveCanvasImageTaskExecutionMode,
+  settleCanvasImageGenerationRequests,
+} from '../../lib/workspace-session-view.mjs';
+import {
+  compileExecutionBrief,
+  ensureOptimizedPromptCoverage,
+  parseAgentProposalBlock,
+  resolveContextReference,
+} from '../../lib/agent/context-reference.mjs';
+import type {
+  AgentContextEntity,
+  AgentContextResolution,
+  ExecutionBrief,
+} from '../../lib/agent/context-reference.types';
+import type {
+  AgentClarificationRequest,
+  AgentClarificationState,
+  AgentEvent,
+  AgentProgressPhase,
+  AgentProgressStatus,
+  AgentProgressStepId,
+} from '../../lib/agent/events';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
@@ -26,6 +67,10 @@ const CONFIRMATION_TTL_MS = 10 * 60 * 1000;
 const encoder = new TextEncoder();
 
 type ConfirmationRecord = {
+  operationId: string;
+  skillSource: 'manual' | 'auto' | null;
+  lastSequence: number;
+  progressToolCallId?: string;
   skillId: string | null;
   toolName: string;
   toolArgs: Record<string, unknown>;
@@ -34,6 +79,9 @@ type ConfirmationRecord = {
   referenceImages: string[];
   canvasContext?: Record<string, unknown>;
   imageOptions?: AgentRequestBody['imageOptions'];
+  optimizePrompt?: boolean;
+  generationBrief?: string;
+  executionBrief?: ExecutionBrief;
   expiresAt: number;
   execution?: Promise<Record<string, unknown>>;
   result?: Record<string, unknown>;
@@ -41,9 +89,12 @@ type ConfirmationRecord = {
 
 const agentGlobals = globalThis as unknown as {
   __agentConfirmationStore?: Map<string, ConfirmationRecord>;
+  __agentClarificationSubmissionStore?: Map<string, number>;
 };
 const confirmationStore = agentGlobals.__agentConfirmationStore || new Map<string, ConfirmationRecord>();
 agentGlobals.__agentConfirmationStore = confirmationStore;
+const clarificationSubmissionStore = agentGlobals.__agentClarificationSubmissionStore || new Map<string, number>();
+agentGlobals.__agentClarificationSubmissionStore = clarificationSubmissionStore;
 
 type AgentRequestBody = {
   runId?: string;
@@ -51,6 +102,9 @@ type AgentRequestBody = {
   messages?: Array<{ role: 'user' | 'assistant'; content: string }>;
   activeSkillId?: string;
   referenceImages?: string[];
+  contextEntities?: AgentContextEntity[];
+  selectedContextEntityIds?: string[];
+  executionBrief?: ExecutionBrief;
   canvasContext?: Record<string, unknown>;
   chatOptions?: {
     providerId?: string;
@@ -65,6 +119,15 @@ type AgentRequestBody = {
     count?: number;
   };
   confirmation?: { confirmationId?: string; toolName?: string };
+  clarificationState?: AgentClarificationState;
+  clarificationRequest?: AgentClarificationRequest;
+  clarificationResponse?: {
+    requestId?: string;
+    selectedOptionId?: string;
+    customText?: string;
+    proceedWithCurrent?: boolean;
+    retry?: boolean;
+  };
 };
 
 function writeEvent(controller: ReadableStreamDefaultController, event: AgentEvent) {
@@ -73,6 +136,25 @@ function writeEvent(controller: ReadableStreamDefaultController, event: AgentEve
 
 function getLatestUserMessage(messages: AgentRequestBody['messages']) {
   return [...(messages || [])].reverse().find((message) => message.role === 'user')?.content?.trim() || '';
+}
+
+const INTERNAL_IMAGE_PLACEHOLDER_PATTERN = /\[(?:Generated image[^\]]*omitted from chat history|聊天记录中省略了代理生成的图像)\]/gi;
+const UNBACKED_EXECUTION_CLAIM_PATTERN = /(?:(?:图片|图像|封面|海报|视觉稿|任务|素材)[^。！!\n]{0,18}(?:已(?:经)?|正在)[^。！!\n]{0,12}(?:启动|开始|提交|生成|制作|出图)|(?:已(?:经)?|现已|正在)[^。！!\n]{0,8}为(?:您|你)[^。！!\n]{0,12}(?:启动|开始|提交|生成|制作|出图)|已(?:经)?(?:启动|开始|提交)(?:生成|制作|出图))/i;
+
+function sanitizeAgentResponseContent(content: string, hasMutationEvidence: boolean) {
+  const cleaned = String(content || '')
+    .replace(INTERNAL_IMAGE_PLACEHOLDER_PATTERN, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  if (
+    hasMutationEvidence
+    || !UNBACKED_EXECUTION_CLAIM_PATTERN.test(cleaned)
+    || /(?:尚未|还未|没有|并未|未实际)(?:[^。！!\n]{0,8})(?:启动|开始|生成)/i.test(cleaned)
+  ) {
+    return cleaned;
+  }
+  const proposal = cleaned.replace(UNBACKED_EXECUTION_CLAIM_PATTERN, '建议按以下方向生成');
+  return `生成尚未实际启动。${proposal ? `\n\n${proposal}` : ''}\n\n请确认是否按当前方向开始生成，或补充你希望调整的主体与场景。`;
 }
 
 function generatedAssetsFromResult(payload: any) {
@@ -96,6 +178,12 @@ function pruneConfirmationStore(now = Date.now()) {
   }
 }
 
+function pruneClarificationSubmissionStore(now = Date.now()) {
+  for (const [key, expiresAt] of clarificationSubmissionStore) {
+    if (expiresAt <= now) clarificationSubmissionStore.delete(key);
+  }
+}
+
 export async function POST(request: NextRequest) {
   const body = await request.json().catch(() => null) as AgentRequestBody | null;
   if (!body || !Array.isArray(body.messages)) {
@@ -109,6 +197,34 @@ export async function POST(request: NextRequest) {
   if (!latestUserMessage) {
     return NextResponse.json({ error: 'A user message is required' }, { status: 400 });
   }
+  const conversationIntent = resolveAgentConversationIntent(
+    body.messages,
+    Boolean(body.referenceImages?.length),
+  );
+  const contextEntities = Array.isArray(body.contextEntities)
+    ? body.contextEntities.filter((entity) => entity && typeof entity.id === 'string').slice(-200)
+    : [];
+  const selectedContextEntityIds = Array.isArray(body.selectedContextEntityIds)
+    ? body.selectedContextEntityIds.filter((id): id is string => typeof id === 'string').slice(0, 8)
+    : [];
+  const initialContextResolution = resolveContextReference({
+    userMessage: latestUserMessage,
+    entities: contextEntities,
+    selectedEntityIds: selectedContextEntityIds,
+  });
+  const initialBriefSource = conversationIntent.brief || latestUserMessage;
+  const initialExecutionBrief = initialContextResolution.status === 'resolved'
+    ? compileExecutionBrief({ userMessage: latestUserMessage, contextResolution: initialContextResolution })
+    : compileExecutionBrief({
+        userMessage: body.executionBrief?.plainText || initialBriefSource,
+        contextResolution: { status: 'none', detected: false, confidence: 'none', candidates: [], entityIds: [] },
+      });
+  const contextLogger = createLogger('api.agent.context', {
+    source: 'server',
+    route: '/api/agent',
+    requestId: runId,
+    topicId: body.topicId || 'default',
+  });
 
   let skillManifests;
   try {
@@ -121,6 +237,8 @@ export async function POST(request: NextRequest) {
   }
 
   const providers = (await readProviderRegistry()).providers;
+  const providerImageOptionProfiles = buildProviderImageOptionProfiles(providers);
+  const requestedImageCount = normalizeAgentImageCount(body.imageOptions?.count);
   const requestedChatModel = body.chatOptions?.model || process.env.AGENT_CHAT_MODEL || DEFAULT_AGENT_MODEL;
   const resolvedChatSelection = resolveProviderModelSelection({
     providers,
@@ -148,50 +266,224 @@ export async function POST(request: NextRequest) {
     async start(controller) {
       let toolCalls = 0;
       let turns = 0;
+      let skillSource: 'manual' | 'auto' | null = body.activeSkillId ? 'manual' : null;
       let intent: 'chat' | 'image' | 'skill_action' = 'chat';
       let selectedSkill = body.activeSkillId
         ? skillManifests.find((manifest) => manifest.id === body.activeSkillId) || null
         : null;
+      let contextResolution = structuredClone(initialContextResolution) as AgentContextResolution;
+      let executionBriefData = structuredClone(initialExecutionBrief) as ExecutionBrief;
+      let executionBrief = executionBriefData.plainText;
+      let executionReferenceImages = [...(body.referenceImages || [])];
+      let activeClarificationState = body.clarificationState
+        ? structuredClone(body.clarificationState)
+        : null;
+      let resumedClarification = false;
+      let proceedWithCurrentBrief = false;
+      let clarificationSubmissionKey: string | null = null;
+      const progressTracker = createAgentProgressTracker({
+        runId,
+        emit: (event) => writeEvent(controller, event as AgentEvent),
+      });
+      const writeProgress = (input: {
+        stepId: AgentProgressStepId;
+        phase: AgentProgressPhase;
+        status: AgentProgressStatus;
+        label: string;
+        toolCallId?: string;
+        toolName?: string;
+      }) => progressTracker.update(input);
+      const writeToolProgress = (
+        toolName: string,
+        status: 'active' | 'waiting' | 'completed' | 'failed',
+        toolCallId: string,
+      ) => {
+        const definitions: Record<string, {
+          stepId: AgentProgressStepId;
+          phase: AgentProgressPhase;
+          labels: Record<AgentProgressStatus, string>;
+        }> = {
+          generate_image: {
+            stepId: 'generate_image',
+            phase: 'generating',
+            labels: { active: '正在生成图片', waiting: '等待确认生成图片', completed: '图片生成完成', failed: '图片生成失败' },
+          },
+          get_canvas_context: {
+            stepId: 'canvas_context',
+            phase: 'reading',
+            labels: { active: '正在读取画布摘要', waiting: '等待读取画布', completed: '画布摘要读取完成', failed: '画布摘要读取失败' },
+          },
+          start_skill_job: {
+            stepId: 'skill_job',
+            phase: 'starting',
+            labels: { active: '正在启动 Skill 任务', waiting: '等待确认 Skill 任务', completed: 'Skill 任务已启动', failed: 'Skill 任务启动失败' },
+          },
+          get_skill_job: {
+            stepId: 'skill_job',
+            phase: 'checking',
+            labels: { active: '正在查询 Skill 任务', waiting: '等待查询 Skill 任务', completed: 'Skill 任务状态已更新', failed: 'Skill 任务查询失败' },
+          },
+        };
+        const definition = definitions[toolName] || {
+          stepId: 'tool',
+          phase: 'executing',
+          labels: { active: '正在执行工具', waiting: '等待确认工具', completed: '工具执行完成', failed: '工具执行失败' },
+        };
+        writeProgress({
+          stepId: definition.stepId,
+          phase: definition.phase,
+          status,
+          label: definition.labels[status],
+          toolCallId,
+          toolName,
+        });
+        if (status === 'active' && contextResolution.status === 'resolved') {
+          void contextLogger.info('context.execution', 'Resolved context entered tool execution', {
+            toolName,
+            entityIds: contextResolution.entityIds,
+          });
+        }
+      };
       const generateImagePayload = async (
-        prompt: string,
+        sourcePrompt: string,
         optimizePrompt = true,
         imageOptions = body.imageOptions,
         referenceImages = body.referenceImages,
+        generationPrompt = sourcePrompt,
       ) => {
-        const optimized = optimizePrompt && process.env.PROMPT_PIPELINE_AGENT_ENABLED !== '0'
+        if (optimizePrompt && process.env.PROMPT_PIPELINE_AGENT_ENABLED !== '0') {
+          writeProgress({ stepId: 'prompt_optimization', phase: 'optimizing', status: 'active', label: '正在优化图片提示词' });
+        }
+        const optimizedResult = optimizePrompt && process.env.PROMPT_PIPELINE_AGENT_ENABLED !== '0'
           ? await optimizeImagePrompt({
-              userPrompt: prompt,
+              userPrompt: generationPrompt,
               skillLabel: selectedSkill?.name,
               providerId: process.env.PROMPT_OPTIMIZER_PROVIDER_ID,
               optimizerModel: process.env.PROMPT_OPTIMIZER_MODEL || process.env.AGENT_CHAT_MODEL || DEFAULT_AGENT_MODEL,
               signal: runSignal,
               chatFn: chat,
             })
-          : { prompt, optimized: false };
-        const generationRequest = new NextRequest(new URL('/api/generate', request.url), {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          signal: runSignal,
-          body: JSON.stringify({
-            messages: [{ role: 'user', content: optimized.prompt }],
-            intent: 'image',
-            reference_images: referenceImages,
-            providerId: imageOptions?.providerId,
-            imageProviderId: imageOptions?.providerId,
-            model: imageOptions?.model,
-            aspect_ratio: imageOptions?.aspectRatio,
-            size: imageOptions?.size,
-            quality: imageOptions?.quality,
-            n: imageOptions?.count,
-            cancelWithRequest: true,
-          }),
-        });
-        const generationResponse = await generatePost(generationRequest);
-        const generationPayload = await generationResponse.json().catch(() => null);
-        if (!generationResponse.ok || generationPayload?.status !== 'completed') {
-          throw new Error(generationPayload?.error || `Image generation failed (${generationResponse.status})`);
+          : { prompt: generationPrompt, optimized: false };
+        const optimized = {
+          ...optimizedResult,
+          prompt: ensureOptimizedPromptCoverage(optimizedResult.prompt, executionBriefData),
+        };
+        if (optimizePrompt && process.env.PROMPT_PIPELINE_AGENT_ENABLED !== '0') {
+          writeProgress({ stepId: 'prompt_optimization', phase: 'optimizing', status: 'completed', label: '图片提示词优化完成' });
         }
-        return generationPayload;
+        const resolvedImageSelection = resolveProviderModelSelection({
+          providers,
+          purpose: 'image',
+          requestedProviderId: imageOptions?.providerId,
+          requestedModel: imageOptions?.model,
+        });
+        if (!resolvedImageSelection.providerId || !resolvedImageSelection.model) {
+          throw new Error('No enabled image provider and model are configured');
+        }
+        const resolvedProvider = providers.find((provider) => provider.id === resolvedImageSelection.providerId);
+        const allowedModelIds = Array.isArray(resolvedProvider?.imageModels)
+          ? resolvedProvider.imageModels
+          : [resolvedImageSelection.model];
+        const { options: resolvedImageOptions, requests } = buildAgentImageGenerationRequests({
+          prompt: sourcePrompt,
+          generationPrompt: optimized.prompt,
+          referenceImages,
+          providerId: resolvedImageSelection.providerId,
+          modelId: resolvedImageSelection.model,
+          allowedModelIds,
+          providerImageOptionProfiles,
+          selectedAspectRatio: imageOptions?.aspectRatio,
+          requestedSize: imageOptions?.size,
+          requestedQuality: imageOptions?.quality,
+          requestedCount: imageOptions?.count,
+        });
+        if (requests.length === 0) throw new Error('Image generation request is empty');
+        const executionMode = resolveCanvasImageTaskExecutionMode({
+          modelId: resolvedImageSelection.model,
+          size: resolvedImageOptions.size,
+          count: resolvedImageOptions.count,
+        });
+        const taskResults = await settleCanvasImageGenerationRequests({
+          requests,
+          executionMode,
+          runTask: async (requestBody: Record<string, unknown>) => {
+            const generationRequest = new NextRequest(new URL('/api/generate', request.url), {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              signal: runSignal,
+              body: JSON.stringify({
+                ...requestBody,
+                cancelWithRequest: true,
+              }),
+            });
+            const generationResponse = await generatePost(generationRequest);
+            const generationPayload = await generationResponse.json().catch(() => null);
+            if (!generationResponse.ok || generationPayload?.status !== 'completed') {
+              throw new Error(generationPayload?.error || `Image generation failed (${generationResponse.status})`);
+            }
+            return generationPayload;
+          },
+        });
+        const successfulPayloads = taskResults.flatMap((result: PromiseSettledResult<any>) =>
+          result.status === 'fulfilled' ? [result.value] : []
+        );
+        const requestFailureCount = taskResults.filter(
+          (result: PromiseSettledResult<any>) => result.status === 'rejected'
+        ).length;
+        if (successfulPayloads.length === 0) {
+          const firstFailure = taskResults.find((result: PromiseSettledResult<any>) => result.status === 'rejected');
+          throw firstFailure?.status === 'rejected'
+            ? firstFailure.reason
+            : new Error('Image generation returned no usable outputs');
+        }
+        const assets = successfulPayloads.flatMap((payload: any) => generatedAssetsFromResult(payload));
+        if (assets.length === 0) throw new Error('Image generation returned no usable assets');
+        const partialFailureMessage = buildCanvasImageGenerationFailureMessage({
+          requestedCount: requests.length,
+          completedCount: successfulPayloads.length,
+          requestFailureCount,
+        });
+        const payload = {
+          status: 'completed',
+          result: {
+            type: 'image',
+            outputs: assets.map((asset) => ({
+              localUrl: asset.src,
+              naturalWidth: asset.naturalWidth,
+              naturalHeight: asset.naturalHeight,
+            })),
+          },
+          optimized: optimized.optimized,
+          requestStats: {
+            requested: requests.length,
+            succeeded: successfulPayloads.length,
+            failed: requestFailureCount,
+          },
+          partialFailureMessage,
+          resolvedImageOptions: {
+            providerId: resolvedImageSelection.providerId,
+            model: resolvedImageSelection.model,
+            ...resolvedImageOptions,
+          },
+        };
+        return payload;
+      };
+      const writeResolvedImageOptionUpdate = (toolCallId: string, result: any) => {
+        const resolvedOptions = result?.resolvedImageOptions;
+        const updates = [];
+        if (resolvedOptions?.ratioFallback) {
+          updates.push(`当前模型不支持 ${resolvedOptions.requestedAspectRatio}，已使用 ${resolvedOptions.aspectRatio}`);
+        }
+        if (resolvedOptions?.sizeFallback) {
+          updates.push(`当前模型不支持 ${resolvedOptions.requestedSize}，已使用 ${resolvedOptions.size}`);
+        }
+        if (resolvedOptions?.qualityFallback) {
+          updates.push(`当前模型不支持 ${resolvedOptions.requestedQuality} 质量，已使用 ${resolvedOptions.quality}`);
+        }
+        if (result?.partialFailureMessage) updates.push(result.partialFailureMessage);
+        for (const message of updates) {
+          writeEvent(controller, { type: 'tool_update', toolCallId, message });
+        }
       };
       try {
         writeEvent(controller, { type: 'agent_start', runId });
@@ -209,10 +501,19 @@ export async function POST(request: NextRequest) {
           ) {
             throw new Error('Confirmation does not match this request');
           }
+          progressTracker.resume({
+            operationId: confirmationRecord.operationId,
+            lastSequence: confirmationRecord.lastSequence,
+          });
+          skillSource = confirmationRecord.skillSource;
           selectedSkill = confirmationRecord.skillId
             ? skillManifests.find((manifest) => manifest.id === confirmationRecord.skillId) || null
             : null;
           if (confirmationRecord.skillId && !selectedSkill) throw new Error('Confirmed skill is no longer available');
+          executionBriefData = confirmationRecord.executionBrief || compileExecutionBrief({
+            userMessage: confirmationRecord.generationBrief || confirmationRecord.userMessage,
+          });
+          executionBrief = executionBriefData.plainText;
           intent = confirmationRecord.toolName === 'generate_image' ? 'image' : 'skill_action';
           writeEvent(controller, { type: 'routing_start' });
           writeEvent(controller, { type: 'intent_resolved', intent });
@@ -221,22 +522,25 @@ export async function POST(request: NextRequest) {
               type: 'skill_selected',
               skillId: selectedSkill.id,
               label: selectedSkill.name,
-              source: 'manual',
+              source: skillSource || 'auto',
             });
           }
-          const toolCallId = `${runId}-${confirmationRecord.toolName}-confirmed`;
+          const toolCallId = confirmationRecord.progressToolCallId
+            || `${runId}-${confirmationRecord.toolName}-confirmed`;
+          writeToolProgress(confirmationRecord.toolName, 'active', toolCallId);
           writeEvent(controller, { type: 'tool_start', toolCallId, toolName: confirmationRecord.toolName });
           if (!confirmationRecord.execution && !confirmationRecord.result) {
             confirmationRecord.execution = (async () => {
               if (confirmationRecord.toolName === 'generate_image') {
                 const prompt = typeof confirmationRecord.toolArgs.prompt === 'string'
                   ? confirmationRecord.toolArgs.prompt
-                  : confirmationRecord.userMessage;
+                  : confirmationRecord.generationBrief || confirmationRecord.userMessage;
                 return generateImagePayload(
-                  prompt,
-                  confirmationRecord.toolArgs.optimizePrompt !== false,
+                  confirmationRecord.generationBrief || confirmationRecord.userMessage,
+                  confirmationRecord.optimizePrompt !== false,
                   confirmationRecord.imageOptions,
                   confirmationRecord.referenceImages,
+                  prompt,
                 );
               }
               const registry = createAgentToolRegistry({ createSkillJob, getSkillJob });
@@ -272,48 +576,237 @@ export async function POST(request: NextRequest) {
           confirmationRecord.result = result;
           confirmationRecord.execution = undefined;
           if (confirmationRecord.toolName === 'generate_image') {
-            const assets = generatedAssetsFromResult(result);
-            writeEvent(controller, { type: 'tool_result', toolCallId, result: { assets } });
-            if (assets.length > 0) {
-              writeEvent(controller, { type: 'client_action', action: { type: 'add_generated_assets', runId, assets } });
-            }
-          } else {
-            writeEvent(controller, { type: 'tool_result', toolCallId, result });
+            writeResolvedImageOptionUpdate(toolCallId, result);
           }
+          for (const event of createAgentToolResultEvents({
+            source: 'confirmed',
+            runId,
+            toolCallId,
+            toolName: confirmationRecord.toolName,
+            rawResult: result,
+          })) writeEvent(controller, event as AgentEvent);
+          writeToolProgress(confirmationRecord.toolName, 'completed', toolCallId);
           writeEvent(controller, { type: 'agent_done', stopReason: 'confirmed_tool_completed' });
           return;
         }
+        if (activeClarificationState?.operationId) {
+          progressTracker.resume({
+            operationId: activeClarificationState.operationId,
+            lastSequence: activeClarificationState.lastSequence,
+          });
+          skillSource = activeClarificationState.skillSource ?? skillSource;
+        }
+        if (!body.clarificationResponse && contextResolution.detected) {
+          writeProgress({ stepId: 'context_resolution', phase: 'resolving', status: 'active', label: '正在解析上下文引用' });
+          if (contextResolution.status === 'resolved') {
+            executionBriefData = compileExecutionBrief({ userMessage: latestUserMessage, contextResolution });
+            executionBrief = executionBriefData.plainText;
+            executionReferenceImages = Array.from(new Set([
+              ...executionReferenceImages,
+              ...executionBriefData.referenceImageUrls,
+            ]));
+            const resolvedIntent = contextResolution.candidates[0]?.intent;
+            if (resolvedIntent === 'image' || resolvedIntent === 'skill_action') intent = resolvedIntent;
+            const labels = contextResolution.candidates.map((candidate) => candidate.label).filter(Boolean);
+            writeProgress({
+              stepId: 'context_resolution',
+              phase: 'resolving',
+              status: 'completed',
+              label: `已解析引用：${labels.join('、')}`,
+            });
+            writeEvent(controller, {
+              type: 'context_resolved',
+              status: 'resolved',
+              confidence: contextResolution.confidence === 'medium' ? 'medium' : 'high',
+              entityIds: contextResolution.entityIds,
+              labels,
+              kind: contextResolution.candidates[0]?.kind || 'context',
+            });
+            writeEvent(controller, {
+              type: 'brief_compiled',
+              resolvedEntityIds: executionBriefData.resolvedEntityIds,
+              summary: labels.join('、') || '已整合当前需求',
+              mustPreserveCount: executionBriefData.mustPreserve.length,
+            });
+            void contextLogger.info('context.resolved', 'Agent context reference resolved', {
+              status: contextResolution.status,
+              confidence: contextResolution.confidence,
+              entityIds: contextResolution.entityIds,
+              kinds: contextResolution.candidates.map((candidate) => candidate.kind),
+            });
+          } else {
+            const candidates = contextResolution.candidates.slice(0, 4);
+            const taskId = randomUUID();
+            const request: AgentClarificationRequest = {
+              id: randomUUID(),
+              taskId,
+              question: candidates.length > 0
+                ? '我找到了多个可能的引用，请确认你想使用哪一个。'
+                : '我无法确定你引用的是哪个方案、图片或画布对象，请补充名称或重新选择。',
+              dimension: 'context_reference',
+              options: candidates.map((candidate) => ({
+                id: candidate.id,
+                label: candidate.label,
+                answer: candidate.brief,
+                description: candidate.summary,
+              })),
+              allowCustom: true,
+              allowProceed: true,
+            };
+            writeProgress({ stepId: 'context_resolution', phase: 'resolving', status: 'waiting', label: '等待确认引用对象' });
+            const checkpoint = progressTracker.snapshot();
+            writeEvent(controller, {
+              type: 'clarification_required',
+              message: request.question,
+              request,
+              state: {
+                taskId,
+                operationId: checkpoint.operationId,
+                skillSource,
+                lastSequence: checkpoint.lastSequence,
+                intent: candidates.every((candidate) => candidate.intent === 'skill_action') ? 'skill_action' : 'image',
+                originalRequest: latestUserMessage,
+                workingBrief: latestUserMessage,
+                askedDimensions: [],
+                answers: [],
+                referenceImages: executionReferenceImages,
+                contextCandidates: candidates,
+              },
+            });
+            writeEvent(controller, { type: 'agent_done', stopReason: 'context_reference_required' });
+            void contextLogger.info('context.waiting', 'Agent context reference requires user input', {
+              status: contextResolution.status,
+              confidence: contextResolution.confidence,
+              candidateIds: candidates.map((candidate) => candidate.id),
+            });
+            return;
+          }
+        }
+        writeProgress({ stepId: 'routing', phase: 'routing', status: 'active', label: '正在理解并路由请求' });
         writeEvent(controller, { type: 'routing_start' });
-        const routingDecision = await routeAgentRequest({
-          userMessage: latestUserMessage,
-          manifests: skillManifests,
-          manualSkillId: body.activeSkillId,
-          hasReferenceImages: Boolean(body.referenceImages?.length),
-          routerModel: resolvedRouterSelection.model,
-          providerId: resolvedRouterSelection.providerId || undefined,
-          signal: runSignal,
-          chatFn: chat,
-        });
-        selectedSkill = routingDecision.skillId
-          ? skillManifests.find((manifest) => manifest.id === routingDecision.skillId) || null
-          : null;
-        intent = routingDecision.intent === 'image' && selectedSkill && !selectedSkill.allowedTools.includes('generate_image')
-          ? 'chat'
-          : routingDecision.intent;
+        let routingDecision = null;
+        if (body.clarificationResponse && activeClarificationState && body.clarificationRequest) {
+          const retryClarification = body.clarificationResponse.retry === true;
+          const applied = applyClarificationResponse({
+            state: activeClarificationState,
+            request: body.clarificationRequest,
+            response: body.clarificationResponse,
+          });
+          if (!applied) throw new Error('Clarification response does not match the pending request');
+          pruneClarificationSubmissionStore();
+          const nextClarificationSubmissionKey = `${activeClarificationState.taskId}:${body.clarificationResponse.requestId}`;
+          if (clarificationSubmissionStore.has(nextClarificationSubmissionKey)) {
+            throw new Error('Clarification response has already been submitted');
+          }
+          clarificationSubmissionStore.set(nextClarificationSubmissionKey, Date.now() + CONFIRMATION_TTL_MS);
+          clarificationSubmissionKey = nextClarificationSubmissionKey;
+          activeClarificationState = applied.state;
+          executionBrief = activeClarificationState.workingBrief || activeClarificationState.originalRequest;
+          executionReferenceImages = [...(activeClarificationState.referenceImages || executionReferenceImages)];
+          const selectedContextEntity = body.clarificationRequest.dimension === 'context_reference'
+            ? [...(activeClarificationState.contextCandidates || []), ...contextEntities]
+                .find((entity) => entity.id === body.clarificationResponse?.selectedOptionId)
+            : null;
+          if (selectedContextEntity) {
+            contextResolution = {
+              status: 'resolved',
+              detected: true,
+              confidence: 'high',
+              candidates: [selectedContextEntity],
+              entityIds: [selectedContextEntity.id],
+            };
+            executionBriefData = compileExecutionBrief({ userMessage: latestUserMessage, contextResolution });
+            executionBrief = executionBriefData.plainText;
+            executionReferenceImages = Array.from(new Set([
+              ...executionReferenceImages,
+              ...executionBriefData.referenceImageUrls,
+            ]));
+            writeEvent(controller, {
+              type: 'context_resolved',
+              status: 'resolved',
+              confidence: 'high',
+              entityIds: [selectedContextEntity.id],
+              labels: [selectedContextEntity.label],
+              kind: selectedContextEntity.kind,
+            });
+            writeEvent(controller, {
+              type: 'brief_compiled',
+              resolvedEntityIds: [selectedContextEntity.id],
+              summary: selectedContextEntity.label,
+              mustPreserveCount: executionBriefData.mustPreserve.length,
+            });
+          } else {
+            executionBriefData = compileExecutionBrief({ userMessage: executionBrief });
+          }
+          proceedWithCurrentBrief = applied.proceedWithCurrent;
+          resumedClarification = true;
+          writeProgress({ stepId: 'clarification', phase: 'resuming', status: 'active', label: '正在应用补充信息' });
+          intent = activeClarificationState.intent;
+          selectedSkill = activeClarificationState.skillId
+            ? skillManifests.find((manifest) => manifest.id === activeClarificationState?.skillId) || null
+            : null;
+          if (activeClarificationState.skillId && !selectedSkill) {
+            throw new Error('The selected skill is no longer available; please restart the request');
+          }
+          if (selectedSkill && !skillSource) skillSource = body.activeSkillId ? 'manual' : 'auto';
+          if (retryClarification) executionBrief = activeClarificationState.workingBrief;
+          writeProgress({ stepId: 'clarification', phase: 'resuming', status: 'completed', label: '补充信息已应用' });
+        } else {
+          routingDecision = await routeAgentRequest({
+            userMessage: latestUserMessage,
+            manifests: skillManifests,
+            manualSkillId: body.activeSkillId,
+            hasReferenceImages: Boolean(body.referenceImages?.length),
+            routerModel: resolvedRouterSelection.model,
+            providerId: resolvedRouterSelection.providerId || undefined,
+            signal: runSignal,
+            chatFn: chat,
+          });
+          selectedSkill = routingDecision.skillId
+            ? skillManifests.find((manifest) => manifest.id === routingDecision.skillId) || null
+            : null;
+          skillSource = selectedSkill ? (body.activeSkillId ? 'manual' : 'auto') : null;
+          const resolvedContextIntent = contextResolution.status === 'resolved'
+            ? contextResolution.candidates[0]?.intent
+            : null;
+          const routedIntent = resolvedContextIntent === 'image' || resolvedContextIntent === 'skill_action'
+            ? resolvedContextIntent
+            : conversationIntent.inherited
+              ? conversationIntent.intent
+              : routingDecision.intent;
+          intent = routedIntent === 'image' && selectedSkill && !selectedSkill.allowedTools.includes('generate_image')
+            ? 'chat'
+            : routedIntent;
+          if (intent === 'chat' && !selectedSkill && isPotentialDesignExecutionRequest(latestUserMessage)) {
+            intent = 'image';
+          }
+        }
+        const selectedSkillMayExecute = Boolean(selectedSkill?.allowedTools?.some(
+          (toolName) => toolName === 'generate_image' || toolName === 'start_skill_job'
+        ));
+        const selectedSkillExecutionRequest = selectedSkillMayExecute
+          && (
+            conversationIntent.inherited
+            || (
+              /(生成|制作|设计|开始执行|开始制作|输出|出图)/i.test(executionBrief)
+              && !/(信息收集|访谈|分析|解释|点评|总结)/i.test(executionBrief)
+            )
+          );
+        if (intent === 'chat' && selectedSkillExecutionRequest) {
+          intent = 'skill_action';
+        }
+        writeProgress({ stepId: 'routing', phase: 'routing', status: 'completed', label: '请求路由完成' });
         writeEvent(controller, { type: 'intent_resolved', intent });
         if (selectedSkill) {
           writeEvent(controller, {
             type: 'skill_selected',
             skillId: selectedSkill.id,
             label: selectedSkill.name,
-            source: routingDecision.source === 'manual' ? 'manual' : 'auto',
+            source: skillSource || 'auto',
           });
         }
-        if (routingDecision.needsClarification && routingDecision.clarificationQuestion) {
-          writeEvent(controller, {
-            type: 'clarification_required',
-            message: routingDecision.clarificationQuestion,
-          });
+        if (intent === 'chat' && routingDecision?.needsClarification && routingDecision.clarificationQuestion) {
+          writeProgress({ stepId: 'clarification', phase: 'waiting_input', status: 'waiting', label: '等待补充关键信息' });
           writeEvent(controller, {
             type: 'assistant_delta',
             delta: routingDecision.clarificationQuestion,
@@ -324,37 +817,166 @@ export async function POST(request: NextRequest) {
           return;
         }
 
+        if (selectedSkill) {
+          writeProgress({ stepId: 'skill_loading', phase: 'loading', status: 'active', label: `正在加载 ${selectedSkill.name}` });
+        }
+        const skillContent = selectedSkill ? await loadSkillContent(selectedSkill.id) : '';
+        if (selectedSkill) {
+          writeProgress({ stepId: 'skill_loading', phase: 'loading', status: 'completed', label: `${selectedSkill.name} 已加载` });
+        }
+        const shouldRunClarifier = intent === 'image' || intent === 'skill_action';
+
+        if (shouldRunClarifier && !proceedWithCurrentBrief) {
+          writeProgress({ stepId: 'clarification', phase: 'analyzing', status: 'active', label: '正在检查需求完整性' });
+          const clarificationState: AgentClarificationState = activeClarificationState || {
+            taskId: randomUUID(),
+            operationId: progressTracker.snapshot().operationId,
+            skillSource,
+            lastSequence: progressTracker.snapshot().lastSequence,
+            intent: intent === 'skill_action' ? 'skill_action' : 'image',
+            ...(selectedSkill ? { skillId: selectedSkill.id } : {}),
+            originalRequest: executionBrief,
+            workingBrief: executionBrief,
+            askedDimensions: [],
+            answers: [],
+            referenceImages: executionReferenceImages,
+          };
+          const clarification = await resolveBriefClarification({
+            userMessage: executionBrief,
+            intent: clarificationState.intent,
+            skillContent,
+            referenceImageCount: executionReferenceImages.length,
+            state: clarificationState,
+            requireCreativeDirectionConfirmation: conversationIntent.needsDirectionConfirmation,
+            providerId: resolvedRouterSelection.providerId || undefined,
+            model: resolvedRouterSelection.model,
+            signal: runSignal,
+            chatFn: chat,
+          });
+
+          if (clarification.failed || !clarification.result) {
+            const failedState = {
+              ...clarificationState,
+              workingBrief: clarification.fallbackBrief || clarificationState.workingBrief,
+            };
+            const failedRequest: AgentClarificationRequest = {
+              id: randomUUID(),
+              taskId: failedState.taskId,
+              question: '暂时无法确认需求是否完整，你可以重新分析，或按当前信息开始制作。',
+              dimension: 'clarifier_failure',
+              options: [],
+              allowCustom: true,
+              allowProceed: true,
+              failed: true,
+            };
+            writeProgress({ stepId: 'clarification', phase: 'waiting_input', status: 'waiting', label: '等待补充需求信息' });
+            const failedCheckpoint = progressTracker.snapshot();
+            const resumableFailedState: AgentClarificationState = {
+              ...failedState,
+              operationId: failedCheckpoint.operationId,
+              skillSource,
+              lastSequence: failedCheckpoint.lastSequence,
+            };
+            writeEvent(controller, {
+              type: 'clarification_required',
+              message: failedRequest.question,
+              request: failedRequest,
+              state: resumableFailedState,
+            });
+            writeEvent(controller, { type: 'agent_done', stopReason: 'clarification_failed' });
+            return;
+          }
+
+          executionBrief = clarification.result.workingBrief;
+          if (shouldAskClarification({
+            result: clarification.result,
+            userMessage: clarificationState.workingBrief || clarificationState.originalRequest,
+            askedDimensions: clarificationState.askedDimensions,
+            referenceImageCount: executionReferenceImages.length,
+            requireCreativeDirectionConfirmation: conversationIntent.needsDirectionConfirmation,
+          })) {
+            const nextState: AgentClarificationState = {
+              ...clarificationState,
+              workingBrief: clarification.result.workingBrief,
+            };
+            const clarificationRequest: AgentClarificationRequest = {
+              id: randomUUID(),
+              taskId: nextState.taskId,
+              question: clarification.result.question!,
+              dimension: clarification.result.ambiguity!.dimension,
+              options: clarification.result.options || [],
+              allowCustom: true,
+              allowProceed: true,
+            };
+            writeProgress({ stepId: 'clarification', phase: 'waiting_input', status: 'waiting', label: '等待补充需求信息' });
+            const clarificationCheckpoint = progressTracker.snapshot();
+            const resumableNextState: AgentClarificationState = {
+              ...nextState,
+              operationId: clarificationCheckpoint.operationId,
+              skillSource,
+              lastSequence: clarificationCheckpoint.lastSequence,
+            };
+            writeEvent(controller, {
+              type: 'clarification_required',
+              message: clarificationRequest.question,
+              request: clarificationRequest,
+              state: resumableNextState,
+            });
+            writeEvent(controller, { type: 'agent_done', stopReason: 'clarification_required' });
+            return;
+          }
+          writeProgress({ stepId: 'clarification', phase: 'analyzing', status: 'completed', label: '需求信息已确认' });
+        } else if (resumedClarification && proceedWithCurrentBrief) {
+          writeProgress({ stepId: 'clarification', phase: 'resuming', status: 'completed', label: '已按当前信息继续' });
+        }
+
         if (intent === 'image' && !selectedSkill) {
           turns += 1;
+          writeProgress({ stepId: 'prompt_optimization', phase: 'optimizing', status: 'active', label: '正在优化图片提示词' });
           writeEvent(controller, { type: 'prompt_optimization_start' });
           const optimizerModel = process.env.PROMPT_OPTIMIZER_MODEL || process.env.AGENT_CHAT_MODEL || DEFAULT_AGENT_MODEL;
-          const optimized = process.env.PROMPT_PIPELINE_AGENT_ENABLED === '0'
-            ? { prompt: latestUserMessage, optimized: false, summary: '已保留你的原始设计要求' }
+          const optimizedResult = process.env.PROMPT_PIPELINE_AGENT_ENABLED === '0'
+            ? { prompt: executionBrief, optimized: false, summary: '已保留你的原始设计要求' }
             : await optimizeImagePrompt({
-                userPrompt: latestUserMessage,
+                userPrompt: executionBrief,
                 skillLabel: selectedSkill?.name,
                 providerId: process.env.PROMPT_OPTIMIZER_PROVIDER_ID,
                 optimizerModel,
                 signal: runSignal,
                 chatFn: chat,
               });
+          const optimized = {
+            ...optimizedResult,
+            prompt: ensureOptimizedPromptCoverage(optimizedResult.prompt, executionBriefData),
+          };
           writeEvent(controller, {
             type: 'prompt_optimization_done',
             summary: optimized.summary,
             optimized: optimized.optimized,
           });
+          writeProgress({ stepId: 'prompt_optimization', phase: 'optimizing', status: 'completed', label: '图片提示词优化完成' });
 
-          if ((body.imageOptions?.count || 1) > 1) {
+          if (requestedImageCount > 1) {
             const confirmationId = randomUUID();
+            const progressToolCallId = `${runId}-generate-image-confirmation`;
+            writeToolProgress('generate_image', 'waiting', progressToolCallId);
+            const confirmationCheckpoint = progressTracker.snapshot();
             confirmationStore.set(confirmationId, {
+              operationId: confirmationCheckpoint.operationId,
+              skillSource,
+              lastSequence: confirmationCheckpoint.lastSequence,
+              progressToolCallId,
               skillId: selectedSkill?.id || null,
               toolName: 'generate_image',
-              toolArgs: { prompt: optimized.prompt, optimizePrompt: false },
+              toolArgs: { prompt: optimized.prompt },
               allowedTools: ['generate_image'],
               userMessage: latestUserMessage,
-              referenceImages: [...(body.referenceImages || [])],
+              generationBrief: executionBrief,
+              executionBrief: structuredClone(executionBriefData),
+              referenceImages: [...executionReferenceImages],
               canvasContext: body.canvasContext ? structuredClone(body.canvasContext) : undefined,
-              imageOptions: body.imageOptions ? structuredClone(body.imageOptions) : undefined,
+              imageOptions: { ...structuredClone(body.imageOptions || {}), count: requestedImageCount },
+              optimizePrompt: false,
               expiresAt: Date.now() + CONFIRMATION_TTL_MS,
             });
             writeEvent(controller, {
@@ -362,7 +984,7 @@ export async function POST(request: NextRequest) {
               request: {
                 confirmationId,
                 toolName: 'generate_image',
-                message: `本次将生成 ${body.imageOptions?.count} 张图片，确认后继续。`,
+                message: `本次将生成 ${requestedImageCount} 张图片，确认后继续。`,
               },
             });
             writeEvent(controller, { type: 'agent_done', stopReason: 'awaiting_confirmation' });
@@ -374,36 +996,18 @@ export async function POST(request: NextRequest) {
           }
           toolCalls += 1;
           const toolCallId = `${runId}-generate-image-1`;
+          writeToolProgress('generate_image', 'active', toolCallId);
           writeEvent(controller, { type: 'tool_start', toolCallId, toolName: 'generate_image' });
           writeEvent(controller, { type: 'tool_update', toolCallId, message: '正在渲染高分辨率画面' });
 
           const toolRegistry = createAgentToolRegistry({
-            generateImage: async () => {
-              const generationRequest = new NextRequest(new URL('/api/generate', request.url), {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                signal: runSignal,
-                body: JSON.stringify({
-                  messages: [{ role: 'user', content: optimized.prompt }],
-                  intent: 'image',
-                  reference_images: body.referenceImages,
-                  providerId: body.imageOptions?.providerId,
-                  imageProviderId: body.imageOptions?.providerId,
-                  model: body.imageOptions?.model,
-                  aspect_ratio: body.imageOptions?.aspectRatio,
-                  size: body.imageOptions?.size,
-                  quality: body.imageOptions?.quality,
-                  n: body.imageOptions?.count,
-                  cancelWithRequest: true,
-                }),
-              });
-              const generationResponse = await generatePost(generationRequest);
-              const generationPayload = await generationResponse.json().catch(() => null);
-              if (!generationResponse.ok || generationPayload?.status !== 'completed') {
-                throw new Error(generationPayload?.error || `Image generation failed (${generationResponse.status})`);
-              }
-              return generationPayload;
-            },
+            generateImage: async () => generateImagePayload(
+              executionBrief,
+              false,
+              body.imageOptions,
+              executionReferenceImages,
+              optimized.prompt,
+            ),
           });
           const generationPayload = await executeAgentTool(toolRegistry, 'generate_image', {}, {
             allowedTools: selectedSkill?.allowedTools || ['generate_image', 'get_canvas_context'],
@@ -411,19 +1015,26 @@ export async function POST(request: NextRequest) {
           }) as any;
           const assets = generatedAssetsFromResult(generationPayload);
           if (assets.length === 0) throw new Error('Image generation returned no usable assets');
-          writeEvent(controller, { type: 'tool_result', toolCallId, result: { assets, optimized: optimized.optimized } });
-          writeEvent(controller, { type: 'client_action', action: { type: 'add_generated_assets', runId, assets } });
+          writeResolvedImageOptionUpdate(toolCallId, generationPayload);
+          for (const event of createAgentToolResultEvents({
+            source: 'direct',
+            runId,
+            toolCallId,
+            toolName: 'generate_image',
+            rawResult: generationPayload,
+          })) writeEvent(controller, event as AgentEvent);
+          writeToolProgress('generate_image', 'completed', toolCallId);
           writeEvent(controller, { type: 'agent_done', stopReason: 'image_generated' });
           return;
         }
 
         turns += 1;
-        const skillContent = selectedSkill ? await loadSkillContent(selectedSkill.id) : '';
         const chatMessages = buildMainAgentMessages({
           messages: body.messages,
           skillContent,
           canvasContext: body.canvasContext,
-          referenceImages: body.referenceImages,
+          referenceImages: executionReferenceImages,
+          resolvedBrief: shouldRunClarifier ? executionBrief : undefined,
         });
         const model = resolvedChatSelection.model!;
         const allowedTools = selectedSkill?.allowedTools || [];
@@ -433,12 +1044,20 @@ export async function POST(request: NextRequest) {
           generateImage: async (args: Record<string, unknown>) => {
             const prompt = typeof args.prompt === 'string' && args.prompt.trim()
               ? args.prompt.trim()
-              : latestUserMessage;
-            return generateImagePayload(prompt, true);
+              : executionBrief;
+            return generateImagePayload(
+              executionBrief,
+              true,
+              body.imageOptions,
+              executionReferenceImages,
+              prompt,
+            );
           },
         });
         const modelTools = getAgentModelTools(toolRegistry, allowedTools);
         if (modelTools.length > 0) {
+          const rawToolResults = new Map<string, unknown>();
+          writeProgress({ stepId: 'composing', phase: 'planning', status: 'active', label: '正在规划下一步操作' });
           const loopResult = await runAgentLoop({
             messages: chatMessages,
             tools: modelTools,
@@ -452,42 +1071,107 @@ export async function POST(request: NextRequest) {
               toolChoice: 'auto',
               signal: runSignal,
             }),
-            executeTool: (toolName, args) => {
-              if (toolName === 'generate_image' && (body.imageOptions?.count || 1) > 1) {
-                return Promise.resolve({
+            executeTool: async (toolName, args, context) => {
+              if (toolName === 'generate_image' && requestedImageCount > 1) {
+                return {
                   confirmationRequired: true,
                   toolName,
-                  message: `本次将生成 ${body.imageOptions?.count} 张图片，确认后继续。`,
-                });
+                  message: `本次将生成 ${requestedImageCount} 张图片，确认后继续。`,
+                };
               }
-              return executeAgentTool(toolRegistry, toolName, args, {
+              const rawResult = await executeAgentTool(toolRegistry, toolName, args, {
                 allowedTools,
                 confirmed: false,
                 canvasContext: body.canvasContext,
               });
+              rawToolResults.set(context.toolCallId, rawResult);
+              return rawResult;
             },
             isReadOnlyTool: (toolName) => toolRegistry.get(toolName)?.readOnly === true,
+            requireMutationTool: intent === 'image' || intent === 'skill_action',
+            serializeToolResultForModel: (toolName, result) => createAgentToolResultViews(toolName, result).modelResult,
+            serializeToolResultForPublic: (toolName, result) => createAgentToolResultViews(toolName, result).publicResult,
             onToolStart: ({ id, name }) => {
+              writeToolProgress(name, 'active', id);
               writeEvent(controller, { type: 'tool_start', toolCallId: id, toolName: name });
             },
             onToolResult: ({ id, name, result }) => {
+              const rawResult = rawToolResults.get(id);
               if (name === 'generate_image') {
-                const assets = generatedAssetsFromResult(result);
-                writeEvent(controller, { type: 'tool_result', toolCallId: id, result: { assets } });
-                if (assets.length > 0) {
-                  writeEvent(controller, {
-                    type: 'client_action',
-                    action: { type: 'add_generated_assets', runId, assets },
-                  });
-                }
-                return;
+                writeResolvedImageOptionUpdate(id, rawResult);
               }
-              writeEvent(controller, { type: 'tool_result', toolCallId: id, result });
+              for (const event of createAgentToolResultEvents({
+                source: 'loop',
+                runId,
+                toolCallId: id,
+                toolName: name,
+                rawResult: rawResult ?? result,
+              })) writeEvent(controller, event as AgentEvent);
+              writeToolProgress(name, 'completed', id);
             },
           });
+          writeProgress({ stepId: 'composing', phase: 'planning', status: 'completed', label: '操作规划完成' });
+          if (loopResult.stopReason === 'execution_required') {
+            const taskId = randomUUID();
+            const request: AgentClarificationRequest = {
+              id: randomUUID(),
+              taskId,
+              question: '生成尚未实际启动。是否按当前方向开始生成？',
+              dimension: 'execution_confirmation',
+              options: [
+                {
+                  id: 'confirm_execution',
+                  label: '按当前方向生成',
+                  answer: '确认按当前方向开始生成，并立即调用可用的生成工具。',
+                  description: '保持当前 Brief，真实启动生成。',
+                },
+                {
+                  id: 'revise_direction',
+                  label: '先调整方向',
+                  answer: '暂不生成，我要先调整主体、场景或其他关键方向。',
+                  description: '可在下方补充需要修改的内容。',
+                },
+              ],
+              allowCustom: true,
+              allowProceed: true,
+            };
+            writeProgress({ stepId: 'clarification', phase: 'waiting_input', status: 'waiting', label: '等待确认真实启动生成' });
+            const checkpoint = progressTracker.snapshot();
+            writeEvent(controller, {
+              type: 'clarification_required',
+              message: request.question,
+              request,
+              state: {
+                taskId,
+                operationId: checkpoint.operationId,
+                skillSource,
+                lastSequence: checkpoint.lastSequence,
+                intent: intent === 'skill_action' ? 'skill_action' : 'image',
+                ...(selectedSkill ? { skillId: selectedSkill.id } : {}),
+                originalRequest: executionBrief,
+                workingBrief: executionBrief,
+                askedDimensions: [],
+                answers: [],
+                referenceImages: executionReferenceImages,
+              },
+            });
+            writeEvent(controller, { type: 'agent_done', stopReason: 'awaiting_user_intent' });
+            return;
+          }
           if (loopResult.stopReason === 'confirmation_required') {
             const confirmationId = randomUUID();
+            const progressToolCallId = String(loopResult.confirmation?.toolCallId || `${runId}-confirmation`);
+            writeToolProgress(
+              String(loopResult.confirmation?.toolName || 'start_skill_job'),
+              'waiting',
+              progressToolCallId,
+            );
+            const confirmationCheckpoint = progressTracker.snapshot();
             confirmationStore.set(confirmationId, {
+              operationId: confirmationCheckpoint.operationId,
+              skillSource,
+              lastSequence: confirmationCheckpoint.lastSequence,
+              progressToolCallId,
               skillId: selectedSkill!.id,
               toolName: String(loopResult.confirmation?.toolName || 'start_skill_job'),
               toolArgs: (loopResult.confirmation?.arguments && typeof loopResult.confirmation.arguments === 'object')
@@ -495,9 +1179,12 @@ export async function POST(request: NextRequest) {
                 : {},
               allowedTools: [...allowedTools],
               userMessage: latestUserMessage,
-              referenceImages: [...(body.referenceImages || [])],
+              generationBrief: executionBrief,
+              executionBrief: structuredClone(executionBriefData),
+              referenceImages: [...executionReferenceImages],
               canvasContext: body.canvasContext ? structuredClone(body.canvasContext) : undefined,
-              imageOptions: body.imageOptions ? structuredClone(body.imageOptions) : undefined,
+              imageOptions: { ...structuredClone(body.imageOptions || {}), count: requestedImageCount },
+              optimizePrompt: true,
               expiresAt: Date.now() + CONFIRMATION_TTL_MS,
             });
             writeEvent(controller, {
@@ -511,17 +1198,29 @@ export async function POST(request: NextRequest) {
             writeEvent(controller, { type: 'agent_done', stopReason: 'awaiting_confirmation' });
             return;
           }
-          if (loopResult.content) {
+          writeProgress({ stepId: 'composing', phase: 'responding', status: 'active', label: '正在整理执行结果' });
+          const loopProposal = parseAgentProposalBlock(loopResult.content);
+          const safeLoopContent = sanitizeAgentResponseContent(
+            loopProposal.cleanContent,
+            loopResult.mutationToolCalls > 0,
+          );
+          if (loopProposal.proposal) {
+            writeEvent(controller, { type: 'proposal_presented', proposal: loopProposal.proposal });
+          }
+          if (safeLoopContent) {
             writeEvent(controller, {
               type: 'assistant_delta',
-              delta: loopResult.content,
+              delta: safeLoopContent,
               channel: 'content',
               model,
             });
           }
+          writeProgress({ stepId: 'composing', phase: 'responding', status: 'completed', label: '执行结果已整理' });
           writeEvent(controller, { type: 'agent_done', stopReason: loopResult.stopReason });
           return;
         }
+        writeProgress({ stepId: 'composing', phase: 'responding', status: 'active', label: '正在组织回复' });
+        let streamedContent = '';
         for await (const event of chatStream({
           providerId: resolvedChatSelection.providerId || undefined,
           model,
@@ -530,18 +1229,34 @@ export async function POST(request: NextRequest) {
           stream: true,
         })) {
           if (event.type === 'delta' && event.channel === 'content' && event.content) {
-            writeEvent(controller, {
-              type: 'assistant_delta',
-              delta: event.content,
-              channel: event.channel,
-              model,
-            });
+            streamedContent += event.content;
           }
         }
+        const streamedProposal = parseAgentProposalBlock(streamedContent);
+        const safeStreamedContent = sanitizeAgentResponseContent(streamedProposal.cleanContent, false);
+        if (streamedProposal.proposal) {
+          writeEvent(controller, { type: 'proposal_presented', proposal: streamedProposal.proposal });
+        }
+        if (safeStreamedContent) {
+          writeEvent(controller, {
+            type: 'assistant_delta',
+            delta: safeStreamedContent,
+            channel: 'content',
+            model,
+          });
+        }
+        writeProgress({ stepId: 'composing', phase: 'responding', status: 'completed', label: '回复已完成' });
         writeEvent(controller, { type: 'agent_done', stopReason: 'completed' });
       } catch (error) {
+        if (clarificationSubmissionKey) {
+          clarificationSubmissionStore.delete(clarificationSubmissionKey);
+        }
         const aborted = request.signal.aborted;
         const timedOut = timeoutSignal.aborted && !aborted;
+        progressTracker.settleActive(
+          'failed',
+          aborted ? '运行已取消' : timedOut ? '运行超时' : '运行失败',
+        );
         writeEvent(controller, {
           type: 'agent_error',
           stage: aborted ? 'cancelled' : timedOut ? 'timeout' : intent === 'image' ? 'image_pipeline' : 'chat',

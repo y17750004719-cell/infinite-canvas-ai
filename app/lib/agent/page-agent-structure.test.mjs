@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const source = fs.readFileSync(path.resolve(import.meta.dirname, '../../page.tsx'), 'utf8');
+const globalStyles = fs.readFileSync(path.resolve(import.meta.dirname, '../../globals.css'), 'utf8');
 const skillsIconPath = path.resolve(import.meta.dirname, '../../../public/icons/lovart-skills.svg');
 
 function controlIndex(id) {
@@ -20,17 +21,127 @@ test('agent mode posts to the agent route and handles agent events', () => {
   assert.match(source, /generationMode === 'agent' \? '\/api\/agent' : '\/api\/generate'/);
   assert.match(source, /routing_start/);
   assert.match(source, /clarification_required/);
+  assert.match(source, /agentClarification/);
+  assert.match(source, /agentClarificationResponse/);
+  assert.match(source, /按当前信息开始制作/);
   assert.match(source, /prompt_optimization_start/);
   assert.match(source, /prompt_optimization_done/);
   assert.match(source, /client_action/);
   assert.match(source, /agent_error/);
 });
 
-test('agent progress displays all emoji breadcrumb labels', () => {
-  assert.match(source, /🧠 AI 正在理解你的设计意图/);
-  assert.match(source, /🎨 正在优化构图、材质与光影语言/);
-  assert.match(source, /🚀 正在渲染高分辨率画面/);
-  assert.match(source, /✨ 已完成设计生成/);
+test('agent clarification modal is flat, editable, persistent, and accessible', () => {
+  assert.match(source, /showAgentClarificationModal/);
+  assert.match(source, /pendingAgentClarification/);
+  assert.match(source, /agentClarificationCustomText/);
+  assert.match(source, /role="dialog"/);
+  assert.match(source, /aria-modal="true"/);
+  assert.match(source, /重新回答/);
+  assert.match(source, /按当前信息开始制作/);
+  assert.match(source, /\['creative_direction', 'context_reference'\]\.includes/);
+  assert.match(source, /确认并开始生成/);
+  assert.match(source, /retry:\s*true/);
+  assert.match(source, /!options\?\.agentClarification/);
+  assert.match(source, /agentClarificationResponsePayload/);
+  assert.match(source, /agentClarification:\s*sourceMessage\.agentClarificationResponsePayload\.clarification/);
+  assert.doesNotMatch(source, /agent-clarification[^\n]*shadow/);
+});
+
+test('failed clarification submissions preserve their structured retry context', () => {
+  assert.match(source, /AGENT_RETRY_CONFIRMATION_PATTERN/);
+  assert.match(source, /latestConversationMessage\.agentRunProgress\?\.outcome === 'failed'/);
+  assert.match(source, /retrySourceMessage\?\.agentClarificationResponsePayload\?\.clarification/);
+  assert.match(source, /effectiveAgentClarificationResponse/);
+  assert.match(source, /agentClarificationResolved:\s*false/);
+  assert.match(source, /resolveAgentClarificationMessage\(effectiveAgentClarification\.request\.id\)/);
+  assert.match(source, /重试生成/);
+});
+
+test('agent proposals and context entities persist and submit stable selections', () => {
+  assert.match(source, /buildAgentContextEntities/);
+  assert.match(source, /contextEntities,/);
+  assert.match(source, /selectedContextEntityIds:\s*options\?\.selectedContextEntityIds/);
+  assert.match(source, /event\.type === 'proposal_presented'/);
+  assert.match(source, /event\.type === 'context_resolved'/);
+  assert.match(source, /showAgentProposalModal/);
+  assert.match(source, /pendingAgentProposal\.options\.map/);
+  assert.match(source, /selectedContextEntityIds:\s*\[option\.entityId\]/);
+  assert.match(source, /已采用：/);
+  assert.match(source, /\['creative_direction', 'context_reference'\]\.includes/);
+});
+
+test('agent progress accumulates reached breadcrumbs without an assistant bubble', () => {
+  assert.match(source, /createInitialAgentRunProgress/);
+  assert.match(source, /agentRunProgress:\s*generationMode === 'agent'[\s\S]{0,120}createInitialAgentRunProgress\(agentRunId\)/);
+  assert.match(source, /reduceAgentRunProgress/);
+  assert.match(source, /event\.type === 'progress_update'/);
+  assert.match(source, /createAgentProgressEventRouter/);
+  assert.match(source, /routeAgentProgressEvent\(progressEventRouter, event\)/);
+  assert.match(source, /event\.type === 'agent_done'/);
+  assert.match(source, /agentRunProgress\.steps\.map/);
+  assert.match(source, /formatAgentProgressLabel\(step\)/);
+  assert.match(source, /getAgentProgressCompletionLabel/);
+  assert.match(source, /✍️ 回复已完成/);
+  assert.match(source, /🖼️ 设计生成已完成/);
+  assert.match(source, /⚙️ 任务已完成/);
+  assert.match(source, /\{ type: 'intent_resolved', intent \},[\s\S]{0,140}routed\.events/);
+  assert.match(source, /status === 'completed' \? '✓'/);
+  assert.match(source, /status === 'waiting' \? '⏸'/);
+  assert.match(source, /status === 'active' \|\| status === 'running' \? '○'/);
+  assert.match(source, /outcome === 'warning'/);
+  assert.match(source, /outcome === 'failed'/);
+  assert.match(source, /\['completed', 'warning', 'failed'\]\.includes\(msg\.agentRunProgress\.outcome\)/);
+  assert.match(source, /isAgentProgressMessage\s*\?\s*'py-1'/);
+  assert.match(source, /shouldShowAgentRunProgress\(msg\.agentRunProgress\)/);
+  assert.doesNotMatch(source, /模型推理/);
+  assert.doesNotMatch(source, /animate-pulse/);
+  assert.match(globalStyles, /@keyframes agent-progress-enter/);
+  assert.match(globalStyles, /prefers-reduced-motion:[\s\S]{0,240}agent-progress-enter/);
+});
+
+test('agent image loading preloads before atomically appending and settles the original progress message', () => {
+  assert.match(source, /const updateChatMessageById =/);
+  assert.match(source, /processedAgentActionsRef\.current\.has\(key\)/);
+  assert.match(source, /await preloadGeneratedAssets\(freshAssets, \{ timeoutMs: 15_000 \}\)/);
+  assert.match(source, /loadedAssets\.length > 0[\s\S]{0,4000}setChatMessages\(prev => \[\.\.\.prev, \.\.\.imageMessages\]\)/);
+  assert.match(source, /type: 'assets_settled'/);
+  assert.match(source, /setImageCount\(\(prev\) => prev \+ loadedAssets\.length\)/);
+  assert.match(source, /if \(msg\.imageUrl && !content\) return \[\]/);
+  assert.doesNotMatch(source, /\[Generated image\$\{/);
+  assert.match(source, /currentSessionIdRef\.current !== generationSessionId/);
+  assert.match(source, /processedAgentActionKeysForRun\.add\(key\)/);
+  assert.match(source, /for \(const key of processedAgentActionKeysForRun\)[\s\S]{0,180}processedAgentActionsRef\.current\.delete\(key\)/);
+  assert.match(source, /generateAbortRef\.current === runController/);
+  assert.match(source, /pendingAssistantMessageIdRef\.current === assistantPlaceholderId/);
+  assert.match(source, /activeSkillJobMessageIdRef\.current = assistantId/);
+  assert.match(source, /type: 'assets_progress'/);
+  assert.match(source, /updateChatMessageById\(skillJobMessageId/);
+});
+
+test('clarification and confirmation preserve waiting agent progress', () => {
+  const clarificationStart = source.indexOf("event.type === 'clarification_required'");
+  const confirmationStart = source.indexOf("event.type === 'confirmation_required'");
+  const toolResultStart = source.indexOf("event.type === 'tool_result'", confirmationStart);
+  assert.ok(clarificationStart >= 0 && confirmationStart > clarificationStart && toolResultStart > confirmationStart);
+  assert.doesNotMatch(source.slice(clarificationStart, confirmationStart), /agentRunProgress:\s*undefined/);
+  assert.doesNotMatch(source.slice(confirmationStart, toolResultStart), /agentRunProgress:\s*undefined/);
+});
+
+test('skill jobs, cancellation, and clarification recovery preserve progress state', () => {
+  assert.match(source, /interface AgentClarificationState\s*\{[\s\S]{0,260}operationId\?: string/);
+  assert.match(source, /interface AgentClarificationState\s*\{[\s\S]{0,320}skillSource\?: 'manual' \| 'auto' \| null/);
+  assert.match(source, /interface AgentClarificationState\s*\{[\s\S]{0,380}lastSequence\?: number/);
+
+  const jobResultStart = source.indexOf("event.type === 'tool_result' && typeof event.result?.jobId === 'string'");
+  const imageResultStart = source.indexOf("event.type === 'tool_result' && event.result?.kind === 'image_generation'", jobResultStart);
+  assert.ok(jobResultStart >= 0 && imageResultStart > jobResultStart);
+  assert.doesNotMatch(source.slice(jobResultStart, imageResultStart), /agentRunProgress:\s*undefined/);
+
+  const abortStart = source.indexOf("error instanceof Error && error.name === 'AbortError'");
+  const failureStart = source.indexOf("updateActiveStreamMessageStatus('failed'", abortStart);
+  assert.ok(abortStart >= 0 && failureStart > abortStart);
+  assert.doesNotMatch(source.slice(abortStart, failureStart), /agentRunProgress:\s*undefined/);
+  assert.match(source.slice(abortStart, failureStart), /updateAgentRunProgress\(msg, \{ type: 'agent_error' \}\)/);
 });
 
 test('right chat exposes adaptive chat and image provider model selectors', () => {
@@ -55,6 +166,18 @@ test('chat panel sends selected providers and models to agent and direct routes'
   assert.match(source, /imageOptions:\s*\{[\s\S]{0,180}model:\s*selectedImageModelId/);
   assert.match(source, /requestBody\.chatProviderId/);
   assert.match(source, /requestBody\.imageProviderId/);
+});
+
+test('agent image preferences default to 2K and portrait 3:4 without changing direct image mode', () => {
+  assert.match(source, /const \[imageAspectRatio, setImageAspectRatio\] = useState\('auto'\)/);
+  assert.match(source, /const \[agentImageAspectRatio, setAgentImageAspectRatio\] = useState\('3:4'\)/);
+  assert.match(source, /generationMode === 'agent' \? agentImageAspectRatio : imageAspectRatio/);
+  assert.match(source, /generationMode === 'agent'\s*\? setAgentImageAspectRatio\(option\.id\)\s*:\s*setImageAspectRatio\(option\.id\)/);
+  assert.match(source, /imageOptions:\s*\{[\s\S]{0,260}aspectRatio:\s*agentImageAspectRatio/);
+  assert.match(source, /imageOptions:\s*\{[\s\S]{0,320}size:\s*'2048x2048'/);
+  assert.match(source, /imageOptions:\s*\{[\s\S]{0,360}quality:\s*'auto'/);
+  assert.match(source, /imageOptions:\s*\{[\s\S]{0,400}count:\s*1/);
+  assert.match(source, /generationMode === 'image' && imageAspectRatio !== 'auto'/);
 });
 
 test('chat panel keeps persisted model selections available while provider settings are unavailable', () => {
@@ -128,7 +251,10 @@ test('chat composer exposes disabled reasoning and one adaptive model preference
   assert.match(source, /showModelPreferencePopover/);
   assert.match(source, /generationMode === 'agent' \|\| generationMode === 'chat'/);
   assert.match(source, /generationMode === 'agent' \|\| generationMode === 'image'/);
-  assert.match(source, /ASPECT_RATIOS\.map/);
+  assert.match(
+    source,
+    /ASPECT_RATIOS\s*\.filter\(\(option\) => generationMode !== 'agent' \|\| option\.id !== 'auto'\)\s*\.map/
+  );
   assert.doesNotMatch(source, /aria-label="聊天框供应商与模型"/);
 });
 

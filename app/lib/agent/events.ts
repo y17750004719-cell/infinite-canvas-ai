@@ -1,4 +1,69 @@
+import type { AgentContextEntity, AgentProposal } from './context-reference.types';
+
 export type AgentIntent = 'chat' | 'image' | 'skill_action';
+
+export type AgentProgressStepId =
+  | 'routing'
+  | 'context_resolution'
+  | 'clarification'
+  | 'skill_loading'
+  | 'prompt_optimization'
+  | 'generate_image'
+  | 'canvas_context'
+  | 'skill_job'
+  | 'tool'
+  | 'composing';
+
+export type AgentProgressPhase =
+  | 'routing'
+  | 'resolving'
+  | 'resuming'
+  | 'analyzing'
+  | 'waiting_input'
+  | 'loading'
+  | 'optimizing'
+  | 'generating'
+  | 'reading'
+  | 'starting'
+  | 'checking'
+  | 'executing'
+  | 'planning'
+  | 'responding';
+
+export type AgentProgressStatus = 'active' | 'waiting' | 'completed' | 'failed';
+
+export type AgentClarificationOption = {
+  id: string;
+  label: string;
+  answer: string;
+  description?: string;
+};
+
+export type AgentClarificationState = {
+  taskId: string;
+  operationId?: string;
+  skillSource?: 'manual' | 'auto' | null;
+  lastSequence?: number;
+  intent: 'image' | 'skill_action';
+  skillId?: string;
+  originalRequest: string;
+  workingBrief: string;
+  askedDimensions: string[];
+  answers: Array<{ dimension: string; question: string; answer: string }>;
+  referenceImages?: string[];
+  contextCandidates?: AgentContextEntity[];
+};
+
+export type AgentClarificationRequest = {
+  id: string;
+  taskId: string;
+  question: string;
+  dimension: string;
+  options: AgentClarificationOption[];
+  allowCustom: true;
+  allowProceed: true;
+  failed?: boolean;
+};
 
 export type AgentClientAction = {
   type: 'add_generated_assets';
@@ -6,12 +71,42 @@ export type AgentClientAction = {
   assets: Array<{ src: string; naturalWidth?: number; naturalHeight?: number }>;
 };
 
+export type AgentProgressUpdate = {
+  type: 'progress_update';
+  version: 1;
+  runId: string;
+  operationId: string;
+  sequence: number;
+  stepId: AgentProgressStepId;
+  phase: AgentProgressPhase;
+  status: AgentProgressStatus;
+  label: string;
+  toolCallId?: string;
+  toolName?: string;
+};
+
 export type AgentEvent =
   | { type: 'agent_start'; runId: string }
+  | AgentProgressUpdate
   | { type: 'routing_start' }
   | { type: 'intent_resolved'; intent: AgentIntent }
+  | { type: 'proposal_presented'; proposal: AgentProposal }
+  | {
+      type: 'context_resolved';
+      status: 'resolved';
+      confidence: 'high' | 'medium';
+      entityIds: string[];
+      labels: string[];
+      kind: string;
+    }
+  | { type: 'brief_compiled'; resolvedEntityIds: string[]; summary: string; mustPreserveCount: number }
   | { type: 'skill_selected'; skillId: string; label: string; source: 'manual' | 'auto' }
-  | { type: 'clarification_required'; message: string }
+  | {
+      type: 'clarification_required';
+      message: string;
+      request: AgentClarificationRequest;
+      state: AgentClarificationState;
+    }
   | { type: 'prompt_optimization_start' }
   | { type: 'prompt_optimization_done'; summary: string; optimized: boolean }
   | { type: 'tool_start'; toolCallId: string; toolName: string }

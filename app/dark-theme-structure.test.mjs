@@ -22,3 +22,22 @@ test('dark-capable workspace controls do not hard-code white surfaces', () => {
   assert.equal(workspacesSource.includes('bg-white/90'), false);
   assert.equal(workspaceDetailSource.includes('bg-white/90'), false);
 });
+
+test('sent chat messages use theme-specific surfaces instead of the inverse black surface', () => {
+  assert.match(globalsSource, /:root \{[\s\S]*--workspace-message-user-bg: #f1f1ef;/);
+  assert.match(globalsSource, /:root \{[\s\S]*--workspace-message-user-fg: #262626;/);
+  assert.match(globalsSource, /\[data-workspace-theme="dark"\] \{[\s\S]*--workspace-message-user-bg: #343434;/);
+  assert.match(globalsSource, /\[data-workspace-theme="dark"\] \{[\s\S]*--workspace-message-user-fg: #f5f5f5;/);
+  assert.match(globalsSource, /\.workspace-message-user \{\s*background: var\(--workspace-message-user-bg\);\s*color: var\(--workspace-message-user-fg\);\s*\}/);
+});
+
+test('light theme text overrides include the portaled chat panel', () => {
+  assert.match(
+    globalsSource,
+    /\[data-workspace-theme="light"\] :is\(\.workspace-editor-shell, \.workspace-chat-panel\) \.text-zinc-200/
+  );
+  assert.match(
+    globalsSource,
+    /\[data-workspace-theme="light"\] :is\(\.workspace-editor-shell, \.workspace-chat-panel\) \.text-zinc-500/
+  );
+});

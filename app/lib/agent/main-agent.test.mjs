@@ -11,6 +11,13 @@ test('main agent prompt defines the agent as a skill orchestration hub', () => {
   assert.match(MAIN_AGENT_SYSTEM_PROMPT, /手动选择的 Skill/);
   assert.match(MAIN_AGENT_SYSTEM_PROMPT, /不得虚构不存在的 Skill/);
   assert.match(MAIN_AGENT_SYSTEM_PROMPT, /不向用户暴露内部思维链/);
+  assert.match(MAIN_AGENT_SYSTEM_PROMPT, /清晰需求默认直接执行/);
+  assert.match(MAIN_AGENT_SYSTEM_PROMPT, /不得为了.*颜色.*材质.*灯光.*构图/);
+  assert.match(MAIN_AGENT_SYSTEM_PROMPT, /自由发挥/);
+  assert.match(MAIN_AGENT_SYSTEM_PROMPT, /没有真实变更型工具调用/);
+  assert.match(MAIN_AGENT_SYSTEM_PROMPT, /禁止使用“已启动”“正在生成”“已提交”“已生成”/);
+  assert.match(MAIN_AGENT_SYSTEM_PROMPT, /<<agent_proposal>>/);
+  assert.match(MAIN_AGENT_SYSTEM_PROMPT, /brief 必须自包含/);
 });
 
 test('main agent messages keep one consistent system and skill hierarchy with references', () => {

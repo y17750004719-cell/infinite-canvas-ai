@@ -42,6 +42,21 @@ export function buildPromptOptimizerMessages(userPrompt, skillLabel) {
 
 const IMAGE_HINTS = ['生成', '生图', '画一个', '设计一个', '海报', '包装', 'logo', '插画', '封面', '渲染', '视觉稿', '图片'];
 const ANALYSIS_HINTS = ['分析', '解释', '点评', '总结', '看看', '识别', '构图怎么样', '风格是什么'];
+const EXECUTION_CONTINUATION_PATTERN = /^(?:好(?:的)?|可以|同意|确认|没问题|继续(?:生成|制作|执行|出图)?|按(?:这个|此|上述)(?:方案)?来|就按(?:这个|此|上述)(?:方案)?|开始吧|执行吧|生成吧|制作吧|出图吧|就这样|确认(?:生成|执行)?)(?:[\s，,。.!！?？]*(?:(?:请)?(?:给我|帮我)?(?:继续)?(?:生成|制作|执行|出图)(?:这张|该张|图片|图像|封面|海报|任务)?))?[\s，,。.!！?？]*$/i;
+const EXECUTION_OFFER_PATTERN = /(?:(?:是否|要不要|可以|准备|接下来|下一步|确认后|请确认).{0,24}(?:继续|开始|生成|制作|执行|出图)|(?:继续|开始).{0,12}(?:生成|制作|执行|出图)|(?:生成|制作|执行|出图).{0,12}(?:吗|呢|[?？]))/i;
+const TRANSIENT_FAILURE_MESSAGE_PATTERN = /^(?:(?:生成|任务|运行|请求|连接|网络)[^。！!\n]{0,20}(?:失败|超时|中断)|暂时无法|fetch failed)/i;
+const NEXT_ASSET_PATTERN = /(?:下一张|下一版|另一张|第[二三四五六七八九十\d]+张|其余|剩余|继续(?:生成|制作|设计|出图))/i;
+const GENERIC_ASSET_WORDS_PATTERN = /(?:请|帮我|为我|继续|开始|生成|制作|设计|出图|下一张|下一版|另一张|第[二三四五六七八九十\d]+张|其余|剩余|一张|一个|封面|海报|图片|图像|视觉稿|版本|方案)/gi;
+const GENERATED_IMAGE_HISTORY_PLACEHOLDER_PATTERN = /\[(?:Generated image[^\]]*omitted from chat history|聊天记录中省略了代理生成的图像)\]/gi;
+
+function needsDirectionConfirmation(message, intent, inherited) {
+  if (inherited || (intent !== 'image' && intent !== 'skill_action')) return false;
+  if (!NEXT_ASSET_PATTERN.test(message)) return false;
+  const specificDirection = String(message || '')
+    .replace(GENERIC_ASSET_WORDS_PATTERN, '')
+    .replace(/[\s，,。.!！?？:：;；、-]+/g, '');
+  return specificDirection.length < 2;
+}
 
 export function resolveAgentIntent(text, hasReferenceImages = false) {
   const normalized = typeof text === 'string' ? text.trim().toLowerCase() : '';
@@ -54,4 +69,56 @@ export function resolveAgentIntent(text, hasReferenceImages = false) {
   if (analysisHit && !imageHit) return 'chat';
   if (imageHit) return 'image';
   return hasReferenceImages ? 'chat' : 'chat';
+}
+
+export function resolveAgentConversationIntent(messages, hasReferenceImages = false) {
+  const conversation = (Array.isArray(messages) ? messages : [])
+    .filter((message) => message?.role === 'user' || message?.role === 'assistant')
+    .map((message) => ({
+      role: message.role,
+      content: typeof message.content === 'string'
+        ? message.content.replace(GENERATED_IMAGE_HISTORY_PLACEHOLDER_PATTERN, '').trim()
+        : '',
+    }))
+    .filter((message) => message.content);
+  const latestUserIndex = conversation.findLastIndex((message) => message.role === 'user');
+  const latestUserMessage = latestUserIndex >= 0 ? conversation[latestUserIndex].content : '';
+  const directIntent = resolveAgentIntent(latestUserMessage, hasReferenceImages);
+  const direct = {
+    intent: directIntent,
+    brief: latestUserMessage,
+    inherited: false,
+    needsDirectionConfirmation: needsDirectionConfirmation(latestUserMessage, directIntent, false),
+  };
+  if (
+    latestUserMessage.toLowerCase().startsWith('/chat')
+    || !EXECUTION_CONTINUATION_PATTERN.test(latestUserMessage)
+  ) {
+    return direct;
+  }
+
+  const previousAssistantIndex = conversation
+    .slice(0, latestUserIndex)
+    .findLastIndex((message) => (
+      message.role === 'assistant'
+      && !TRANSIENT_FAILURE_MESSAGE_PATTERN.test(message.content)
+    ));
+  if (previousAssistantIndex < 0) return direct;
+  const previousAssistantMessage = conversation[previousAssistantIndex].content;
+  if (!EXECUTION_OFFER_PATTERN.test(previousAssistantMessage)) return direct;
+
+  for (let index = previousAssistantIndex - 1; index >= 0; index -= 1) {
+    const message = conversation[index];
+    if (message.role !== 'user') continue;
+    const inheritedIntent = resolveAgentIntent(message.content, hasReferenceImages);
+    if (inheritedIntent === 'chat') continue;
+    return {
+      intent: inheritedIntent,
+      brief: `${message.content}\n\n用户确认：${latestUserMessage}`,
+      inherited: true,
+      needsDirectionConfirmation: false,
+    };
+  }
+
+  return direct;
 }
