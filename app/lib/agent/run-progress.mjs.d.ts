@@ -45,6 +45,7 @@ export type AgentRunProgressEvent =
   | { type: 'assets_settled'; succeeded: number; failed: number }
   | { type: 'agent_done' }
   | { type: 'agent_error' }
+  | { type: 'confirmation_submitted'; toolName?: string }
   | { type: 'intent_resolved'; intent: 'chat' | 'image' | 'skill_action' }
   | { type: string; [key: string]: unknown };
 

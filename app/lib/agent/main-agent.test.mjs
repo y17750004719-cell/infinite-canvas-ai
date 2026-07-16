@@ -7,11 +7,16 @@ import {
 } from './main-agent.mjs';
 
 test('main agent prompt defines the agent as a skill orchestration hub', () => {
-  assert.match(MAIN_AGENT_SYSTEM_PROMPT, /ZO Design 的主 Agent/);
+  assert.match(MAIN_AGENT_SYSTEM_PROMPT, /Z Flow 的主 Agent/);
   assert.match(MAIN_AGENT_SYSTEM_PROMPT, /手动选择的 Skill/);
   assert.match(MAIN_AGENT_SYSTEM_PROMPT, /不得虚构不存在的 Skill/);
   assert.match(MAIN_AGENT_SYSTEM_PROMPT, /不向用户暴露内部思维链/);
   assert.match(MAIN_AGENT_SYSTEM_PROMPT, /清晰需求默认直接执行/);
+  assert.match(MAIN_AGENT_SYSTEM_PROMPT, /交付数量/);
+  assert.match(MAIN_AGENT_SYSTEM_PROMPT, /不得默认回退为 1 张/);
+  assert.match(MAIN_AGENT_SYSTEM_PROMPT, /选择其中一个/);
+  assert.match(MAIN_AGENT_SYSTEM_PROMPT, /风格统一但内容独立/);
+  assert.match(MAIN_AGENT_SYSTEM_PROMPT, /同一 Brief 生成多个随机变体/);
   assert.match(MAIN_AGENT_SYSTEM_PROMPT, /不得为了.*颜色.*材质.*灯光.*构图/);
   assert.match(MAIN_AGENT_SYSTEM_PROMPT, /自由发挥/);
   assert.match(MAIN_AGENT_SYSTEM_PROMPT, /没有真实变更型工具调用/);

@@ -27,6 +27,8 @@ test('recognizes vague design execution language without hijacking analysis or p
   assert.equal(isPotentialDesignExecutionRequest('帮我设计一个更有视觉冲击力的方案'), true);
   assert.equal(isPotentialDesignExecutionRequest('帮我分析这个设计为什么不好'), false);
   assert.equal(isPotentialDesignExecutionRequest('帮我做个开发计划'), false);
+  assert.equal(isPotentialDesignExecutionRequest('Please design a similar Vogue animal magazine cover series for 5 issues.'), true);
+  assert.equal(isPotentialDesignExecutionRequest('Analyze and review this magazine cover.'), false);
 });
 
 test('parses ready and critical ask results with one question and two to four options', () => {
@@ -208,6 +210,8 @@ test('clarifier prompt makes execution the default and includes prior answers', 
   assert.equal(messages[0]?.role, 'system');
   assert.match(messages[0]?.content || '', /默认执行/);
   assert.match(messages[0]?.content || '', /不得为了.*颜色.*材质.*灯光.*构图/);
+  assert.match(messages[0]?.content || '', /没有说数量时默认单张/);
+  assert.match(messages[0]?.content || '', /数量解析流程/);
   assert.match(messages[1]?.content || '', /产品海报/);
   assert.match(messages[1]?.content || '', /deliverable/);
 });

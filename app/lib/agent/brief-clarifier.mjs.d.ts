@@ -30,6 +30,16 @@ export interface AgentClarificationState {
   askedDimensions: string[];
   answers: Array<{ dimension: string; question: string; answer: string }>;
   referenceImages?: string[];
+  resolvedImageCount?: number;
+  resolvedImageCountSource?: 'clarification' | 'prompt' | 'interface' | 'default' | 'batch';
+  requestedImageCountTotal?: number;
+  pendingImageCountCandidates?: number[];
+  imageBatchPlan?: {
+    totalCount: number;
+    completedCount: number;
+    remainingCount: number;
+    batchSize: number;
+  };
 }
 
 export function parseBriefClarifierResult(raw: string): BriefClarifierResult | null;

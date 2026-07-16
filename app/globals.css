@@ -269,6 +269,50 @@ body {
   color: var(--workspace-text-primary);
 }
 
+.agent-decision-popover {
+  background: var(--workspace-surface-elevated);
+  transform-origin: bottom center;
+  animation: agent-decision-enter 160ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.agent-decision-option:hover,
+.agent-decision-option:focus-visible,
+.agent-decision-option.is-recommended {
+  background: var(--workspace-control-hover);
+  outline: none;
+}
+
+.agent-decision-index {
+  border: 1px solid var(--workspace-border);
+  background: var(--workspace-surface-soft);
+  color: var(--workspace-text-muted);
+}
+
+.agent-decision-recommended {
+  background: var(--workspace-control-active);
+  color: var(--workspace-text-muted);
+}
+
+.agent-decision-custom {
+  background: var(--workspace-control-hover);
+}
+
+.agent-decision-send {
+  background: var(--workspace-inverse-bg);
+  color: var(--workspace-inverse-fg);
+}
+
+@keyframes agent-decision-enter {
+  from {
+    opacity: 0;
+    transform: translateY(5px) scale(0.99);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
 .workspace-add-button {
   border: 1px solid var(--workspace-border);
   background: var(--workspace-inverse-bg);
@@ -393,6 +437,10 @@ body {
 
 @media (prefers-reduced-motion: reduce) {
   .agent-progress-enter {
+    animation: none;
+  }
+
+  .agent-decision-popover {
     animation: none;
   }
 }

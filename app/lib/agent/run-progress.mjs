@@ -19,6 +19,15 @@ function finiteCount(value) {
   return Number.isFinite(count) && count > 0 ? Math.floor(count) : 0;
 }
 
+function finiteTimestamp(value) {
+  const timestamp = Number(value);
+  return Number.isFinite(timestamp) && timestamp > 0 ? timestamp : Date.now();
+}
+
+function isImageGenerationStep(step) {
+  return step?.toolName === 'generate_image' || step?.stepId === 'generate_image';
+}
+
 function needsAssetSettlement(steps) {
   return steps.some((step) => (
     step.toolName === 'generate_image'
@@ -97,6 +106,19 @@ export function reduceAgentRunProgress(state, event) {
       step.stepId === nextStep.stepId
       && (nextStep.toolCallId ? step.toolCallId === nextStep.toolCallId : !step.toolCallId)
     ));
+    const existingStep = existingIndex >= 0 ? base.steps[existingIndex] : null;
+    if (isImageGenerationStep(nextStep)) {
+      const timestampMs = finiteTimestamp(event.timestampMs);
+      if (nextStep.status === 'active') {
+        nextStep.startedAt = existingStep?.status === 'active' && existingStep.startedAt
+          ? existingStep.startedAt
+          : timestampMs;
+        nextStep.completedAt = undefined;
+      } else if (nextStep.status === 'completed' || nextStep.status === 'failed') {
+        nextStep.startedAt = existingStep?.startedAt || timestampMs;
+        nextStep.completedAt = existingStep?.completedAt || timestampMs;
+      }
+    }
     const steps = existingIndex === -1
       ? [...base.steps, nextStep]
       : base.steps.map((step, index) => index === existingIndex ? { ...step, ...nextStep } : step);
@@ -116,6 +138,20 @@ export function reduceAgentRunProgress(state, event) {
       ? event.intent
       : state.intent;
     return intent === state.intent ? state : { ...state, intent };
+  }
+
+  if (event.type === 'confirmation_submitted') {
+    const targetIndex = state.steps.findLastIndex((step) => (
+      step.status === 'waiting'
+      && (!event.toolName || step.toolName === event.toolName || step.stepId === event.toolName)
+    ));
+    if (targetIndex < 0) return state;
+    return withOutcome({
+      ...state,
+      steps: state.steps.map((step, index) => index === targetIndex
+        ? { ...step, phase: 'confirming', label: '正在确认并启动任务' }
+        : step),
+    });
   }
 
   if (event.type === 'assets_pending') {
@@ -227,4 +263,14 @@ export function formatAgentProgressLabel(step) {
     || PHASE_EMOJI_RULES.find(([pattern]) => pattern.test(stepId))?.[1]
     || '⚙️';
   return `${emoji} ${String(step?.label || '')}`.trim();
+}
+
+export function getAgentProgressElapsedMs(step, now = Date.now()) {
+  if (!isImageGenerationStep(step) || !Number.isFinite(Number(step?.startedAt))) return null;
+  const end = Number.isFinite(Number(step?.completedAt))
+    ? Number(step.completedAt)
+    : step?.status === 'active'
+      ? Number(now)
+      : null;
+  return Number.isFinite(end) ? Math.max(0, end - Number(step.startedAt)) : null;
 }

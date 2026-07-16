@@ -94,6 +94,17 @@ export function createAgentToolResultViews(toolName, rawResult) {
       assetCount: outputs.length,
       requestStats,
       partialFailure: requestStats.failed > 0,
+      ...(value?.resolvedImageOptions && typeof value.resolvedImageOptions === 'object'
+        ? {
+            resolvedImageOptions: {
+              count: finiteCount(value.resolvedImageOptions.count, requestStats.requested),
+              requestedCount: finiteCount(value.resolvedImageOptions.requestedCount, requestStats.requested),
+              countSource: typeof value.resolvedImageOptions.countSource === 'string'
+                ? value.resolvedImageOptions.countSource
+                : 'default',
+            },
+          }
+        : {}),
     };
     return { modelResult: publicResult, publicResult };
   }
@@ -223,6 +234,7 @@ export function createAgentProgressTracker({
       runId: runId || '',
       operationId: currentOperationId,
       sequence,
+      timestampMs: Date.now(),
       stepId: String(input.stepId || 'run'),
       phase: String(input.phase || 'running'),
       status: input.status || 'active',

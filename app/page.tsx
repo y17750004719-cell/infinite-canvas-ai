@@ -33,6 +33,7 @@ import {
   createInitialAgentRunProgress,
   createAgentProgressEventRouter,
   formatAgentProgressLabel,
+  getAgentProgressElapsedMs,
   reduceAgentRunProgress,
   routeAgentProgressEvent,
   shouldShowAgentRunProgress,
@@ -130,6 +131,7 @@ import {
   normalizeProviderModelAspectRatioForSize,
 } from './lib/image-provider-option-profiles.mjs';
 import { GalleryView, SessionActionErrorBanner } from './components/workspace/GalleryView';
+import { AgentDecisionPopover } from './components/workspace/AgentDecisionPopover';
 import { useWorkspaceSessionController } from './hooks/useWorkspaceSessionController';
 
 gsap.registerPlugin(useGSAP);
@@ -301,7 +303,9 @@ interface ChatMessage {
   skillChoiceDismissed?: boolean;
   skillChoiceResolved?: boolean;
   agentRunProgress?: AgentRunProgress;
-  agentConfirmation?: { confirmationId: string; toolName: string };
+  agentConfirmation?: AgentConfirmationPayload;
+  agentConfirmationDismissed?: boolean;
+  agentConfirmationResolved?: boolean;
   agentClarification?: AgentClarificationPayload;
   agentClarificationResponsePayload?: {
     clarification: AgentClarificationPayload;
@@ -345,6 +349,14 @@ const getAgentProgressCompletionLabel = (progress: AgentRunProgress) => {
   return '⚙️ 任务已完成';
 };
 
+const isAgentImageGenerationStep = (step: AgentRunProgressStep) =>
+  step.toolName === 'generate_image' || step.stepId === 'generate_image';
+
+const getAgentProgressDurationLabel = (step: AgentRunProgressStep, now: number) => {
+  const elapsedMs = getAgentProgressElapsedMs(step, now);
+  return elapsedMs === null ? null : getGenerationDurationDisplay(elapsedMs);
+};
+
 interface SkillChoiceOption {
   label: string;
   submitText: string;
@@ -377,6 +389,16 @@ interface AgentClarificationState {
   answers: Array<{ dimension: string; question: string; answer: string }>;
   referenceImages?: string[];
   contextCandidates?: AgentContextEntity[];
+  resolvedImageCount?: number;
+  resolvedImageCountSource?: 'clarification' | 'prompt' | 'interface' | 'default' | 'batch';
+  requestedImageCountTotal?: number;
+  pendingImageCountCandidates?: number[];
+  imageBatchPlan?: {
+    totalCount: number;
+    completedCount: number;
+    remainingCount: number;
+    batchSize: number;
+  };
 }
 
 interface AgentClarificationRequest {
@@ -393,6 +415,12 @@ interface AgentClarificationRequest {
 interface AgentClarificationPayload {
   request: AgentClarificationRequest;
   state: AgentClarificationState;
+}
+
+interface AgentConfirmationPayload {
+  confirmationId: string;
+  toolName: string;
+  message: string;
 }
 
 interface AgentClarificationResponse {
@@ -4557,7 +4585,6 @@ export default function AIWorkspace() {
   const chatFileInputRef = useRef<HTMLInputElement>(null);
   const chatInputEditorRef = useRef<HTMLDivElement>(null);
   const chatContainerRef = useRef<HTMLDivElement>(null);
-  const agentClarificationDialogRef = useRef<HTMLDivElement>(null);
   const activeSkillJobMessageIdRef = useRef<string | null>(null);
   const generateAbortRef = useRef<AbortController | null>(null);
   const isGeneratingRef = useRef(false);
@@ -4599,9 +4626,10 @@ export default function AIWorkspace() {
   const [showSkillChoiceModal, setShowSkillChoiceModal] = useState(false);
   const [pendingAgentProposal, setPendingAgentProposal] = useState<AgentProposal | null>(null);
   const [showAgentProposalModal, setShowAgentProposalModal] = useState(false);
+  const [pendingAgentConfirmation, setPendingAgentConfirmation] = useState<AgentConfirmationPayload | null>(null);
+  const [showAgentConfirmationModal, setShowAgentConfirmationModal] = useState(false);
   const [pendingAgentClarification, setPendingAgentClarification] = useState<AgentClarificationPayload | null>(null);
   const [showAgentClarificationModal, setShowAgentClarificationModal] = useState(false);
-  const [agentClarificationSelectedOptionId, setAgentClarificationSelectedOptionId] = useState('');
   const [agentClarificationCustomText, setAgentClarificationCustomText] = useState('');
   const [chatInputFocused, setChatInputFocused] = useState(false);
   const [chatInputHeight, setChatInputHeight] = useState(72);
@@ -5093,10 +5121,17 @@ export default function AIWorkspace() {
     () => new Set(Object.keys(activeCanvasImageGenerations)),
     [activeCanvasImageGenerations]
   );
+  const hasActiveAgentImageGeneration = React.useMemo(
+    () => chatMessages.some((message) => message.agentRunProgress?.steps.some(
+      (step) => step.status === 'active' && isAgentImageGenerationStep(step)
+    )),
+    [chatMessages]
+  );
   useEffect(() => {
     if (
       Object.keys(activeCanvasTextGenerations).length === 0 &&
-      Object.keys(activeCanvasImageGenerations).length === 0
+      Object.keys(activeCanvasImageGenerations).length === 0 &&
+      !hasActiveAgentImageGeneration
     ) {
       return;
     }
@@ -5109,7 +5144,7 @@ export default function AIWorkspace() {
     return () => {
       window.clearInterval(timer);
     };
-  }, [activeCanvasTextGenerations, activeCanvasImageGenerations]);
+  }, [activeCanvasTextGenerations, activeCanvasImageGenerations, hasActiveAgentImageGeneration]);
   const isSelectedTextCardGenerating =
     !!selectedTextCardPanelItem && !!activeCanvasTextGenerations[selectedTextCardPanelItem.id];
   const isSelectedImageCardGenerating =
@@ -5658,6 +5693,21 @@ export default function AIWorkspace() {
   }, [chatMessages]);
 
   useEffect(() => {
+    const pendingMessage = [...chatMessages].reverse().find((message) => (
+      message.role === 'assistant'
+      && message.agentConfirmation
+      && !message.agentConfirmationResolved
+    ));
+    if (!pendingMessage?.agentConfirmation) {
+      setPendingAgentConfirmation(null);
+      setShowAgentConfirmationModal(false);
+      return;
+    }
+    setPendingAgentConfirmation(pendingMessage.agentConfirmation);
+    if (!pendingMessage.agentConfirmationDismissed) setShowAgentConfirmationModal(true);
+  }, [chatMessages]);
+
+  useEffect(() => {
     const pendingMessage = [...chatMessages].reverse().find((message) =>
       message.role === 'assistant'
       && message.agentClarification
@@ -5673,11 +5723,6 @@ export default function AIWorkspace() {
       setShowAgentClarificationModal(true);
     }
   }, [chatMessages]);
-
-  useEffect(() => {
-    if (!showAgentClarificationModal) return;
-    requestAnimationFrame(() => agentClarificationDialogRef.current?.focus());
-  }, [showAgentClarificationModal]);
 
   const stopStreamTypewriter = () => {
     if (streamTimerRef.current) {
@@ -8615,7 +8660,7 @@ export default function AIWorkspace() {
     skill?: { id: string; label: string } | null;
     referenceImagesOverride?: Array<{ id?: string; src: string; label: string; alt?: string }>;
     modelOverride?: string;
-    agentConfirmation?: { confirmationId: string; toolName: string };
+    agentConfirmation?: AgentConfirmationPayload;
     agentClarification?: AgentClarificationPayload;
     agentClarificationResponse?: AgentClarificationResponse;
     selectedContextEntityIds?: string[];
@@ -9216,6 +9261,7 @@ export default function AIWorkspace() {
         let generatedAssetModel = '';
         let nextGeneratedImageNumber = currentImageCount + 1;
         let progressEventRouter = createAgentProgressEventRouter();
+        let suppressAssistantContentForDecision = false;
 
         while (true) {
           const { done, value } = await reader.read();
@@ -9296,6 +9342,7 @@ export default function AIWorkspace() {
                 runId?: string;
                 operationId?: string;
                 sequence?: number;
+                timestampMs?: number;
                 stepId?: string;
                 phase?: string;
                 status?: 'active' | 'waiting' | 'completed' | 'failed';
@@ -9343,8 +9390,10 @@ export default function AIWorkspace() {
             }
 
             if (event.type === 'proposal_presented' && event.proposal) {
+              suppressAssistantContentForDecision = event.proposal.requiresSelection === true;
               updatePendingAssistantMessage((msg) => ({
                 ...msg,
+                ...(suppressAssistantContentForDecision ? { content: '' } : {}),
                 agentProposal: event.proposal,
                 agentProposalDismissed: false,
                 agentProposalResolved: false,
@@ -9408,6 +9457,7 @@ export default function AIWorkspace() {
             }
 
             if (event.type === 'clarification_required') {
+              suppressAssistantContentForDecision = true;
               const requestPayload = event.request;
               if (
                 requestPayload?.id
@@ -9431,14 +9481,13 @@ export default function AIWorkspace() {
                 };
                 updatePendingAssistantMessage((msg) => ({
                   ...msg,
-                  content: event.message || requestPayload.question || '需要补充一项关键信息。',
+                  content: '',
                   taskStatus: undefined,
                   agentClarification: clarificationPayload,
                   agentClarificationDismissed: false,
                   agentClarificationResolved: false,
                 }));
                 setPendingAgentClarification(clarificationPayload);
-                setAgentClarificationSelectedOptionId('');
                 setAgentClarificationCustomText('');
                 setShowAgentClarificationModal(true);
               }
@@ -9462,14 +9511,26 @@ export default function AIWorkspace() {
             }
 
             if (event.type === 'confirmation_required') {
+              suppressAssistantContentForDecision = true;
+              const confirmation = event.request?.confirmationId && event.request?.toolName
+                ? {
+                    confirmationId: event.request.confirmationId,
+                    toolName: event.request.toolName,
+                    message: event.request.message || '此操作需要你的确认。',
+                  }
+                : undefined;
               updatePendingAssistantMessage((msg) => ({
                 ...msg,
-                content: event.request?.message || '此操作需要你的确认。',
+                content: '',
                 taskStatus: undefined,
-                agentConfirmation: event.request?.confirmationId && event.request?.toolName
-                  ? { confirmationId: event.request.confirmationId, toolName: event.request.toolName }
-                  : undefined,
+                agentConfirmation: confirmation,
+                agentConfirmationDismissed: false,
+                agentConfirmationResolved: false,
               }));
+              if (confirmation) {
+                setPendingAgentConfirmation(confirmation);
+                setShowAgentConfirmationModal(true);
+              }
               continue;
             }
 
@@ -9526,6 +9587,7 @@ export default function AIWorkspace() {
               if (event.channel === 'reasoning') {
                 continue;
               } else {
+                if (suppressAssistantContentForDecision) continue;
                 if (event.model) {
                   updatePendingAssistantMessage((msg) => ({
                     ...msg,
@@ -9902,6 +9964,62 @@ export default function AIWorkspace() {
     selectedImageCardPanelSize,
   ]);
 
+  const openAgentConfirmationModal = (confirmation: AgentConfirmationPayload) => {
+    setPendingAgentConfirmation(confirmation);
+    setShowAgentConfirmationModal(true);
+    setChatMessages((prev) => prev.map((message) => (
+      message.agentConfirmation?.confirmationId === confirmation.confirmationId
+        ? { ...message, agentConfirmationDismissed: false }
+        : message
+    )));
+  };
+
+  const closeAgentConfirmationModal = () => {
+    if (pendingAgentConfirmation) {
+      setChatMessages((prev) => prev.map((message) => (
+        message.agentConfirmation?.confirmationId === pendingAgentConfirmation.confirmationId
+          ? { ...message, agentConfirmationDismissed: true }
+          : message
+      )));
+    }
+    setShowAgentConfirmationModal(false);
+  };
+
+  const submitAgentConfirmation = () => {
+    const confirmation = pendingAgentConfirmation;
+    if (!confirmation || pendingAgentConfirmationsRef.current.has(confirmation.confirmationId)) return;
+    const messageIndex = chatMessages.findIndex((message) => (
+      message.agentConfirmation?.confirmationId === confirmation.confirmationId
+    ));
+    const sourceMessage = [...chatMessages.slice(0, messageIndex)]
+      .reverse()
+      .find((message) => message.role === 'user');
+    if (!sourceMessage) return;
+    pendingAgentConfirmationsRef.current.add(confirmation.confirmationId);
+    setPendingAgentConfirmation(null);
+    setShowAgentConfirmationModal(false);
+    setChatMessages((prev) => prev.map((message) => (
+      message.agentConfirmation?.confirmationId === confirmation.confirmationId
+        ? {
+            ...message,
+            content: '',
+            agentRunProgress: reduceAgentRunProgress(message.agentRunProgress || null, {
+              type: 'confirmation_submitted',
+              toolName: confirmation.toolName,
+            }) || undefined,
+            agentConfirmationResolved: true,
+            agentConfirmationDismissed: false,
+            taskStatus: 'running',
+          }
+        : message
+    )));
+    void handleGenerate({
+      input: sourceMessage.content,
+      skill: sourceMessage.skill,
+      agentConfirmation: confirmation,
+    }).finally(() => pendingAgentConfirmationsRef.current.delete(confirmation.confirmationId));
+  };
+
   const openAgentProposalModal = (proposal: AgentProposal) => {
     setPendingAgentProposal(proposal);
     setShowAgentProposalModal(true);
@@ -9946,12 +10064,6 @@ export default function AIWorkspace() {
         if (msg.skillChoice?.id !== pendingSkillChoice.id) return msg;
         return { ...msg, skillChoiceDismissed: true };
       }));
-      const waitMessage: ChatMessage = {
-        id: `msg-${Date.now()}-skill-choice-wait`,
-        role: 'assistant',
-        content: '已暂停，等待你的选择。你可以点击“重新选择”继续流程。',
-      };
-      setChatMessages((prev) => [...prev, waitMessage]);
     }
     setShowSkillChoiceModal(false);
   };
@@ -9975,7 +10087,6 @@ export default function AIWorkspace() {
 
   const openAgentClarificationModal = (clarification: AgentClarificationPayload) => {
     setPendingAgentClarification(clarification);
-    setAgentClarificationSelectedOptionId('');
     setAgentClarificationCustomText('');
     setShowAgentClarificationModal(true);
     setChatMessages((prev) => prev.map((message) => message.agentClarification?.request.id === clarification.request.id
@@ -10004,13 +10115,13 @@ export default function AIWorkspace() {
         : message));
   };
 
-  const submitAgentClarification = (proceedWithCurrent = false) => {
+  const submitAgentClarification = (proceedWithCurrent = false, selectedOptionId = '') => {
     const clarification = pendingAgentClarification;
     if (!clarification || isGenerating) return;
     const selectedOption = clarification.request.options.find(
-      (option) => option.id === agentClarificationSelectedOptionId
+      (option) => option.id === selectedOptionId
     );
-    const customText = agentClarificationCustomText.trim();
+    const customText = selectedOptionId === 'custom' ? agentClarificationCustomText.trim() : '';
     if (!proceedWithCurrent && !selectedOption && !customText) return;
     const answer = proceedWithCurrent
       ? '按当前信息开始制作，其余创作细节由 Agent 决定。'
@@ -10031,7 +10142,6 @@ export default function AIWorkspace() {
         : message));
     setPendingAgentClarification(null);
     setShowAgentClarificationModal(false);
-    setAgentClarificationSelectedOptionId('');
     setAgentClarificationCustomText('');
     void handleGenerate({
       input: answer,
@@ -10054,6 +10164,39 @@ export default function AIWorkspace() {
         retry: true,
       },
     });
+  };
+
+  const hasPendingAgentDecision = (message: ChatMessage) => Boolean(
+    (message.agentConfirmation && !message.agentConfirmationResolved)
+    || (message.agentClarification && !message.agentClarificationResolved)
+    || (message.agentProposal?.requiresSelection && !message.agentProposalResolved)
+    || (message.skillChoice && !message.skillChoiceResolved)
+  );
+
+  const openPendingAgentDecision = (message: ChatMessage) => {
+    if (message.agentConfirmation && !message.agentConfirmationResolved) {
+      openAgentConfirmationModal(message.agentConfirmation);
+      return;
+    }
+    if (message.agentClarification && !message.agentClarificationResolved) {
+      openAgentClarificationModal(message.agentClarification);
+      return;
+    }
+    if (message.agentProposal?.requiresSelection && !message.agentProposalResolved) {
+      openAgentProposalModal(message.agentProposal);
+      return;
+    }
+    if (message.skillChoice && !message.skillChoiceResolved) {
+      openSkillChoiceModal(message.skillChoice);
+    }
+  };
+
+  const getPendingAgentDecisionLabel = (message: ChatMessage) => {
+    if (message.agentConfirmation) return message.agentConfirmation.message;
+    if (message.agentClarification) return message.agentClarification.request.question;
+    if (message.agentProposal) return `等待选择：${message.agentProposal.title}`;
+    if (message.skillChoice) return `等待选择：${message.skillChoice.title}`;
+    return '等待你的选择';
   };
 
   const handleQuickSkillSelect = (
@@ -10326,6 +10469,23 @@ export default function AIWorkspace() {
     setShowChatModelSelector(false);
     setShowImageModelSelector(false);
   }, []);
+
+  useEffect(() => {
+    if (
+      showAgentConfirmationModal
+      || showAgentProposalModal
+      || showAgentClarificationModal
+      || showSkillChoiceModal
+    ) {
+      closeChatComposerPopovers();
+    }
+  }, [
+    closeChatComposerPopovers,
+    showAgentClarificationModal,
+    showAgentConfirmationModal,
+    showAgentProposalModal,
+    showSkillChoiceModal,
+  ]);
 
   useEffect(() => {
     if (!showChatAssetPicker) return;
@@ -12190,14 +12350,14 @@ export default function AIWorkspace() {
       <div className="absolute left-[34px] top-4 z-[120] flex items-center gap-2">
         <div className="relative">
           <button 
-            className="workspace-floating-control flex h-10 w-10 items-center justify-center rounded-full text-sm font-medium transition-colors"
+            className="workspace-floating-control flex h-10 w-10 items-center justify-center overflow-hidden rounded-full text-sm font-medium transition-colors"
             onClick={(e) => { 
               e.stopPropagation(); 
               leaveEditor();
             }}
             aria-label="返回画廊"
           >
-            L
+            <Image src="/z-flow-logo.svg" alt="" width={40} height={40} priority />
           </button>
           {showAvatarMenu && (
             <div className="workspace-popover-panel absolute left-0 top-12 z-[130] w-48 rounded-2xl py-2 backdrop-blur-xl">
@@ -13769,23 +13929,46 @@ export default function AIWorkspace() {
                           role="status"
                           aria-live="polite"
                         >
-                          {msg.agentRunProgress.steps.map((step) => (
-                            <div
-                              key={`${step.stepId}:${step.toolCallId || ''}`}
-                              className={`agent-progress-enter flex min-h-7 items-center gap-2.5 ${
-                                step.status === 'failed'
-                                  ? 'text-red-600 dark:text-red-300'
-                                  : step.status === 'completed'
-                                    ? 'workspace-text-muted'
-                                    : 'workspace-text-primary'
-                              }`}
-                            >
-                              <span className="w-3 flex-none text-center text-[12px]" aria-hidden="true">
-                                {getAgentProgressMarker(step.status)}
-                              </span>
-                              <span>{formatAgentProgressLabel(step)}</span>
-                            </div>
-                          ))}
+                          {msg.agentRunProgress.steps.map((step) => {
+                            const canOpenDecision = step.status === 'waiting' && hasPendingAgentDecision(msg);
+                            const className = `agent-progress-enter flex min-h-7 items-center gap-2.5 rounded-md text-left ${
+                              canOpenDecision ? '-mx-1 px-1 transition-colors hover:bg-[var(--workspace-control-hover)]' : ''
+                            } ${
+                              step.status === 'failed'
+                                ? 'text-red-600 dark:text-red-300'
+                                : step.status === 'completed'
+                                  ? 'workspace-text-muted'
+                                  : 'workspace-text-primary'
+                            }`;
+                            const content = (
+                              <>
+                                <span className="w-3 flex-none text-center text-[12px]" aria-hidden="true">
+                                  {getAgentProgressMarker(step.status)}
+                                </span>
+                                <span>
+                                  {formatAgentProgressLabel(step)}
+                                  {getAgentProgressDurationLabel(step, generationClockMs)
+                                    ? ` · ${getAgentProgressDurationLabel(step, generationClockMs)}`
+                                    : ''}
+                                </span>
+                              </>
+                            );
+                            return canOpenDecision ? (
+                              <button
+                                key={`${step.stepId}:${step.toolCallId || ''}`}
+                                type="button"
+                                className={className}
+                                onClick={() => openPendingAgentDecision(msg)}
+                                aria-label={`重新打开选择：${getPendingAgentDecisionLabel(msg)}`}
+                              >
+                                {content}
+                              </button>
+                            ) : (
+                              <div key={`${step.stepId}:${step.toolCallId || ''}`} className={className}>
+                                {content}
+                              </div>
+                            );
+                          })}
                           {['completed', 'warning', 'failed'].includes(msg.agentRunProgress.outcome) && (
                             <div className={`agent-progress-enter flex min-h-7 items-center gap-2.5 ${
                               msg.agentRunProgress.outcome === 'failed'
@@ -13878,66 +14061,16 @@ export default function AIWorkspace() {
                           </div>
                         )
                       ))}
-                      {msg.agentConfirmation && (
-                        <div className="mt-2 flex items-center gap-2">
-                          <button
-                            type="button"
-                            className="workspace-control-chip rounded-lg px-3 py-1.5 text-xs font-medium"
-                            onClick={() => {
-                              const confirmationId = msg.agentConfirmation?.confirmationId;
-                              if (!confirmationId || pendingAgentConfirmationsRef.current.has(confirmationId)) return;
-                              const messageIndex = chatMessages.findIndex((item) => item.id === msg.id);
-                              const sourceMessage = [...chatMessages.slice(0, messageIndex)]
-                                .reverse()
-                                .find((item) => item.role === 'user');
-                              if (sourceMessage) {
-                                pendingAgentConfirmationsRef.current.add(confirmationId);
-                                setChatMessages((prev) => prev.map((item) => item.id === msg.id
-                                  ? { ...item, content: '正在确认并启动任务…', agentConfirmation: undefined, taskStatus: 'running' }
-                                  : item));
-                                void handleGenerate({
-                                  input: sourceMessage.content,
-                                  skill: sourceMessage.skill,
-                                  agentConfirmation: msg.agentConfirmation,
-                                }).finally(() => pendingAgentConfirmationsRef.current.delete(confirmationId));
-                              }
-                            }}
-                          >
-                            确认执行
-                          </button>
-                        </div>
-                      )}
-                      {msg.skillChoice && !msg.skillChoiceResolved && (
-                        <div className="mt-2.5">
-                          <button
-                            onClick={() => openSkillChoiceModal(msg.skillChoice as SkillChoicePayload)}
-                            className="workspace-control-chip inline-flex items-center rounded-full px-3 py-1 text-xs"
-                          >
-                            重新选择
-                          </button>
-                        </div>
-                      )}
-                      {msg.agentProposal?.requiresSelection && !msg.agentProposalResolved && (
-                        <div className="mt-2.5">
-                          <button
-                            type="button"
-                            onClick={() => openAgentProposalModal(msg.agentProposal as AgentProposal)}
-                            className="workspace-control-chip inline-flex items-center rounded-full px-3 py-1 text-xs"
-                          >
-                            选择方案
-                          </button>
-                        </div>
-                      )}
-                      {msg.agentClarification && !msg.agentClarificationResolved && (
-                        <div className="mt-2.5">
-                          <button
-                            type="button"
-                            onClick={() => openAgentClarificationModal(msg.agentClarification as AgentClarificationPayload)}
-                            className="workspace-control-chip inline-flex items-center rounded-full px-3 py-1 text-xs"
-                          >
-                            重新回答
-                          </button>
-                        </div>
+                      {hasPendingAgentDecision(msg)
+                        && !msg.agentRunProgress?.steps.some((step) => step.status === 'waiting') && (
+                        <button
+                          type="button"
+                          onClick={() => openPendingAgentDecision(msg)}
+                          className="agent-progress-enter workspace-text-primary mt-2 flex min-h-7 items-center gap-2.5 rounded-md px-1 text-left text-[13px] leading-5 transition-colors hover:bg-[var(--workspace-control-hover)]"
+                        >
+                          <span className="w-3 flex-none text-center text-[12px]" aria-hidden="true">⏸</span>
+                          <span>{getPendingAgentDecisionLabel(msg)}</span>
+                        </button>
                       )}
                       {msg.imageName && <div className="mb-1.5 text-sm font-medium text-zinc-200">{msg.imageName}</div>}
                       {msg.imageUrl && (
@@ -13961,199 +14094,90 @@ export default function AIWorkspace() {
             </div>
           )}
 
+          <div className="relative flex-shrink-0">
+          {showAgentConfirmationModal && pendingAgentConfirmation && (
+            <AgentDecisionPopover
+              title={pendingAgentConfirmation.message}
+              options={[{
+                id: 'confirm',
+                label: pendingAgentConfirmation.toolName === 'generate_image' ? '确认生成图片' : '确认执行操作',
+                description: '确认后立即开始执行。',
+                recommended: true,
+              }]}
+              onSelect={() => submitAgentConfirmation()}
+              onClose={closeAgentConfirmationModal}
+              skipLabel="暂不执行"
+              onSkip={closeAgentConfirmationModal}
+            />
+          )}
+
           {showAgentProposalModal && pendingAgentProposal && (
-            <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/20 px-4">
-              <div
-                role="dialog"
-                aria-modal="true"
-                aria-labelledby="agent-proposal-title"
-                className="agent-clarification-panel flex max-h-[80vh] w-full max-w-md flex-col rounded-[24px] border border-[var(--workspace-border)] bg-[var(--workspace-surface-elevated)] p-5 outline-none"
-              >
-                <div className="flex items-start justify-between gap-4">
-                  <div>
-                    <div id="agent-proposal-title" className="text-base font-semibold">{pendingAgentProposal.title}</div>
-                    <p className="workspace-text-muted mt-1 text-sm leading-5">选择一个方案后，Agent 会使用完整 Brief 继续执行。</p>
-                  </div>
-                  <button
-                    type="button"
-                    aria-label="关闭方案选择"
-                    onClick={closeAgentProposalModal}
-                    className="workspace-chat-icon-control flex h-8 w-8 flex-none items-center justify-center rounded-lg"
-                  >
-                    <X size={15} />
-                  </button>
-                </div>
-                <div className="panel-scrollbar mt-4 space-y-2 overflow-y-auto">
-                  {pendingAgentProposal.options.map((option) => (
-                    <button
-                      key={option.entityId}
-                      type="button"
-                      onClick={() => submitAgentProposal(pendingAgentProposal, option)}
-                      className="w-full rounded-xl border border-[var(--workspace-border)] px-3 py-2.5 text-left transition-colors hover:bg-[var(--workspace-control-hover)]"
-                    >
-                      <span className="block text-sm font-medium">{`${option.index}. ${option.label}`}</span>
-                      {option.summary && <span className="workspace-text-muted mt-0.5 block text-xs leading-4">{option.summary}</span>}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            </div>
+            <AgentDecisionPopover
+              title={pendingAgentProposal.title}
+              options={pendingAgentProposal.options.map((option) => ({
+                id: option.entityId,
+                label: option.label,
+                description: option.summary,
+              }))}
+              onSelect={(entityId) => {
+                const option = pendingAgentProposal.options.find((item) => item.entityId === entityId);
+                if (option) submitAgentProposal(pendingAgentProposal, option);
+              }}
+              onClose={closeAgentProposalModal}
+              skipLabel="稍后选择"
+              onSkip={closeAgentProposalModal}
+            />
           )}
 
           {showAgentClarificationModal && pendingAgentClarification && (
-            <div className="absolute inset-0 z-30 flex items-center justify-center bg-black/20 px-4">
-              <div
-                ref={agentClarificationDialogRef}
-                role="dialog"
-                aria-modal="true"
-                aria-labelledby="agent-clarification-title"
-                tabIndex={-1}
-                onKeyDown={(event) => {
-                  if (event.key === 'Escape') closeAgentClarificationModal();
-                }}
-                className="agent-clarification-panel w-full max-w-md rounded-[24px] border border-[var(--workspace-border)] bg-[var(--workspace-surface-elevated)] p-5 outline-none"
-              >
-                <div className="flex items-start justify-between gap-4">
-                  <div>
-                    <div id="agent-clarification-title" className="text-base font-semibold">
-                      {pendingAgentClarification.request.failed ? '需要你的决定' : '确认一个关键方向'}
-                    </div>
-                    <p className="workspace-text-muted mt-1 whitespace-pre-wrap text-sm leading-5">
-                      {pendingAgentClarification.request.question}
-                    </p>
-                  </div>
-                  <button
-                    type="button"
-                    aria-label="关闭需求澄清"
-                    onClick={closeAgentClarificationModal}
-                    className="workspace-chat-icon-control flex h-8 w-8 flex-none items-center justify-center rounded-lg"
-                  >
-                    <X size={15} />
-                  </button>
-                </div>
-
-                {!pendingAgentClarification.request.failed && (
-                  <>
-                    <div className="mt-4 space-y-2" role="radiogroup" aria-label="Agent 建议方向">
-                      {pendingAgentClarification.request.options.map((option) => {
-                        const selected = agentClarificationSelectedOptionId === option.id;
-                        return (
-                          <button
-                            key={option.id}
-                            type="button"
-                            role="radio"
-                            aria-checked={selected}
-                            onClick={() => setAgentClarificationSelectedOptionId(option.id)}
-                            className={`w-full rounded-xl border px-3 py-2.5 text-left transition-colors ${
-                              selected
-                                ? 'border-[var(--workspace-text-primary)] bg-[var(--workspace-control-hover)]'
-                                : 'border-[var(--workspace-border)] hover:bg-[var(--workspace-control-hover)]'
-                            }`}
-                          >
-                            <span className="block text-sm font-medium">{option.label}</span>
-                            {option.description && (
-                              <span className="workspace-text-muted mt-0.5 block text-xs leading-4">{option.description}</span>
-                            )}
-                          </button>
-                        );
-                      })}
-                      <button
-                        type="button"
-                        role="radio"
-                        aria-checked={agentClarificationSelectedOptionId === 'custom'}
-                        onClick={() => setAgentClarificationSelectedOptionId('custom')}
-                        className={`w-full rounded-xl border px-3 py-2.5 text-left text-sm font-medium transition-colors ${
-                          agentClarificationSelectedOptionId === 'custom'
-                            ? 'border-[var(--workspace-text-primary)] bg-[var(--workspace-control-hover)]'
-                            : 'border-[var(--workspace-border)] hover:bg-[var(--workspace-control-hover)]'
-                        }`}
-                      >
-                        自定义
-                      </button>
-                    </div>
-
-                    <label className="mt-4 block text-xs font-medium" htmlFor="agent-clarification-custom">
-                      {agentClarificationSelectedOptionId === 'custom' ? '自定义方向' : '补充或调整（可选）'}
-                    </label>
-                    <textarea
-                      id="agent-clarification-custom"
-                      value={agentClarificationCustomText}
-                      onChange={(event) => {
-                        setAgentClarificationCustomText(event.target.value);
-                        if (!agentClarificationSelectedOptionId) setAgentClarificationSelectedOptionId('custom');
-                      }}
-                      placeholder="输入你希望调整的方向…"
-                      rows={3}
-                      className="panel-scrollbar mt-2 w-full resize-none rounded-xl border border-[var(--workspace-border)] bg-transparent px-3 py-2.5 text-sm outline-none focus:border-[var(--workspace-text-muted)]"
-                    />
-                  </>
-                )}
-
-                <div className="mt-5 flex flex-wrap items-center justify-end gap-2">
-                  {pendingAgentClarification.request.failed && (
-                    <button
-                      type="button"
-                      onClick={retryAgentClarification}
-                      className="workspace-control-chip rounded-lg px-3 py-2 text-xs font-medium"
-                    >
-                      重新分析需求
-                    </button>
-                  )}
-                  {!['creative_direction', 'context_reference'].includes(pendingAgentClarification.request.dimension) && (
-                    <button
-                      type="button"
-                      onClick={() => submitAgentClarification(true)}
-                      className="workspace-control-chip rounded-lg px-3 py-2 text-xs font-medium"
-                    >
-                      按当前信息开始制作
-                    </button>
-                  )}
-                  {!pendingAgentClarification.request.failed && (
-                    <button
-                      type="button"
-                      disabled={
-                        (!agentClarificationSelectedOptionId && !agentClarificationCustomText.trim())
-                        || (agentClarificationSelectedOptionId === 'custom' && !agentClarificationCustomText.trim())
-                      }
-                      onClick={() => submitAgentClarification(false)}
-                      className="rounded-lg bg-[var(--workspace-text-primary)] px-4 py-2 text-xs font-medium text-[var(--workspace-surface)] disabled:cursor-not-allowed disabled:opacity-40"
-                    >
-                      确认并开始生成
-                    </button>
-                  )}
-                </div>
-              </div>
-            </div>
+            <AgentDecisionPopover
+              title={pendingAgentClarification.request.question}
+              options={pendingAgentClarification.request.failed
+                ? [{ id: 'retry', label: '重新分析需求', description: '保留当前任务并重新检查需求。', recommended: true }]
+                : pendingAgentClarification.request.options.map((option, index) => ({
+                    id: option.id,
+                    label: option.label,
+                    description: option.description,
+                    recommended: index === 0,
+                  }))}
+              onSelect={(optionId) => {
+                if (optionId === 'retry') retryAgentClarification();
+                else submitAgentClarification(false, optionId);
+              }}
+              onClose={closeAgentClarificationModal}
+              {...(!['creative_direction', 'context_reference'].includes(pendingAgentClarification.request.dimension)
+                ? { skipLabel: '按当前信息开始制作', onSkip: () => submitAgentClarification(true) }
+                : {})}
+              {...(!pendingAgentClarification.request.failed
+                ? {
+                    custom: {
+                      label: '自定义回答',
+                      placeholder: '输入你希望调整的方向…',
+                      value: agentClarificationCustomText,
+                      onChange: setAgentClarificationCustomText,
+                      onSubmit: () => submitAgentClarification(false, 'custom'),
+                    },
+                  }
+                : {})}
+            />
           )}
 
           {showSkillChoiceModal && pendingSkillChoice && (
-            <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/30 px-4">
-              <div className="workspace-popover-panel w-full max-w-md rounded-[24px] p-5">
-                <div className="mb-1 text-base font-semibold">{pendingSkillChoice.title}</div>
-                {pendingSkillChoice.message && (
-                  <p className="workspace-text-muted mb-4 whitespace-pre-wrap text-sm">{pendingSkillChoice.message}</p>
-                )}
-                <div className="space-y-2">
-                  {pendingSkillChoice.options.map((option, index) => (
-                    <button
-                      key={`${pendingSkillChoice.id}-option-${index}`}
-                      onClick={() => handleSubmitSkillChoice(pendingSkillChoice, option)}
-                      className="w-full rounded-xl border border-[var(--workspace-border)] px-3 py-2 text-left text-sm hover:bg-[var(--workspace-control-hover)]"
-                    >
-                      {option.label}
-                    </button>
-                  ))}
-                </div>
-                <div className="mt-4 flex justify-end">
-                  <button
-                    onClick={handleCloseSkillChoiceModal}
-                    className="rounded-lg border border-[var(--workspace-border)] px-3 py-1.5 text-xs text-[var(--workspace-text-muted)] hover:bg-[var(--workspace-control-hover)]"
-                  >
-                    稍后再选
-                  </button>
-                </div>
-              </div>
-            </div>
+            <AgentDecisionPopover
+              title={pendingSkillChoice.message || pendingSkillChoice.title}
+              options={pendingSkillChoice.options.map((option, index) => ({
+                id: String(index),
+                label: option.label,
+                recommended: index === 0,
+              }))}
+              onSelect={(optionId) => {
+                const option = pendingSkillChoice.options[Number(optionId)];
+                if (option) handleSubmitSkillChoice(pendingSkillChoice, option);
+              }}
+              onClose={handleCloseSkillChoiceModal}
+              skipLabel="稍后再选"
+              onSkip={handleCloseSkillChoiceModal}
+            />
           )}
 
           {/* Reference Images */}
@@ -14611,6 +14635,7 @@ export default function AIWorkspace() {
             </div>
           </div>
             </div>
+          </div>
           </>,
           document.body
         )}

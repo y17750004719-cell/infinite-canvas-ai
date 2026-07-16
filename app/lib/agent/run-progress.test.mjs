@@ -5,6 +5,7 @@ import {
   createInitialAgentRunProgress,
   createAgentProgressEventRouter,
   formatAgentProgressLabel,
+  getAgentProgressElapsedMs,
   reduceAgentRunProgress,
   routeAgentProgressEvent,
   shouldShowAgentRunProgress,
@@ -113,6 +114,70 @@ test('updates one image step across confirmation and execution when the tool id 
   assert.equal(state.steps.length, 1);
   assert.equal(state.steps[0].status, 'active');
   assert.equal(state.steps[0].label, '正在生成图片');
+});
+
+test('confirmation submission updates the breadcrumb without starting image timing', () => {
+  let state = reduceAgentRunProgress(null, progress(1, {
+    stepId: 'generate_image',
+    phase: 'generating',
+    status: 'waiting',
+    toolCallId: 'generate-image-confirmation',
+    toolName: 'generate_image',
+    label: '等待确认生成图片',
+    timestampMs: 1_000,
+  }));
+  state = reduceAgentRunProgress(state, {
+    type: 'confirmation_submitted',
+    toolName: 'generate_image',
+  });
+
+  assert.equal(state.steps[0].label, '正在确认并启动任务');
+  assert.equal(state.steps[0].status, 'waiting');
+  assert.equal(state.steps[0].startedAt, undefined);
+  assert.equal(getAgentProgressElapsedMs(state.steps[0], 5_000), null);
+});
+
+test('image generation timing starts on active, freezes on completion, and resets per tool call', () => {
+  let state = reduceAgentRunProgress(null, progress(1, {
+    stepId: 'generate_image',
+    phase: 'generating',
+    status: 'waiting',
+    toolCallId: 'image-batch-1',
+    toolName: 'generate_image',
+    timestampMs: 1_000,
+  }));
+  assert.equal(state.steps[0].startedAt, undefined);
+  assert.equal(getAgentProgressElapsedMs(state.steps[0], 5_000), null);
+
+  state = reduceAgentRunProgress(state, progress(2, {
+    stepId: 'generate_image',
+    phase: 'generating',
+    status: 'active',
+    toolCallId: 'image-batch-1',
+    toolName: 'generate_image',
+    timestampMs: 2_000,
+  }));
+  assert.equal(getAgentProgressElapsedMs(state.steps[0], 5_500), 3_500);
+
+  state = reduceAgentRunProgress(state, progress(3, {
+    stepId: 'generate_image',
+    phase: 'generating',
+    status: 'completed',
+    toolCallId: 'image-batch-1',
+    toolName: 'generate_image',
+    timestampMs: 8_500,
+  }));
+  assert.equal(getAgentProgressElapsedMs(state.steps[0], 20_000), 6_500);
+
+  state = reduceAgentRunProgress(state, progress(4, {
+    stepId: 'generate_image',
+    phase: 'generating',
+    status: 'active',
+    toolCallId: 'image-batch-2',
+    toolName: 'generate_image',
+    timestampMs: 10_000,
+  }));
+  assert.equal(getAgentProgressElapsedMs(state.steps[1], 11_250), 1_250);
 });
 
 test('agent_done before image assets settle does not complete the run', () => {

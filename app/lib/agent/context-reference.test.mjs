@@ -49,6 +49,12 @@ test('keeps literal numbers and aspect ratios out of reference resolution', () =
   assert.equal(isReferentialShorthand('生成数字3海报'), false);
 });
 
+test('does not treat a complete multi-issue brief as an old proposal selection', () => {
+  const entities = buildAgentContextEntities({ messages: [{ id: 'assistant-1', role: 'assistant', content: '', agentProposal: proposal }] });
+  const message = 'Vogue magazine cover with two rabbits. Please design a similar series for 5 copies. 《Vogue》杂志封面，主角是两只兔子，请设计一套类似的杂志，共5期。';
+  assert.equal(resolveContextReference({ userMessage: message, entities }).status, 'none');
+});
+
 test('returns ambiguity when two proposal groups share the same ordinal', () => {
   const secondProposal = { ...proposal, id: 'posters', options: proposal.options.map((option) => ({ ...option, entityId: `posters:${option.id}` })) };
   const entities = buildAgentContextEntities({ messages: [

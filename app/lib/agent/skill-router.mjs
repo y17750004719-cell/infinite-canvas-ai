@@ -37,7 +37,7 @@ export function filterSkillCandidates(userMessage, manifests, limit = MAX_CANDID
 
 export function buildSkillRouterMessages({ userMessage, candidates, hasReferenceImages = false }) {
   const system = [
-    'You are the routing component for the ZO Design main agent.',
+    'You are the routing component for the Z Flow main agent.',
     'Return exactly one JSON object without Markdown, code fences, commentary, or extra keys.',
     'Schema: {"version":1,"intent":"chat|image|skill_action","skillId":null,"confidence":0,"needsClarification":false,"clarificationQuestion":""}.',
     'Choose skillId only from the supplied candidates. Use null when no candidate is appropriate.',

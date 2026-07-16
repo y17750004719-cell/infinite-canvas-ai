@@ -9,6 +9,8 @@ export interface AgentRunProgressStep {
   label: string;
   toolCallId?: string;
   toolName?: string;
+  startedAt?: number;
+  completedAt?: number;
 }
 
 export interface AgentRunProgress {
@@ -27,12 +29,15 @@ export interface AgentRunProgress {
   outcome: AgentRunOutcome;
 }
 
+export function getAgentProgressElapsedMs(step: AgentRunProgressStep, now?: number): number | null;
+
 export type AgentRunProgressEvent =
   | {
       type: 'progress_update';
       runId?: string;
       operationId?: string;
       sequence?: number;
+      timestampMs?: number;
       stepId?: string;
       phase?: string;
       status?: AgentRunStepStatus;
@@ -45,5 +50,6 @@ export type AgentRunProgressEvent =
   | { type: 'assets_settled'; succeeded: number; failed: number }
   | { type: 'agent_done' }
   | { type: 'agent_error' }
+  | { type: 'confirmation_submitted'; toolName?: string }
   | { type: 'intent_resolved'; intent: 'chat' | 'image' | 'skill_action' }
   | { type: string; [key: string]: unknown };

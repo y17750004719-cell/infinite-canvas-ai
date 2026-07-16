@@ -9,9 +9,11 @@ export interface OptimizedImagePrompt {
   colorPalette: string[];
   constraints: string[];
   finalPrompt: string;
+  items?: Array<{ index: number; label: string; subject: string; prompt: string }>;
 }
-export function parseOptimizedImagePrompt(raw: string): OptimizedImagePrompt | null;
-export function buildPromptOptimizerMessages(userPrompt: string, skillLabel?: string): Array<{ role: 'system' | 'user'; content: string }>;
+export function parseOptimizedImagePrompt(raw: string, options?: { outputCount?: number; batchMode?: 'series' | 'variants' }): OptimizedImagePrompt | null;
+export function buildPromptOptimizerMessages(userPrompt: string, skillLabel?: string, options?: { outputCount?: number; batchMode?: 'series' | 'variants'; repair?: boolean }): Array<{ role: 'system' | 'user'; content: string }>;
+export function resolveImageBatchMode(text: string, outputCount?: number): 'series' | 'variants';
 export function resolveAgentIntent(text: string, hasReferenceImages?: boolean): 'chat' | 'image' | 'skill_action';
 export function resolveAgentConversationIntent(
   messages: Array<{ role: 'user' | 'assistant'; content: string }>,

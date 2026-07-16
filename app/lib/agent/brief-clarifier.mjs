@@ -30,9 +30,9 @@ const ALLOWED_CRITICAL_DIMENSIONS = new Set([
 
 const CREATIVE_DELEGATION_PATTERN = /(你决定|自由发挥|按你的理解|交给你|你来定|自行决定|surprise me|use your judgment)/i;
 const IMPROVEMENT_ONLY_PATTERN = /(提高|提升|改善|优化).{0,8}(质量|效果|表现)|更好的?效果|more detail|better quality|improve quality/i;
-const DELIVERABLE_PATTERN = /(海报|包装|包装盒|插画|封面|效果图|产品图|广告图|主视觉|视觉稿|logo|标志|图标|banner|poster|packaging|illustration|cover|render|image)/i;
-const DESIGN_EXECUTION_ACTION_PATTERN = /(做个|做一个|设计|制作|生成|出图|弄个|create|design|generate)/i;
-const DESIGN_EXECUTION_CONTEXT_PATTERN = /(高级|视觉|创意|海报|包装|插画|封面|效果图|产品图|广告图|主视觉|logo|标志|图像|图片|东西|方案|visual|poster|packaging|illustration|image)/i;
+const DELIVERABLE_PATTERN = /(海报|包装|包装盒|插画|封面|杂志|期刊|画册|效果图|产品图|广告图|主视觉|视觉稿|logo|标志|图标|banner|poster|packaging|illustration|cover|magazine|editorial|issue|series|render|image)/i;
+const DESIGN_EXECUTION_ACTION_PATTERN = /(做个|做一个|设计|制作|生成|出图|弄个|create|design|generate|make|produce)/i;
+const DESIGN_EXECUTION_CONTEXT_PATTERN = /(高级|视觉|创意|海报|包装|插画|封面|杂志|期刊|画册|效果图|产品图|广告图|主视觉|logo|标志|图像|图片|东西|方案|visual|poster|packaging|illustration|image|cover|magazine|editorial|issue|series)/i;
 const NON_EXECUTION_PATTERN = /(分析|解释|点评|总结|为什么|开发计划|实施计划|代码|文档|analysis|explain|review|code|plan)/i;
 const DIRECTION_CONFLICT_PATTERN = /(也要|同时|既.+又|但.+(?:也|又)|一方面.+另一方面|同时包含|兼具.+(?:和|与))/i;
 const LITERAL_COPY_REQUEST_PATTERN = /(文案|文字|写上|写着|标题|品牌名|产品名|slogan|标语|准确呈现|保持原样|literal copy|exact text)/i;
@@ -145,9 +145,10 @@ export function buildBriefClarifierMessages({
   requireCreativeDirectionConfirmation = false,
 } = {}) {
   const system = [
-    '你是 ZO Design 的 Brief Clarifier，负责在执行设计任务前判断需求是否存在真正阻碍执行的关键歧义。',
+    '你是 Z Flow 的 Brief Clarifier，负责在执行设计任务前判断需求是否存在真正阻碍执行的关键歧义。',
     '默认执行，澄清是例外。清晰需求默认直接执行，不得为了显得专业、完善提示词或增加互动而提问。',
-    '不得为了补充颜色、材质、灯光、镜头、构图、装饰、供应商、模型、比例、尺寸、质量或数量而提问。',
+    '不得为了补充颜色、材质、灯光、镜头、构图、装饰、供应商、模型、比例、尺寸或质量而提问。',
+    '用户没有说数量时默认单张，不得追问；用户已明确说出的交付数量必须保留，数量冲突、语义歧义和超出单批上限由系统的数量解析流程处理。',
     '用户说“你决定”“自由发挥”“按你的理解”等内容时，视为授权你补全创作细节。',
     '参考图片能够回答的信息不得再次询问，已经回答过的维度不得重复询问。',
     '只有缺少主体或交付物、核心方向互相冲突、必须准确呈现的文案不明确、多张参考图优先级不明、用途会根本改变版式，或 Skill 明确禁止继续时，才可以提问。',

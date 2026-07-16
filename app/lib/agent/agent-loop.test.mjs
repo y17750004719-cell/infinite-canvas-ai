@@ -201,6 +201,9 @@ test('public image results contain counts but never asset URLs', () => {
       size: '2048x2048',
       aspectRatio: '4:3',
       quality: 'auto',
+      count: 5,
+      requestedCount: 12,
+      countSource: 'batch',
     },
     requestStats: { requested: 1, succeeded: 1, failed: 0 },
   });
@@ -210,6 +213,7 @@ test('public image results contain counts but never asset URLs', () => {
     assetCount: 1,
     requestStats: { requested: 1, succeeded: 1, failed: 0 },
     partialFailure: false,
+    resolvedImageOptions: { count: 5, requestedCount: 12, countSource: 'batch' },
   });
   const serializedViews = JSON.stringify(views);
   assert.doesNotMatch(serializedViews, /https?:\/\//);
@@ -278,6 +282,7 @@ test('progress tracker resumes one operation with strictly increasing sequence a
   assert.deepEqual(resumedEvents.map((event) => event.sequence), [3, 4, 5, 6]);
   assert.ok(resumedEvents.slice(-2).every((event) => event.status === 'failed'));
   assert.ok(resumedEvents.every((event) => event.operationId === 'operation-1'));
+  assert.ok([...firstEvents, ...resumedEvents].every((event) => Number.isFinite(event.timestampMs)));
 });
 
 test('public tool event helper keeps image URLs only in client actions for every image branch', () => {

@@ -4,8 +4,13 @@ import assert from 'node:assert/strict';
 import { buildProviderImageOptionProfiles } from '../image-provider-option-profiles.mjs';
 import {
   AGENT_DEFAULT_IMAGE_OPTIONS,
+  AGENT_MAX_IMAGE_BATCH_COUNT,
   buildAgentImageGenerationRequests,
+  extractAgentImageCount,
   extractExplicitImageAspectRatio,
+  parseAgentImageCountNumber,
+  resolveAgentImageBatchContinuation,
+  resolveAgentImageCountDecision,
   resolveAgentImageOptions,
 } from './image-options.mjs';
 import { buildAsyncImageTaskRequests } from '../workspace-session-view.mjs';
@@ -17,6 +22,79 @@ test('agent image defaults use 2K, portrait 3:4, auto quality, and one output', 
     quality: 'auto',
     count: 1,
   });
+  assert.equal(AGENT_MAX_IMAGE_BATCH_COUNT, 9);
+});
+
+test('agent image count parser supports Chinese, English, and compound deliverable counts', () => {
+  assert.deepEqual(extractAgentImageCount('请设计一套杂志封面，共5期'), {
+    status: 'resolved',
+    count: 5,
+    source: 'prompt',
+    candidates: [5],
+    matchedText: '5期',
+  });
+  assert.equal(extractAgentImageCount('生成六张封面').count, 6);
+  assert.equal(extractAgentImageCount('做4个版本').count, 4);
+  assert.equal(extractAgentImageCount('Create six covers').count, 6);
+  assert.deepEqual(extractAgentImageCount('3套，每套4张'), {
+    status: 'overflow',
+    count: 12,
+    source: 'prompt',
+    candidates: [12],
+    matchedText: '3套,每套4张',
+  });
+  assert.equal(extractAgentImageCount('5期，每期2版').count, 10);
+});
+
+test('agent image count parser rejects subject counts and technical numbers', () => {
+  assert.equal(extractAgentImageCount('画面里有5只兔子').status, 'none');
+  assert.deepEqual(extractAgentImageCount('两只兔子的一张封面'), {
+    status: 'resolved',
+    count: 1,
+    source: 'prompt',
+    candidates: [1],
+    matchedText: '一张',
+  });
+  assert.equal(extractAgentImageCount('16:9, 2K, 2048x2048, 2026').status, 'none');
+  assert.equal(extractAgentImageCount('生成5个').status, 'ambiguous');
+});
+
+test('agent image count parser surfaces conflicting deliverable counts', () => {
+  const result = extractAgentImageCount('生成3张封面，但最终要5个版本');
+  assert.equal(result.status, 'ambiguous');
+  assert.deepEqual(result.candidates, [3, 5]);
+  assert.equal(parseAgentImageCountNumber('二十一'), 21);
+  assert.equal(parseAgentImageCountNumber('twenty-one'), 21);
+});
+
+test('agent image count decisions prefer clarification, prompt, explicit interface, then default', () => {
+  assert.deepEqual(resolveAgentImageCountDecision({ prompt: '共5期', interfaceCount: 1 }), {
+    status: 'resolved',
+    count: 5,
+    totalCount: 5,
+    source: 'prompt',
+    candidates: [5],
+    matchedText: '5期',
+  });
+  assert.equal(resolveAgentImageCountDecision({ prompt: '生成封面', interfaceCount: 4 }).count, 4);
+  assert.equal(resolveAgentImageCountDecision({ prompt: '生成封面', interfaceCount: 1 }).count, 1);
+  assert.equal(resolveAgentImageCountDecision({ prompt: '共5期', clarifiedCount: 3 }).count, 3);
+  assert.deepEqual(resolveAgentImageCountDecision({ prompt: '共5期', interfaceCount: 2 }).candidates, [5, 2]);
+});
+
+test('agent image count decisions restore per-batch counts from remaining successful outputs', () => {
+  const plan = { totalCount: 20, completedCount: 9, remainingCount: 11, batchSize: 9 };
+  assert.deepEqual(resolveAgentImageCountDecision({ prompt: '生成20张', batchPlan: plan }), {
+    status: 'resolved',
+    count: 9,
+    totalCount: 20,
+    source: 'batch',
+    batchPlan: plan,
+    candidates: [20],
+  });
+  assert.equal(resolveAgentImageCountDecision({
+    batchPlan: { ...plan, completedCount: 18, remainingCount: 2 },
+  }).count, 2);
 });
 
 test('explicit image ratio parsing supports colon variants and uses the last ratio', () => {
@@ -136,6 +214,61 @@ test('agent generation requests are the canvas image-card builder output', () =>
   });
   assert.equal(resolved.options.requestSize, '2048x1536');
   assert.deepEqual(resolved.options.requestSizes, ['2048x1536']);
+});
+
+test('agent series generation creates one request per distinct issue prompt', () => {
+  const profiles = buildProviderImageOptionProfiles([
+    { id: 'comfly', imageModels: ['gpt-image-2'] },
+  ]);
+  const resolved = buildAgentImageGenerationRequests({
+    prompt: 'Vogue 动物杂志系列，共 3 期',
+    generationPrompt: 'shared series prompt',
+    generationPrompts: [
+      'Vogue rabbit issue with red background',
+      'Vogue cat issue with yellow background',
+      'Vogue dog issue with green background',
+    ],
+    providerId: 'comfly',
+    modelId: 'gpt-image-2',
+    allowedModelIds: ['gpt-image-2'],
+    providerImageOptionProfiles: profiles,
+    requestedCount: 3,
+  });
+  assert.equal(resolved.options.count, 3);
+  assert.deepEqual(resolved.requests.map((request) => request.messages?.[0]?.content), [
+    'Vogue rabbit issue with red background',
+    'Vogue cat issue with yellow background',
+    'Vogue dog issue with green background',
+  ]);
+  assert.ok(resolved.requests.every((request) => request.n === 1));
+});
+
+test('series batch continuation retries failed issues before later untouched issues', () => {
+  const currentItems = Array.from({ length: 9 }, (_, index) => ({ id: `issue-${index + 1}` }));
+  const remainingItems = Array.from({ length: 11 }, (_, index) => ({ id: `issue-${index + 10}` }));
+  const continuation = resolveAgentImageBatchContinuation({
+    currentItems,
+    remainingItems,
+    failedItemIds: ['issue-2', 'issue-8'],
+  });
+  assert.equal(continuation.pendingCount, 13);
+  assert.deepEqual(continuation.nextItems.map((item) => item.id), [
+    'issue-2',
+    'issue-8',
+    'issue-10',
+    'issue-11',
+    'issue-12',
+    'issue-13',
+    'issue-14',
+    'issue-15',
+    'issue-16',
+  ]);
+  assert.deepEqual(continuation.remainingItems.map((item) => item.id), [
+    'issue-17',
+    'issue-18',
+    'issue-19',
+    'issue-20',
+  ]);
 });
 
 test('agent Gemini requests preserve the 2K tier and native aspect ratio', () => {

@@ -52,6 +52,16 @@ export type AgentClarificationState = {
   answers: Array<{ dimension: string; question: string; answer: string }>;
   referenceImages?: string[];
   contextCandidates?: AgentContextEntity[];
+  resolvedImageCount?: number;
+  resolvedImageCountSource?: 'clarification' | 'prompt' | 'interface' | 'default' | 'batch';
+  requestedImageCountTotal?: number;
+  pendingImageCountCandidates?: number[];
+  imageBatchPlan?: {
+    totalCount: number;
+    completedCount: number;
+    remainingCount: number;
+    batchSize: number;
+  };
 };
 
 export type AgentClarificationRequest = {
@@ -77,6 +87,7 @@ export type AgentProgressUpdate = {
   runId: string;
   operationId: string;
   sequence: number;
+  timestampMs?: number;
   stepId: AgentProgressStepId;
   phase: AgentProgressPhase;
   status: AgentProgressStatus;

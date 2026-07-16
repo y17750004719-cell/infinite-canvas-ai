@@ -3,7 +3,10 @@ import { randomUUID } from 'node:crypto';
 import { POST as generatePost } from '../generate/route';
 import { chat, chatStream } from '../../lib/api-client';
 import { optimizeImagePrompt } from '../../lib/agent/image-pipeline.mjs';
-import { resolveAgentConversationIntent } from '../../lib/agent/prompt-optimizer.mjs';
+import {
+  resolveAgentConversationIntent,
+  resolveImageBatchMode,
+} from '../../lib/agent/prompt-optimizer.mjs';
 import {
   listSkillManifests,
   loadSkillContent,
@@ -29,8 +32,14 @@ import { resolveProviderModelSelection } from '../../lib/provider-model-selectio
 import { createLogger } from '../../lib/logger';
 import { buildProviderImageOptionProfiles } from '../../lib/image-provider-option-profiles.mjs';
 import {
+  AGENT_DEFAULT_IMAGE_OPTIONS,
+  AGENT_MAX_IMAGE_BATCH_COUNT,
   buildAgentImageGenerationRequests,
+  extractAgentImageCount,
   normalizeAgentImageCount,
+  parseAgentImageCountNumber,
+  resolveAgentImageBatchContinuation,
+  resolveAgentImageCountDecision,
 } from '../../lib/agent/image-options.mjs';
 import {
   buildCanvasImageGenerationFailureMessage,
@@ -40,6 +49,7 @@ import {
 import {
   compileExecutionBrief,
   ensureOptimizedPromptCoverage,
+  isReferentialShorthand,
   parseAgentProposalBlock,
   resolveContextReference,
 } from '../../lib/agent/context-reference.mjs';
@@ -79,12 +89,37 @@ type ConfirmationRecord = {
   referenceImages: string[];
   canvasContext?: Record<string, unknown>;
   imageOptions?: AgentRequestBody['imageOptions'];
+  imageCountSource?: AgentImageCountSource;
+  requestedTotalImageCount?: number;
+  imageBatchPlan?: AgentImageBatchPlan;
+  nextConfirmationId?: string;
+  imageBatchMode?: AgentImageBatchMode;
+  generationItems?: AgentImageGenerationItem[];
+  remainingGenerationItems?: AgentImageGenerationItem[];
   optimizePrompt?: boolean;
   generationBrief?: string;
   executionBrief?: ExecutionBrief;
   expiresAt: number;
   execution?: Promise<Record<string, unknown>>;
   result?: Record<string, unknown>;
+};
+
+type AgentImageCountSource = 'clarification' | 'prompt' | 'interface' | 'default' | 'batch';
+type AgentImageBatchMode = 'series' | 'variants';
+
+type AgentImageGenerationItem = {
+  id: string;
+  index: number;
+  label: string;
+  subject: string;
+  prompt: string;
+};
+
+type AgentImageBatchPlan = {
+  totalCount: number;
+  completedCount: number;
+  remainingCount: number;
+  batchSize: number;
 };
 
 const agentGlobals = globalThis as unknown as {
@@ -184,6 +219,64 @@ function pruneClarificationSubmissionStore(now = Date.now()) {
   }
 }
 
+function positiveInteger(value: unknown) {
+  const count = Number(value);
+  return Number.isFinite(count) && count > 0 ? Math.floor(count) : null;
+}
+
+function parseClarifiedImageCount(value: unknown) {
+  const text = typeof value === 'string' ? value.trim() : '';
+  if (!text) return null;
+  const parsed = extractAgentImageCount(text);
+  if ((parsed.status === 'resolved' || parsed.status === 'overflow') && parsed.count) return parsed.count;
+  const standalone = text.match(/^\s*(\d{1,4}|[零〇一二两三四五六七八九十百]+|[a-z-]+)\s*(?:张|幅|期|版|款|个|images?|covers?|versions?)?\s*$/i);
+  return standalone ? parseAgentImageCountNumber(standalone[1]) : null;
+}
+
+function applyImageCountClarificationState(
+  state: AgentClarificationState,
+  request: AgentClarificationRequest,
+  response: NonNullable<AgentRequestBody['clarificationResponse']>,
+) {
+  if (!request.dimension.startsWith('output_count')) return state;
+  const selectedOptionId = typeof response.selectedOptionId === 'string' ? response.selectedOptionId : '';
+  const requestedTotal = positiveInteger(state.requestedImageCountTotal);
+  if (selectedOptionId === 'split_batches' && requestedTotal) {
+    return {
+      ...state,
+      resolvedImageCount: AGENT_MAX_IMAGE_BATCH_COUNT,
+      resolvedImageCountSource: 'batch' as const,
+      imageBatchPlan: {
+        totalCount: requestedTotal,
+        completedCount: 0,
+        remainingCount: requestedTotal,
+        batchSize: AGENT_MAX_IMAGE_BATCH_COUNT,
+      },
+    };
+  }
+  if (selectedOptionId === 'first_batch') {
+    return {
+      ...state,
+      resolvedImageCount: AGENT_MAX_IMAGE_BATCH_COUNT,
+      resolvedImageCountSource: 'clarification' as const,
+      imageBatchPlan: undefined,
+    };
+  }
+  const optionCount = selectedOptionId.startsWith('count_')
+    ? positiveInteger(selectedOptionId.slice('count_'.length))
+    : null;
+  const customCount = parseClarifiedImageCount(response.customText);
+  const resolvedCount = customCount || optionCount;
+  if (!resolvedCount) return state;
+  return {
+    ...state,
+    resolvedImageCount: resolvedCount,
+    resolvedImageCountSource: 'clarification' as const,
+    requestedImageCountTotal: resolvedCount,
+    imageBatchPlan: undefined,
+  };
+}
+
 export async function POST(request: NextRequest) {
   const body = await request.json().catch(() => null) as AgentRequestBody | null;
   if (!body || !Array.isArray(body.messages)) {
@@ -207,12 +300,24 @@ export async function POST(request: NextRequest) {
   const selectedContextEntityIds = Array.isArray(body.selectedContextEntityIds)
     ? body.selectedContextEntityIds.filter((id): id is string => typeof id === 'string').slice(0, 8)
     : [];
-  const initialContextResolution = resolveContextReference({
-    userMessage: latestUserMessage,
-    entities: contextEntities,
-    selectedEntityIds: selectedContextEntityIds,
-  });
   const initialBriefSource = conversationIntent.brief || latestUserMessage;
+  const explicitBatchCountResolution = extractAgentImageCount(initialBriefSource);
+  const explicitBatchImageRequest = !body.activeSkillId
+    && (
+      conversationIntent.intent === 'image'
+      || isPotentialDesignExecutionRequest(initialBriefSource)
+    )
+    && (explicitBatchCountResolution.candidates || []).some((count) => Number(count) > 1);
+  const shouldResolveInitialContext = !explicitBatchImageRequest
+    || selectedContextEntityIds.length > 0
+    || isReferentialShorthand(latestUserMessage);
+  const initialContextResolution = shouldResolveInitialContext
+    ? resolveContextReference({
+        userMessage: latestUserMessage,
+        entities: contextEntities,
+        selectedEntityIds: selectedContextEntityIds,
+      })
+    : { status: 'none' as const, detected: false, confidence: 'none' as const, candidates: [], entityIds: [] };
   const initialExecutionBrief = initialContextResolution.status === 'resolved'
     ? compileExecutionBrief({ userMessage: latestUserMessage, contextResolution: initialContextResolution })
     : compileExecutionBrief({
@@ -238,7 +343,7 @@ export async function POST(request: NextRequest) {
 
   const providers = (await readProviderRegistry()).providers;
   const providerImageOptionProfiles = buildProviderImageOptionProfiles(providers);
-  const requestedImageCount = normalizeAgentImageCount(body.imageOptions?.count);
+  const requestedInterfaceImageCount = normalizeAgentImageCount(body.imageOptions?.count);
   const requestedChatModel = body.chatOptions?.model || process.env.AGENT_CHAT_MODEL || DEFAULT_AGENT_MODEL;
   const resolvedChatSelection = resolveProviderModelSelection({
     providers,
@@ -281,6 +386,10 @@ export async function POST(request: NextRequest) {
       let resumedClarification = false;
       let proceedWithCurrentBrief = false;
       let clarificationSubmissionKey: string | null = null;
+      let requestedImageCount = requestedInterfaceImageCount;
+      let requestedTotalImageCount = requestedImageCount;
+      let requestedImageCountSource: AgentImageCountSource = requestedImageCount > 1 ? 'interface' : 'default';
+      let imageBatchPlan: AgentImageBatchPlan | undefined;
       const progressTracker = createAgentProgressTracker({
         runId,
         emit: (event) => writeEvent(controller, event as AgentEvent),
@@ -350,7 +459,11 @@ export async function POST(request: NextRequest) {
         imageOptions = body.imageOptions,
         referenceImages = body.referenceImages,
         generationPrompt = sourcePrompt,
+        countMetadata?: { source?: AgentImageCountSource; totalCount?: number },
+        generationItems: AgentImageGenerationItem[] = [],
       ) => {
+        const payloadOutputCount = normalizeAgentImageCount(imageOptions?.count);
+        const payloadBatchMode = resolveImageBatchMode(sourcePrompt, payloadOutputCount);
         if (optimizePrompt && process.env.PROMPT_PIPELINE_AGENT_ENABLED !== '0') {
           writeProgress({ stepId: 'prompt_optimization', phase: 'optimizing', status: 'active', label: '正在优化图片提示词' });
         }
@@ -362,12 +475,29 @@ export async function POST(request: NextRequest) {
               optimizerModel: process.env.PROMPT_OPTIMIZER_MODEL || process.env.AGENT_CHAT_MODEL || DEFAULT_AGENT_MODEL,
               signal: runSignal,
               chatFn: chat,
+              outputCount: payloadOutputCount,
+              batchMode: payloadBatchMode,
             })
           : { prompt: generationPrompt, optimized: false };
         const optimized = {
           ...optimizedResult,
           prompt: ensureOptimizedPromptCoverage(optimizedResult.prompt, executionBriefData),
         };
+        const optimizedItems = 'items' in optimizedResult && Array.isArray(optimizedResult.items)
+          ? optimizedResult.items
+          : [];
+        const effectiveGenerationItems: AgentImageGenerationItem[] = generationItems.length
+          ? generationItems
+          : optimizedItems.map((item: any) => ({
+              id: `series-${item.index}`,
+              index: item.index,
+              label: item.label,
+              subject: item.subject,
+              prompt: ensureOptimizedPromptCoverage(item.prompt, executionBriefData),
+            }));
+        if (payloadBatchMode === 'series' && payloadOutputCount > 1 && effectiveGenerationItems.length !== payloadOutputCount) {
+          throw new Error(`未能形成完整的 ${payloadOutputCount} 期系列生成计划，请重试。`);
+        }
         if (optimizePrompt && process.env.PROMPT_PIPELINE_AGENT_ENABLED !== '0') {
           writeProgress({ stepId: 'prompt_optimization', phase: 'optimizing', status: 'completed', label: '图片提示词优化完成' });
         }
@@ -387,6 +517,7 @@ export async function POST(request: NextRequest) {
         const { options: resolvedImageOptions, requests } = buildAgentImageGenerationRequests({
           prompt: sourcePrompt,
           generationPrompt: optimized.prompt,
+          generationPrompts: effectiveGenerationItems.map((item) => item.prompt),
           referenceImages,
           providerId: resolvedImageSelection.providerId,
           modelId: resolvedImageSelection.model,
@@ -430,6 +561,16 @@ export async function POST(request: NextRequest) {
         const requestFailureCount = taskResults.filter(
           (result: PromiseSettledResult<any>) => result.status === 'rejected'
         ).length;
+        const succeededItemIds = taskResults.flatMap((result: PromiseSettledResult<any>, index) => (
+          result.status === 'fulfilled' && effectiveGenerationItems[index]?.id
+            ? [effectiveGenerationItems[index].id]
+            : []
+        ));
+        const failedItemIds = taskResults.flatMap((result: PromiseSettledResult<any>, index) => (
+          result.status === 'rejected' && effectiveGenerationItems[index]?.id
+            ? [effectiveGenerationItems[index].id]
+            : []
+        ));
         if (successfulPayloads.length === 0) {
           const firstFailure = taskResults.find((result: PromiseSettledResult<any>) => result.status === 'rejected');
           throw firstFailure?.status === 'rejected'
@@ -458,12 +599,15 @@ export async function POST(request: NextRequest) {
             requested: requests.length,
             succeeded: successfulPayloads.length,
             failed: requestFailureCount,
+            ...(effectiveGenerationItems.length ? { succeededItemIds, failedItemIds } : {}),
           },
           partialFailureMessage,
           resolvedImageOptions: {
             providerId: resolvedImageSelection.providerId,
             model: resolvedImageSelection.model,
             ...resolvedImageOptions,
+            requestedCount: positiveInteger(countMetadata?.totalCount) || resolvedImageOptions.count,
+            countSource: countMetadata?.source || 'default',
           },
         };
         return payload;
@@ -541,6 +685,11 @@ export async function POST(request: NextRequest) {
                   confirmationRecord.imageOptions,
                   confirmationRecord.referenceImages,
                   prompt,
+                  {
+                    source: confirmationRecord.imageCountSource,
+                    totalCount: confirmationRecord.requestedTotalImageCount,
+                  },
+                  confirmationRecord.generationItems || [],
                 );
               }
               const registry = createAgentToolRegistry({ createSkillJob, getSkillJob });
@@ -586,6 +735,105 @@ export async function POST(request: NextRequest) {
             rawResult: result,
           })) writeEvent(controller, event as AgentEvent);
           writeToolProgress(confirmationRecord.toolName, 'completed', toolCallId);
+          if (confirmationRecord.toolName === 'generate_image' && confirmationRecord.generationItems?.length) {
+            const requestStats = (result as any)?.requestStats || {};
+            const continuation = resolveAgentImageBatchContinuation({
+              currentItems: confirmationRecord.generationItems,
+              remainingItems: confirmationRecord.remainingGenerationItems,
+              failedItemIds: Array.isArray(requestStats.failedItemIds) ? requestStats.failedItemIds : [],
+            });
+            if (continuation.pendingCount > 0) {
+              const totalCount = positiveInteger(confirmationRecord.requestedTotalImageCount)
+                || confirmationRecord.generationItems.length + (confirmationRecord.remainingGenerationItems?.length || 0);
+              const completedCount = Math.max(0, totalCount - continuation.pendingCount);
+              const nextItems = continuation.nextItems;
+              const nextConfirmationId = confirmationRecord.nextConfirmationId || randomUUID();
+              confirmationRecord.nextConfirmationId = nextConfirmationId;
+              if (!confirmationStore.has(nextConfirmationId)) {
+                const checkpoint = progressTracker.snapshot();
+                confirmationStore.set(nextConfirmationId, {
+                  ...confirmationRecord,
+                  operationId: checkpoint.operationId,
+                  lastSequence: checkpoint.lastSequence,
+                  progressToolCallId: `${checkpoint.operationId}-generate-image-batch-${completedCount + 1}`,
+                  imageOptions: { ...structuredClone(confirmationRecord.imageOptions || {}), count: nextItems.length },
+                  imageCountSource: 'batch',
+                  requestedTotalImageCount: totalCount,
+                  generationItems: structuredClone(nextItems),
+                  remainingGenerationItems: structuredClone(continuation.remainingItems),
+                  imageBatchPlan: {
+                    totalCount,
+                    completedCount,
+                    remainingCount: continuation.pendingCount,
+                    batchSize: AGENT_MAX_IMAGE_BATCH_COUNT,
+                  },
+                  nextConfirmationId: undefined,
+                  execution: undefined,
+                  result: undefined,
+                  expiresAt: Date.now() + CONFIRMATION_TTL_MS,
+                });
+              }
+              const succeeded = positiveInteger(requestStats.succeeded) || 0;
+              const failed = positiveInteger(requestStats.failed) || 0;
+              writeEvent(controller, {
+                type: 'confirmation_required',
+                request: {
+                  confirmationId: nextConfirmationId,
+                  toolName: 'generate_image',
+                  message: `本批成功 ${succeeded} 张${failed ? `、失败 ${failed} 张` : ''}，还需生成 ${continuation.pendingCount} 张。下一批将生成 ${nextItems.length} 张，确认后继续。`,
+                },
+              });
+              writeEvent(controller, { type: 'agent_done', stopReason: 'awaiting_confirmation' });
+              return;
+            }
+          }
+          if (confirmationRecord.toolName === 'generate_image' && confirmationRecord.imageBatchPlan) {
+            const succeeded = positiveInteger((result as any)?.requestStats?.succeeded)
+              || generatedAssetsFromResult(result).length;
+            const completedCount = Math.min(
+              confirmationRecord.imageBatchPlan.totalCount,
+              confirmationRecord.imageBatchPlan.completedCount + succeeded,
+            );
+            const remainingCount = Math.max(0, confirmationRecord.imageBatchPlan.totalCount - completedCount);
+            if (remainingCount > 0) {
+              const nextBatchPlan: AgentImageBatchPlan = {
+                ...confirmationRecord.imageBatchPlan,
+                completedCount,
+                remainingCount,
+              };
+              const nextCount = Math.min(nextBatchPlan.batchSize, remainingCount);
+              const nextConfirmationId = confirmationRecord.nextConfirmationId || randomUUID();
+              confirmationRecord.nextConfirmationId = nextConfirmationId;
+              if (!confirmationStore.has(nextConfirmationId)) {
+                const checkpoint = progressTracker.snapshot();
+                confirmationStore.set(nextConfirmationId, {
+                  ...confirmationRecord,
+                  operationId: checkpoint.operationId,
+                  lastSequence: checkpoint.lastSequence,
+                  progressToolCallId: `${checkpoint.operationId}-generate-image-batch-${completedCount + 1}`,
+                  imageOptions: { ...structuredClone(confirmationRecord.imageOptions || {}), count: nextCount },
+                  imageCountSource: 'batch',
+                  requestedTotalImageCount: nextBatchPlan.totalCount,
+                  imageBatchPlan: nextBatchPlan,
+                  nextConfirmationId: undefined,
+                  execution: undefined,
+                  result: undefined,
+                  expiresAt: Date.now() + CONFIRMATION_TTL_MS,
+                });
+              }
+              const failed = positiveInteger((result as any)?.requestStats?.failed) || 0;
+              writeEvent(controller, {
+                type: 'confirmation_required',
+                request: {
+                  confirmationId: nextConfirmationId,
+                  toolName: 'generate_image',
+                  message: `本批成功 ${succeeded} 张${failed ? `、失败 ${failed} 张` : ''}，还需生成 ${remainingCount} 张。下一批将生成 ${nextCount} 张，确认后继续。`,
+                },
+              });
+              writeEvent(controller, { type: 'agent_done', stopReason: 'awaiting_confirmation' });
+              return;
+            }
+          }
           writeEvent(controller, { type: 'agent_done', stopReason: 'confirmed_tool_completed' });
           return;
         }
@@ -700,7 +948,11 @@ export async function POST(request: NextRequest) {
           }
           clarificationSubmissionStore.set(nextClarificationSubmissionKey, Date.now() + CONFIRMATION_TTL_MS);
           clarificationSubmissionKey = nextClarificationSubmissionKey;
-          activeClarificationState = applied.state;
+          activeClarificationState = applyImageCountClarificationState(
+            applied.state,
+            body.clarificationRequest,
+            body.clarificationResponse,
+          );
           executionBrief = activeClarificationState.workingBrief || activeClarificationState.originalRequest;
           executionReferenceImages = [...(activeClarificationState.referenceImages || executionReferenceImages)];
           const selectedContextEntity = body.clarificationRequest.dimension === 'context_reference'
@@ -752,16 +1004,25 @@ export async function POST(request: NextRequest) {
           if (retryClarification) executionBrief = activeClarificationState.workingBrief;
           writeProgress({ stepId: 'clarification', phase: 'resuming', status: 'completed', label: '补充信息已应用' });
         } else {
-          routingDecision = await routeAgentRequest({
-            userMessage: latestUserMessage,
-            manifests: skillManifests,
-            manualSkillId: body.activeSkillId,
-            hasReferenceImages: Boolean(body.referenceImages?.length),
-            routerModel: resolvedRouterSelection.model,
-            providerId: resolvedRouterSelection.providerId || undefined,
-            signal: runSignal,
-            chatFn: chat,
-          });
+          routingDecision = explicitBatchImageRequest
+            ? {
+                version: 1,
+                intent: 'image' as const,
+                skillId: null,
+                confidence: 1,
+                needsClarification: false,
+                source: 'deterministic_batch',
+              }
+            : await routeAgentRequest({
+                userMessage: latestUserMessage,
+                manifests: skillManifests,
+                manualSkillId: body.activeSkillId,
+                hasReferenceImages: Boolean(body.referenceImages?.length),
+                routerModel: resolvedRouterSelection.model,
+                providerId: resolvedRouterSelection.providerId || undefined,
+                signal: runSignal,
+                chatFn: chat,
+              });
           selectedSkill = routingDecision.skillId
             ? skillManifests.find((manifest) => manifest.id === routingDecision.skillId) || null
             : null;
@@ -795,6 +1056,17 @@ export async function POST(request: NextRequest) {
         if (intent === 'chat' && selectedSkillExecutionRequest) {
           intent = 'skill_action';
         }
+        void contextLogger.info('routing.resolved', 'Agent routing decision resolved', {
+          conversationIntent: conversationIntent.intent,
+          routerIntent: routingDecision?.intent || null,
+          finalIntent: intent,
+          selectedSkillId: selectedSkill?.id || null,
+          explicitBatchImageRequest,
+          requestedCount: explicitBatchCountResolution.count || null,
+          countCandidates: explicitBatchCountResolution.candidates || [],
+          countStatus: explicitBatchCountResolution.status,
+          contextResolutionSkipped: !shouldResolveInitialContext,
+        });
         writeProgress({ stepId: 'routing', phase: 'routing', status: 'completed', label: '请求路由完成' });
         writeEvent(controller, { type: 'intent_resolved', intent });
         if (selectedSkill) {
@@ -823,6 +1095,94 @@ export async function POST(request: NextRequest) {
         const skillContent = selectedSkill ? await loadSkillContent(selectedSkill.id) : '';
         if (selectedSkill) {
           writeProgress({ stepId: 'skill_loading', phase: 'loading', status: 'completed', label: `${selectedSkill.name} 已加载` });
+        }
+        const shouldResolveImageCount = intent === 'image'
+          || Boolean(selectedSkill?.allowedTools?.includes('generate_image'));
+        if (shouldResolveImageCount) {
+          const countResolution = resolveAgentImageCountDecision({
+            prompt: executionBrief,
+            interfaceCount: body.imageOptions?.count,
+            clarifiedCount: activeClarificationState?.resolvedImageCount,
+            clarifiedSource: activeClarificationState?.resolvedImageCountSource,
+            batchPlan: activeClarificationState?.imageBatchPlan,
+            proceedWithCurrent: proceedWithCurrentBrief,
+          });
+          if (countResolution.status === 'ambiguous' || countResolution.status === 'overflow') {
+            const taskId = activeClarificationState?.taskId || randomUUID();
+            const candidates = [...new Set((countResolution.candidates || [])
+              .map((candidate) => positiveInteger(candidate))
+              .filter((candidate): candidate is number => Boolean(candidate)))];
+            const requestedTotal = positiveInteger(countResolution.totalCount || countResolution.count)
+              || candidates[0]
+              || AGENT_DEFAULT_IMAGE_OPTIONS.count;
+            const isOverflow = countResolution.status === 'overflow';
+            const options = isOverflow
+              ? [
+                  {
+                    id: 'first_batch',
+                    label: `先生成 ${AGENT_MAX_IMAGE_BATCH_COUNT} 张`,
+                    answer: `本次只生成前 ${AGENT_MAX_IMAGE_BATCH_COUNT} 张。`,
+                    description: '生成单批上限数量，不自动继续剩余图片。',
+                  },
+                  {
+                    id: 'split_batches',
+                    label: '拆分多批',
+                    answer: `将 ${requestedTotal} 张拆成每批最多 ${AGENT_MAX_IMAGE_BATCH_COUNT} 张，每批单独确认。`,
+                    description: '只有成功生成的图片才计入完成数量。',
+                  },
+                ]
+              : [...new Set([...candidates, AGENT_DEFAULT_IMAGE_OPTIONS.count])]
+                  .slice(0, 4)
+                  .map((count) => ({
+                    id: `count_${count}`,
+                    label: `${count} 张`,
+                    answer: `本次交付数量为 ${count} 张。`,
+                    description: count === AGENT_DEFAULT_IMAGE_OPTIONS.count
+                      ? '按单张图片理解。'
+                      : `按 ${count} 个独立图片交付。`,
+                  }));
+            const question = isOverflow
+              ? `你要求生成 ${requestedTotal} 张图片，当前单批最多 ${AGENT_MAX_IMAGE_BATCH_COUNT} 张。你希望怎么处理？`
+              : `我检测到多个可能的交付数量${candidates.length ? `（${candidates.join('、')} 张）` : ''}，请确认本次要生成多少张图片。`;
+            writeProgress({ stepId: 'clarification', phase: 'waiting_input', status: 'waiting', label: '等待确认交付数量' });
+            const checkpoint = progressTracker.snapshot();
+            const state: AgentClarificationState = {
+              ...(activeClarificationState || {
+                taskId,
+                intent: intent === 'skill_action' ? 'skill_action' : 'image',
+                originalRequest: executionBrief,
+                workingBrief: executionBrief,
+                askedDimensions: [],
+                answers: [],
+                referenceImages: executionReferenceImages,
+              }),
+              taskId,
+              operationId: checkpoint.operationId,
+              skillSource,
+              lastSequence: checkpoint.lastSequence,
+              ...(selectedSkill ? { skillId: selectedSkill.id } : {}),
+              requestedImageCountTotal: requestedTotal,
+              pendingImageCountCandidates: candidates,
+            };
+            const request: AgentClarificationRequest = {
+              id: randomUUID(),
+              taskId,
+              question,
+              dimension: isOverflow ? 'output_count_batching' : 'output_count_ambiguity',
+              options,
+              allowCustom: true,
+              allowProceed: true,
+            };
+            writeEvent(controller, { type: 'clarification_required', message: question, request, state });
+            writeEvent(controller, { type: 'agent_done', stopReason: 'output_count_required' });
+            return;
+          }
+          requestedImageCount = countResolution.count;
+          requestedTotalImageCount = countResolution.totalCount || countResolution.count;
+          requestedImageCountSource = countResolution.source as AgentImageCountSource;
+          imageBatchPlan = countResolution.batchPlan
+            ? structuredClone(countResolution.batchPlan)
+            : undefined;
         }
         const shouldRunClarifier = intent === 'image' || intent === 'skill_action';
 
@@ -932,6 +1292,14 @@ export async function POST(request: NextRequest) {
 
         if (intent === 'image' && !selectedSkill) {
           turns += 1;
+          const imageBatchMode = resolveImageBatchMode(executionBrief, requestedTotalImageCount);
+          if (
+            imageBatchMode === 'series'
+            && requestedTotalImageCount > 1
+            && process.env.PROMPT_PIPELINE_AGENT_ENABLED === '0'
+          ) {
+            throw new Error('系列批量生成需要启用提示词优化流程。');
+          }
           writeProgress({ stepId: 'prompt_optimization', phase: 'optimizing', status: 'active', label: '正在优化图片提示词' });
           writeEvent(controller, { type: 'prompt_optimization_start' });
           const optimizerModel = process.env.PROMPT_OPTIMIZER_MODEL || process.env.AGENT_CHAT_MODEL || DEFAULT_AGENT_MODEL;
@@ -944,11 +1312,50 @@ export async function POST(request: NextRequest) {
                 optimizerModel,
                 signal: runSignal,
                 chatFn: chat,
+                outputCount: requestedTotalImageCount,
+                batchMode: imageBatchMode,
               });
           const optimized = {
             ...optimizedResult,
             prompt: ensureOptimizedPromptCoverage(optimizedResult.prompt, executionBriefData),
           };
+          const optimizedItems = 'items' in optimizedResult && Array.isArray(optimizedResult.items)
+            ? optimizedResult.items
+            : [];
+          const optimizedSubject = 'structured' in optimizedResult
+            ? optimizedResult.structured?.subject
+            : undefined;
+          const allGenerationItems: AgentImageGenerationItem[] = requestedTotalImageCount > 1
+            ? imageBatchMode === 'series'
+              ? optimizedItems.map((item: any) => ({
+                  id: `series-${item.index}`,
+                  index: item.index,
+                  label: item.label,
+                  subject: item.subject,
+                  prompt: ensureOptimizedPromptCoverage(item.prompt, executionBriefData),
+                }))
+              : Array.from({ length: requestedTotalImageCount }, (_, index) => ({
+                  id: `variant-${index + 1}`,
+                  index: index + 1,
+                  label: `变体 ${index + 1}`,
+                  subject: optimizedSubject || 'image variant',
+                  prompt: optimized.prompt,
+                }))
+            : [];
+          if (requestedTotalImageCount > 1 && allGenerationItems.length !== requestedTotalImageCount) {
+            throw new Error(`系列生成计划数量不完整：需要 ${requestedTotalImageCount} 项。`);
+          }
+          if (requestedTotalImageCount > 1) {
+            void contextLogger.info('image.batch_plan', 'Agent image batch plan resolved', {
+              mode: imageBatchMode,
+              requestedCount: requestedTotalImageCount,
+              itemCount: allGenerationItems.length,
+              uniquePromptCount: new Set(allGenerationItems.map((item) => item.prompt)).size,
+              subjects: imageBatchMode === 'series'
+                ? allGenerationItems.map((item) => item.subject)
+                : [],
+            });
+          }
           writeEvent(controller, {
             type: 'prompt_optimization_done',
             summary: optimized.summary,
@@ -957,6 +1364,7 @@ export async function POST(request: NextRequest) {
           writeProgress({ stepId: 'prompt_optimization', phase: 'optimizing', status: 'completed', label: '图片提示词优化完成' });
 
           if (requestedImageCount > 1) {
+            const generationItems = allGenerationItems.slice(0, requestedImageCount);
             const confirmationId = randomUUID();
             const progressToolCallId = `${runId}-generate-image-confirmation`;
             writeToolProgress('generate_image', 'waiting', progressToolCallId);
@@ -976,6 +1384,12 @@ export async function POST(request: NextRequest) {
               referenceImages: [...executionReferenceImages],
               canvasContext: body.canvasContext ? structuredClone(body.canvasContext) : undefined,
               imageOptions: { ...structuredClone(body.imageOptions || {}), count: requestedImageCount },
+              imageCountSource: requestedImageCountSource,
+              requestedTotalImageCount,
+              imageBatchPlan: imageBatchPlan ? structuredClone(imageBatchPlan) : undefined,
+              imageBatchMode,
+              generationItems: structuredClone(generationItems),
+              remainingGenerationItems: structuredClone(allGenerationItems.slice(generationItems.length)),
               optimizePrompt: false,
               expiresAt: Date.now() + CONFIRMATION_TTL_MS,
             });
@@ -984,7 +1398,9 @@ export async function POST(request: NextRequest) {
               request: {
                 confirmationId,
                 toolName: 'generate_image',
-                message: `本次将生成 ${requestedImageCount} 张图片，确认后继续。`,
+                message: imageBatchPlan
+                  ? `本次将生成首批 ${requestedImageCount} 张图片，总目标 ${requestedTotalImageCount} 张，确认后继续。`
+                  : `本次将生成 ${requestedImageCount} 张图片，确认后继续。`,
               },
             });
             writeEvent(controller, { type: 'agent_done', stopReason: 'awaiting_confirmation' });
@@ -1007,6 +1423,8 @@ export async function POST(request: NextRequest) {
               body.imageOptions,
               executionReferenceImages,
               optimized.prompt,
+              { source: requestedImageCountSource, totalCount: requestedTotalImageCount },
+              allGenerationItems,
             ),
           });
           const generationPayload = await executeAgentTool(toolRegistry, 'generate_image', {}, {
@@ -1051,6 +1469,7 @@ export async function POST(request: NextRequest) {
               body.imageOptions,
               executionReferenceImages,
               prompt,
+              { source: requestedImageCountSource, totalCount: requestedTotalImageCount },
             );
           },
         });
@@ -1076,7 +1495,9 @@ export async function POST(request: NextRequest) {
                 return {
                   confirmationRequired: true,
                   toolName,
-                  message: `本次将生成 ${requestedImageCount} 张图片，确认后继续。`,
+                  message: imageBatchPlan
+                    ? `本次将生成首批 ${requestedImageCount} 张图片，总目标 ${requestedTotalImageCount} 张，确认后继续。`
+                    : `本次将生成 ${requestedImageCount} 张图片，确认后继续。`,
                 };
               }
               const rawResult = await executeAgentTool(toolRegistry, toolName, args, {
@@ -1184,6 +1605,9 @@ export async function POST(request: NextRequest) {
               referenceImages: [...executionReferenceImages],
               canvasContext: body.canvasContext ? structuredClone(body.canvasContext) : undefined,
               imageOptions: { ...structuredClone(body.imageOptions || {}), count: requestedImageCount },
+              imageCountSource: requestedImageCountSource,
+              requestedTotalImageCount,
+              imageBatchPlan: imageBatchPlan ? structuredClone(imageBatchPlan) : undefined,
               optimizePrompt: true,
               expiresAt: Date.now() + CONFIRMATION_TTL_MS,
             });

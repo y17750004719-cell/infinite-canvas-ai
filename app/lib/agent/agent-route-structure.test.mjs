@@ -228,3 +228,48 @@ test('agent image confirmations keep optimizer control server-side and report pa
   assert.match(source, /requestFailureCount/);
   assert.match(source, /partialFailureMessage/);
 });
+
+test('agent route resolves natural-language output counts before clarification and preserves batch state', () => {
+  const source = fs.readFileSync(routePath, 'utf8');
+  assert.match(source, /resolveAgentImageCountDecision/);
+  assert.match(source, /output_count_ambiguity/);
+  assert.match(source, /output_count_batching/);
+  assert.match(source, /requestedImageCountSource/);
+  assert.match(source, /requestedTotalImageCount/);
+  assert.match(source, /imageBatchPlan/);
+  assert.match(source, /split_batches/);
+  assert.match(source, /first_batch/);
+  assert.match(source, /remainingCount/);
+  assert.match(source, /completedCount \+ succeeded/);
+  assert.match(source, /还需生成 \$\{remainingCount\} 张/);
+  const countResolutionIndex = source.indexOf('resolveAgentImageCountDecision');
+  const genericClarifierIndex = source.indexOf('resolveBriefClarification', countResolutionIndex);
+  assert.ok(countResolutionIndex >= 0 && genericClarifierIndex > countResolutionIndex);
+});
+
+test('explicit multi-image requests bypass automatic proposals and model routing', () => {
+  const source = fs.readFileSync(routePath, 'utf8');
+  assert.match(source, /const explicitBatchImageRequest = !body\.activeSkillId/);
+  assert.match(source, /conversationIntent\.intent === 'image'[\s\S]*\|\| isPotentialDesignExecutionRequest\(initialBriefSource\)/);
+  assert.match(source, /isPotentialDesignExecutionRequest\(initialBriefSource\)/);
+  assert.match(source, /isReferentialShorthand\(latestUserMessage\)/);
+  assert.match(source, /source: 'deterministic_batch'/);
+  assert.match(source, /contextResolutionSkipped/);
+  assert.match(source, /event: 'routing\.resolved'|routing\.resolved/);
+  const batchGate = source.indexOf('const explicitBatchImageRequest');
+  const contextResolution = source.indexOf('resolveContextReference({', batchGate);
+  const modelRouting = source.indexOf('await routeAgentRequest({', contextResolution);
+  assert.ok(batchGate >= 0 && contextResolution > batchGate && modelRouting > contextResolution);
+});
+
+test('series batches persist distinct prompts and retry failed issue ids', () => {
+  const source = fs.readFileSync(routePath, 'utf8');
+  assert.match(source, /resolveImageBatchMode\(executionBrief, requestedTotalImageCount\)/);
+  assert.match(source, /outputCount: requestedTotalImageCount/);
+  assert.match(source, /batchMode: imageBatchMode/);
+  assert.match(source, /generationItems: structuredClone\(generationItems\)/);
+  assert.match(source, /remainingGenerationItems/);
+  assert.match(source, /generationPrompts: effectiveGenerationItems\.map/);
+  assert.match(source, /failedItemIds/);
+  assert.match(source, /resolveAgentImageBatchContinuation/);
+});

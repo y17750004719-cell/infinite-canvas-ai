@@ -6,6 +6,7 @@ import {
   parseOptimizedImagePrompt,
   resolveAgentConversationIntent,
   resolveAgentIntent,
+  resolveImageBatchMode,
 } from './prompt-optimizer.mjs';
 
 test('parseOptimizedImagePrompt accepts the required structured payload', () => {
@@ -29,6 +30,43 @@ test('parseOptimizedImagePrompt rejects markdown and incomplete payloads', () =>
   assert.equal(parseOptimizedImagePrompt('{"version":1,"intent":"image_generation"}'), null);
 });
 
+test('series prompt parsing requires the exact count and distinct item prompts', () => {
+  const base = {
+    version: 1,
+    intent: 'image_generation',
+    subject: 'Vogue animal magazine series',
+    style: ['editorial'],
+    composition: 'consistent masthead',
+    lighting: 'studio',
+    materials: [],
+    colorPalette: ['red'],
+    constraints: ['preserve Vogue'],
+    finalPrompt: 'Cohesive Vogue animal magazine cover series',
+  };
+  const valid = parseOptimizedImagePrompt(JSON.stringify({
+    ...base,
+    items: [
+      { index: 1, label: 'Rabbit issue', subject: 'rabbit', prompt: 'Vogue rabbit cover, red background' },
+      { index: 2, label: 'Cat issue', subject: 'cat', prompt: 'Vogue cat cover, yellow background' },
+    ],
+  }), { outputCount: 2, batchMode: 'series' });
+  assert.deepEqual(valid?.items?.map((item) => item.subject), ['rabbit', 'cat']);
+  assert.equal(parseOptimizedImagePrompt(JSON.stringify({
+    ...base,
+    items: [
+      { index: 1, label: 'Rabbit issue', subject: 'rabbit', prompt: 'same prompt' },
+      { index: 2, label: 'Cat issue', subject: 'cat', prompt: 'same prompt' },
+    ],
+  }), { outputCount: 2, batchMode: 'series' }), null);
+});
+
+test('batch mode distinguishes cohesive series from ordinary prompt variants', () => {
+  assert.equal(resolveImageBatchMode('Vogue 动物杂志封面系列，共 5 期', 5), 'series');
+  assert.equal(resolveImageBatchMode('生成 5 个不同版本的封面', 5), 'series');
+  assert.equal(resolveImageBatchMode('Please produce a magazine series for 5 issues', 5), 'series');
+  assert.equal(resolveImageBatchMode('生成 5 张猫咪封面', 5), 'variants');
+});
+
 test('optimizer messages demand JSON and preserve literal user text', () => {
   const messages = buildPromptOptimizerMessages('为 ZO DESIGN 做一个简约包装盒', 'Logo 与品牌');
   assert.equal(messages[0].role, 'system');
@@ -37,10 +75,22 @@ test('optimizer messages demand JSON and preserve literal user text', () => {
   assert.match(messages[1].content, /Logo 与品牌/);
 });
 
+test('series optimizer instructions preserve listed subjects and auto-fill missing issues', () => {
+  const messages = buildPromptOptimizerMessages('兔子主题的动物杂志系列，共 5 期', undefined, {
+    outputCount: 5,
+    batchMode: 'series',
+  });
+  assert.match(messages[0].content, /exactly 5 items/);
+  assert.match(messages[0].content, /original order/);
+  assert.match(messages[0].content, /automatically add suitable non-repeating subjects/);
+});
+
 test('agent intent distinguishes image requests from visual analysis with references', () => {
   assert.equal(resolveAgentIntent('生成一个简约包装盒', false), 'image');
   assert.equal(resolveAgentIntent('分析一下这张图的构图', true), 'chat');
   assert.equal(resolveAgentIntent('参考这张图生成新的海报', true), 'image');
+  assert.equal(resolveAgentIntent('Please design a similar Vogue animal magazine cover series for 5 issues.', false), 'image');
+  assert.equal(resolveAgentIntent('分析这本 magazine cover', true), 'chat');
   assert.equal(resolveAgentIntent('请按 Logo 与品牌流程开始信息收集，先询问我品牌名称和行业。', false), 'chat');
   assert.equal(resolveAgentIntent('请按品牌识别系统流程开始信息收集，先询问我行业和品牌名称。', false), 'chat');
   assert.equal(resolveAgentIntent('开始批量生成全部品牌物料', false), 'skill_action');

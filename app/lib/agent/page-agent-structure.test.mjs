@@ -5,6 +5,10 @@ import path from 'node:path';
 
 const source = fs.readFileSync(path.resolve(import.meta.dirname, '../../page.tsx'), 'utf8');
 const globalStyles = fs.readFileSync(path.resolve(import.meta.dirname, '../../globals.css'), 'utf8');
+const decisionPopoverSource = fs.readFileSync(
+  path.resolve(import.meta.dirname, '../../components/workspace/AgentDecisionPopover.tsx'),
+  'utf8',
+);
 const skillsIconPath = path.resolve(import.meta.dirname, '../../../public/icons/lovart-skills.svg');
 
 function controlIndex(id) {
@@ -30,16 +34,16 @@ test('agent mode posts to the agent route and handles agent events', () => {
   assert.match(source, /agent_error/);
 });
 
-test('agent clarification modal is flat, editable, persistent, and accessible', () => {
+test('agent clarification uses the shared editable decision popover', () => {
   assert.match(source, /showAgentClarificationModal/);
   assert.match(source, /pendingAgentClarification/);
   assert.match(source, /agentClarificationCustomText/);
-  assert.match(source, /role="dialog"/);
-  assert.match(source, /aria-modal="true"/);
-  assert.match(source, /重新回答/);
+  assert.match(source, /<AgentDecisionPopover/);
+  assert.match(decisionPopoverSource, /role="dialog"/);
+  assert.doesNotMatch(decisionPopoverSource, /aria-modal="true"/);
+  assert.match(decisionPopoverSource, /自定义回答|custom\.label/);
   assert.match(source, /按当前信息开始制作/);
   assert.match(source, /\['creative_direction', 'context_reference'\]\.includes/);
-  assert.match(source, /确认并开始生成/);
   assert.match(source, /retry:\s*true/);
   assert.match(source, /!options\?\.agentClarification/);
   assert.match(source, /agentClarificationResponsePayload/);
@@ -78,6 +82,10 @@ test('agent progress accumulates reached breadcrumbs without an assistant bubble
   assert.match(source, /createAgentProgressEventRouter/);
   assert.match(source, /routeAgentProgressEvent\(progressEventRouter, event\)/);
   assert.match(source, /event\.type === 'agent_done'/);
+  assert.match(source, /getAgentProgressElapsedMs/);
+  assert.match(source, /hasActiveAgentImageGeneration/);
+  assert.match(source, /getAgentProgressDurationLabel\(step, generationClockMs\)/);
+  assert.match(source, /timestampMs\?: number/);
   assert.match(source, /agentRunProgress\.steps\.map/);
   assert.match(source, /formatAgentProgressLabel\(step\)/);
   assert.match(source, /getAgentProgressCompletionLabel/);
@@ -125,6 +133,31 @@ test('clarification and confirmation preserve waiting agent progress', () => {
   assert.ok(clarificationStart >= 0 && confirmationStart > clarificationStart && toolResultStart > confirmationStart);
   assert.doesNotMatch(source.slice(clarificationStart, confirmationStart), /agentRunProgress:\s*undefined/);
   assert.doesNotMatch(source.slice(confirmationStart, toolResultStart), /agentRunProgress:\s*undefined/);
+});
+
+test('all agent decisions use one Codex-style popover above the composer', () => {
+  assert.match(source, /setPendingAgentConfirmation\(confirmation\)/);
+  assert.match(source, /setShowAgentConfirmationModal\(true\)/);
+  assert.match(source, /showAgentConfirmationModal && pendingAgentConfirmation[\s\S]{0,220}<AgentDecisionPopover/);
+  assert.match(source, /showAgentProposalModal && pendingAgentProposal[\s\S]{0,180}<AgentDecisionPopover/);
+  assert.match(source, /showAgentClarificationModal && pendingAgentClarification[\s\S]{0,180}<AgentDecisionPopover/);
+  assert.match(source, /showSkillChoiceModal && pendingSkillChoice[\s\S]{0,180}<AgentDecisionPopover/);
+  assert.match(decisionPopoverSource, /absolute bottom-full left-4 right-4/);
+  assert.match(decisionPopoverSource, /rounded-\[18px\]/);
+  assert.match(decisionPopoverSource, /option\.recommended/);
+  assert.match(decisionPopoverSource, /onClick=\{\(\) => onSelect\(option\.id\)\}/);
+  assert.match(source, /暂不执行/);
+  assert.doesNotMatch(source, /重新打开确认|重新回答|重新选择/);
+  assert.doesNotMatch(source, /absolute inset-0 z-(?:20|30|40).*bg-black\//);
+  assert.match(source, /openPendingAgentDecision\(msg\)/);
+});
+
+test('confirmation transitions stay in breadcrumbs without a nested message bubble', () => {
+  assert.match(source, /type: 'confirmation_submitted'/);
+  assert.match(source, /content: ''/);
+  assert.doesNotMatch(source, /content: '正在确认并启动任务…'/);
+  assert.match(source, /suppressAssistantContentForDecision/);
+  assert.match(source, /step\.status === 'waiting' && hasPendingAgentDecision\(msg\)/);
 });
 
 test('skill jobs, cancellation, and clarification recovery preserve progress state', () => {
