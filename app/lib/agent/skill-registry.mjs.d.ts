@@ -5,6 +5,9 @@ export interface SkillManifest {
   triggerHints: string[];
   allowedTools: string[];
   entryPrompt?: string;
+  executionMode?: 'agent_loop' | 'image_pipeline';
+  promptStyle?: 'text' | 'json-text';
+  planningGuidance?: string;
   enabled: boolean;
 }
 

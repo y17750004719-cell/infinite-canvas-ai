@@ -53,6 +53,7 @@ export function createAgentToolResultEvents(input: {
   toolCallId: string;
   toolName: string;
   rawResult: unknown;
+  includeAssets?: boolean;
 }): Array<
   | { type: 'tool_result'; toolCallId: string; result: Record<string, unknown> }
   | { type: 'client_action'; action: AgentClientAction }

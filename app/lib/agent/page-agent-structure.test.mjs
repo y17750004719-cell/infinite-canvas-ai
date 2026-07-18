@@ -126,6 +126,17 @@ test('agent image loading preloads before atomically appending and settles the o
   assert.match(source, /updateChatMessageById\(skillJobMessageId/);
 });
 
+test('agent batch assets render in completion order while retaining their original labels', () => {
+  assert.match(source, /generatedAssetExpectedCount = batchTotal/);
+  assert.match(source, /generatedAssetSucceededCount \+= loadedAssets\.length/);
+  assert.match(source, /generatedAssetPreloadFailureCount \+= preloadFailureCount/);
+  assert.match(source, /imageName:\s*asset\.label \|\|/);
+  assert.match(source, /const firstStreamedOrdinal = streamedAssetOrdinal/);
+  assert.match(source, /getSpawnPosition\(displaySize, firstStreamedOrdinal \+ index, currentViewport\)/);
+  assert.match(source, /succeeded:\s*generatedAssetSucceededCount/);
+  assert.match(source, /failed:\s*generatedAssetFailureCount \+ generatedAssetPreloadFailureCount/);
+});
+
 test('clarification and confirmation preserve waiting agent progress', () => {
   const clarificationStart = source.indexOf("event.type === 'clarification_required'");
   const confirmationStart = source.indexOf("event.type === 'confirmation_required'");
@@ -158,6 +169,12 @@ test('confirmation transitions stay in breadcrumbs without a nested message bubb
   assert.doesNotMatch(source, /content: '正在确认并启动任务…'/);
   assert.match(source, /suppressAssistantContentForDecision/);
   assert.match(source, /step\.status === 'waiting' && hasPendingAgentDecision\(msg\)/);
+});
+
+test('typed confirmation replies submit the stored image delivery plan instead of starting a new run', () => {
+  assert.match(source, /pendingAgentConfirmation[\s\S]{0,120}AGENT_RETRY_CONFIRMATION_PATTERN\.test\(currentChatInput\)/);
+  assert.match(source, /setChatInput\(''\)[\s\S]{0,80}submitAgentConfirmation\(\)/);
+  assert.match(source, /agentConfirmation:\s*confirmation/);
 });
 
 test('skill jobs, cancellation, and clarification recovery preserve progress state', () => {

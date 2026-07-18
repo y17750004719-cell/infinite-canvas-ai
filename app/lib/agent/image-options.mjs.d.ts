@@ -22,6 +22,7 @@ export const AGENT_MAX_IMAGE_BATCH_COUNT: number;
 
 export function extractExplicitImageAspectRatio(input?: string): string | null;
 export function parseAgentImageCountNumber(value?: string): number | null;
+export function extractAgentImageFileCounts(input?: string): Array<{ count: number; matchedText: string }>;
 export function extractAgentImageCount(input?: string): {
   status: 'none' | 'resolved' | 'ambiguous' | 'overflow';
   count?: number;
@@ -32,6 +33,8 @@ export function extractAgentImageCount(input?: string): {
 };
 export function resolveAgentImageCountDecision(input?: {
   prompt?: string;
+  rawPrompt?: string;
+  plannedCount?: number;
   interfaceCount?: number;
   clarifiedCount?: number;
   clarifiedSource?: 'clarification' | 'prompt' | 'interface' | 'default' | 'batch';

@@ -2208,6 +2208,30 @@ test('settleCanvasImageGenerationRequests runs serial tasks one at a time and pr
   assert.deepEqual(results[1], { status: 'fulfilled', value: 'second-ok' });
 });
 
+test('settleCanvasImageGenerationRequests reports parallel results in completion order while preserving request order', async () => {
+  const releases = new Map();
+  const completionOrder = [];
+  const resultPromise = settleCanvasImageGenerationRequests({
+    requests: ['first', 'second', 'third', 'fourth'],
+    executionMode: 'parallel',
+    runTask: (requestId) => new Promise((resolve) => releases.set(requestId, resolve)),
+    onSettled: (result, index) => completionOrder.push({ index, value: result.value }),
+  });
+
+  await Promise.resolve();
+  releases.get('third')('third-ok');
+  await Promise.resolve();
+  releases.get('first')('first-ok');
+  await Promise.resolve();
+  releases.get('fourth')('fourth-ok');
+  await Promise.resolve();
+  releases.get('second')('second-ok');
+
+  const results = await resultPromise;
+  assert.deepEqual(completionOrder.map((item) => item.index), [2, 0, 3, 1]);
+  assert.deepEqual(results.map((item) => item.value), ['first-ok', 'second-ok', 'third-ok', 'fourth-ok']);
+});
+
 test('buildCanvasImageGenerationFailureMessage asks for manual backfill when request failures leave missing outputs', () => {
   const result = buildCanvasImageGenerationFailureMessage({
     requestedCount: 2,

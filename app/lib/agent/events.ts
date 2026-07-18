@@ -1,4 +1,5 @@
 import type { AgentContextEntity, AgentProposal } from './context-reference.types';
+import type { AgentExecutionPlan } from './execution-planner.types';
 
 export type AgentIntent = 'chat' | 'image' | 'skill_action';
 
@@ -56,12 +57,15 @@ export type AgentClarificationState = {
   resolvedImageCountSource?: 'clarification' | 'prompt' | 'interface' | 'default' | 'batch';
   requestedImageCountTotal?: number;
   pendingImageCountCandidates?: number[];
+  resolvedImageDeliveryMode?: 'variants' | 'series' | 'composite';
+  resolvedImagePanelCount?: number;
   imageBatchPlan?: {
     totalCount: number;
     completedCount: number;
     remainingCount: number;
     batchSize: number;
   };
+  executionPlan?: AgentExecutionPlan;
 };
 
 export type AgentClarificationRequest = {
@@ -78,7 +82,17 @@ export type AgentClarificationRequest = {
 export type AgentClientAction = {
   type: 'add_generated_assets';
   runId: string;
-  assets: Array<{ src: string; naturalWidth?: number; naturalHeight?: number }>;
+  model?: string;
+  assets: Array<{
+    src: string;
+    naturalWidth?: number;
+    naturalHeight?: number;
+    model?: string;
+    itemId?: string;
+    index?: number;
+    label?: string;
+  }>;
+  batch?: { total: number; settled: number; succeeded: number; failed: number };
 };
 
 export type AgentProgressUpdate = {

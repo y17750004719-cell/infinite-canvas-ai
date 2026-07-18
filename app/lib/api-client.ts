@@ -1788,6 +1788,12 @@ export interface ChatToolCall {
   };
 }
 
+export type ChatToolChoice =
+  | 'auto'
+  | 'none'
+  | 'required'
+  | { type: 'function'; function: { name: string } };
+
 export interface ChatMessage {
   role: 'user' | 'assistant' | 'system' | 'tool';
   content:
@@ -1806,7 +1812,7 @@ export interface ChatRequest {
   providerId?: string;
   messages: ChatMessage[];
   tools?: ChatToolDefinition[];
-  toolChoice?: 'auto' | 'none';
+  toolChoice?: ChatToolChoice;
   signal?: AbortSignal;
 }
 
@@ -2010,6 +2016,21 @@ function extractGeminiTextResponse(payload: GeminiGenerateContentPayload): {
   return { content, reasoning, toolCalls };
 }
 
+function resolveGeminiFunctionCallingConfig(toolChoice?: ChatToolChoice): {
+  mode: 'AUTO' | 'NONE' | 'ANY';
+  allowedFunctionNames?: string[];
+} {
+  if (toolChoice === 'none') return { mode: 'NONE' };
+  if (toolChoice === 'required') return { mode: 'ANY' };
+  if (toolChoice && typeof toolChoice === 'object') {
+    return {
+      mode: 'ANY',
+      allowedFunctionNames: [toolChoice.function.name],
+    };
+  }
+  return { mode: 'AUTO' };
+}
+
 export async function chat(
   request: ChatRequest
 ): Promise<ChatResponse> {
@@ -2060,9 +2081,7 @@ export async function chat(
                   })),
                 }],
                 toolConfig: {
-                  functionCallingConfig: {
-                    mode: request.toolChoice === "none" ? "NONE" : "AUTO",
-                  },
+                  functionCallingConfig: resolveGeminiFunctionCallingConfig(request.toolChoice),
                 },
               }
             : {}),

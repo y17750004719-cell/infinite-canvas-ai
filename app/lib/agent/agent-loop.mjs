@@ -175,16 +175,25 @@ function extractAgentImageAssets(rawResult) {
     .filter((item) => item.src);
 }
 
+/** @param {{
+ * source?: 'direct'|'loop'|'confirmed',
+ * runId?: string,
+ * toolCallId?: string,
+ * toolName?: string,
+ * rawResult?: any,
+ * includeAssets?: boolean,
+ * }} input */
 export function createAgentToolResultEvents({
   runId,
   toolCallId,
   toolName,
   rawResult,
+  includeAssets = true,
 } = {}) {
   if (rawResult?.confirmationRequired === true) return [];
   const { publicResult } = createAgentToolResultViews(toolName, rawResult);
   const events = [{ type: 'tool_result', toolCallId, result: publicResult }];
-  if (toolName === 'generate_image') {
+  if (toolName === 'generate_image' && includeAssets) {
     const assets = extractAgentImageAssets(rawResult);
     if (assets.length > 0) {
       events.push({

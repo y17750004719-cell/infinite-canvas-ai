@@ -24,5 +24,16 @@
     "allowedTools": ["generate_image", "get_canvas_context", "start_skill_job", "get_skill_job"],
     "entryPrompt": "请按 Logo 与品牌流程开始信息收集。",
     "enabled": true
+  },
+  {
+    "id": "magazine-poster",
+    "name": "杂志封面与编辑海报",
+    "description": "设计高级杂志封面、期刊主视觉、文字主导的文化海报、报纸或杂志排版语言海报、拼贴艺术编辑海报，并生成 JSON 文本形式的生图提示词。",
+    "triggerHints": ["杂志封面", "杂志海报", "编辑海报", "文化海报", "拼贴艺术海报", "报纸排版", "期刊封面", "刊物主视觉", "杂志感海报", "magazine cover", "editorial poster", "editorial typography poster", "collage editorial poster", "fashion editorial"],
+    "planningGuidance": "Use for magazine covers and editorial posters, including typography-led cultural posters, newspaper or magazine visual language, and art-directed collage posters. Do not select it from the generic word poster alone; require a clear editorial, publication, typographic, or art-directed poster context. Do not use it for image analysis, magazine articles, web magazine layouts, or complete brand identity systems.",
+    "allowedTools": ["generate_image", "get_canvas_context"],
+    "executionMode": "image_pipeline",
+    "promptStyle": "json-text",
+    "enabled": true
   }
 ]

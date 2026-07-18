@@ -1,0 +1,4 @@
+interface:
+  display_name: "杂志封面与编辑海报"
+  short_description: "设计高级杂志封面、期刊主视觉与专业编辑风格海报作品"
+  default_prompt: "Use $magazine-poster to design a refined editorial magazine cover."

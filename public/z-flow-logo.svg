@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg id="_图层_2" data-name="图层 2" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 359.83 359.83">
+  <defs>
+    <style>
+      .cls-1 {
+        fill: #f2f2f2;
+      }
+
+      .cls-2 {
+        fill: #060807;
+      }
+    </style>
+  </defs>
+  <g id="_图层_1-2" data-name="图层 1">
+    <rect class="cls-2" width="359.83" height="359.83" rx="53.57" ry="53.57"/>
+    <g>
+      <polygon class="cls-1" points="267.93 85.97 146.89 273.86 91.9 273.86 212.94 85.97 267.93 85.97"/>
+      <path class="cls-1" d="M159.64,85.97c-31.58,25.44-53.37,61.33-67.74,105.16v-105.16h67.74Z"/>
+      <path class="cls-1" d="M200.19,273.86c31.58-25.44,53.37-61.33,67.74-105.16v105.16h-67.74Z"/>
+    </g>
+  </g>
+</svg>

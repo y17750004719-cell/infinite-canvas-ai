@@ -1,3 +1,5 @@
+import type { AgentExecutionPlan } from './execution-planner.types';
+
 export interface BriefClarifierOption {
   id: string;
   label: string;
@@ -40,6 +42,7 @@ export interface AgentClarificationState {
     remainingCount: number;
     batchSize: number;
   };
+  executionPlan?: AgentExecutionPlan;
 }
 
 export function parseBriefClarifierResult(raw: string): BriefClarifierResult | null;

@@ -9,11 +9,25 @@ export interface OptimizedImagePrompt {
   colorPalette: string[];
   constraints: string[];
   finalPrompt: string;
-  items?: Array<{ index: number; label: string; subject: string; prompt: string }>;
+  items?: Array<{ index: number; label: string; subjectKey: string; subject: string; prompt: string }>;
 }
-export function parseOptimizedImagePrompt(raw: string, options?: { outputCount?: number; batchMode?: 'series' | 'variants' }): OptimizedImagePrompt | null;
-export function buildPromptOptimizerMessages(userPrompt: string, skillLabel?: string, options?: { outputCount?: number; batchMode?: 'series' | 'variants'; repair?: boolean }): Array<{ role: 'system' | 'user'; content: string }>;
-export function resolveImageBatchMode(text: string, outputCount?: number): 'series' | 'variants';
+export type ImageDeliveryMode = 'variants' | 'series' | 'composite';
+export interface ImageDeliveryPlan {
+  mode: ImageDeliveryMode;
+  outputCount: number;
+  promptCount: number;
+  panelCount?: number;
+  variationAxes: string[];
+  evidence: string[];
+  confidence: 'high' | 'medium' | 'low';
+  requiresClarification: boolean;
+}
+export function parseOptimizedImagePrompt(raw: string, options?: { outputCount?: number; batchMode?: ImageDeliveryMode; allowRepeatedSubjects?: boolean; promptStyle?: 'text' | 'json-text'; userPrompt?: string }): OptimizedImagePrompt | null;
+export function buildPromptOptimizerMessages(userPrompt: string, skillLabel?: string, options?: { outputCount?: number; batchMode?: ImageDeliveryMode; repair?: boolean; skillContent?: string; promptStyle?: 'text' | 'json-text'; plannerItems?: Array<{ index: number; label: string; subject: string; variation: string }> }): Array<{ role: 'system' | 'user'; content: string }>;
+export function allowsRepeatedSeriesSubjects(text: string): boolean;
+export function resolveImageDeliveryPlan(text: string, fallbackOutputCount?: number): ImageDeliveryPlan;
+export function resolveImageBatchMode(text: string, outputCount?: number): ImageDeliveryMode;
+export function applyImagePromptDeliveryContract(prompt: string, deliveryPlan?: Partial<ImageDeliveryPlan>): string;
 export function resolveAgentIntent(text: string, hasReferenceImages?: boolean): 'chat' | 'image' | 'skill_action';
 export function resolveAgentConversationIntent(
   messages: Array<{ role: 'user' | 'assistant'; content: string }>,

@@ -8667,6 +8667,15 @@ export default function AIWorkspace() {
   }) => {
     const currentChatInput = options?.input ?? chatInput;
     if (!currentChatInput.trim()) return;
+    if (
+      !options?.agentConfirmation
+      && pendingAgentConfirmation
+      && AGENT_RETRY_CONFIRMATION_PATTERN.test(currentChatInput)
+    ) {
+      setChatInput('');
+      submitAgentConfirmation();
+      return;
+    }
 
     const latestConversationMessageIndex = chatMessages.findLastIndex(
       (message) => message.role === 'user' || message.role === 'assistant'
@@ -9258,6 +9267,10 @@ export default function AIWorkspace() {
 
         let doneReceived = false;
         let generatedAssetFailureCount = 0;
+        let generatedAssetPreloadFailureCount = 0;
+        let generatedAssetSucceededCount = 0;
+        let generatedAssetExpectedCount = 0;
+        let streamedAssetOrdinal = 0;
         let generatedAssetModel = '';
         let nextGeneratedImageNumber = currentImageCount + 1;
         let progressEventRouter = createAgentProgressEventRouter();
@@ -9300,7 +9313,8 @@ export default function AIWorkspace() {
                 type?: string;
                 runId?: string;
                 model?: string;
-                assets?: Array<{ src?: string; naturalWidth?: number; naturalHeight?: number; model?: string }>;
+                assets?: Array<{ src?: string; naturalWidth?: number; naturalHeight?: number; model?: string; itemId?: string; index?: number; label?: string }>;
+                batch?: { total?: number; settled?: number; succeeded?: number; failed?: number };
               };
               request?: {
                 confirmationId?: string;
@@ -9352,7 +9366,8 @@ export default function AIWorkspace() {
                   type?: string;
                   runId?: string;
                   model?: string;
-                  assets?: Array<{ src?: string; naturalWidth?: number; naturalHeight?: number; model?: string }>;
+                  assets?: Array<{ src?: string; naturalWidth?: number; naturalHeight?: number; model?: string; itemId?: string; index?: number; label?: string }>;
+                  batch?: { total?: number; settled?: number; succeeded?: number; failed?: number };
                 };
                 request?: {
                   confirmationId?: string;
@@ -9572,6 +9587,21 @@ export default function AIWorkspace() {
               generatedAssetFailureCount = typeof requestStats.failed === 'number'
                 ? Math.max(0, requestStats.failed)
                 : 0;
+              const requestedAssetCount = typeof requestStats.requested === 'number'
+                ? Math.max(0, requestStats.requested)
+                : 0;
+              if (requestedAssetCount > generatedAssetExpectedCount) {
+                generatedAssetExpectedCount = requestedAssetCount;
+                updateChatMessageById(assistantId, (msg) => updateAgentRunProgress(msg, {
+                  type: 'assets_pending',
+                  count: generatedAssetExpectedCount,
+                }));
+              }
+              updateChatMessageById(assistantId, (msg) => updateAgentRunProgress(msg, {
+                type: 'assets_settled',
+                succeeded: generatedAssetSucceededCount,
+                failed: generatedAssetFailureCount + generatedAssetPreloadFailureCount,
+              }));
               const resolvedImageOptions = event.result.resolvedImageOptions && typeof event.result.resolvedImageOptions === 'object'
                 ? event.result.resolvedImageOptions as Record<string, unknown>
                 : {};
@@ -9602,20 +9632,40 @@ export default function AIWorkspace() {
             if (event.type === 'client_action' && event.action?.type === 'add_generated_assets') {
               const actionRunId = event.action.runId || agentRunId;
               const assets = (event.action.assets || []).filter(
-                (asset): asset is { src: string; naturalWidth?: number; naturalHeight?: number; model?: string } => Boolean(asset.src)
+                (asset): asset is { src: string; naturalWidth?: number; naturalHeight?: number; model?: string; itemId?: string; index?: number; label?: string } => Boolean(asset.src)
               );
+              const getAssetActionKey = (asset: typeof assets[number]) => {
+                const itemKey = asset.itemId || (typeof asset.index === 'number' ? `index-${asset.index}` : asset.src);
+                return `${actionRunId}:${itemKey}:${asset.src}`;
+              };
+              const batchTotal = typeof event.action.batch?.total === 'number'
+                ? Math.max(0, event.action.batch.total)
+                : 0;
+              if (batchTotal > generatedAssetExpectedCount) {
+                generatedAssetExpectedCount = batchTotal;
+                updateChatMessageById(assistantId, (msg) => updateAgentRunProgress(msg, {
+                  type: 'assets_pending',
+                  count: generatedAssetExpectedCount,
+                }));
+              }
+              if (typeof event.action.batch?.failed === 'number') {
+                generatedAssetFailureCount = Math.max(generatedAssetFailureCount, event.action.batch.failed);
+              }
               const freshAssets = assets.filter((asset) => {
-                const key = `${actionRunId}:${asset.src}`;
+                const key = getAssetActionKey(asset);
                 if (processedAgentActionsRef.current.has(key)) return false;
                 processedAgentActionsRef.current.add(key);
                 processedAgentActionKeysForRun.add(key);
                 return true;
               });
               if (freshAssets.length > 0) {
-                updateChatMessageById(assistantId, (msg) => updateAgentRunProgress(msg, {
-                  type: 'assets_pending',
-                  count: freshAssets.length + generatedAssetFailureCount,
-                }));
+                if (generatedAssetExpectedCount === 0) {
+                  generatedAssetExpectedCount = freshAssets.length + generatedAssetFailureCount;
+                  updateChatMessageById(assistantId, (msg) => updateAgentRunProgress(msg, {
+                    type: 'assets_pending',
+                    count: generatedAssetExpectedCount,
+                  }));
+                }
                 const preloadedAssets = await preloadGeneratedAssets(freshAssets, { timeoutMs: 15_000 });
                 if (
                   currentSessionIdRef.current !== generationSessionId
@@ -9623,7 +9673,7 @@ export default function AIWorkspace() {
                   || controller.signal.aborted
                 ) {
                   for (const asset of freshAssets) {
-                    const key = `${actionRunId}:${asset.src}`;
+                    const key = getAssetActionKey(asset);
                     processedAgentActionsRef.current.delete(key);
                     processedAgentActionKeysForRun.delete(key);
                   }
@@ -9631,31 +9681,35 @@ export default function AIWorkspace() {
                 }
                 const loadedAssets = preloadedAssets.fulfilled;
                 preloadedAssets.failed.forEach(({ asset }) => {
-                  const key = `${actionRunId}:${asset.src}`;
+                  const key = getAssetActionKey(asset);
                   processedAgentActionsRef.current.delete(key);
                   processedAgentActionKeysForRun.delete(key);
                 });
                 const preloadFailureCount = preloadedAssets.failed.length;
+                generatedAssetPreloadFailureCount += preloadFailureCount;
                 if (loadedAssets.length > 0) {
                   const firstImageNumber = nextGeneratedImageNumber;
                   nextGeneratedImageNumber += loadedAssets.length;
+                  const firstStreamedOrdinal = streamedAssetOrdinal;
+                  streamedAssetOrdinal += loadedAssets.length;
+                  generatedAssetSucceededCount += loadedAssets.length;
                   const resolvedModel = event.action.model
                     || loadedAssets.find(({ asset }) => asset.model)?.asset.model
                     || generatedAssetModel
                     || selectedImageModelId;
                   const imageMessages: ChatMessage[] = loadedAssets.map(({ asset }, index) => ({
-                    id: `${assistantId}-asset-${index}-${Date.now()}`,
+                    id: `${assistantId}-asset-${asset.itemId || asset.index || firstStreamedOrdinal + index}-${Date.now()}`,
                     role: 'assistant',
                     content: '',
                     imageUrl: asset.src,
-                    imageName: `image ${firstImageNumber + index}`,
+                    imageName: asset.label || `image ${firstImageNumber + index}`,
                     model: asset.model || resolvedModel,
                   }));
                   const canvasItems = loadedAssets.map(({ asset, naturalWidth, naturalHeight }, index) => {
                     const displaySize = getConstrainedImageDisplaySize(naturalWidth, naturalHeight);
-                    const spawnPosition = getSpawnPosition(displaySize, index, currentViewport);
+                    const spawnPosition = getSpawnPosition(displaySize, firstStreamedOrdinal + index, currentViewport);
                     return createImageCanvasItem({
-                      id: `${actionRunId}-asset-${Date.now()}-${index}`,
+                      id: `${actionRunId}-asset-${asset.itemId || asset.index || firstStreamedOrdinal + index}-${Date.now()}`,
                       src: asset.src,
                       naturalWidth,
                       naturalHeight,
@@ -9680,8 +9734,8 @@ export default function AIWorkspace() {
                 }
                 updateChatMessageById(assistantId, (msg) => updateAgentRunProgress(msg, {
                   type: 'assets_settled',
-                  succeeded: loadedAssets.length,
-                  failed: generatedAssetFailureCount + preloadFailureCount,
+                  succeeded: generatedAssetSucceededCount,
+                  failed: generatedAssetFailureCount + generatedAssetPreloadFailureCount,
                 }));
               }
               continue;

@@ -10,6 +10,8 @@ test('chat request and response types expose normalized tool calling', () => {
   assert.match(source, /tools\?: ChatToolDefinition\[\]/);
   assert.match(source, /tool_calls\?: ChatToolCall\[\]/);
   assert.match(source, /tool_call_id\?: string/);
+  assert.match(source, /export type ChatToolChoice/);
+  assert.match(source, /\{ type: 'function'; function: \{ name: string \} \}/);
 });
 
 test('openai compatible chat forwards tools and tool choice', () => {
@@ -23,4 +25,7 @@ test('gemini chat maps function declarations calls and responses', () => {
   assert.match(source, /functionResponse/);
   assert.match(source, /toolConfig/);
   assert.match(source, /pendingToolResponses/);
+  assert.match(source, /mode: 'ANY'/);
+  assert.match(source, /allowedFunctionNames: \[toolChoice\.function\.name\]/);
+  assert.match(source, /resolveGeminiFunctionCallingConfig\(request\.toolChoice\)/);
 });

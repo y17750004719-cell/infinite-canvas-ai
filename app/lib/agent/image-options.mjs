@@ -62,8 +62,9 @@ const ENGLISH_NUMBER_VALUES = Object.freeze({
 });
 
 const NUMBER_TOKEN_SOURCE = String.raw`(?:\d{1,4}|[零〇一二两三四五六七八九十百]+|(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred)(?:[\s-]+(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty|thirty|forty|fifty|sixty|seventy|eighty|ninety|hundred))*)`;
-const CHINESE_OUTPUT_UNIT_SOURCE = String.raw`(?:张|幅|期|版|款|个\s*(?:版本|方案|封面|海报|图片|图像|设计)|份\s*(?:设计|方案))`;
+const CHINESE_OUTPUT_UNIT_SOURCE = String.raw`(?:张|張|幅|期|版|款|个\s*(?:不同(?:的)?\s*)?(?:版本|方案|封面|海报|图片|图像|设计)|份\s*(?:设计|方案))`;
 const ENGLISH_OUTPUT_UNIT_SOURCE = String.raw`(?:images?|pictures?|covers?|posters?|issues?|versions?|variations?|options?|designs?|copies)`;
+const ENGLISH_OUTPUT_MODIFIER_SOURCE = String.raw`(?:(?:main|visual|standalone|independent|different|distinct|final|primary|key|creative|editorial)\s+){0,4}`;
 
 function parseChineseNumber(token) {
   if (!token || !/^[零〇一二两三四五六七八九十百]+$/.test(token)) return null;
@@ -120,13 +121,24 @@ function collectCountMatches(text, pattern, countIndexes = [1]) {
     .filter(Boolean);
 }
 
+export function extractAgentImageFileCounts(input) {
+  const text = typeof input === 'string'
+    ? input.normalize('NFKC').replace(/[\u200B-\u200D\uFEFF]/g, '').trim()
+    : '';
+  if (!text) return [];
+  return [
+    ...collectCountMatches(text, new RegExp(`(${NUMBER_TOKEN_SOURCE})\\s*(?:张|張|幅)`, 'giu')),
+    ...collectCountMatches(text, new RegExp(`(${NUMBER_TOKEN_SOURCE})\\s+${ENGLISH_OUTPUT_MODIFIER_SOURCE}(?:images?|pictures?|covers?|posters?)\\b`, 'giu')),
+  ];
+}
+
 /**
  * Resolve an image deliverable count from natural language without confusing
  * scene subjects, aspect ratios, resolutions, years, or model names for outputs.
  */
 export function extractAgentImageCount(input) {
   const text = typeof input === 'string'
-    ? input.normalize('NFKC').trim()
+    ? input.normalize('NFKC').replace(/[\u200B-\u200D\uFEFF]/g, '').trim()
     : '';
   if (!text) return { status: 'none', source: 'default', candidates: [] };
 
@@ -170,7 +182,7 @@ export function extractAgentImageCount(input) {
     ),
     ...collectCountMatches(
       text,
-      new RegExp(`(${NUMBER_TOKEN_SOURCE})\\s+${ENGLISH_OUTPUT_UNIT_SOURCE}\\b`, 'giu'),
+      new RegExp(`(${NUMBER_TOKEN_SOURCE})\\s+${ENGLISH_OUTPUT_MODIFIER_SOURCE}${ENGLISH_OUTPUT_UNIT_SOURCE}\\b`, 'giu'),
     ),
     ...collectCountMatches(
       text,
@@ -220,6 +232,8 @@ function positiveImageCount(value) {
 
 /** @param {{
  * prompt?: string,
+ * rawPrompt?: string,
+ * plannedCount?: number,
  * interfaceCount?: number,
  * clarifiedCount?: number,
  * clarifiedSource?: 'clarification'|'prompt'|'interface'|'default'|'batch',
@@ -228,6 +242,8 @@ function positiveImageCount(value) {
  * }} input */
 export function resolveAgentImageCountDecision({
   prompt,
+  rawPrompt,
+  plannedCount,
   interfaceCount,
   clarifiedCount,
   clarifiedSource,
@@ -268,7 +284,29 @@ export function resolveAgentImageCountDecision({
     };
   }
 
-  const promptCount = extractAgentImageCount(prompt);
+  const resolvedPlannedCount = positiveImageCount(plannedCount);
+  if (resolvedPlannedCount) {
+    if (hasExplicitInterfaceCount && selectedCount !== resolvedPlannedCount) {
+      return {
+        status: 'ambiguous',
+        source: 'prompt',
+        candidates: [resolvedPlannedCount, selectedCount],
+        reason: '文字中的交付数量与界面选择的数量不一致。',
+      };
+    }
+    return {
+      status: resolvedPlannedCount > AGENT_MAX_IMAGE_BATCH_COUNT ? 'overflow' : 'resolved',
+      count: resolvedPlannedCount,
+      totalCount: resolvedPlannedCount,
+      source: 'prompt',
+      candidates: [resolvedPlannedCount],
+    };
+  }
+
+  const rawPromptCount = extractAgentImageCount(rawPrompt);
+  const promptCount = rawPromptCount.status !== 'none'
+    ? rawPromptCount
+    : extractAgentImageCount(prompt);
   if (
     (promptCount.status === 'resolved' || promptCount.status === 'overflow')
     && promptCount.count

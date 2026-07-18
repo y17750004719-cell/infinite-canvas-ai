@@ -91,11 +91,11 @@ export function GalleryView({
         <div className="flex w-full items-center justify-start py-4 pl-4 pr-4 sm:pl-[34px] sm:pr-0">
           <div className="flex items-center">
             <button
-              className="workspace-dark-icon-button h-10 w-10 rounded-full text-sm font-medium"
+              className="workspace-dark-icon-button h-10 w-10 overflow-hidden rounded-full text-sm font-medium"
               onClick={onBack}
               aria-label="返回画廊"
             >
-              L
+              <Image src="/z-flow-logo.svg" alt="" width={40} height={40} priority />
             </button>
           </div>
         </div>

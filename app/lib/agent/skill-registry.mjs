@@ -17,6 +17,9 @@ function isManifest(value) {
     typeof value.description === 'string' &&
     Array.isArray(value.triggerHints) &&
     Array.isArray(value.allowedTools) &&
+    (value.executionMode === undefined || ['agent_loop', 'image_pipeline'].includes(value.executionMode)) &&
+    (value.promptStyle === undefined || ['text', 'json-text'].includes(value.promptStyle)) &&
+    (value.planningGuidance === undefined || typeof value.planningGuidance === 'string') &&
     typeof value.enabled === 'boolean';
 }
 

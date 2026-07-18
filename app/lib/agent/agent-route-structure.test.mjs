@@ -37,6 +37,9 @@ test('agent route exposes NDJSON orchestration events and reuses the generate ro
   assert.match(source, /generatePost/);
   assert.match(source, /executeAgentTool/);
   assert.match(source, /routeAgentRequest/);
+  assert.match(source, /planAgentExecutionRequest/);
+  assert.match(source, /executionPlanToImageDeliveryPlan/);
+  assert.match(source, /decisionSource:\s*plannerResult\.source/);
   assert.match(source, /resolveBriefClarification/);
   assert.match(source, /shouldAskClarification/);
   assert.match(source, /clarificationResponse/);
@@ -98,13 +101,38 @@ test('agent route emits versioned semantic progress and keeps asset URLs in clie
   assert.match(loopSource, /type:\s*'client_action'[\s\S]{0,180}assets/);
 });
 
+test('agent route streams confirmed batch images individually without a duplicate aggregate action', () => {
+  const source = fs.readFileSync(routePath, 'utf8');
+  const loopSource = fs.readFileSync(agentLoopPath, 'utf8');
+  assert.match(source, /onSettled:\s*streamIncrementally/);
+  assert.match(source, /type:\s*'add_generated_assets'[\s\S]{0,900}itemId:[\s\S]{0,500}batch:/);
+  assert.match(source, /total:\s*requests\.length/);
+  assert.match(source, /settled:\s*streamedSettled/);
+  assert.match(source, /succeeded:\s*streamedSucceeded/);
+  assert.match(source, /failed:\s*streamedFailed/);
+  assert.match(source, /includeAssets:\s*!\(result as any\)\?\.streamedAssets/);
+  assert.match(loopSource, /includeAssets = true/);
+  assert.match(loopSource, /toolName === 'generate_image' && includeAssets/);
+});
+
+test('agent route resolves raw user counts before briefs and validates the final request count', () => {
+  const source = fs.readFileSync(routePath, 'utf8');
+  assert.match(source, /const rawUserCountResolution = plannerAuthoritative[\s\S]{0,220}extractAgentImageCount\(latestUserMessage\)/);
+  assert.match(source, /rawUserCountResolution\.status !== 'none'[\s\S]{0,120}rawUserCountResolution[\s\S]{0,80}briefCountResolution/);
+  assert.match(source, /rawPrompt:\s*latestUserMessage/);
+  assert.match(source, /requests\.length !== payloadOutputCount/);
+  assert.match(source, /Number\(request\?\.n\) !== 1/);
+  assert.match(source, /image\.requests_built/);
+  assert.match(source, /actualRequestCount:\s*requests\.length/);
+});
+
 test('agent route resolves continuation context and final execution intent before announcing it', () => {
   const source = fs.readFileSync(routePath, 'utf8');
   assert.match(source, /resolveAgentConversationIntent/);
   assert.match(source, /const initialBriefSource = conversationIntent\.brief \|\| latestUserMessage/);
   assert.match(source, /let executionBrief = executionBriefData\.plainText/);
   assert.match(source, /conversationIntent\.inherited[\s\S]{0,120}conversationIntent\.intent/);
-  assert.match(source, /if \(intent === 'chat' && selectedSkillExecutionRequest\) \{[\s\S]{0,80}intent = 'skill_action'/);
+  assert.match(source, /if \(!executionPlan && intent === 'chat' && selectedSkillExecutionRequest\) \{[\s\S]{0,80}intent = 'skill_action'/);
   const executionIntentIndex = source.indexOf("intent = 'skill_action';");
   const resolvedEventIndex = source.indexOf("writeEvent(controller, { type: 'intent_resolved', intent });", executionIntentIndex);
   assert.ok(executionIntentIndex >= 0 && resolvedEventIndex > executionIntentIndex);
@@ -114,7 +142,7 @@ test('agent route resolves continuation context and final execution intent befor
 
 test('agent route rejects unbacked execution claims and requests a real mutation tool', () => {
   const source = fs.readFileSync(routePath, 'utf8');
-  assert.match(source, /requireMutationTool:\s*intent === 'image' \|\| intent === 'skill_action'/);
+  assert.match(source, /requireMutationTool:\s*executionPlan[\s\S]{0,120}Boolean\(executionPlan\.execution\.tool\)[\s\S]{0,120}intent === 'image' \|\| intent === 'skill_action'/);
   assert.match(source, /loopResult\.stopReason === 'execution_required'/);
   assert.match(source, /等待确认真实启动生成/);
   assert.match(source, /sanitizeAgentResponseContent/);
@@ -153,7 +181,7 @@ test('agent route uses one main-agent message hierarchy for text and referenced 
   assert.match(source, /buildMainAgentMessages\(\{/);
   assert.match(source, /referenceImages:\s*executionReferenceImages/);
   assert.doesNotMatch(source, /if \(body\.referenceImages\?\.length\) \{[\s\S]{0,1200}generatePost/);
-  assert.match(source, /if \(intent === 'image' && !selectedSkill\)/);
+  assert.match(source, /const shouldUseImagePipeline = executionKind[\s\S]{0,180}executionKind === 'image_pipeline'/);
   assert.doesNotMatch(source, /if \(intent === 'skill_action'\)/);
   assert.match(source, /loadSkillContent\(selectedSkill\.id\)/);
   assert.match(source, /runAgentLoop\(\{/);
@@ -175,7 +203,7 @@ test('agent route enforces run and tool limits', () => {
   assert.match(source, /body\.confirmation\?\.confirmationId/);
   assert.match(source, /confirmed:\s*true/);
   assert.match(source, /normalizeAgentImageCount\(body\.imageOptions\?\.count\)/);
-  assert.match(source, /本次将生成 \$\{requestedImageCount\} 张图片，确认后继续/);
+  assert.match(source, /describeImageDelivery\(imageDeliveryPlan, requestedImageCount\)/);
   assert.doesNotMatch(source, /channel:\s*'reasoning'/);
   assert.match(source, /clarificationSubmissionStore/);
   assert.match(source, /Clarification response has already been submitted/);
@@ -247,12 +275,33 @@ test('agent route resolves natural-language output counts before clarification a
   assert.ok(countResolutionIndex >= 0 && genericClarifierIndex > countResolutionIndex);
 });
 
-test('explicit multi-image requests bypass automatic proposals and model routing', () => {
+test('unified planner is authoritative, supports shadow mode, and survives clarification', () => {
+  const source = fs.readFileSync(routePath, 'utf8');
+  assert.match(source, /AGENT_UNIFIED_PLANNER_ENABLED/);
+  assert.match(source, /AGENT_PLANNER_SHADOW_MODE/);
+  assert.match(source, /plannerAuthoritative/);
+  assert.match(source, /planner\.shadow/);
+  assert.match(source, /executionPlan:\s*structuredClone\(executionPlan\)/);
+  assert.match(source, /activeClarificationState\?\.executionPlan/);
+  assert.match(source, /executionPlan\.execution\.kind/);
+  assert.match(source, /plannerSeriesItems/);
+  assert.match(source, /sourceDetail: plannerResult\.sourceDetail/);
+  assert.match(source, /mutationBlocked: true/);
+  assert.match(source, /stage: 'planning'/);
+  assert.match(source, /stopReason: 'planner_failed'/);
+  assert.match(source, /const shouldRunClarifier = \(intent === 'image' \|\| intent === 'skill_action'\)[\s\S]*&& !executionPlan/);
+  assert.match(source, /deliveryPlan[\s\S]*executionPlanToImageDeliveryPlan\(executionPlan\)/);
+});
+
+test('explicit multi-image requests preserve deterministic image skills while bypassing proposals', () => {
   const source = fs.readFileSync(routePath, 'utf8');
   assert.match(source, /const explicitBatchImageRequest = !body\.activeSkillId/);
   assert.match(source, /conversationIntent\.intent === 'image'[\s\S]*\|\| isPotentialDesignExecutionRequest\(initialBriefSource\)/);
   assert.match(source, /isPotentialDesignExecutionRequest\(initialBriefSource\)/);
   assert.match(source, /isReferentialShorthand\(latestUserMessage\)/);
+  assert.match(source, /const deterministicImageSkill = !plannerAuthoritative && !body\.activeSkillId/);
+  assert.match(source, /manifest\.executionMode === 'image_pipeline'/);
+  assert.match(source, /source: 'deterministic_image_skill'/);
   assert.match(source, /source: 'deterministic_batch'/);
   assert.match(source, /contextResolutionSkipped/);
   assert.match(source, /event: 'routing\.resolved'|routing\.resolved/);
@@ -262,9 +311,17 @@ test('explicit multi-image requests bypass automatic proposals and model routing
   assert.ok(batchGate >= 0 && contextResolution > batchGate && modelRouting > contextResolution);
 });
 
+test('image pipeline skills pass their full instructions and JSON text style to prompt optimization', () => {
+  const source = fs.readFileSync(routePath, 'utf8');
+  assert.match(source, /skillContent,/);
+  assert.match(source, /promptStyle: selectedSkill\?\.promptStyle \|\| 'text'/);
+  assert.match(source, /selectedSkill\?\.promptStyle === 'json-text'/);
+  assert.match(source, /当前 Skill 需要启用提示词优化流程/);
+});
+
 test('series batches persist distinct prompts and retry failed issue ids', () => {
   const source = fs.readFileSync(routePath, 'utf8');
-  assert.match(source, /resolveImageBatchMode\(executionBrief, requestedTotalImageCount\)/);
+  assert.match(source, /resolveImageDeliveryPlan\(executionBrief, requestedTotalImageCount\)/);
   assert.match(source, /outputCount: requestedTotalImageCount/);
   assert.match(source, /batchMode: imageBatchMode/);
   assert.match(source, /generationItems: structuredClone\(generationItems\)/);
@@ -272,4 +329,15 @@ test('series batches persist distinct prompts and retry failed issue ids', () =>
   assert.match(source, /generationPrompts: effectiveGenerationItems\.map/);
   assert.match(source, /failedItemIds/);
   assert.match(source, /resolveAgentImageBatchContinuation/);
+});
+
+test('agent route preserves three-mode image delivery plans through confirmation and requests', () => {
+  const source = fs.readFileSync(routePath, 'utf8');
+  assert.match(source, /imageDeliveryPlan\?: ImageDeliveryPlan/);
+  assert.match(source, /resolvedImageDeliveryMode:\s*'composite'/);
+  assert.match(source, /dimension:\s*'image_delivery_scope'/);
+  assert.match(source, /applyImagePromptDeliveryContract/);
+  assert.match(source, /deliveryMode:\s*payloadDeliveryPlan\.mode/);
+  assert.match(source, /panelCount:\s*payloadDeliveryPlan\.panelCount/);
+  assert.match(source, /confirmationRecord\.imageDeliveryPlan/);
 });

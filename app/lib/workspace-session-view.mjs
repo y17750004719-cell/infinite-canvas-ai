@@ -1637,29 +1637,41 @@ export function resolveCanvasImageTaskExecutionMode({
   return 'parallel';
 }
 
+/** @param {{
+ * requests?: any[],
+ * executionMode?: string,
+ * runTask: (request: any) => Promise<any>,
+ * onSettled?: (result: PromiseSettledResult<any>, requestIndex: number) => void|Promise<void>,
+ * }} input */
 export async function settleCanvasImageGenerationRequests({
   requests,
   executionMode = 'parallel',
   runTask,
+  onSettled = undefined,
 }) {
   const safeRequests = Array.isArray(requests) ? requests : [];
+  const results = new Array(safeRequests.length);
+  const settleRequest = async (request, index) => {
+    let result;
+    try {
+      result = { status: 'fulfilled', value: await runTask(request) };
+    } catch (error) {
+      result = { status: 'rejected', reason: error };
+    }
+    results[index] = result;
+    if (typeof onSettled === 'function') await onSettled(result, index);
+    return result;
+  };
   if (executionMode !== 'serial') {
-    return Promise.allSettled(safeRequests.map((request) => runTask(request)));
+    await Promise.all(safeRequests.map(settleRequest));
+    return results;
   }
 
-  const results = [];
-  for (const request of safeRequests) {
-    try {
-      const value = await runTask(request);
-      results.push({ status: 'fulfilled', value });
-    } catch (error) {
-      results.push({ status: 'rejected', reason: error });
-      if (error instanceof Error && error.name === 'AbortError') {
-        break;
-      }
-    }
+  for (const [index, request] of safeRequests.entries()) {
+    const result = await settleRequest(request, index);
+    if (result.status === 'rejected' && result.reason instanceof Error && result.reason.name === 'AbortError') break;
   }
-  return results;
+  return results.filter(Boolean);
 }
 
 export function buildCanvasImageGenerationFailureMessage({

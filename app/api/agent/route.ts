@@ -4,15 +4,22 @@ import { POST as generatePost } from '../generate/route';
 import { chat, chatStream } from '../../lib/api-client';
 import { optimizeImagePrompt } from '../../lib/agent/image-pipeline.mjs';
 import {
+  applyImagePromptDeliveryContract,
   resolveAgentConversationIntent,
-  resolveImageBatchMode,
+  resolveImageDeliveryPlan,
 } from '../../lib/agent/prompt-optimizer.mjs';
 import {
   listSkillManifests,
   loadSkillContent,
+  selectSkillForPrompt,
 } from '../../lib/agent/skill-registry.mjs';
 import { buildMainAgentMessages } from '../../lib/agent/main-agent.mjs';
 import { routeAgentRequest } from '../../lib/agent/skill-router.mjs';
+import {
+  executionPlanToBrief,
+  executionPlanToImageDeliveryPlan,
+  planAgentExecutionRequest,
+} from '../../lib/agent/execution-planner.mjs';
 import {
   applyClarificationResponse,
   isPotentialDesignExecutionRequest,
@@ -59,6 +66,10 @@ import type {
   ExecutionBrief,
 } from '../../lib/agent/context-reference.types';
 import type {
+  AgentExecutionPlan,
+  AgentPlannerSourceDetail,
+} from '../../lib/agent/execution-planner.types';
+import type {
   AgentClarificationRequest,
   AgentClarificationState,
   AgentEvent,
@@ -94,6 +105,7 @@ type ConfirmationRecord = {
   imageBatchPlan?: AgentImageBatchPlan;
   nextConfirmationId?: string;
   imageBatchMode?: AgentImageBatchMode;
+  imageDeliveryPlan?: ImageDeliveryPlan;
   generationItems?: AgentImageGenerationItem[];
   remainingGenerationItems?: AgentImageGenerationItem[];
   optimizePrompt?: boolean;
@@ -105,7 +117,8 @@ type ConfirmationRecord = {
 };
 
 type AgentImageCountSource = 'clarification' | 'prompt' | 'interface' | 'default' | 'batch';
-type AgentImageBatchMode = 'series' | 'variants';
+type AgentImageBatchMode = 'series' | 'variants' | 'composite';
+type ImageDeliveryPlan = ReturnType<typeof resolveImageDeliveryPlan>;
 
 type AgentImageGenerationItem = {
   id: string;
@@ -224,6 +237,14 @@ function positiveInteger(value: unknown) {
   return Number.isFinite(count) && count > 0 ? Math.floor(count) : null;
 }
 
+function describeImageDelivery(plan: ImageDeliveryPlan, count: number) {
+  if (plan.mode === 'composite') {
+    return `${count} 张${plan.panelCount ? `每张由 ${plan.panelCount} 个画面组成的` : ''}多宫格图片`;
+  }
+  if (plan.mode === 'series') return `${count} 张内容不同、风格统一的系列图片`;
+  return `${count} 张同一 Brief 的随机变体`;
+}
+
 function parseClarifiedImageCount(value: unknown) {
   const text = typeof value === 'string' ? value.trim() : '';
   if (!text) return null;
@@ -233,11 +254,65 @@ function parseClarifiedImageCount(value: unknown) {
   return standalone ? parseAgentImageCountNumber(standalone[1]) : null;
 }
 
+function updateClarifiedExecutionPlan(
+  state: AgentClarificationState,
+  { count, mode, panelCount }: { count?: number; mode?: AgentImageBatchMode; panelCount?: number },
+) {
+  if (!state.executionPlan) return state;
+  const nextCount = positiveInteger(count) || state.executionPlan.delivery.outputCount;
+  const nextMode = mode || (state.executionPlan.delivery.mode === 'single' ? 'variants' : state.executionPlan.delivery.mode);
+  const existingItems = state.executionPlan.delivery.items || [];
+  const items = nextMode === 'series'
+    ? Array.from({ length: nextCount }, (_, index) => existingItems[index] || {
+        index: index + 1,
+        label: `Series item ${index + 1}`,
+        subject: state.executionPlan?.brief.subject || 'requested subject',
+        variation: state.executionPlan?.delivery.variationAxes.join(', ') || 'distinct composition',
+      })
+    : [];
+  return {
+    ...state,
+    executionPlan: {
+      ...state.executionPlan,
+      delivery: {
+        ...state.executionPlan.delivery,
+        mode: nextMode,
+        outputCount: nextCount,
+        panelCount: nextMode === 'composite' ? positiveInteger(panelCount) || state.executionPlan.delivery.panelCount : null,
+        items,
+      },
+    },
+  };
+}
+
 function applyImageCountClarificationState(
   state: AgentClarificationState,
   request: AgentClarificationRequest,
   response: NonNullable<AgentRequestBody['clarificationResponse']>,
 ) {
+  if (request.dimension === 'image_delivery_scope') {
+    const selectedOptionId = typeof response.selectedOptionId === 'string' ? response.selectedOptionId : '';
+    if (selectedOptionId === 'single_composite') {
+      return updateClarifiedExecutionPlan({
+        ...state,
+        resolvedImageCount: 1,
+        resolvedImageCountSource: 'clarification' as const,
+        resolvedImageDeliveryMode: 'composite' as const,
+      }, { count: 1, mode: 'composite', panelCount: state.resolvedImagePanelCount });
+    }
+    if (selectedOptionId === 'separate_outputs') {
+      const count = Math.max(2, ...(state.pendingImageCountCandidates || [state.requestedImageCountTotal || 2]));
+      return updateClarifiedExecutionPlan({
+        ...state,
+        resolvedImageCount: count,
+        requestedImageCountTotal: count,
+        resolvedImageCountSource: 'clarification' as const,
+        resolvedImageDeliveryMode: 'variants' as const,
+        resolvedImagePanelCount: undefined,
+      }, { count, mode: 'variants' });
+    }
+    return state;
+  }
   if (!request.dimension.startsWith('output_count')) return state;
   const selectedOptionId = typeof response.selectedOptionId === 'string' ? response.selectedOptionId : '';
   const requestedTotal = positiveInteger(state.requestedImageCountTotal);
@@ -255,12 +330,13 @@ function applyImageCountClarificationState(
     };
   }
   if (selectedOptionId === 'first_batch') {
-    return {
+    return updateClarifiedExecutionPlan({
       ...state,
       resolvedImageCount: AGENT_MAX_IMAGE_BATCH_COUNT,
       resolvedImageCountSource: 'clarification' as const,
+      requestedImageCountTotal: AGENT_MAX_IMAGE_BATCH_COUNT,
       imageBatchPlan: undefined,
-    };
+    }, { count: AGENT_MAX_IMAGE_BATCH_COUNT });
   }
   const optionCount = selectedOptionId.startsWith('count_')
     ? positiveInteger(selectedOptionId.slice('count_'.length))
@@ -268,13 +344,13 @@ function applyImageCountClarificationState(
   const customCount = parseClarifiedImageCount(response.customText);
   const resolvedCount = customCount || optionCount;
   if (!resolvedCount) return state;
-  return {
+  return updateClarifiedExecutionPlan({
     ...state,
     resolvedImageCount: resolvedCount,
     resolvedImageCountSource: 'clarification' as const,
     requestedImageCountTotal: resolvedCount,
     imageBatchPlan: undefined,
-  };
+  }, { count: resolvedCount });
 }
 
 export async function POST(request: NextRequest) {
@@ -290,10 +366,15 @@ export async function POST(request: NextRequest) {
   if (!latestUserMessage) {
     return NextResponse.json({ error: 'A user message is required' }, { status: 400 });
   }
-  const conversationIntent = resolveAgentConversationIntent(
-    body.messages,
-    Boolean(body.referenceImages?.length),
-  );
+  const unifiedPlannerEnabled = process.env.AGENT_UNIFIED_PLANNER_ENABLED !== '0';
+  const plannerShadowMode = process.env.AGENT_PLANNER_SHADOW_MODE === '1';
+  const plannerAuthoritative = unifiedPlannerEnabled && !plannerShadowMode;
+  const conversationIntent = plannerAuthoritative
+    ? { intent: 'chat' as const, brief: latestUserMessage, inherited: false, needsDirectionConfirmation: false }
+    : resolveAgentConversationIntent(
+        body.messages,
+        Boolean(body.referenceImages?.length),
+      );
   const contextEntities = Array.isArray(body.contextEntities)
     ? body.contextEntities.filter((entity) => entity && typeof entity.id === 'string').slice(-200)
     : [];
@@ -301,17 +382,34 @@ export async function POST(request: NextRequest) {
     ? body.selectedContextEntityIds.filter((id): id is string => typeof id === 'string').slice(0, 8)
     : [];
   const initialBriefSource = conversationIntent.brief || latestUserMessage;
-  const explicitBatchCountResolution = extractAgentImageCount(initialBriefSource);
+  const rawUserCountResolution = plannerAuthoritative
+    ? { status: 'none' as const, source: 'default' as const, candidates: [] as number[], count: undefined, matchedText: undefined }
+    : extractAgentImageCount(latestUserMessage);
+  const briefCountResolution = initialBriefSource === latestUserMessage
+    ? rawUserCountResolution
+    : extractAgentImageCount(initialBriefSource);
+  const explicitBatchCountResolution = rawUserCountResolution.status !== 'none'
+    ? rawUserCountResolution
+    : briefCountResolution;
+  const rawUserDeliveryPlan = plannerAuthoritative
+    ? { mode: 'variants' as const, outputCount: 1, promptCount: 1, panelCount: undefined, variationAxes: [], evidence: [], confidence: 'low' as const, requiresClarification: false }
+    : resolveImageDeliveryPlan(latestUserMessage, rawUserCountResolution.count || 1);
+  const briefDeliveryPlan = initialBriefSource === latestUserMessage || plannerAuthoritative
+    ? rawUserDeliveryPlan
+    : resolveImageDeliveryPlan(initialBriefSource, briefCountResolution.count || 1);
+  const initialDeliveryPlan = rawUserDeliveryPlan.evidence.length > 0 ? rawUserDeliveryPlan : briefDeliveryPlan;
   const explicitBatchImageRequest = !body.activeSkillId
     && (
       conversationIntent.intent === 'image'
       || isPotentialDesignExecutionRequest(initialBriefSource)
     )
-    && (explicitBatchCountResolution.candidates || []).some((count) => Number(count) > 1);
+    && initialDeliveryPlan.outputCount > 1;
   const shouldResolveInitialContext = !explicitBatchImageRequest
     || selectedContextEntityIds.length > 0
     || isReferentialShorthand(latestUserMessage);
-  const initialContextResolution = shouldResolveInitialContext
+  const initialContextResolution = plannerAuthoritative
+    ? { status: 'none' as const, detected: false, confidence: 'none' as const, candidates: [], entityIds: [] }
+    : shouldResolveInitialContext
     ? resolveContextReference({
         userMessage: latestUserMessage,
         entities: contextEntities,
@@ -340,6 +438,16 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : 'Invalid skill' }, { status: 400 });
   }
+  const deterministicImageSkill = !plannerAuthoritative && !body.activeSkillId
+    && (
+      conversationIntent.intent === 'image'
+      || isPotentialDesignExecutionRequest(initialBriefSource)
+    )
+    ? selectSkillForPrompt(
+        initialBriefSource,
+        skillManifests.filter((manifest) => manifest.executionMode === 'image_pipeline'),
+      )
+    : null;
 
   const providers = (await readProviderRegistry()).providers;
   const providerImageOptionProfiles = buildProviderImageOptionProfiles(providers);
@@ -376,6 +484,7 @@ export async function POST(request: NextRequest) {
       let selectedSkill = body.activeSkillId
         ? skillManifests.find((manifest) => manifest.id === body.activeSkillId) || null
         : null;
+      let skillContent = '';
       let contextResolution = structuredClone(initialContextResolution) as AgentContextResolution;
       let executionBriefData = structuredClone(initialExecutionBrief) as ExecutionBrief;
       let executionBrief = executionBriefData.plainText;
@@ -390,6 +499,21 @@ export async function POST(request: NextRequest) {
       let requestedTotalImageCount = requestedImageCount;
       let requestedImageCountSource: AgentImageCountSource = requestedImageCount > 1 ? 'interface' : 'default';
       let imageBatchPlan: AgentImageBatchPlan | undefined;
+      let imageDeliveryPlan: ImageDeliveryPlan = {
+        ...initialDeliveryPlan,
+        ...(activeClarificationState?.resolvedImageDeliveryMode
+          ? {
+              mode: activeClarificationState.resolvedImageDeliveryMode,
+              panelCount: activeClarificationState.resolvedImageDeliveryMode === 'composite'
+                ? activeClarificationState.resolvedImagePanelCount
+                : undefined,
+            }
+          : {}),
+      };
+      let executionPlan: AgentExecutionPlan | null = activeClarificationState?.executionPlan || null;
+      let executionPlanSource: 'model' | 'fallback' | null = executionPlan ? 'model' : null;
+      let executionPlanSourceDetail: AgentPlannerSourceDetail | null = executionPlan ? 'tool_call' : null;
+      let executionKind: AgentExecutionPlan['execution']['kind'] | null = executionPlan?.execution.kind || null;
       const progressTracker = createAgentProgressTracker({
         runId,
         emit: (event) => writeEvent(controller, event as AgentEvent),
@@ -461,9 +585,15 @@ export async function POST(request: NextRequest) {
         generationPrompt = sourcePrompt,
         countMetadata?: { source?: AgentImageCountSource; totalCount?: number },
         generationItems: AgentImageGenerationItem[] = [],
+        streamOptions?: { enabled?: boolean; toolCallId?: string },
+        deliveryPlan?: ImageDeliveryPlan,
       ) => {
         const payloadOutputCount = normalizeAgentImageCount(imageOptions?.count);
-        const payloadBatchMode = resolveImageBatchMode(sourcePrompt, payloadOutputCount);
+        const payloadDeliveryPlan = deliveryPlan
+          || (executionPlan
+            ? executionPlanToImageDeliveryPlan(executionPlan) as ImageDeliveryPlan
+            : resolveImageDeliveryPlan(sourcePrompt, payloadOutputCount));
+        const payloadBatchMode = payloadDeliveryPlan.mode;
         if (optimizePrompt && process.env.PROMPT_PIPELINE_AGENT_ENABLED !== '0') {
           writeProgress({ stepId: 'prompt_optimization', phase: 'optimizing', status: 'active', label: '正在优化图片提示词' });
         }
@@ -471,6 +601,8 @@ export async function POST(request: NextRequest) {
           ? await optimizeImagePrompt({
               userPrompt: generationPrompt,
               skillLabel: selectedSkill?.name,
+              skillContent,
+              promptStyle: selectedSkill?.promptStyle || 'text',
               providerId: process.env.PROMPT_OPTIMIZER_PROVIDER_ID,
               optimizerModel: process.env.PROMPT_OPTIMIZER_MODEL || process.env.AGENT_CHAT_MODEL || DEFAULT_AGENT_MODEL,
               signal: runSignal,
@@ -481,20 +613,37 @@ export async function POST(request: NextRequest) {
           : { prompt: generationPrompt, optimized: false };
         const optimized = {
           ...optimizedResult,
-          prompt: ensureOptimizedPromptCoverage(optimizedResult.prompt, executionBriefData),
+          prompt: applyImagePromptDeliveryContract(selectedSkill?.promptStyle === 'json-text'
+            ? optimizedResult.prompt
+            : ensureOptimizedPromptCoverage(optimizedResult.prompt, executionBriefData), payloadDeliveryPlan),
         };
         const optimizedItems = 'items' in optimizedResult && Array.isArray(optimizedResult.items)
           ? optimizedResult.items
           : [];
         const effectiveGenerationItems: AgentImageGenerationItem[] = generationItems.length
-          ? generationItems
-          : optimizedItems.map((item: any) => ({
+          ? generationItems.map((item) => ({
+              ...item,
+              prompt: applyImagePromptDeliveryContract(item.prompt, payloadDeliveryPlan),
+            }))
+          : optimizedItems.length
+            ? optimizedItems.map((item: any) => ({
               id: `series-${item.index}`,
               index: item.index,
               label: item.label,
               subject: item.subject,
-              prompt: ensureOptimizedPromptCoverage(item.prompt, executionBriefData),
-            }));
+              prompt: applyImagePromptDeliveryContract(selectedSkill?.promptStyle === 'json-text'
+                ? item.prompt
+                : ensureOptimizedPromptCoverage(item.prompt, executionBriefData), payloadDeliveryPlan),
+            }))
+            : payloadOutputCount > 1
+              ? Array.from({ length: payloadOutputCount }, (_, index) => ({
+                  id: `${payloadBatchMode}-${index + 1}`,
+                  index: index + 1,
+                  label: payloadBatchMode === 'composite' ? `多宫格 ${index + 1}` : `变体 ${index + 1}`,
+                  subject: payloadBatchMode === 'composite' ? 'composite image' : 'image variant',
+                  prompt: optimized.prompt,
+                }))
+              : [];
         if (payloadBatchMode === 'series' && payloadOutputCount > 1 && effectiveGenerationItems.length !== payloadOutputCount) {
           throw new Error(`未能形成完整的 ${payloadOutputCount} 期系列生成计划，请重试。`);
         }
@@ -529,11 +678,30 @@ export async function POST(request: NextRequest) {
           requestedCount: imageOptions?.count,
         });
         if (requests.length === 0) throw new Error('Image generation request is empty');
+        if (requests.length !== payloadOutputCount) {
+          throw new Error(`图片请求数量不一致：要求 ${payloadOutputCount} 张，实际创建 ${requests.length} 个任务。`);
+        }
+        if (requests.some((request) => Number(request?.n) !== 1)) {
+          throw new Error('批量图片请求必须拆分为独立的 n:1 任务。');
+        }
+        void contextLogger.info('image.requests_built', 'Agent image requests built', {
+          requestedCount: payloadOutputCount,
+          actualRequestCount: requests.length,
+          countSource: countMetadata?.source || 'default',
+          deliveryMode: payloadDeliveryPlan.mode,
+          panelCount: payloadDeliveryPlan.panelCount || null,
+          promptCount: effectiveGenerationItems.length || 1,
+          streamed: streamOptions?.enabled === true && requests.length > 1,
+        });
         const executionMode = resolveCanvasImageTaskExecutionMode({
           modelId: resolvedImageSelection.model,
           size: resolvedImageOptions.size,
           count: resolvedImageOptions.count,
         });
+        const streamIncrementally = streamOptions?.enabled === true && requests.length > 1;
+        let streamedSettled = 0;
+        let streamedSucceeded = 0;
+        let streamedFailed = 0;
         const taskResults = await settleCanvasImageGenerationRequests({
           requests,
           executionMode,
@@ -554,20 +722,72 @@ export async function POST(request: NextRequest) {
             }
             return generationPayload;
           },
+          onSettled: streamIncrementally
+            ? (result: PromiseSettledResult<any>, requestIndex: number) => {
+                streamedSettled += 1;
+                if (result.status === 'rejected') {
+                  streamedFailed += 1;
+                } else {
+                  const assets = generatedAssetsFromResult(result.value);
+                  if (assets.length > 0) {
+                    streamedSucceeded += 1;
+                    const item = effectiveGenerationItems[requestIndex];
+                    writeEvent(controller, {
+                      type: 'client_action',
+                      action: {
+                        type: 'add_generated_assets',
+                        runId,
+                        model: resolvedImageSelection.model,
+                        assets: assets.map((asset) => ({
+                          src: asset.src,
+                          naturalWidth: asset.naturalWidth,
+                          naturalHeight: asset.naturalHeight,
+                          model: resolvedImageSelection.model,
+                          ...(item?.id ? { itemId: item.id } : {}),
+                          index: item?.index || requestIndex + 1,
+                          label: item?.label || `图片 ${requestIndex + 1}`,
+                        })),
+                        batch: {
+                          total: requests.length,
+                          settled: streamedSettled,
+                          succeeded: streamedSucceeded,
+                          failed: streamedFailed,
+                        },
+                      },
+                    });
+                  } else {
+                    streamedFailed += 1;
+                  }
+                }
+                if (streamOptions?.toolCallId) {
+                  writeProgress({
+                    stepId: 'generate_image',
+                    phase: 'generating',
+                    status: 'active',
+                    label: `正在生成图片（${streamedSettled}/${requests.length}）`,
+                    toolCallId: streamOptions.toolCallId,
+                    toolName: 'generate_image',
+                  });
+                }
+              }
+            : undefined,
         });
-        const successfulPayloads = taskResults.flatMap((result: PromiseSettledResult<any>) =>
-          result.status === 'fulfilled' ? [result.value] : []
-        );
-        const requestFailureCount = taskResults.filter(
-          (result: PromiseSettledResult<any>) => result.status === 'rejected'
-        ).length;
-        const succeededItemIds = taskResults.flatMap((result: PromiseSettledResult<any>, index) => (
-          result.status === 'fulfilled' && effectiveGenerationItems[index]?.id
+        const usableTaskResults = taskResults.map((result: PromiseSettledResult<any>) => (
+          result.status === 'fulfilled'
+            ? { result, assets: generatedAssetsFromResult(result.value) }
+            : { result, assets: [] }
+        ));
+        const successfulPayloads = usableTaskResults.flatMap(({ result, assets }) => (
+          result.status === 'fulfilled' && assets.length > 0 ? [result.value] : []
+        ));
+        const requestFailureCount = requests.length - successfulPayloads.length;
+        const succeededItemIds = usableTaskResults.flatMap(({ assets }, index) => (
+          assets.length > 0 && effectiveGenerationItems[index]?.id
             ? [effectiveGenerationItems[index].id]
             : []
         ));
-        const failedItemIds = taskResults.flatMap((result: PromiseSettledResult<any>, index) => (
-          result.status === 'rejected' && effectiveGenerationItems[index]?.id
+        const failedItemIds = usableTaskResults.flatMap(({ assets }, index) => (
+          assets.length === 0 && effectiveGenerationItems[index]?.id
             ? [effectiveGenerationItems[index].id]
             : []
         ));
@@ -602,12 +822,15 @@ export async function POST(request: NextRequest) {
             ...(effectiveGenerationItems.length ? { succeededItemIds, failedItemIds } : {}),
           },
           partialFailureMessage,
+          streamedAssets: streamIncrementally && streamedSucceeded > 0,
           resolvedImageOptions: {
             providerId: resolvedImageSelection.providerId,
             model: resolvedImageSelection.model,
             ...resolvedImageOptions,
             requestedCount: positiveInteger(countMetadata?.totalCount) || resolvedImageOptions.count,
             countSource: countMetadata?.source || 'default',
+            deliveryMode: payloadDeliveryPlan.mode,
+            panelCount: payloadDeliveryPlan.panelCount,
           },
         };
         return payload;
@@ -690,6 +913,11 @@ export async function POST(request: NextRequest) {
                     totalCount: confirmationRecord.requestedTotalImageCount,
                   },
                   confirmationRecord.generationItems || [],
+                  {
+                    enabled: (confirmationRecord.generationItems?.length || confirmationRecord.imageOptions?.count || 1) > 1,
+                    toolCallId,
+                  },
+                  confirmationRecord.imageDeliveryPlan,
                 );
               }
               const registry = createAgentToolRegistry({ createSkillJob, getSkillJob });
@@ -733,6 +961,7 @@ export async function POST(request: NextRequest) {
             toolCallId,
             toolName: confirmationRecord.toolName,
             rawResult: result,
+            includeAssets: !(result as any)?.streamedAssets,
           })) writeEvent(controller, event as AgentEvent);
           writeToolProgress(confirmationRecord.toolName, 'completed', toolCallId);
           if (confirmationRecord.toolName === 'generate_image' && confirmationRecord.generationItems?.length) {
@@ -844,17 +1073,210 @@ export async function POST(request: NextRequest) {
           });
           skillSource = activeClarificationState.skillSource ?? skillSource;
         }
+        if (
+          !body.clarificationResponse
+          && !activeClarificationState
+          && process.env.AGENT_UNIFIED_PLANNER_ENABLED !== '0'
+        ) {
+          const plannerStartedAt = Date.now();
+          const plannerResult = await planAgentExecutionRequest({
+            userMessage: latestUserMessage,
+            messages: body.messages,
+            manifests: skillManifests,
+            contextEntities,
+            selectedContextEntityIds,
+            activeSkillId: body.activeSkillId,
+            hasReferenceImages: Boolean(body.referenceImages?.length),
+            imageOptions: body.imageOptions,
+            canvasContext: body.canvasContext,
+            model: process.env.AGENT_PLANNER_MODEL || resolvedRouterSelection.model,
+            providerId: process.env.AGENT_PLANNER_PROVIDER_ID || resolvedRouterSelection.providerId || undefined,
+            signal: runSignal,
+            chatFn: chat,
+          });
+          if (plannerShadowMode) {
+            const shadowPlan = plannerResult.plan;
+            void contextLogger.info('planner.shadow', 'Unified planner shadow result', {
+              durationMs: Date.now() - plannerStartedAt,
+              providerId: process.env.AGENT_PLANNER_PROVIDER_ID || resolvedRouterSelection.providerId || null,
+              model: process.env.AGENT_PLANNER_MODEL || resolvedRouterSelection.model,
+              usage: plannerResult.usage || null,
+              decisionSource: plannerResult.source,
+              sourceDetail: plannerResult.sourceDetail,
+              attempts: plannerResult.attempts,
+              repairAttempted: plannerResult.repairAttempted,
+              error: plannerResult.error || null,
+              validationErrors: plannerResult.validationErrors || [],
+              normalizedFields: plannerResult.normalizedFields || [],
+              diagnostics: plannerResult.diagnostics || [],
+              planSummary: shadowPlan ? {
+                intent: shadowPlan.intent,
+                skillId: shadowPlan.skillId,
+                confidence: shadowPlan.confidence,
+                executionKind: shadowPlan.execution.kind,
+                executionTool: shadowPlan.execution.tool,
+                deliveryMode: shadowPlan.delivery.mode,
+                outputCount: shadowPlan.delivery.outputCount,
+                panelCount: shadowPlan.delivery.panelCount,
+                contextReferenceCount: shadowPlan.contextReferences.length,
+              } : null,
+              legacy: {
+                intent: conversationIntent.intent,
+                skillId: deterministicImageSkill?.id || null,
+                deliveryMode: initialDeliveryPlan.mode,
+                outputCount: initialDeliveryPlan.outputCount,
+                contextStatus: initialContextResolution.status,
+              },
+              disagreements: {
+                intent: shadowPlan ? (shadowPlan.intent === 'analysis' ? 'chat' : shadowPlan.intent) !== conversationIntent.intent : null,
+                skill: shadowPlan ? (shadowPlan.skillId || null) !== (deterministicImageSkill?.id || null) : null,
+                deliveryMode: shadowPlan ? (shadowPlan.delivery.mode === 'single' ? 'variants' : shadowPlan.delivery.mode) !== initialDeliveryPlan.mode : null,
+                outputCount: shadowPlan ? shadowPlan.delivery.outputCount !== initialDeliveryPlan.outputCount : null,
+              },
+            });
+          } else {
+            if (!plannerResult.plan) {
+              void contextLogger.warn('planner.failed', 'Unified planner failed closed before execution', {
+                durationMs: Date.now() - plannerStartedAt,
+                providerId: process.env.AGENT_PLANNER_PROVIDER_ID || resolvedRouterSelection.providerId || null,
+                model: process.env.AGENT_PLANNER_MODEL || resolvedRouterSelection.model,
+                decisionSource: plannerResult.source,
+                sourceDetail: plannerResult.sourceDetail,
+                attempts: plannerResult.attempts,
+                repairAttempted: plannerResult.repairAttempted,
+                error: plannerResult.error || null,
+                validationErrors: plannerResult.validationErrors || [],
+                normalizedFields: plannerResult.normalizedFields || [],
+                diagnostics: plannerResult.diagnostics || [],
+                mutationBlocked: true,
+              });
+              writeProgress({ stepId: 'routing', phase: 'planning', status: 'failed', label: '需求规划失败，已停止执行' });
+              writeEvent(controller, {
+                type: 'agent_error',
+                stage: 'planning',
+                message: '模型暂时无法形成有效的执行计划，已停止工具调用。请重试当前请求。',
+              });
+              writeEvent(controller, { type: 'agent_done', stopReason: 'planner_failed' });
+              return;
+            }
+            executionPlan = plannerResult.plan;
+            executionPlanSource = plannerResult.source as 'model' | 'fallback';
+            executionPlanSourceDetail = plannerResult.sourceDetail as AgentPlannerSourceDetail;
+            executionKind = executionPlan.execution.kind;
+            imageDeliveryPlan = executionPlanToImageDeliveryPlan(executionPlan) as ImageDeliveryPlan;
+            executionBriefData = executionPlanToBrief(executionPlan, latestUserMessage, contextEntities) as ExecutionBrief;
+            executionBrief = executionBriefData.plainText;
+            executionReferenceImages = Array.from(new Set([
+              ...executionReferenceImages,
+              ...executionBriefData.referenceImageUrls,
+            ]));
+            intent = executionPlan.intent === 'analysis' ? 'chat' : executionPlan.intent;
+            selectedSkill = executionPlan.skillId
+              ? skillManifests.find((manifest) => manifest.id === executionPlan?.skillId) || null
+              : null;
+            skillSource = selectedSkill ? (body.activeSkillId ? 'manual' : 'auto') : null;
+            const referenced = executionPlan.contextReferences
+              .map((id) => contextEntities.find((entity) => entity.id === id))
+              .filter((entity): entity is AgentContextEntity => Boolean(entity));
+            contextResolution = referenced.length > 0
+              ? {
+                  status: 'resolved',
+                  detected: true,
+                  confidence: executionPlan.confidence === 'low' ? 'medium' : 'high',
+                  candidates: referenced,
+                  entityIds: referenced.map((entity) => entity.id),
+                }
+              : { status: 'none', detected: false, confidence: 'none', candidates: [], entityIds: [] };
+            void contextLogger.info('planner.resolved', 'Unified agent execution plan resolved', {
+              durationMs: Date.now() - plannerStartedAt,
+              providerId: process.env.AGENT_PLANNER_PROVIDER_ID || resolvedRouterSelection.providerId || null,
+              model: process.env.AGENT_PLANNER_MODEL || resolvedRouterSelection.model,
+              usage: plannerResult.usage || null,
+              decisionSource: plannerResult.source,
+              sourceDetail: plannerResult.sourceDetail,
+              attempts: plannerResult.attempts,
+              repairAttempted: plannerResult.repairAttempted,
+              error: plannerResult.error || null,
+              validationErrors: plannerResult.validationErrors || [],
+              normalizedFields: plannerResult.normalizedFields || [],
+              diagnostics: plannerResult.diagnostics || [],
+              intent: executionPlan.intent,
+              skillId: executionPlan.skillId,
+              confidence: executionPlan.confidence,
+              executionKind: executionPlan.execution.kind,
+              executionTool: executionPlan.execution.tool,
+              deliveryMode: executionPlan.delivery.mode,
+              outputCount: executionPlan.delivery.outputCount,
+              panelCount: executionPlan.delivery.panelCount,
+              variationAxes: executionPlan.delivery.variationAxes,
+              contextReferences: executionPlan.contextReferences,
+            });
+          if (executionPlan.needsClarification && executionPlan.clarification) {
+            if (intent === 'chat') {
+              writeProgress({ stepId: 'clarification', phase: 'waiting_input', status: 'waiting', label: '等待补充关键信息' });
+              writeEvent(controller, {
+                type: 'assistant_delta',
+                delta: executionPlan.clarification.question,
+                channel: 'content',
+                model: resolvedChatSelection.model,
+              });
+              writeEvent(controller, { type: 'agent_done', stopReason: 'clarification_required' });
+              return;
+            }
+            const taskId = randomUUID();
+            const request: AgentClarificationRequest = {
+              id: randomUUID(),
+              taskId,
+              question: executionPlan.clarification.question,
+              dimension: executionPlan.clarification.dimension,
+              options: executionPlan.clarification.options,
+              allowCustom: true,
+              allowProceed: true,
+            };
+            writeProgress({ stepId: 'clarification', phase: 'waiting_input', status: 'waiting', label: '等待补充关键信息' });
+            const checkpoint = progressTracker.snapshot();
+            writeEvent(controller, {
+              type: 'clarification_required',
+              message: request.question,
+              request,
+              state: {
+                taskId,
+                operationId: checkpoint.operationId,
+                skillSource,
+                lastSequence: checkpoint.lastSequence,
+                intent: intent === 'skill_action' ? 'skill_action' : 'image',
+                ...(selectedSkill ? { skillId: selectedSkill.id } : {}),
+                originalRequest: latestUserMessage,
+                workingBrief: executionBrief,
+                askedDimensions: [],
+                answers: [],
+                referenceImages: executionReferenceImages,
+                requestedImageCountTotal: executionPlan.delivery.outputCount,
+                resolvedImageCount: executionPlan.delivery.outputCount,
+                resolvedImageCountSource: 'prompt',
+                resolvedImageDeliveryMode: executionPlan.delivery.mode === 'single' ? 'variants' : executionPlan.delivery.mode,
+                resolvedImagePanelCount: executionPlan.delivery.panelCount || undefined,
+                executionPlan: structuredClone(executionPlan),
+              },
+            });
+            writeEvent(controller, { type: 'agent_done', stopReason: 'clarification_required' });
+            return;
+          }
+          }
+        }
         if (!body.clarificationResponse && contextResolution.detected) {
           writeProgress({ stepId: 'context_resolution', phase: 'resolving', status: 'active', label: '正在解析上下文引用' });
           if (contextResolution.status === 'resolved') {
-            executionBriefData = compileExecutionBrief({ userMessage: latestUserMessage, contextResolution });
+            executionBriefData = executionPlan
+              ? executionPlanToBrief(executionPlan, latestUserMessage, contextEntities) as ExecutionBrief
+              : compileExecutionBrief({ userMessage: latestUserMessage, contextResolution });
             executionBrief = executionBriefData.plainText;
             executionReferenceImages = Array.from(new Set([
               ...executionReferenceImages,
               ...executionBriefData.referenceImageUrls,
             ]));
             const resolvedIntent = contextResolution.candidates[0]?.intent;
-            if (resolvedIntent === 'image' || resolvedIntent === 'skill_action') intent = resolvedIntent;
+            if (!executionPlan && (resolvedIntent === 'image' || resolvedIntent === 'skill_action')) intent = resolvedIntent;
             const labels = contextResolution.candidates.map((candidate) => candidate.label).filter(Boolean);
             writeProgress({
               stepId: 'context_resolution',
@@ -960,6 +1382,13 @@ export async function POST(request: NextRequest) {
                 .find((entity) => entity.id === body.clarificationResponse?.selectedOptionId)
             : null;
           if (selectedContextEntity) {
+            if (executionPlan) {
+              executionPlan = {
+                ...executionPlan,
+                contextReferences: [selectedContextEntity.id],
+              };
+              activeClarificationState.executionPlan = structuredClone(executionPlan);
+            }
             contextResolution = {
               status: 'resolved',
               detected: true,
@@ -967,7 +1396,9 @@ export async function POST(request: NextRequest) {
               candidates: [selectedContextEntity],
               entityIds: [selectedContextEntity.id],
             };
-            executionBriefData = compileExecutionBrief({ userMessage: latestUserMessage, contextResolution });
+            executionBriefData = executionPlan
+              ? executionPlanToBrief(executionPlan, latestUserMessage, contextEntities) as ExecutionBrief
+              : compileExecutionBrief({ userMessage: latestUserMessage, contextResolution });
             executionBrief = executionBriefData.plainText;
             executionReferenceImages = Array.from(new Set([
               ...executionReferenceImages,
@@ -1004,7 +1435,26 @@ export async function POST(request: NextRequest) {
           if (retryClarification) executionBrief = activeClarificationState.workingBrief;
           writeProgress({ stepId: 'clarification', phase: 'resuming', status: 'completed', label: '补充信息已应用' });
         } else {
-          routingDecision = explicitBatchImageRequest
+          routingDecision = executionPlan
+            ? {
+                version: 1,
+                intent: executionPlan.intent === 'analysis' ? 'chat' as const : executionPlan.intent,
+                skillId: executionPlan.skillId,
+                confidence: executionPlan.confidence === 'high' ? 1 : executionPlan.confidence === 'medium' ? 0.7 : 0.4,
+                needsClarification: executionPlan.needsClarification,
+                clarificationQuestion: executionPlan.clarification?.question,
+                source: executionPlanSource || 'fallback',
+              }
+            : deterministicImageSkill
+            ? {
+                version: 1,
+                intent: 'image' as const,
+                skillId: deterministicImageSkill.id,
+                confidence: 1,
+                needsClarification: false,
+                source: 'deterministic_image_skill',
+              }
+            : explicitBatchImageRequest
             ? {
                 version: 1,
                 intent: 'image' as const,
@@ -1030,7 +1480,12 @@ export async function POST(request: NextRequest) {
           const resolvedContextIntent = contextResolution.status === 'resolved'
             ? contextResolution.candidates[0]?.intent
             : null;
-          const routedIntent = resolvedContextIntent === 'image' || resolvedContextIntent === 'skill_action'
+          const routedIntent = executionPlan
+            ? routingDecision.intent
+            : selectedSkill?.executionMode === 'image_pipeline'
+            && conversationIntent.intent === 'image'
+            ? 'image'
+            : resolvedContextIntent === 'image' || resolvedContextIntent === 'skill_action'
             ? resolvedContextIntent
             : conversationIntent.inherited
               ? conversationIntent.intent
@@ -1038,7 +1493,7 @@ export async function POST(request: NextRequest) {
           intent = routedIntent === 'image' && selectedSkill && !selectedSkill.allowedTools.includes('generate_image')
             ? 'chat'
             : routedIntent;
-          if (intent === 'chat' && !selectedSkill && isPotentialDesignExecutionRequest(latestUserMessage)) {
+          if (!executionPlan && intent === 'chat' && !selectedSkill && isPotentialDesignExecutionRequest(latestUserMessage)) {
             intent = 'image';
           }
         }
@@ -1053,10 +1508,13 @@ export async function POST(request: NextRequest) {
               && !/(信息收集|访谈|分析|解释|点评|总结)/i.test(executionBrief)
             )
           );
-        if (intent === 'chat' && selectedSkillExecutionRequest) {
+        if (!executionPlan && intent === 'chat' && selectedSkillExecutionRequest) {
           intent = 'skill_action';
         }
         void contextLogger.info('routing.resolved', 'Agent routing decision resolved', {
+          decisionSource: executionPlanSource || routingDecision?.source || null,
+          sourceDetail: executionPlanSourceDetail,
+          plannerConfidence: executionPlan?.confidence || null,
           conversationIntent: conversationIntent.intent,
           routerIntent: routingDecision?.intent || null,
           finalIntent: intent,
@@ -1065,6 +1523,14 @@ export async function POST(request: NextRequest) {
           requestedCount: explicitBatchCountResolution.count || null,
           countCandidates: explicitBatchCountResolution.candidates || [],
           countStatus: explicitBatchCountResolution.status,
+          rawCount: rawUserCountResolution.count || null,
+          rawCountStatus: rawUserCountResolution.status,
+          briefCount: briefCountResolution.count || null,
+          briefCountStatus: briefCountResolution.status,
+          deliveryMode: imageDeliveryPlan.mode,
+          deliveryOutputCount: imageDeliveryPlan.outputCount,
+          panelCount: imageDeliveryPlan.panelCount || null,
+          deliveryEvidence: imageDeliveryPlan.evidence,
           contextResolutionSkipped: !shouldResolveInitialContext,
         });
         writeProgress({ stepId: 'routing', phase: 'routing', status: 'completed', label: '请求路由完成' });
@@ -1092,20 +1558,103 @@ export async function POST(request: NextRequest) {
         if (selectedSkill) {
           writeProgress({ stepId: 'skill_loading', phase: 'loading', status: 'active', label: `正在加载 ${selectedSkill.name}` });
         }
-        const skillContent = selectedSkill ? await loadSkillContent(selectedSkill.id) : '';
+        skillContent = selectedSkill ? await loadSkillContent(selectedSkill.id) : '';
         if (selectedSkill) {
           writeProgress({ stepId: 'skill_loading', phase: 'loading', status: 'completed', label: `${selectedSkill.name} 已加载` });
         }
         const shouldResolveImageCount = intent === 'image'
           || Boolean(selectedSkill?.allowedTools?.includes('generate_image'));
         if (shouldResolveImageCount) {
+          if (executionPlan) {
+            imageDeliveryPlan = executionPlanToImageDeliveryPlan(executionPlan) as ImageDeliveryPlan;
+          } else {
+            const rawPlan = resolveImageDeliveryPlan(latestUserMessage, requestedImageCount);
+            const briefPlan = resolveImageDeliveryPlan(executionBrief, requestedImageCount);
+            imageDeliveryPlan = rawPlan.evidence.length > 0 ? rawPlan : briefPlan;
+          }
+          if (activeClarificationState?.resolvedImageDeliveryMode) {
+            imageDeliveryPlan = {
+              ...imageDeliveryPlan,
+              mode: activeClarificationState.resolvedImageDeliveryMode,
+              panelCount: activeClarificationState.resolvedImageDeliveryMode === 'composite'
+                ? activeClarificationState.resolvedImagePanelCount
+                : undefined,
+              requiresClarification: false,
+            };
+          }
+          if (imageDeliveryPlan.requiresClarification) {
+            const taskId = activeClarificationState?.taskId || randomUUID();
+            const candidates = [...new Set((explicitBatchCountResolution.candidates || [])
+              .map((candidate) => positiveInteger(candidate))
+              .filter((candidate): candidate is number => Boolean(candidate)))];
+            const requestedTotal = Math.max(2, ...candidates);
+            const question = '你同时要求多张独立图片和全部放进一张图，需确认最终交付形式。';
+            const checkpoint = progressTracker.snapshot();
+            const state: AgentClarificationState = {
+              ...(activeClarificationState || {
+                taskId,
+                intent: intent === 'skill_action' ? 'skill_action' : 'image',
+                originalRequest: executionBrief,
+                workingBrief: executionBrief,
+                askedDimensions: [],
+                answers: [],
+                referenceImages: executionReferenceImages,
+              }),
+              taskId,
+              operationId: checkpoint.operationId,
+              skillSource,
+              lastSequence: checkpoint.lastSequence,
+              requestedImageCountTotal: requestedTotal,
+              pendingImageCountCandidates: candidates,
+              resolvedImagePanelCount: imageDeliveryPlan.panelCount,
+              ...(executionPlan ? { executionPlan: structuredClone(executionPlan) } : {}),
+            };
+            const request: AgentClarificationRequest = {
+              id: randomUUID(),
+              taskId,
+              question,
+              dimension: 'image_delivery_scope',
+              options: [
+                {
+                  id: 'separate_outputs',
+                  label: `生成 ${requestedTotal} 张独立图片`,
+                  answer: `生成 ${requestedTotal} 个独立图片文件。`,
+                  description: '每张图片单独生成和返回。',
+                },
+                {
+                  id: 'single_composite',
+                  label: '生成 1 张多宫格图片',
+                  answer: '把多个画面组合在一个图片文件中。',
+                  description: '只返回一张包含多个画面的图片。',
+                },
+              ],
+              allowCustom: true,
+              allowProceed: true,
+            };
+            writeProgress({ stepId: 'clarification', phase: 'waiting_input', status: 'waiting', label: '等待确认图片交付形式' });
+            writeEvent(controller, { type: 'clarification_required', message: question, request, state });
+            writeEvent(controller, { type: 'agent_done', stopReason: 'image_delivery_scope_required' });
+            return;
+          }
           const countResolution = resolveAgentImageCountDecision({
             prompt: executionBrief,
+            rawPrompt: latestUserMessage,
+            plannedCount: imageDeliveryPlan.evidence.length > 0 ? imageDeliveryPlan.outputCount : undefined,
             interfaceCount: body.imageOptions?.count,
             clarifiedCount: activeClarificationState?.resolvedImageCount,
             clarifiedSource: activeClarificationState?.resolvedImageCountSource,
             batchPlan: activeClarificationState?.imageBatchPlan,
             proceedWithCurrent: proceedWithCurrentBrief,
+          });
+          void contextLogger.info('image.count_resolved', 'Agent image count resolved', {
+            status: countResolution.status,
+            count: countResolution.count || null,
+            totalCount: countResolution.totalCount || null,
+            source: countResolution.source,
+            matchedText: countResolution.matchedText || null,
+            deliveryMode: imageDeliveryPlan.mode,
+            panelCount: imageDeliveryPlan.panelCount || null,
+            deliveryEvidence: imageDeliveryPlan.evidence,
           });
           if (countResolution.status === 'ambiguous' || countResolution.status === 'overflow') {
             const taskId = activeClarificationState?.taskId || randomUUID();
@@ -1163,6 +1712,7 @@ export async function POST(request: NextRequest) {
               ...(selectedSkill ? { skillId: selectedSkill.id } : {}),
               requestedImageCountTotal: requestedTotal,
               pendingImageCountCandidates: candidates,
+              ...(executionPlan ? { executionPlan: structuredClone(executionPlan) } : {}),
             };
             const request: AgentClarificationRequest = {
               id: randomUUID(),
@@ -1180,11 +1730,17 @@ export async function POST(request: NextRequest) {
           requestedImageCount = countResolution.count;
           requestedTotalImageCount = countResolution.totalCount || countResolution.count;
           requestedImageCountSource = countResolution.source as AgentImageCountSource;
+          imageDeliveryPlan = {
+            ...imageDeliveryPlan,
+            outputCount: requestedTotalImageCount,
+            promptCount: imageDeliveryPlan.mode === 'series' ? requestedTotalImageCount : 1,
+          };
           imageBatchPlan = countResolution.batchPlan
             ? structuredClone(countResolution.batchPlan)
             : undefined;
         }
-        const shouldRunClarifier = intent === 'image' || intent === 'skill_action';
+        const shouldRunClarifier = (intent === 'image' || intent === 'skill_action')
+          && !executionPlan;
 
         if (shouldRunClarifier && !proceedWithCurrentBrief) {
           writeProgress({ stepId: 'clarification', phase: 'analyzing', status: 'active', label: '正在检查需求完整性' });
@@ -1200,6 +1756,7 @@ export async function POST(request: NextRequest) {
             askedDimensions: [],
             answers: [],
             referenceImages: executionReferenceImages,
+            ...(executionPlan ? { executionPlan: structuredClone(executionPlan) } : {}),
           };
           const clarification = await resolveBriefClarification({
             userMessage: executionBrief,
@@ -1290,15 +1847,30 @@ export async function POST(request: NextRequest) {
           writeProgress({ stepId: 'clarification', phase: 'resuming', status: 'completed', label: '已按当前信息继续' });
         }
 
-        if (intent === 'image' && !selectedSkill) {
+        const shouldUseImagePipeline = executionKind
+          ? executionKind === 'image_pipeline'
+          : intent === 'image' && (!selectedSkill || selectedSkill.executionMode === 'image_pipeline');
+        if (shouldUseImagePipeline) {
           turns += 1;
-          const imageBatchMode = resolveImageBatchMode(executionBrief, requestedTotalImageCount);
+          const refinedDeliveryPlan = executionPlan
+            ? executionPlanToImageDeliveryPlan(executionPlan) as ImageDeliveryPlan
+            : resolveImageDeliveryPlan(executionBrief, requestedTotalImageCount);
+          if (!activeClarificationState?.resolvedImageDeliveryMode) {
+            imageDeliveryPlan = {
+              ...refinedDeliveryPlan,
+              outputCount: requestedTotalImageCount,
+              promptCount: refinedDeliveryPlan.mode === 'series' ? requestedTotalImageCount : 1,
+            };
+          }
+          const imageBatchMode = imageDeliveryPlan.mode as AgentImageBatchMode;
           if (
-            imageBatchMode === 'series'
-            && requestedTotalImageCount > 1
+            (
+              (imageBatchMode === 'series' && requestedTotalImageCount > 1)
+              || selectedSkill?.promptStyle === 'json-text'
+            )
             && process.env.PROMPT_PIPELINE_AGENT_ENABLED === '0'
           ) {
-            throw new Error('系列批量生成需要启用提示词优化流程。');
+            throw new Error('当前 Skill 需要启用提示词优化流程。');
           }
           writeProgress({ stepId: 'prompt_optimization', phase: 'optimizing', status: 'active', label: '正在优化图片提示词' });
           writeEvent(controller, { type: 'prompt_optimization_start' });
@@ -1308,16 +1880,21 @@ export async function POST(request: NextRequest) {
             : await optimizeImagePrompt({
                 userPrompt: executionBrief,
                 skillLabel: selectedSkill?.name,
+                skillContent,
+                promptStyle: selectedSkill?.promptStyle || 'text',
                 providerId: process.env.PROMPT_OPTIMIZER_PROVIDER_ID,
                 optimizerModel,
                 signal: runSignal,
                 chatFn: chat,
                 outputCount: requestedTotalImageCount,
                 batchMode: imageBatchMode,
+                plannerItems: executionPlan?.delivery.items || [],
               });
           const optimized = {
             ...optimizedResult,
-            prompt: ensureOptimizedPromptCoverage(optimizedResult.prompt, executionBriefData),
+            prompt: selectedSkill?.promptStyle === 'json-text'
+              ? optimizedResult.prompt
+              : ensureOptimizedPromptCoverage(optimizedResult.prompt, executionBriefData),
           };
           const optimizedItems = 'items' in optimizedResult && Array.isArray(optimizedResult.items)
             ? optimizedResult.items
@@ -1325,20 +1902,23 @@ export async function POST(request: NextRequest) {
           const optimizedSubject = 'structured' in optimizedResult
             ? optimizedResult.structured?.subject
             : undefined;
+          const plannerSeriesItems = executionPlan?.delivery?.items || [];
           const allGenerationItems: AgentImageGenerationItem[] = requestedTotalImageCount > 1
             ? imageBatchMode === 'series'
-              ? optimizedItems.map((item: any) => ({
+              ? (optimizedItems.length > 0 ? optimizedItems : plannerSeriesItems).map((item: any) => ({
                   id: `series-${item.index}`,
                   index: item.index,
-                  label: item.label,
-                  subject: item.subject,
-                  prompt: ensureOptimizedPromptCoverage(item.prompt, executionBriefData),
+                  label: item.label || `系列 ${item.index}`,
+                  subject: item.subject || optimizedSubject || 'series item',
+                  prompt: selectedSkill?.promptStyle === 'json-text'
+                    ? item.prompt || executionBrief
+                    : ensureOptimizedPromptCoverage(item.prompt || `${optimized.prompt}\n\nSpecific direction: ${item.variation || item.subject || item.label}`, executionBriefData),
                 }))
               : Array.from({ length: requestedTotalImageCount }, (_, index) => ({
-                  id: `variant-${index + 1}`,
+                  id: `${imageBatchMode}-${index + 1}`,
                   index: index + 1,
-                  label: `变体 ${index + 1}`,
-                  subject: optimizedSubject || 'image variant',
+                  label: imageBatchMode === 'composite' ? `多宫格 ${index + 1}` : `变体 ${index + 1}`,
+                  subject: optimizedSubject || (imageBatchMode === 'composite' ? 'composite image' : 'image variant'),
                   prompt: optimized.prompt,
                 }))
             : [];
@@ -1363,7 +1943,7 @@ export async function POST(request: NextRequest) {
           });
           writeProgress({ stepId: 'prompt_optimization', phase: 'optimizing', status: 'completed', label: '图片提示词优化完成' });
 
-          if (requestedImageCount > 1) {
+          if (requestedImageCount > 1 || executionPlan?.execution.requiresConfirmation === true) {
             const generationItems = allGenerationItems.slice(0, requestedImageCount);
             const confirmationId = randomUUID();
             const progressToolCallId = `${runId}-generate-image-confirmation`;
@@ -1388,6 +1968,7 @@ export async function POST(request: NextRequest) {
               requestedTotalImageCount,
               imageBatchPlan: imageBatchPlan ? structuredClone(imageBatchPlan) : undefined,
               imageBatchMode,
+              imageDeliveryPlan: structuredClone(imageDeliveryPlan),
               generationItems: structuredClone(generationItems),
               remainingGenerationItems: structuredClone(allGenerationItems.slice(generationItems.length)),
               optimizePrompt: false,
@@ -1400,7 +1981,7 @@ export async function POST(request: NextRequest) {
                 toolName: 'generate_image',
                 message: imageBatchPlan
                   ? `本次将生成首批 ${requestedImageCount} 张图片，总目标 ${requestedTotalImageCount} 张，确认后继续。`
-                  : `本次将生成 ${requestedImageCount} 张图片，确认后继续。`,
+                  : `本次将生成 ${describeImageDelivery(imageDeliveryPlan, requestedImageCount)}，确认后继续。`,
               },
             });
             writeEvent(controller, { type: 'agent_done', stopReason: 'awaiting_confirmation' });
@@ -1425,6 +2006,8 @@ export async function POST(request: NextRequest) {
               optimized.prompt,
               { source: requestedImageCountSource, totalCount: requestedTotalImageCount },
               allGenerationItems,
+              undefined,
+              imageDeliveryPlan,
             ),
           });
           const generationPayload = await executeAgentTool(toolRegistry, 'generate_image', {}, {
@@ -1452,10 +2035,17 @@ export async function POST(request: NextRequest) {
           skillContent,
           canvasContext: body.canvasContext,
           referenceImages: executionReferenceImages,
-          resolvedBrief: shouldRunClarifier ? executionBrief : undefined,
+          resolvedBrief: executionPlan || shouldRunClarifier ? executionBrief : undefined,
+          executionPlan: executionPlan || undefined,
         });
         const model = resolvedChatSelection.model!;
-        const allowedTools = selectedSkill?.allowedTools || [];
+        const skillAllowedTools = selectedSkill?.allowedTools || [];
+        const allowedTools = executionPlan
+          ? skillAllowedTools.filter((toolName) => (
+              toolName === executionPlan?.execution.tool
+              || toolName === 'get_canvas_context'
+            ))
+          : skillAllowedTools;
         const toolRegistry = createAgentToolRegistry({
           createSkillJob,
           getSkillJob,
@@ -1470,6 +2060,9 @@ export async function POST(request: NextRequest) {
               executionReferenceImages,
               prompt,
               { source: requestedImageCountSource, totalCount: requestedTotalImageCount },
+              [],
+              undefined,
+              imageDeliveryPlan,
             );
           },
         });
@@ -1497,7 +2090,7 @@ export async function POST(request: NextRequest) {
                   toolName,
                   message: imageBatchPlan
                     ? `本次将生成首批 ${requestedImageCount} 张图片，总目标 ${requestedTotalImageCount} 张，确认后继续。`
-                    : `本次将生成 ${requestedImageCount} 张图片，确认后继续。`,
+                    : `本次将生成 ${describeImageDelivery(imageDeliveryPlan, requestedImageCount)}，确认后继续。`,
                 };
               }
               const rawResult = await executeAgentTool(toolRegistry, toolName, args, {
@@ -1509,7 +2102,9 @@ export async function POST(request: NextRequest) {
               return rawResult;
             },
             isReadOnlyTool: (toolName) => toolRegistry.get(toolName)?.readOnly === true,
-            requireMutationTool: intent === 'image' || intent === 'skill_action',
+            requireMutationTool: executionPlan
+              ? Boolean(executionPlan.execution.tool)
+              : intent === 'image' || intent === 'skill_action',
             serializeToolResultForModel: (toolName, result) => createAgentToolResultViews(toolName, result).modelResult,
             serializeToolResultForPublic: (toolName, result) => createAgentToolResultViews(toolName, result).publicResult,
             onToolStart: ({ id, name }) => {
@@ -1608,6 +2203,7 @@ export async function POST(request: NextRequest) {
               imageCountSource: requestedImageCountSource,
               requestedTotalImageCount,
               imageBatchPlan: imageBatchPlan ? structuredClone(imageBatchPlan) : undefined,
+              imageDeliveryPlan: structuredClone(imageDeliveryPlan),
               optimizePrompt: true,
               expiresAt: Date.now() + CONFIRMATION_TTL_MS,
             });
@@ -1683,7 +2279,7 @@ export async function POST(request: NextRequest) {
         );
         writeEvent(controller, {
           type: 'agent_error',
-          stage: aborted ? 'cancelled' : timedOut ? 'timeout' : intent === 'image' ? 'image_pipeline' : 'chat',
+          stage: aborted ? 'cancelled' : timedOut ? 'timeout' : executionKind || (intent === 'image' ? 'image_pipeline' : 'chat'),
           message: aborted ? '运行已取消' : timedOut ? '运行超时，请重试' : error instanceof Error ? error.message : 'Agent run failed',
         });
       } finally {

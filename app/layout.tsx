@@ -3,8 +3,12 @@ import ClientErrorReporter from './components/ClientErrorReporter';
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "ZO Design Workspace",
-  description: "面向设计师与创意团队的 AI 画布工作区",
+  title: "Z Flow",
+  description: "AI 无限画布创作工作区",
+  icons: {
+    icon: [{ url: "/z-flow-logo.svg", type: "image/svg+xml" }],
+    shortcut: "/z-flow-logo.svg",
+  },
 };
 
 export default function RootLayout({

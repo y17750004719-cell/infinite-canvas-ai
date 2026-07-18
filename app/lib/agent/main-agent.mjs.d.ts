@@ -13,4 +13,6 @@ export function buildMainAgentMessages(input?: {
   skillContent?: string;
   canvasContext?: Record<string, unknown>;
   referenceImages?: string[];
+  resolvedBrief?: string;
+  executionPlan?: Record<string, unknown>;
 }): MainAgentMessage[];

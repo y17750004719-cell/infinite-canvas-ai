@@ -314,6 +314,21 @@ test('public tool event helper emits no ordinary result for confirmation placeho
   }), []);
 });
 
+test('public tool event helper can suppress aggregate assets after incremental delivery', () => {
+  const events = agentLoopModule.createAgentToolResultEvents({
+    runId: 'run-streamed',
+    toolCallId: 'tool-streamed',
+    toolName: 'generate_image',
+    includeAssets: false,
+    rawResult: {
+      result: { outputs: [{ localUrl: 'https://example.test/already-streamed.png' }] },
+      requestStats: { requested: 1, succeeded: 1, failed: 0 },
+    },
+  });
+  assert.deepEqual(events.map((event) => event.type), ['tool_result']);
+  assert.doesNotMatch(JSON.stringify(events), /already-streamed/);
+});
+
 test('agent loop enforces tool and turn budgets', async () => {
   await assert.rejects(
     () => runAgentLoop({

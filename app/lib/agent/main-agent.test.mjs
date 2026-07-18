@@ -17,6 +17,11 @@ test('main agent prompt defines the agent as a skill orchestration hub', () => {
   assert.match(MAIN_AGENT_SYSTEM_PROMPT, /选择其中一个/);
   assert.match(MAIN_AGENT_SYSTEM_PROMPT, /风格统一但内容独立/);
   assert.match(MAIN_AGENT_SYSTEM_PROMPT, /同一 Brief 生成多个随机变体/);
+  assert.match(MAIN_AGENT_SYSTEM_PROMPT, /格数不是输出文件数/);
+  assert.match(MAIN_AGENT_SYSTEM_PROMPT, /不得把外层数量写进单图 Prompt/);
+  assert.match(MAIN_AGENT_SYSTEM_PROMPT, /交付合同/);
+  assert.match(MAIN_AGENT_SYSTEM_PROMPT, /可扩展候选池/);
+  assert.match(MAIN_AGENT_SYSTEM_PROMPT, /一套类似作品/);
   assert.match(MAIN_AGENT_SYSTEM_PROMPT, /不得为了.*颜色.*材质.*灯光.*构图/);
   assert.match(MAIN_AGENT_SYSTEM_PROMPT, /自由发挥/);
   assert.match(MAIN_AGENT_SYSTEM_PROMPT, /没有真实变更型工具调用/);
@@ -59,4 +64,18 @@ test('main agent messages do not load a skill when none was selected', () => {
   assert.equal(messages.length, 2);
   assert.equal(messages[0].role, 'system');
   assert.equal(messages[1].content, '你好');
+});
+
+test('main agent receives the unified execution plan as an authoritative system contract', () => {
+  const messages = buildMainAgentMessages({
+    messages: [{ role: 'user', content: '生成四张海报' }],
+    resolvedBrief: '四张独立海报',
+    executionPlan: {
+      intent: 'image',
+      delivery: { mode: 'series', outputCount: 4 },
+    },
+  });
+  assert.match(messages[1].content, /四张独立海报/);
+  assert.match(messages[2].content, /统一 Planner/);
+  assert.match(messages[2].content, /\"outputCount\":4/);
 });
