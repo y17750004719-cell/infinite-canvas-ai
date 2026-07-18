@@ -92,6 +92,32 @@ test('normalizeGeneratedImageHistory keeps only valid generated image entries', 
   ]);
 });
 
+test('normalizeGeneratedImageHistory preserves agent edit provenance', () => {
+  const [entry] = normalizeGeneratedImageHistory([{
+    id: 'edit-1',
+    src: '/uploads/generated/edit.png',
+    createdAt: 20,
+    source: 'chat',
+    operation: 'edit',
+    sourceReferenceId: 'canvas-reference:image-1',
+    providerId: 'comfly',
+    model: 'gpt-image-2',
+    promptTrace: {
+      sourcePrompt: '把蓝色瓶子换到场景当中',
+      finalPrompt: 'Edit the first reference image. Replace only the bottle.',
+      optimized: true,
+      operation: 'edit',
+      targetReferenceId: 'canvas-reference:image-1',
+    },
+  }]);
+  assert.equal(entry.operation, 'edit');
+  assert.equal(entry.sourceReferenceId, 'canvas-reference:image-1');
+  assert.equal(entry.providerId, 'comfly');
+  assert.equal(entry.model, 'gpt-image-2');
+  assert.equal(entry.promptTrace.finalPrompt, 'Edit the first reference image. Replace only the bottle.');
+  assert.equal(entry.promptTrace.targetReferenceId, 'canvas-reference:image-1');
+});
+
 test('appendGeneratedImageHistoryEntries preserves existing entries and skips duplicate ids', () => {
   const result = appendGeneratedImageHistoryEntries(
     [

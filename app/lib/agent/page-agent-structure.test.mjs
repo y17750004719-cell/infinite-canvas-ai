@@ -59,6 +59,19 @@ test('failed clarification submissions preserve their structured retry context',
   assert.match(source, /agentClarificationResolved:\s*false/);
   assert.match(source, /resolveAgentClarificationMessage\(effectiveAgentClarification\.request\.id\)/);
   assert.match(source, /重试生成/);
+  assert.match(source, /persistedReferenceContext/);
+  assert.match(source, /referenceContext: currentReferenceContext/);
+  assert.match(source, /persistedReferenceContext\?\.references/);
+});
+
+test('planner failures use one message owner and expose a disabled reanalysis action while running', () => {
+  assert.match(source, /failedClarificationOwnsMessage/);
+  assert.match(source, /label: '重新分析'/);
+  assert.match(source, /disabled: isGenerating/);
+  assert.match(source, /agentReanalysisInFlightRef/);
+  assert.match(source, /handleGenerate\([\s\S]*\.finally\(\(\) => \{[\s\S]*agentReanalysisInFlightRef\.current = false/);
+  assert.match(source, /!pendingAgentClarification\.request\.failed[\s\S]*skipLabel: '按当前信息开始制作'/);
+  assert.doesNotMatch(source, /规划模型连接中断，系统已自动重试/);
 });
 
 test('agent proposals and context entities persist and submit stable selections', () => {
@@ -107,11 +120,13 @@ test('agent progress accumulates reached breadcrumbs without an assistant bubble
   assert.match(globalStyles, /prefers-reduced-motion:[\s\S]{0,240}agent-progress-enter/);
 });
 
-test('agent image loading preloads before atomically appending and settles the original progress message', () => {
+test('every chat-generated image is materialized in both chat and the canvas', () => {
   assert.match(source, /const updateChatMessageById =/);
   assert.match(source, /processedAgentActionsRef\.current\.has\(key\)/);
   assert.match(source, /await preloadGeneratedAssets\(freshAssets, \{ timeoutMs: 15_000 \}\)/);
   assert.match(source, /loadedAssets\.length > 0[\s\S]{0,4000}setChatMessages\(prev => \[\.\.\.prev, \.\.\.imageMessages\]\)/);
+  assert.match(source, /const canvasItems = loadedAssets\.map/);
+  assert.match(source, /recordCurrentCanvasUndoSnapshot\(\);\s*setItems\(prev => \[\.\.\.prev, \.\.\.canvasItems\]\)/);
   assert.match(source, /type: 'assets_settled'/);
   assert.match(source, /setImageCount\(\(prev\) => prev \+ loadedAssets\.length\)/);
   assert.match(source, /if \(msg\.imageUrl && !content\) return \[\]/);
@@ -124,6 +139,9 @@ test('agent image loading preloads before atomically appending and settles the o
   assert.match(source, /activeSkillJobMessageIdRef\.current = assistantId/);
   assert.match(source, /type: 'assets_progress'/);
   assert.match(source, /updateChatMessageById\(skillJobMessageId/);
+  assert.doesNotMatch(source, /agentReadOnlySkillJobIdsRef/);
+  assert.doesNotMatch(source, /if \(!isAgentReadOnlyJob\)/);
+  assert.match(source, /recordCurrentCanvasUndoSnapshot\(\);\s*setItems\(prev => \[\.\.\.prev, newItem\]\);/);
 });
 
 test('agent batch assets render in completion order while retaining their original labels', () => {
@@ -132,7 +150,8 @@ test('agent batch assets render in completion order while retaining their origin
   assert.match(source, /generatedAssetPreloadFailureCount \+= preloadFailureCount/);
   assert.match(source, /imageName:\s*asset\.label \|\|/);
   assert.match(source, /const firstStreamedOrdinal = streamedAssetOrdinal/);
-  assert.match(source, /getSpawnPosition\(displaySize, firstStreamedOrdinal \+ index, currentViewport\)/);
+  assert.match(source, /imageName:\s*asset\.label \|\| `image \$\{firstImageNumber \+ index\}`/);
+  assert.match(source, /getSpawnPosition\(\s*displaySize,\s*firstStreamedOrdinal \+ index,\s*currentViewport\s*\)/);
   assert.match(source, /succeeded:\s*generatedAssetSucceededCount/);
   assert.match(source, /failed:\s*generatedAssetFailureCount \+ generatedAssetPreloadFailureCount/);
 });
@@ -315,13 +334,66 @@ test('chat composer closes transient menus when a generation starts', () => {
   );
 });
 
-test('chat image uploads revalidate generation state and the shared reference limit after async reads', () => {
+test('canvas selection references render as compact composer tokens and submit annotation context', () => {
+  assert.match(source, /interface ChatReferenceToken/);
+  assert.match(source, /data-reference-token/);
+  assert.match(source, /data-reference-id/);
+  assert.match(source, /workspace-reference-token/);
+  assert.match(globalStyles, /\.workspace-reference-token\s*\{[\s\S]{0,180}background:\s*transparent/);
+  assert.match(source, /parseChatEditorSegments/);
+  assert.match(source, /materializeChatMessageInlineContent/);
+  assert.doesNotMatch(source, /inlineContent: currentInlineContent/);
+  assert.match(source, /referenceContext: currentReferenceContext/);
+  assert.match(source, /userInlineContent\.map/);
+  assert.doesNotMatch(source, /resolvedChatReferenceTokens\.map\(\(token, index\) =>/);
+  assert.doesNotMatch(source, /msg\.referenceImages\.map\(\(img, index\) =>/);
+  assert.match(source, /tokenData\.annotationCount/);
+  assert.match(source, /toggleChatReferenceTokenPin\(token\)/);
+  assert.match(source, /selectedContextEntityIds: options\?\.selectedContextEntityIds \?\? selectedIds\.map\(\(id\) => `canvas:\$\{id\}`\)/);
+  assert.match(source, /annotationContext: annotationContextForRequest/);
+  assert.match(source, /referenceContext: currentReferenceContext/);
+  assert.match(source, /composerSegments: currentComposerSegments\.map/);
+  assert.match(source, /await uploadAnnotationCompositePreview/);
+  assert.match(source, /fetch\('\/api\/upload'/);
+  assert.match(source, /evidenceImages\?: Array/);
+  assert.match(source, /kind: 'annotation_composite'/);
+  assert.match(source, /referenceContext: referenceContextForRequest/);
+  assert.match(source, /message\.id === userMessage\.id[\s\S]*referenceContext: referenceContextForRequest/);
+});
+
+test('generated image result cards persist and render model-authored presentation', () => {
+  assert.match(source, /resultTitle\?: string/);
+  assert.match(source, /resultSummary\?: string/);
+  assert.match(source, /imageOperation\?: 'generate' \| 'edit'/);
+  assert.match(source, /event\.action\?\.presentation\?\.title/);
+  assert.match(source, /msg\.resultTitle \|\| msg\.imageName/);
+  assert.match(source, /event\.type === 'agent_completion_summary'/);
+  assert.match(source, /processedAgentCompletionSummariesRef/);
+  assert.match(source, /role: 'assistant',\s*content: event\.summary/);
+  assert.doesNotMatch(source, /generatedPresentationSummary/);
+  assert.doesNotMatch(source, /resultSummary: event\.action\.presentation\.summary/);
+});
+
+test('chat exposes a bottom jump control without forcing users away from history', () => {
+  assert.match(source, /scrollHeight - container\.scrollTop - container\.clientHeight/);
+  assert.match(source, /distanceFromBottom <= 56/);
+  assert.match(source, /const scrollChatToBottom = useCallback/);
+  assert.match(source, /if \(shouldFollowLatest\) \{\s*scrollChatToBottom\('auto'\)/);
+  assert.match(source, /new ResizeObserver/);
+  assert.match(source, /onScroll=\{handleChatContainerScroll\}/);
+  assert.match(source, /!isChatNearBottom && \(/);
+  assert.match(source, /aria-label="滚动到最新消息"/);
+  assert.match(source, /<ArrowDown size=\{15\}/);
+  assert.match(globalStyles, /\.workspace-chat-scroll-bottom\s*\{/);
+});
+
+test('chat image uploads land in local assets before becoming sendable references', () => {
   assert.match(source, /const isGeneratingRef = useRef\(false\)/);
-  assert.match(source, /if \(isGeneratingRef\.current\) return;/);
-  assert.match(
-    source,
-    /setChatReferenceImages\(\(currentReferences\) =>\s*mergeGeneratedHistoryReferences\(currentReferences, uploadedImages, 14\)\s*\)/
-  );
+  assert.match(source, /uploadChatReferenceFile/);
+  assert.match(source, /fetch\('\/api\/upload'/);
+  assert.match(source, /uploadStatus: 'uploading'/);
+  assert.match(source, /hasPendingChatReferenceUploads/);
+  assert.match(source, /if \(!src \|\| existingSources\.has\(src\) \|\| nextTokens\.length >= 14\) continue;/);
 });
 
 test('composer dialogs expose semantics, unique asset labels, and focus restoration', () => {

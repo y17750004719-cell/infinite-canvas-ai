@@ -11,16 +11,17 @@ import {
   MousePointer2, Type, Image as ImageIcon,
   Share2, History, Settings, Paperclip,
   Send, Sparkles, X, ChevronDown, ChevronLeft, ChevronRight, Trash2, Edit3, ArrowLeft, Plus, SlidersHorizontal, Copy, Check, Video, Pencil, Package2, Workflow, Clock3, Eye, EyeOff, Moon, Sun, MessageCircle,
-  MoreHorizontal, Upload, Library, Search, BrainCircuit, Settings2, ArrowUp, Square
+  MoreHorizontal, Upload, Library, Search, BrainCircuit, Settings2, ArrowUp, ArrowDown, Square, Pin
 } from 'lucide-react';
 import { GeneratedImageHistoryEntry, ProjectSession } from './lib/db';
+import type { CanvasItem, CanvasPoint } from './lib/canvas-types';
+import { isCanvasAnnotationItem, isCanvasAnnotationTextItem } from './lib/canvas-types';
 import { ASPECT_RATIOS } from './lib/aspect-ratios';
 import {
   appendGeneratedImageHistoryEntries,
   appendMissingGeneratedHistoryEntries,
   buildGeneratedImageHistorySortKey,
   buildGeneratedHistoryEntriesFromImageCard,
-  mergeGeneratedHistoryReferences,
 } from './lib/generated-image-history.mjs';
 import {
   buildPersistedSession,
@@ -203,30 +204,6 @@ const getFallbackImageDownloadName = (src: string): string => {
   }
 };
 
-interface CanvasItem {
-  id: string;
-  type: 'image' | 'frame' | 'shape' | 'text';
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  rotation: number;
-  src?: string;
-  naturalWidth?: number;
-  naturalHeight?: number;
-  imageVariant?: 'card';
-  imageOutputs?: Array<{ src: string; naturalWidth: number; naturalHeight: number }>;
-  activeImageOutputIndex?: number;
-  fill?: string;
-  text?: string;
-  textVariant?: 'legacy' | 'card';
-  textMode?: 'ai' | 'manual';
-  lastGenerationDurationMs?: number;
-  lastGenerationCompletedAt?: number;
-  visible: boolean;
-  locked: boolean;
-}
-
 interface Connection {
   id: string;
   fromItemId: string;
@@ -287,6 +264,18 @@ interface PendingConnectionMenu {
   position: { x: number; y: number };
 }
 
+type ChatMessageInlineSegment =
+  | { type: 'text'; text: string }
+  | {
+      type: 'reference';
+      referenceId: string;
+      id?: string;
+      src?: string;
+      label?: string;
+      source?: 'upload' | 'history' | 'canvas';
+      annotationCount?: number;
+    };
+
 interface ChatMessage {
   id: string;
   role: 'user' | 'assistant' | 'skill';
@@ -297,6 +286,20 @@ interface ChatMessage {
   taskStatus?: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
   skill?: { id: string; label: string };
   referenceImages?: string[];
+  referenceContext?: AgentReferenceContext;
+  inlineContent?: ChatMessageInlineSegment[];
+  resultTitle?: string;
+  resultSummary?: string;
+  imageOperation?: 'generate' | 'edit';
+  imageProviderId?: string;
+  sourceReferenceId?: string;
+  promptTrace?: {
+    sourcePrompt: string;
+    finalPrompt: string;
+    optimized: boolean;
+    operation: 'generate' | 'edit';
+    targetReferenceId: string | null;
+  };
   model?: string;
   imageName?: string;
   skillChoice?: SkillChoicePayload;
@@ -388,6 +391,7 @@ interface AgentClarificationState {
   askedDimensions: string[];
   answers: Array<{ dimension: string; question: string; answer: string }>;
   referenceImages?: string[];
+  referenceContext?: AgentReferenceContext;
   contextCandidates?: AgentContextEntity[];
   resolvedImageCount?: number;
   resolvedImageCountSource?: 'clarification' | 'prompt' | 'interface' | 'default' | 'batch';
@@ -398,6 +402,11 @@ interface AgentClarificationState {
     completedCount: number;
     remainingCount: number;
     batchSize: number;
+  };
+  plannerFailure?: {
+    reason: 'timeout' | 'transport' | 'invalid_reference' | 'invalid_context' | 'invalid_plan' | 'vision_unsupported' | 'vision_unavailable';
+    retryMode: 'replan';
+    failedAt: number;
   };
 }
 
@@ -429,6 +438,7 @@ interface AgentClarificationResponse {
   customText?: string;
   proceedWithCurrent?: boolean;
   retry?: boolean;
+  retryMode?: 'replan';
 }
 
 interface AssistantTextSelectionSession {
@@ -479,6 +489,7 @@ interface ChatTopic {
   title: string;
   messages: ChatMessage[];
   activeSkill?: { id: string; label: string } | null;
+  activeSkillExplicit?: boolean;
   createdAt: number;
   updatedAt: number;
 }
@@ -506,8 +517,242 @@ interface SessionLiveState {
   viewport: { x: number; y: number; scale: number };
 }
 
-type Tool = 'select' | 'text' | 'image';
+type Tool = 'select' | 'draw' | 'annotation-text';
 type GenerationMode = 'agent' | 'image' | 'chat';
+type ChatReferenceTokenRole = 'reference' | 'edit_target' | 'annotation_bundle';
+type ChatReferenceTokenSource = 'upload' | 'history' | 'canvas';
+
+interface ChatReferenceToken {
+  id: string;
+  src: string;
+  label: string;
+  source: ChatReferenceTokenSource;
+  canvasItemId?: string;
+  transient: boolean;
+  pinned: boolean;
+  role: ChatReferenceTokenRole;
+  annotationCount?: number;
+  annotationItemIds?: string[];
+  uploadStatus?: 'uploading' | 'failed';
+  uploadError?: string;
+  uploadFile?: File;
+  previewObjectUrl?: string;
+}
+
+interface AgentReferenceContext {
+  references: Array<{
+    id: string;
+    src: string;
+    label: string;
+    source: ChatReferenceTokenSource;
+    canvasItemId?: string;
+    role: ChatReferenceTokenRole;
+    annotationCount?: number;
+  }>;
+  composerSegments: Array<
+    | { type: 'text'; text: string }
+    | { type: 'reference'; referenceId: string }
+  >;
+  evidenceImages?: Array<{
+    id: string;
+    referenceId: string;
+    src: string;
+    kind: 'annotation_composite';
+  }>;
+}
+
+type ChatComposerSegment =
+  | { type: 'text'; text: string }
+  | { type: 'reference'; tokenId: string };
+
+interface DraftStroke {
+  pointerId: number;
+  points: CanvasPoint[];
+  color: string;
+  width: number;
+}
+
+interface CanvasAnnotationContext {
+  targetImage?: {
+    id: string;
+    src: string;
+    x: number;
+    y: number;
+    width: number;
+    height: number;
+  };
+  annotations: Array<Record<string, unknown>>;
+  annotationItemIds: string[];
+  annotationCount: number;
+  ambiguousImageTarget: boolean;
+  compositePreviewUrl?: string;
+  compositePreviewError?: string;
+}
+
+const DEFAULT_ANNOTATION_COLOR = '#ef4444';
+const DEFAULT_ANNOTATION_STROKE_WIDTH = 5;
+const ANNOTATION_STROKE_WIDTHS = [
+  { label: '细', value: 2 },
+  { label: '中', value: 5 },
+  { label: '粗', value: 9 },
+] as const;
+const ANNOTATION_COLORS = ['#ef4444', '#f97316', '#facc15', '#22c55e', '#3b82f6', '#ffffff', '#18181b'] as const;
+const ANNOTATION_TEXT_DEFAULT_WIDTH = 260;
+const ANNOTATION_TEXT_DEFAULT_HEIGHT = 36;
+const ANNOTATION_TEXT_DEFAULT_FONT_SIZE = 20;
+
+const getChatComposerPlainText = (segments: ChatComposerSegment[]): string =>
+  segments
+    .filter((segment): segment is Extract<ChatComposerSegment, { type: 'text' }> => segment.type === 'text')
+    .map((segment) => segment.text)
+    .join('');
+
+const mergeAdjacentChatComposerText = (segments: ChatComposerSegment[]): ChatComposerSegment[] => {
+  const merged: ChatComposerSegment[] = [];
+  for (const segment of segments) {
+    if (segment.type === 'text' && !segment.text) continue;
+    const previous = merged.at(-1);
+    if (segment.type === 'text' && previous?.type === 'text') {
+      previous.text += segment.text;
+    } else {
+      merged.push(segment.type === 'text' ? { ...segment } : segment);
+    }
+  }
+  return merged;
+};
+
+const insertReferenceSegmentsAtTextOffset = (
+  segments: ChatComposerSegment[],
+  tokenIds: string[],
+  requestedOffset: number
+): ChatComposerSegment[] => {
+  if (tokenIds.length === 0) return segments;
+  const offset = Math.max(0, Math.min(requestedOffset, getChatComposerPlainText(segments).length));
+  const inserted = tokenIds.map((tokenId) => ({ type: 'reference' as const, tokenId }));
+  const next: ChatComposerSegment[] = [];
+  let consumed = 0;
+  let didInsert = false;
+
+  for (const segment of segments) {
+    if (!didInsert && segment.type === 'text' && consumed + segment.text.length >= offset) {
+      const localOffset = offset - consumed;
+      if (localOffset > 0) next.push({ type: 'text', text: segment.text.slice(0, localOffset) });
+      next.push(...inserted);
+      if (localOffset < segment.text.length) next.push({ type: 'text', text: segment.text.slice(localOffset) });
+      didInsert = true;
+    } else {
+      next.push(segment);
+    }
+    if (segment.type === 'text') consumed += segment.text.length;
+  }
+
+  if (!didInsert) next.push(...inserted);
+  return mergeAdjacentChatComposerText(next);
+};
+
+const replaceChatComposerTextPreservingReferences = (
+  segments: ChatComposerSegment[],
+  text: string
+): ChatComposerSegment[] => {
+  const referencesByOffset = new Map<number, string[]>();
+  let offset = 0;
+  for (const segment of segments) {
+    if (segment.type === 'text') {
+      offset += segment.text.length;
+      continue;
+    }
+    const tokenIds = referencesByOffset.get(offset) || [];
+    tokenIds.push(segment.tokenId);
+    referencesByOffset.set(offset, tokenIds);
+  }
+
+  const next: ChatComposerSegment[] = [];
+  let cursor = 0;
+  for (const [referenceOffset, tokenIds] of [...referencesByOffset.entries()].sort((a, b) => a[0] - b[0])) {
+    const clampedOffset = Math.max(cursor, Math.min(referenceOffset, text.length));
+    if (clampedOffset > cursor) next.push({ type: 'text', text: text.slice(cursor, clampedOffset) });
+    next.push(...tokenIds.map((tokenId) => ({ type: 'reference' as const, tokenId })));
+    cursor = clampedOffset;
+  }
+  if (cursor < text.length) next.push({ type: 'text', text: text.slice(cursor) });
+  return mergeAdjacentChatComposerText(next);
+};
+
+const materializeChatMessageInlineContent = (
+  segments: ChatComposerSegment[],
+  referenceTokens: ChatReferenceToken[]
+): ChatMessageInlineSegment[] => {
+  const tokenById = new Map(referenceTokens.map((token) => [token.id, token]));
+  return segments.flatMap((segment): ChatMessageInlineSegment[] => {
+    if (segment.type === 'text') {
+      return segment.text ? [{ type: 'text', text: segment.text }] : [];
+    }
+    const token = tokenById.get(segment.tokenId);
+    if (!token) return [];
+    return [{
+      type: 'reference',
+      referenceId: token.id,
+    }];
+  });
+};
+
+type ResolvedChatMessageInlineSegment =
+  | { type: 'text'; text: string }
+  | {
+      type: 'reference';
+      id: string;
+      src: string;
+      label: string;
+      source: 'upload' | 'history' | 'canvas';
+      annotationCount?: number;
+    };
+
+const resolveChatMessageInlineContent = (message: ChatMessage): ResolvedChatMessageInlineSegment[] => {
+  const referenceById = new Map(
+    (message.referenceContext?.references || []).map((reference) => [reference.id, reference])
+  );
+  if (message.inlineContent?.length) {
+    return message.inlineContent.flatMap<ResolvedChatMessageInlineSegment>((segment, index) => {
+      if (segment.type === 'text') return [segment];
+      const referenceId = segment.referenceId || segment.id || '';
+      const reference = referenceById.get(referenceId);
+      const src = reference?.src || segment.src;
+      if (!src) return [];
+      return [{
+        type: 'reference' as const,
+        id: referenceId || `${message.id}-inline-reference-${index}`,
+        src,
+        label: reference?.label || segment.label || `image${index + 1}`,
+        source: reference?.source || segment.source || 'upload',
+        annotationCount: reference?.annotationCount || segment.annotationCount,
+      }];
+    });
+  }
+  if (message.referenceContext?.composerSegments?.length) {
+    return message.referenceContext.composerSegments.flatMap<ResolvedChatMessageInlineSegment>((segment) => {
+      if (segment.type === 'text') return [segment];
+      const reference = referenceById.get(segment.referenceId);
+      return reference ? [{
+        type: 'reference' as const,
+        id: reference.id,
+        src: reference.src,
+        label: reference.label,
+        source: reference.source,
+        annotationCount: reference.annotationCount,
+      }] : [];
+    });
+  }
+  return [
+    ...(message.referenceImages || []).map((src, index) => ({
+      type: 'reference' as const,
+      id: `${message.id}-legacy-reference-${index}`,
+      src,
+      label: `image${index + 1}`,
+      source: 'upload' as const,
+    })),
+    ...(message.content ? [{ type: 'text' as const, text: message.content }] : []),
+  ];
+};
 type ProviderSettingsProviderId = string;
 type ProviderSettingsSource = 'runtime' | 'env';
 type ProviderProtocol = 'openai' | 'gemini';
@@ -1227,6 +1472,11 @@ const createGeneratedImageHistoryEntry = ({
   sourceItemId,
   topicId,
   messageId,
+  operation,
+  sourceReferenceId,
+  providerId,
+  model,
+  promptTrace,
 }: {
   src: string;
   naturalWidth?: number;
@@ -1237,6 +1487,11 @@ const createGeneratedImageHistoryEntry = ({
   sourceItemId?: string;
   topicId?: string;
   messageId?: string;
+  operation?: 'generate' | 'edit';
+  sourceReferenceId?: string;
+  providerId?: string;
+  model?: string;
+  promptTrace?: GeneratedImageHistoryEntry['promptTrace'];
 }): GeneratedImageHistoryEntry => {
   const normalizedCreatedAt = buildGeneratedImageHistorySortKey(timestamp, sequence);
 
@@ -1250,6 +1505,11 @@ const createGeneratedImageHistoryEntry = ({
     sourceItemId,
     topicId,
     messageId,
+    operation,
+    sourceReferenceId,
+    providerId,
+    model,
+    promptTrace,
   };
 };
 
@@ -1481,6 +1741,253 @@ const getCanvasItemsVisualBounds = (items: CanvasItem[]) => {
     width: right - left,
     height: bottom - top,
   };
+};
+
+const simplifyStrokePoints = (points: CanvasPoint[], tolerance = 1.25): CanvasPoint[] => {
+  if (points.length <= 2) return points;
+  const simplified = [points[0]];
+  let previous = points[0];
+
+  for (let index = 1; index < points.length - 1; index += 1) {
+    const point = points[index];
+    if (Math.hypot(point.x - previous.x, point.y - previous.y) >= tolerance) {
+      simplified.push(point);
+      previous = point;
+    }
+  }
+
+  simplified.push(points[points.length - 1]);
+  return simplified;
+};
+
+const buildStrokePath = (points: CanvasPoint[]): string => {
+  if (points.length === 0) return '';
+  if (points.length === 1) {
+    return `M ${points[0].x} ${points[0].y} l 0.01 0`;
+  }
+  if (points.length === 2) {
+    return `M ${points[0].x} ${points[0].y} L ${points[1].x} ${points[1].y}`;
+  }
+
+  let path = `M ${points[0].x} ${points[0].y}`;
+  for (let index = 1; index < points.length - 1; index += 1) {
+    const point = points[index];
+    const next = points[index + 1];
+    path += ` Q ${point.x} ${point.y} ${(point.x + next.x) / 2} ${(point.y + next.y) / 2}`;
+  }
+  const last = points[points.length - 1];
+  path += ` L ${last.x} ${last.y}`;
+  return path;
+};
+
+const createStrokeCanvasItem = ({
+  points,
+  color,
+  width,
+}: {
+  points: CanvasPoint[];
+  color: string;
+  width: number;
+}): CanvasItem | null => {
+  if (points.length === 0) return null;
+  const simplifiedPoints = simplifyStrokePoints(points, Math.max(0.8, width * 0.18));
+  const padding = Math.max(8, width * 1.75);
+  const minX = Math.min(...simplifiedPoints.map((point) => point.x));
+  const minY = Math.min(...simplifiedPoints.map((point) => point.y));
+  const maxX = Math.max(...simplifiedPoints.map((point) => point.x));
+  const maxY = Math.max(...simplifiedPoints.map((point) => point.y));
+  const x = minX - padding;
+  const y = minY - padding;
+
+  return {
+    id: `stroke-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    type: 'stroke',
+    x,
+    y,
+    width: Math.max(1, maxX - minX) + padding * 2,
+    height: Math.max(1, maxY - minY) + padding * 2,
+    rotation: 0,
+    points: simplifiedPoints.map((point) => ({
+      x: point.x - x,
+      y: point.y - y,
+      pressure: point.pressure,
+    })),
+    strokeColor: color,
+    strokeWidth: width,
+    visible: true,
+    locked: false,
+  };
+};
+
+const getReferenceTokenLabel = (src: string, fallback: string): string => {
+  try {
+    const url = src.startsWith('/') ? new URL(src, 'http://localhost') : new URL(src);
+    const fileName = decodeURIComponent(url.pathname.split('/').filter(Boolean).at(-1) || '');
+    return fileName || fallback;
+  } catch {
+    return fallback;
+  }
+};
+
+const buildSelectedCanvasAnnotationContext = (
+  items: CanvasItem[],
+  selectedIds: string[]
+): CanvasAnnotationContext => {
+  const selectedItems = items.filter((item) => selectedIds.includes(item.id));
+  const selectedImages = selectedItems.filter(
+    (item) => item.type === 'image' && typeof item.src === 'string' && item.src.length > 0
+  );
+  const selectedAnnotations = selectedItems.filter(isCanvasAnnotationItem);
+  const targetItem = selectedImages.length === 1 ? selectedImages[0] : null;
+  const targetBounds = targetItem ? getItemVisualBounds(targetItem) : null;
+
+  const annotations = selectedAnnotations.map((item) => {
+    if (item.type === 'stroke') {
+      const normalizedPoints = (item.points || []).map((point) => {
+        const globalX = item.x + point.x;
+        const globalY = item.y + point.y;
+        return {
+          x: targetBounds ? (globalX - targetBounds.left) / Math.max(1, targetBounds.width) : globalX,
+          y: targetBounds ? (globalY - targetBounds.top) / Math.max(1, targetBounds.height) : globalY,
+          pressure: point.pressure,
+        };
+      });
+      const pointStep = Math.max(1, Math.ceil(normalizedPoints.length / 256));
+      const points = normalizedPoints.filter((_, index) => index % pointStep === 0);
+      const lastPoint = normalizedPoints.at(-1);
+      if (lastPoint && points.at(-1) !== lastPoint) points.push(lastPoint);
+      return {
+        id: item.id,
+        type: 'stroke',
+        points,
+        color: item.strokeColor || DEFAULT_ANNOTATION_COLOR,
+        width: targetBounds
+          ? (item.strokeWidth || DEFAULT_ANNOTATION_STROKE_WIDTH) / Math.max(1, targetBounds.width)
+          : item.strokeWidth || DEFAULT_ANNOTATION_STROKE_WIDTH,
+        coordinateSpace: targetBounds ? 'target-normalized' : 'canvas',
+      };
+    }
+
+    return {
+      id: item.id,
+      type: 'text',
+      text: item.text || '',
+      color: item.textColor || DEFAULT_ANNOTATION_COLOR,
+      fontSize: targetBounds
+        ? (item.fontSize || ANNOTATION_TEXT_DEFAULT_FONT_SIZE) / Math.max(1, targetBounds.height)
+        : item.fontSize || ANNOTATION_TEXT_DEFAULT_FONT_SIZE,
+      x: targetBounds ? (item.x - targetBounds.left) / Math.max(1, targetBounds.width) : item.x,
+      y: targetBounds ? (item.y - targetBounds.top) / Math.max(1, targetBounds.height) : item.y,
+      width: targetBounds ? item.width / Math.max(1, targetBounds.width) : item.width,
+      height: targetBounds ? item.height / Math.max(1, targetBounds.height) : item.height,
+      coordinateSpace: targetBounds ? 'target-normalized' : 'canvas',
+    };
+  });
+
+  return {
+    targetImage: targetItem && targetBounds && targetItem.src
+      ? {
+          id: targetItem.id,
+          src: targetItem.src,
+          x: targetBounds.left,
+          y: targetBounds.top,
+          width: targetBounds.width,
+          height: targetBounds.height,
+        }
+      : undefined,
+    annotations,
+    annotationItemIds: selectedAnnotations.map((item) => item.id),
+    annotationCount: selectedAnnotations.length,
+    ambiguousImageTarget: selectedImages.length > 1 && selectedAnnotations.length > 0,
+  };
+};
+
+const loadCanvasCompositeImage = (src: string) =>
+  new Promise<HTMLImageElement>((resolve, reject) => {
+    const image = new window.Image();
+    image.crossOrigin = 'anonymous';
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error('目标图片无法载入合成画布'));
+    image.src = src;
+  });
+
+const uploadAnnotationCompositePreview = async ({
+  context,
+  items,
+}: {
+  context: CanvasAnnotationContext;
+  items: CanvasItem[];
+}): Promise<{ url?: string; error?: string }> => {
+  if (!context.targetImage || context.annotationCount === 0) return {};
+
+  try {
+    const target = context.targetImage;
+    const image = await loadCanvasCompositeImage(target.src);
+    const longestEdge = Math.max(target.width, target.height, 1);
+    const scale = Math.min(1, 2048 / longestEdge);
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(target.width * scale));
+    canvas.height = Math.max(1, Math.round(target.height * scale));
+    const context2d = canvas.getContext('2d');
+    if (!context2d) throw new Error('浏览器无法创建图片合成上下文');
+
+    context2d.drawImage(image, 0, 0, canvas.width, canvas.height);
+    context2d.lineCap = 'round';
+    context2d.lineJoin = 'round';
+
+    for (const itemId of context.annotationItemIds) {
+      const item = items.find((candidate) => candidate.id === itemId);
+      if (!item) continue;
+
+      if (item.type === 'stroke') {
+        const points = (item.points || []).map((point) => ({
+          x: (item.x + point.x - target.x) * scale,
+          y: (item.y + point.y - target.y) * scale,
+        }));
+        if (points.length === 0) continue;
+        context2d.beginPath();
+        context2d.moveTo(points[0].x, points[0].y);
+        for (let index = 1; index < points.length; index += 1) {
+          context2d.lineTo(points[index].x, points[index].y);
+        }
+        context2d.strokeStyle = item.strokeColor || DEFAULT_ANNOTATION_COLOR;
+        context2d.lineWidth = Math.max(1, (item.strokeWidth || DEFAULT_ANNOTATION_STROKE_WIDTH) * scale);
+        context2d.stroke();
+        continue;
+      }
+
+      if (isCanvasAnnotationTextItem(item) && item.text) {
+        const fontSize = Math.max(8, (item.fontSize || ANNOTATION_TEXT_DEFAULT_FONT_SIZE) * scale);
+        const lineHeight = fontSize * 1.25;
+        context2d.fillStyle = item.textColor || DEFAULT_ANNOTATION_COLOR;
+        context2d.font = `600 ${fontSize}px sans-serif`;
+        item.text.split('\n').forEach((line, index) => {
+          context2d.fillText(
+            line,
+            (item.x - target.x) * scale,
+            (item.y - target.y) * scale + fontSize + index * lineHeight
+          );
+        });
+      }
+    }
+
+    const imageData = canvas.toDataURL('image/png');
+    const response = await fetch('/api/upload', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ imageData }),
+    });
+    const payload = await response.json().catch(() => null);
+    if (!response.ok || !payload || typeof payload.url !== 'string') {
+      throw new Error(payload?.error || '标注合成预览上传失败');
+    }
+
+    return { url: payload.url };
+  } catch (error) {
+    return {
+      error: error instanceof Error ? error.message : '标注合成预览生成失败',
+    };
+  }
 };
 
 const easeOutCubic = (t: number) => 1 - Math.pow(1 - t, 3);
@@ -2274,9 +2781,180 @@ const CanvasNodesLayer = memo(function CanvasNodesLayer({
   );
 });
 
+const CanvasAnnotationsLayer = memo(function CanvasAnnotationsLayer({
+  items,
+  viewport,
+  selectedIds,
+  selectedId,
+  hoveredCanvasItemId,
+  editingAnnotationTextId,
+  editingAnnotationTextRef,
+  draftStroke,
+  onItemMouseEnter,
+  onItemMouseLeave,
+  onItemClick,
+  onItemDoubleClick,
+  onItemPointerDown,
+  onAnnotationTextChange,
+  onAnnotationTextBlur,
+}: {
+  items: CanvasItem[];
+  viewport: ViewportState;
+  selectedIds: string[];
+  selectedId: string | null;
+  hoveredCanvasItemId: string | null;
+  editingAnnotationTextId: string | null;
+  editingAnnotationTextRef: React.RefObject<HTMLTextAreaElement | null>;
+  draftStroke: DraftStroke | null;
+  onItemMouseEnter: (itemId: string) => void;
+  onItemMouseLeave: (itemId: string) => void;
+  onItemClick: (e: React.MouseEvent<HTMLDivElement>, itemId: string) => void;
+  onItemDoubleClick: (itemId: string) => void;
+  onItemPointerDown: (e: React.PointerEvent<HTMLDivElement>, itemId: string) => void;
+  onAnnotationTextChange: (itemId: string, value: string, height: number) => void;
+  onAnnotationTextBlur: (itemId: string) => void;
+}) {
+  const annotationItems = items.filter(isCanvasAnnotationItem);
+
+  return (
+    <div
+      className="absolute z-[3]"
+      style={{
+        transform: `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.scale})`,
+        transformOrigin: '0 0',
+      }}
+    >
+      {draftStroke && draftStroke.points.length > 0 && (
+        <svg className="pointer-events-none absolute left-0 top-0 overflow-visible" width="1" height="1" aria-hidden="true">
+          <path
+            d={buildStrokePath(draftStroke.points)}
+            fill="none"
+            stroke={draftStroke.color}
+            strokeWidth={draftStroke.width}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      )}
+      {annotationItems.map((item) => {
+        const isSelected = selectedIds.includes(item.id) || selectedId === item.id;
+        const isEditingText = isCanvasAnnotationTextItem(item) && editingAnnotationTextId === item.id;
+        const isHovered = hoveredCanvasItemId === item.id;
+
+        return (
+          <div
+            key={item.id}
+            data-canvas-item-id={item.id}
+            data-canvas-annotation="true"
+            className={`absolute group cursor-move ${!item.visible ? 'opacity-30' : ''}`}
+            style={{
+              left: item.x,
+              top: item.y,
+              width: item.width,
+              height: item.height,
+              transform: `rotate(${item.rotation}deg)`,
+            }}
+            onMouseEnter={() => onItemMouseEnter(item.id)}
+            onMouseLeave={() => onItemMouseLeave(item.id)}
+            onClick={(event) => onItemClick(event, item.id)}
+            onDoubleClick={(event) => {
+              event.stopPropagation();
+              onItemDoubleClick(item.id);
+            }}
+            onPointerDown={(event) => onItemPointerDown(event, item.id)}
+          >
+            {item.type === 'stroke' && (
+              <svg className="absolute inset-0 h-full w-full overflow-visible" viewBox={`0 0 ${Math.max(1, item.width)} ${Math.max(1, item.height)}`}>
+                <path
+                  d={buildStrokePath(item.points || [])}
+                  fill="none"
+                  stroke="transparent"
+                  strokeWidth={Math.max(14, (item.strokeWidth || DEFAULT_ANNOTATION_STROKE_WIDTH) + 10)}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  className="pointer-events-auto"
+                />
+                <path
+                  d={buildStrokePath(item.points || [])}
+                  fill="none"
+                  stroke={item.strokeColor || DEFAULT_ANNOTATION_COLOR}
+                  strokeWidth={item.strokeWidth || DEFAULT_ANNOTATION_STROKE_WIDTH}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  className="pointer-events-none"
+                />
+              </svg>
+            )}
+            {isCanvasAnnotationTextItem(item) && (
+              isEditingText ? (
+                <textarea
+                  ref={editingAnnotationTextRef}
+                  data-annotation-text-editor="true"
+                  value={item.text || ''}
+                  onChange={(event) => {
+                    event.currentTarget.style.height = '0px';
+                    const nextHeight = Math.max(
+                      ANNOTATION_TEXT_DEFAULT_HEIGHT,
+                      event.currentTarget.scrollHeight
+                    );
+                    event.currentTarget.style.height = `${nextHeight}px`;
+                    onAnnotationTextChange(item.id, event.target.value, nextHeight);
+                  }}
+                  onBlur={() => onAnnotationTextBlur(item.id)}
+                  onKeyDown={(event) => {
+                    if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') {
+                      event.preventDefault();
+                      event.currentTarget.blur();
+                    } else if (event.key === 'Escape') {
+                      event.preventDefault();
+                      event.currentTarget.blur();
+                    }
+                  }}
+                  onPointerDown={(event) => event.stopPropagation()}
+                  className="h-full w-full resize-none overflow-hidden bg-transparent p-0 font-semibold outline-none"
+                  style={{
+                    color: item.textColor || DEFAULT_ANNOTATION_COLOR,
+                    fontSize: item.fontSize || ANNOTATION_TEXT_DEFAULT_FONT_SIZE,
+                    lineHeight: 1.25,
+                  }}
+                  placeholder="输入标注"
+                />
+              ) : (
+                <div
+                  className="h-full w-full whitespace-pre-wrap break-words font-semibold"
+                  style={{
+                    color: item.textColor || DEFAULT_ANNOTATION_COLOR,
+                    fontSize: item.fontSize || ANNOTATION_TEXT_DEFAULT_FONT_SIZE,
+                    lineHeight: 1.25,
+                  }}
+                >
+                  {item.text}
+                </div>
+              )
+            )}
+            {isSelected && selectedIds.length <= 1 && !isEditingText && (
+              <div
+                className="pointer-events-none absolute border border-blue-400/90"
+                style={{ inset: -4, borderRadius: item.type === 'stroke' ? 8 : 4 }}
+              />
+            )}
+            {isHovered && !isSelected && !isEditingText && (
+              <div
+                className="pointer-events-none absolute border border-blue-300/40"
+                style={{ inset: -3, borderRadius: item.type === 'stroke' ? 8 : 4 }}
+              />
+            )}
+          </div>
+        );
+      })}
+    </div>
+  );
+});
+
 const CanvasViewport = memo(function CanvasViewport({
   canvasRef,
   widthStyle,
+  tool,
   isSpacePressed,
   isPanning,
   viewport,
@@ -2378,6 +3056,9 @@ const CanvasViewport = memo(function CanvasViewport({
   imageCardSettingsPopoverRef,
   editingTextCardId,
   editingTextCardTextareaRef,
+  editingAnnotationTextId,
+  editingAnnotationTextRef,
+  draftStroke,
   onToggleTextPanelProviderMenu,
   onSelectTextPanelProvider,
   onToggleTextPanelModelMenu,
@@ -2402,6 +3083,8 @@ const CanvasViewport = memo(function CanvasViewport({
   onItemDoubleClick,
   onManualTextCardInputChange,
   onManualTextCardBlur,
+  onAnnotationTextChange,
+  onAnnotationTextBlur,
   onImageCardOutputSelect,
   draggingPanelReference,
   dragOverPanelReference,
@@ -2412,6 +3095,7 @@ const CanvasViewport = memo(function CanvasViewport({
 }: {
   canvasRef: React.RefObject<HTMLDivElement | null>;
   widthStyle: string;
+  tool: Tool;
   isSpacePressed: boolean;
   isPanning: boolean;
   viewport: ViewportState;
@@ -2517,6 +3201,9 @@ const CanvasViewport = memo(function CanvasViewport({
   imageCardSettingsPopoverRef: React.RefObject<HTMLDivElement | null>;
   editingTextCardId: string | null;
   editingTextCardTextareaRef: React.RefObject<HTMLTextAreaElement | null>;
+  editingAnnotationTextId: string | null;
+  editingAnnotationTextRef: React.RefObject<HTMLTextAreaElement | null>;
+  draftStroke: DraftStroke | null;
   onToggleTextPanelProviderMenu: () => void;
   onSelectTextPanelProvider: (providerId: string) => void;
   onToggleTextPanelModelMenu: () => void;
@@ -2541,6 +3228,8 @@ const CanvasViewport = memo(function CanvasViewport({
   onItemDoubleClick: (itemId: string) => void;
   onManualTextCardInputChange: (itemId: string, value: string) => void;
   onManualTextCardBlur: (itemId: string) => void;
+  onAnnotationTextChange: (itemId: string, value: string, height: number) => void;
+  onAnnotationTextBlur: (itemId: string) => void;
   onImageCardOutputSelect: (itemId: string, outputIndex: number) => void;
   draggingPanelReference: { targetItemId: string; sourceItemId: string } | null;
   dragOverPanelReference: { targetItemId: string; sourceItemId: string } | null;
@@ -2562,6 +3251,7 @@ const CanvasViewport = memo(function CanvasViewport({
   onPanelReferenceDragEnd: () => void;
 }) {
   const { from, to } = getPreviewRenderPoints();
+  const regularItems = items.filter((item) => !isCanvasAnnotationItem(item));
   const selectedTextCardPanelTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const selectedImageCardPanelTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const selectedTextCardPanelRootRef = useRef<HTMLDivElement | null>(null);
@@ -3707,7 +4397,17 @@ const CanvasViewport = memo(function CanvasViewport({
       ref={canvasRef}
       data-canvas="true"
       tabIndex={0}
-      className={`relative z-0 shrink-0 overflow-hidden select-none ${isSpacePressed ? (isPanning ? 'cursor-grabbing' : 'cursor-grab') : 'cursor-default'}`}
+      className={`relative z-0 shrink-0 overflow-hidden select-none ${
+        isSpacePressed
+          ? isPanning
+            ? 'cursor-grabbing'
+            : 'cursor-grab'
+          : tool === 'draw'
+            ? 'cursor-crosshair'
+            : tool === 'annotation-text'
+              ? 'cursor-text'
+              : 'cursor-default'
+      }`}
       style={{ width: widthStyle }}
       onPointerDown={onPointerDown}
       onPointerMove={onPointerMove}
@@ -3734,7 +4434,7 @@ const CanvasViewport = memo(function CanvasViewport({
         buildConnectionPath={buildConnectionPath}
       />
       <CanvasPortsLayer
-        items={items}
+        items={regularItems}
         viewport={viewport}
         hoveredCanvasItemId={hoveredCanvasItemId}
         hoveredInputPortItemId={hoveredInputPortItemId}
@@ -3790,7 +4490,7 @@ const CanvasViewport = memo(function CanvasViewport({
       {portaledSelectedTextCardPanel}
       {portaledSelectedImageCardPanel}
       <CanvasNodesLayer
-        items={items}
+        items={regularItems}
         connections={connections}
         viewport={viewport}
         multiSelectionBounds={multiSelectionBounds}
@@ -3815,9 +4515,26 @@ const CanvasViewport = memo(function CanvasViewport({
         onManualTextCardInputChange={onManualTextCardInputChange}
         onManualTextCardBlur={onManualTextCardBlur}
       />
+      <CanvasAnnotationsLayer
+        items={items}
+        viewport={viewport}
+        selectedIds={selectedIds}
+        selectedId={selectedId}
+        hoveredCanvasItemId={hoveredCanvasItemId}
+        editingAnnotationTextId={editingAnnotationTextId}
+        editingAnnotationTextRef={editingAnnotationTextRef}
+        draftStroke={draftStroke}
+        onItemMouseEnter={onItemMouseEnter}
+        onItemMouseLeave={onItemMouseLeave}
+        onItemClick={onItemClick}
+        onItemDoubleClick={onItemDoubleClick}
+        onItemPointerDown={onItemPointerDown}
+        onAnnotationTextChange={onAnnotationTextChange}
+        onAnnotationTextBlur={onAnnotationTextBlur}
+      />
       {isMarqueeSelecting && marqueeRect && (
         <div
-          className="absolute pointer-events-none border border-dashed border-white/35 bg-white/5"
+          className="absolute z-[100] pointer-events-none border border-dashed border-white/35 bg-white/5"
           style={{
             left: marqueeRect.x,
             top: marqueeRect.y,
@@ -4174,7 +4891,7 @@ const IMAGE_NODE_TOOLBAR_ACTIONS = [
 ] as const;
 
 const CANVAS_BOTTOM_TOOLBAR_ITEMS = [
-  { id: 'select', label: '选择', svgPath: 'M2.8 5.66C2.187 3.886 3.887 2.186 5.66 2.8l14.833 5.126c1.96.677 2.038 3.42.12 4.208l-5.722 2.35a.75.75 0 0 0-.408.409l-2.35 5.721-.08.174c-.849 1.682-3.307 1.611-4.059-.116l-.07-.178zm2.37-1.444a.75.75 0 0 0-.953.954l5.127 14.833c.225.653 1.14.68 1.402.04l2.35-5.72.096-.204c.245-.46.645-.823 1.131-1.023l5.72-2.35c.64-.263.614-1.177-.04-1.403z', active: true },
+  { id: 'select', label: '选择', svgPath: 'M2.8 5.66C2.187 3.886 3.887 2.186 5.66 2.8l14.833 5.126c1.96.677 2.038 3.42.12 4.208l-5.722 2.35a.75.75 0 0 0-.408.409l-2.35 5.721-.08.174c-.849 1.682-3.307 1.611-4.059-.116l-.07-.178zm2.37-1.444a.75.75 0 0 0-.953.954l5.127 14.833c.225.653 1.14.68 1.402.04l2.35-5.72.096-.204c.245-.46.645-.823 1.131-1.023l5.72-2.35c.64-.263.614-1.177-.04-1.403z' },
   { id: 'target', label: '定位', svgPath: 'M12.463 2.012A9 9 0 0 1 21 11l-.004.29c-.09 2.975-1.54 5.293-2.996 7.112l-.275.328c-1.45 1.66-3.967 3.52-5.725 3.52l-.179-.006c-1.746-.118-4.145-1.91-5.546-3.514L6 18.403C4.497 16.524 3 14.115 3 11a9 9 0 0 1 9-9zM12 3.38A7.62 7.62 0 0 0 4.38 11c0 2.646 1.264 4.747 2.698 6.54.602.752 1.53 1.622 2.517 2.295 1.036.707 1.9 1.034 2.405 1.034.506 0 1.369-.327 2.405-1.034.986-.673 1.915-1.543 2.517-2.295 1.434-1.793 2.697-3.894 2.697-6.54A7.62 7.62 0 0 0 12 3.38M12 7.5a3.5 3.5 0 1 1 0 7 3.5 3.5 0 0 1 0-7M12 9a2 2 0 1 0 0 4 2 2 0 0 0 0-4' },
   { id: 'image', label: '图片', svgPath: 'M17.25 3A3.75 3.75 0 0 1 21 6.75v4.5a.75.75 0 0 1-1.5 0v-4.5a2.25 2.25 0 0 0-2.25-2.25H6.75A2.25 2.25 0 0 0 4.5 6.75v8.505l2.777-2.634.002-.002a1.75 1.75 0 0 1 2.438.036l2.813 2.815a.75.75 0 1 1-1.06 1.06l-2.815-2.813a.25.25 0 0 0-.347-.006l-3.805 3.607A2.25 2.25 0 0 0 6.75 19.5h6.75a.75.75 0 0 1 0 1.5H6.75A3.75 3.75 0 0 1 3 17.25V6.75A3.75 3.75 0 0 1 6.75 3zm1 10.25a.75.75 0 0 1 .55.241l3 3.25a.75.75 0 0 1-1.1 1.018L19 15.918v4.332a.75.75 0 0 1-1.5 0v-4.332l-1.7 1.84a.75.75 0 0 1-1.1-1.017l3-3.25.055-.054a.75.75 0 0 1 .495-.187M15 7.5a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3' },
   { id: 'grid', label: '网格', svgPath: 'M16.8 3a.75.75 0 0 1 .75.75v3.3h2.7a.75.75 0 0 1 0 1.5h-2.7v6.9h2.7a.75.75 0 0 1 0 1.5h-2.7v3.3a.75.75 0 0 1-1.5 0v-3.3h-8.1v3.3a.75.75 0 0 1-1.5 0v-3.3h-2.7a.75.75 0 0 1 0-1.5h2.7v-6.9h-2.7a.75.75 0 0 1 0-1.5h2.7v-3.3a.75.75 0 0 1 1.5 0v3.3h8.1v-3.3A.75.75 0 0 1 16.8 3M7.95 15.45h8.1v-6.9h-8.1z' },
@@ -4301,6 +5018,10 @@ export default function AIWorkspace() {
   const chatPanelToolbarReserveRef = useRef({ width: CANVAS_CHAT_PANEL_RESERVED_WIDTH });
   const [viewMode, setViewMode] = useState<'gallery' | 'editor'>('gallery');
   const [tool, setTool] = useState<Tool>('select');
+  const [annotationColor, setAnnotationColor] = useState(DEFAULT_ANNOTATION_COLOR);
+  const [annotationStrokeWidth, setAnnotationStrokeWidth] = useState(DEFAULT_ANNOTATION_STROKE_WIDTH);
+  const [draftStroke, setDraftStroke] = useState<DraftStroke | null>(null);
+  const [editingAnnotationTextId, setEditingAnnotationTextId] = useState<string | null>(null);
   const [items, setItemsState] = useState<CanvasItem[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
@@ -4353,6 +5074,8 @@ export default function AIWorkspace() {
     itemId: string;
   } | null>(null);
   const marqueeToggleModeRef = useRef(false);
+  const draftStrokeRef = useRef<DraftStroke | null>(null);
+  const editingAnnotationTextRef = useRef<HTMLTextAreaElement | null>(null);
   const connectionDragMovedRef = useRef(false);
   const connectionSessionRef = useRef<ConnectionSession | null>(null);
   const detachConnectionWindowListenersRef = useRef<(() => void) | null>(null);
@@ -4360,6 +5083,11 @@ export default function AIWorkspace() {
   const [chatInput, setChatInput] = useState('');
   const [chatInputRows, setChatInputRows] = useState(1);
   const [chatMessages, setChatMessagesState] = useState<ChatMessage[]>([]);
+  const [visibleChatMessageLimit, setVisibleChatMessageLimit] = useState(80);
+  const attemptedLegacyChatReferenceMigrationsRef = useRef(new Set<string>());
+  const [activeAgentRunMarker, setActiveAgentRunMarker] = useState<ProjectSession['activeAgentRun']>(undefined);
+  const activeAgentRunMarkerRef = useRef<ProjectSession['activeAgentRun']>(undefined);
+  const [interruptedRunRecoveryPending, setInterruptedRunRecoveryPending] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const [activeCanvasTextGenerations, setActiveCanvasTextGenerations] = useState<
     Record<string, { status: 'running'; startedAt: number }>
@@ -4395,10 +5123,12 @@ export default function AIWorkspace() {
   const activeChatImageAspectRatio = generationMode === 'agent' ? agentImageAspectRatio : imageAspectRatio;
   const [hideWelcomeByCenterSkillPick, setHideWelcomeByCenterSkillPick] = useState(false);
   const [referenceImages, setReferenceImages] = useState<string[]>([]);
-  const [chatReferenceImages, setChatReferenceImages] = useState<string[]>([]);
+  const [chatReferenceTokens, setChatReferenceTokens] = useState<ChatReferenceToken[]>([]);
+  const dismissedCanvasReferenceIdsRef = useRef<Set<string>>(new Set());
   const [draggingImageIndex, setDraggingImageIndex] = useState<number | null>(null);
   const [dragOverImageIndex, setDragOverImageIndex] = useState<number | null>(null);
   const processedAgentActionsRef = useRef(new Set<string>());
+  const processedAgentCompletionSummariesRef = useRef(new Set<string>());
   const pendingAgentConfirmationsRef = useRef(new Set<string>());
   const [draggingPanelReference, setDraggingPanelReference] = useState<{
     targetItemId: string;
@@ -4584,10 +5314,18 @@ export default function AIWorkspace() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const chatFileInputRef = useRef<HTMLInputElement>(null);
   const chatInputEditorRef = useRef<HTMLDivElement>(null);
+  const chatComposerSegmentsRef = useRef<ChatComposerSegment[]>([{ type: 'text', text: '' }]);
+  const chatEditorCaretOffsetRef = useRef(0);
   const chatContainerRef = useRef<HTMLDivElement>(null);
+  const chatMessagesContentRef = useRef<HTMLDivElement>(null);
+  const [isChatNearBottom, setIsChatNearBottom] = useState(true);
+  const isChatNearBottomRef = useRef(true);
+  const isProgrammaticChatScrollRef = useRef(false);
+  const programmaticChatScrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activeSkillJobMessageIdRef = useRef<string | null>(null);
   const generateAbortRef = useRef<AbortController | null>(null);
   const isGeneratingRef = useRef(false);
+  const agentReanalysisInFlightRef = useRef(false);
   isGeneratingRef.current = isGenerating;
   const canvasTextGenerateAbortControllersRef = useRef<Map<string, AbortController>>(new Map());
   const suppressCanvasTextAbortErrorItemIdsRef = useRef<Set<string>>(new Set());
@@ -4608,6 +5346,63 @@ export default function AIWorkspace() {
   const isHydratingSessionRef = useRef(false);
   const imageToolbarNoticeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const modelSelectionNoticeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const updateChatNearBottomState = useCallback(() => {
+    const container = chatContainerRef.current;
+    if (!container) return true;
+    const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+    const nextIsNearBottom = distanceFromBottom <= 56;
+    if (isChatNearBottomRef.current !== nextIsNearBottom) {
+      isChatNearBottomRef.current = nextIsNearBottom;
+      setIsChatNearBottom(nextIsNearBottom);
+    }
+    return nextIsNearBottom;
+  }, []);
+
+  const scrollChatToBottom = useCallback((behavior?: ScrollBehavior) => {
+    const container = chatContainerRef.current;
+    if (!container) return;
+    const resolvedBehavior = behavior || (reducedMotionRef.current ? 'auto' : 'smooth');
+    isChatNearBottomRef.current = true;
+    setIsChatNearBottom(true);
+    if (programmaticChatScrollTimerRef.current) {
+      clearTimeout(programmaticChatScrollTimerRef.current);
+      programmaticChatScrollTimerRef.current = null;
+    }
+    isProgrammaticChatScrollRef.current = resolvedBehavior === 'smooth';
+    container.scrollTo({
+      top: container.scrollHeight,
+      behavior: resolvedBehavior,
+    });
+    if (resolvedBehavior === 'smooth') {
+      programmaticChatScrollTimerRef.current = setTimeout(() => {
+        isProgrammaticChatScrollRef.current = false;
+        programmaticChatScrollTimerRef.current = null;
+        updateChatNearBottomState();
+      }, 500);
+    }
+  }, [updateChatNearBottomState]);
+
+  const handleChatContainerScroll = useCallback(() => {
+    if (isProgrammaticChatScrollRef.current) return;
+    updateChatNearBottomState();
+  }, [updateChatNearBottomState]);
+
+  const cancelProgrammaticChatScroll = useCallback(() => {
+    if (programmaticChatScrollTimerRef.current) {
+      clearTimeout(programmaticChatScrollTimerRef.current);
+      programmaticChatScrollTimerRef.current = null;
+    }
+    if (!isProgrammaticChatScrollRef.current) return;
+    isProgrammaticChatScrollRef.current = false;
+    window.requestAnimationFrame(updateChatNearBottomState);
+  }, [updateChatNearBottomState]);
+
+  useEffect(() => () => {
+    if (programmaticChatScrollTimerRef.current) {
+      clearTimeout(programmaticChatScrollTimerRef.current);
+    }
+  }, []);
   const canvasClipboardRef = useRef<{
     snapshot: CanvasClipboardSnapshot | null;
     pasteCount: number;
@@ -4828,6 +5623,81 @@ export default function AIWorkspace() {
     const selectedItems = items.filter((item) => selectedIds.includes(item.id));
     return selectedItems.length <= 1 ? null : getCanvasItemsVisualBounds(selectedItems);
   }, [items, selectedIds]);
+  const selectedCanvasAnnotationContext = React.useMemo(
+    () => buildSelectedCanvasAnnotationContext(items, selectedIds),
+    [items, selectedIds]
+  );
+  const canvasSelectionReferenceTokens = React.useMemo<ChatReferenceToken[]>(() => {
+    const selectedItems = items.filter((item) => selectedIds.includes(item.id));
+    const imageItems = selectedItems.filter(
+      (item) => item.type === 'image' && typeof item.src === 'string' && item.src.length > 0
+    );
+    const annotations = selectedItems.filter(isCanvasAnnotationItem);
+    const dismissedIds = dismissedCanvasReferenceIdsRef.current;
+
+    if (imageItems.length === 1 && annotations.length > 0) {
+      const imageItem = imageItems[0];
+      if (dismissedIds.has(imageItem.id)) return [];
+      return [{
+        id: `canvas-reference:${imageItem.id}`,
+        src: imageItem.src!,
+        label: getReferenceTokenLabel(imageItem.src!, '画布图片'),
+        source: 'canvas',
+        canvasItemId: imageItem.id,
+        transient: true,
+        pinned: false,
+        role: 'annotation_bundle',
+        annotationCount: annotations.length,
+        annotationItemIds: annotations.map((item) => item.id),
+      }];
+    }
+
+    return imageItems
+      .filter((item) => !dismissedIds.has(item.id))
+      .map((item) => ({
+        id: `canvas-reference:${item.id}`,
+        src: item.src!,
+        label: getReferenceTokenLabel(item.src!, '画布图片'),
+        source: 'canvas' as const,
+        canvasItemId: item.id,
+        transient: true,
+        pinned: false,
+        role: 'reference' as const,
+      }));
+  }, [items, selectedIds]);
+
+  const resolvedChatReferenceTokens = React.useMemo(() => {
+    const occupiedKeys = new Set(
+      chatReferenceTokens.map((token) => token.canvasItemId ? `canvas:${token.canvasItemId}` : `src:${token.src}`)
+    );
+    const transientTokens = canvasSelectionReferenceTokens.filter((token) => {
+      const key = token.canvasItemId ? `canvas:${token.canvasItemId}` : `src:${token.src}`;
+      if (occupiedKeys.has(key)) return false;
+      occupiedKeys.add(key);
+      return true;
+    });
+    return [...chatReferenceTokens, ...transientTokens].slice(0, 14);
+  }, [canvasSelectionReferenceTokens, chatReferenceTokens]);
+  const chatReferenceImages = React.useMemo(
+    () => resolvedChatReferenceTokens
+      .filter((token) => !token.uploadStatus)
+      .map((token) => token.src),
+    [resolvedChatReferenceTokens]
+  );
+  const hasPendingChatReferenceUploads = React.useMemo(
+    () => resolvedChatReferenceTokens.some((token) => Boolean(token.uploadStatus)),
+    [resolvedChatReferenceTokens]
+  );
+  const chatReferenceTokenCount = resolvedChatReferenceTokens.length;
+
+  useEffect(() => {
+    const selectedIdSet = new Set(selectedIds);
+    for (const dismissedId of dismissedCanvasReferenceIdsRef.current) {
+      if (!selectedIdSet.has(dismissedId)) {
+        dismissedCanvasReferenceIdsRef.current.delete(dismissedId);
+      }
+    }
+  }, [selectedIds]);
   const itemById = React.useMemo(
     () => Object.fromEntries(items.map((item) => [item.id, item] as const)),
     [items]
@@ -5175,6 +6045,7 @@ export default function AIWorkspace() {
     findWorkspaceModelOption(selectedTextCardProviderModelOptions, selectedTextCardPanelModelId, selectedTextCardProviderId) ||
     defaultWorkspaceTextModelOption;
   const SKILL_TOKEN_SELECTOR = '[data-skill-token="true"]';
+  const REFERENCE_TOKEN_SELECTOR = '[data-reference-token="true"]';
   const copiedAssistantMessageTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   latestChatInputRef.current = chatInput;
 
@@ -5335,6 +6206,18 @@ export default function AIWorkspace() {
   }, [editingTextCardId]);
 
   useEffect(() => {
+    draftStrokeRef.current = draftStroke;
+  }, [draftStroke]);
+
+  useEffect(() => {
+    if (!editingAnnotationTextId || !editingAnnotationTextRef.current) return;
+    const textarea = editingAnnotationTextRef.current;
+    textarea.focus();
+    const textLength = textarea.value.length;
+    textarea.setSelectionRange(textLength, textLength);
+  }, [editingAnnotationTextId]);
+
+  useEffect(() => {
     viewportRef.current = viewport;
   }, [viewport]);
 
@@ -5348,6 +6231,13 @@ export default function AIWorkspace() {
       setEditingTextCardId(null);
     }
   }, [editingTextCardId, items]);
+
+  useEffect(() => {
+    if (!editingAnnotationTextId) return;
+    if (!items.some((item) => item.id === editingAnnotationTextId && isCanvasAnnotationTextItem(item))) {
+      setEditingAnnotationTextId(null);
+    }
+  }, [editingAnnotationTextId, items]);
 
   useEffect(() => {
     const imageCardIds = new Set(items.filter((item) => isImageCardItem(item)).map((item) => item.id));
@@ -5426,10 +6316,7 @@ export default function AIWorkspace() {
 
   const inferTopicSkill = useCallback((topic: ChatTopic | null): { id: string; label: string } | null => {
     if (!topic) return null;
-    if (topic.activeSkill) return topic.activeSkill;
-
-    const messageWithSkill = [...topic.messages].reverse().find((message) => message.skill);
-    return messageWithSkill?.skill || null;
+    return topic.activeSkillExplicit ? topic.activeSkill || null : null;
   }, []);
 
   const getAssistantSelectableHost = useCallback((node: Node | null): HTMLElement | null => {
@@ -5527,11 +6414,56 @@ export default function AIWorkspace() {
     setChatInputHeight(next);
   }, []);
 
+  const parseChatEditorSegments = useCallback((root: HTMLElement): ChatComposerSegment[] => {
+    const segments: ChatComposerSegment[] = [];
+    const visit = (node: Node) => {
+      if (node.nodeType === Node.TEXT_NODE) {
+        const text = node.textContent || '';
+        if (text) segments.push({ type: 'text', text: text.replace(/\u00A0/g, ' ') });
+        return;
+      }
+      if (node.nodeType !== Node.ELEMENT_NODE) return;
+      const element = node as HTMLElement;
+      if (element.matches(SKILL_TOKEN_SELECTOR)) return;
+      if (element.matches(REFERENCE_TOKEN_SELECTOR)) {
+        const tokenId = element.getAttribute('data-reference-id');
+        if (tokenId) segments.push({ type: 'reference', tokenId });
+        return;
+      }
+      if (element.tagName === 'BR') {
+        segments.push({ type: 'text', text: '\n' });
+        return;
+      }
+      Array.from(element.childNodes).forEach(visit);
+      if (element !== root && /^(DIV|P|LI)$/.test(element.tagName)) {
+        segments.push({ type: 'text', text: '\n' });
+      }
+    };
+    Array.from(root.childNodes).forEach(visit);
+    return mergeAdjacentChatComposerText(segments);
+  }, [REFERENCE_TOKEN_SELECTOR, SKILL_TOKEN_SELECTOR]);
+
   const extractEditorPlainText = useCallback((root: HTMLElement): string => {
-    const cloned = root.cloneNode(true) as HTMLElement;
-    cloned.querySelectorAll(SKILL_TOKEN_SELECTOR).forEach((node) => node.remove());
-    return (cloned.innerText || "").replace(/\u00A0/g, " ");
-  }, [SKILL_TOKEN_SELECTOR]);
+    return getChatComposerPlainText(parseChatEditorSegments(root));
+  }, [parseChatEditorSegments]);
+
+  const getChatEditorCaretOffset = useCallback(() => {
+    const editor = chatInputEditorRef.current;
+    const selection = window.getSelection();
+    if (!editor || !selection || selection.rangeCount === 0) return chatEditorCaretOffsetRef.current;
+    const range = selection.getRangeAt(0);
+    if (!range.collapsed || !editor.contains(range.startContainer)) return chatEditorCaretOffsetRef.current;
+    const prefixRange = range.cloneRange();
+    prefixRange.selectNodeContents(editor);
+    prefixRange.setEnd(range.startContainer, range.startOffset);
+    const wrapper = document.createElement('div');
+    wrapper.appendChild(prefixRange.cloneContents());
+    return getChatComposerPlainText(parseChatEditorSegments(wrapper)).length;
+  }, [parseChatEditorSegments]);
+
+  const rememberChatEditorCaretOffset = useCallback(() => {
+    chatEditorCaretOffsetRef.current = getChatEditorCaretOffset();
+  }, [getChatEditorCaretOffset]);
 
   const moveCaretToEditorEnd = useCallback(() => {
     const editor = chatInputEditorRef.current;
@@ -5549,11 +6481,40 @@ export default function AIWorkspace() {
     const editor = chatInputEditorRef.current;
     if (!editor) return;
 
-    const currentPlain = extractEditorPlainText(editor);
+    let segments = parseChatEditorSegments(editor);
+    const validTokenIds = new Set(resolvedChatReferenceTokens.map((token) => token.id));
+    segments = segments.filter((segment) => segment.type === 'text' || validTokenIds.has(segment.tokenId));
+    const currentTokenIds = new Set(
+      segments.filter((segment): segment is Extract<ChatComposerSegment, { type: 'reference' }> => segment.type === 'reference')
+        .map((segment) => segment.tokenId)
+    );
+    const missingTokenIds = resolvedChatReferenceTokens
+      .map((token) => token.id)
+      .filter((tokenId) => !currentTokenIds.has(tokenId));
+    if (missingTokenIds.length > 0) {
+      segments = insertReferenceSegmentsAtTextOffset(segments, missingTokenIds, chatEditorCaretOffsetRef.current);
+    }
+    if (getChatComposerPlainText(segments) !== value) {
+      segments = replaceChatComposerTextPreservingReferences(segments, value);
+    }
+    segments = mergeAdjacentChatComposerText(segments);
     const currentTokenLabel = editor.querySelector(SKILL_TOKEN_SELECTOR)?.getAttribute("data-skill-label") || "";
     const targetTokenLabel = activeSkill?.label || "";
 
-    const shouldRebuild = currentPlain !== value || currentTokenLabel !== targetTokenLabel;
+    const currentDomSignature = Array.from(editor.querySelectorAll(REFERENCE_TOKEN_SELECTOR))
+      .map((node) => `${node.getAttribute('data-reference-id')}:${node.getAttribute('data-reference-signature') || ''}`)
+      .join('|');
+    const tokenById = new Map(resolvedChatReferenceTokens.map((token) => [token.id, token]));
+    const targetDomSignature = segments
+      .filter((segment): segment is Extract<ChatComposerSegment, { type: 'reference' }> => segment.type === 'reference')
+      .map((segment) => {
+        const token = tokenById.get(segment.tokenId);
+        return `${segment.tokenId}:${token ? JSON.stringify(token) : ''}`;
+      })
+      .join('|');
+    const existingSegments = chatComposerSegmentsRef.current;
+    const segmentsChanged = JSON.stringify(existingSegments) !== JSON.stringify(segments);
+    const shouldRebuild = segmentsChanged || currentTokenLabel !== targetTokenLabel || currentDomSignature !== targetDomSignature;
     if (shouldRebuild) {
       editor.innerHTML = "";
 
@@ -5567,14 +6528,75 @@ export default function AIWorkspace() {
         editor.appendChild(token);
       }
 
-      editor.appendChild(document.createTextNode(value));
+      for (const segment of segments) {
+        if (segment.type === 'text') {
+          editor.appendChild(document.createTextNode(segment.text));
+          continue;
+        }
+        const tokenData = tokenById.get(segment.tokenId);
+        if (!tokenData) continue;
+        const token = document.createElement('span');
+        token.setAttribute('data-reference-token', 'true');
+        token.setAttribute('data-reference-id', tokenData.id);
+        token.setAttribute('data-reference-signature', JSON.stringify(tokenData));
+        token.setAttribute('contenteditable', 'false');
+        token.className = 'workspace-reference-token group/reference relative mx-0.5 inline-flex h-7 max-w-[172px] align-middle items-center gap-1 rounded-lg px-1.5 text-[11px]';
+        token.title = tokenData.label;
+
+        const thumb = document.createElement('span');
+        thumb.className = 'h-5 w-5 shrink-0 rounded-md bg-cover bg-center';
+        thumb.style.backgroundImage = `url("${tokenData.src.replace(/"/g, '\\"')}")`;
+        token.appendChild(thumb);
+        const label = document.createElement('span');
+        label.className = 'min-w-0 truncate text-[11px] font-medium';
+        label.textContent = tokenData.uploadStatus === 'uploading'
+          ? '上传中…'
+          : tokenData.uploadStatus === 'failed'
+            ? '上传失败'
+            : tokenData.label;
+        token.appendChild(label);
+        if (tokenData.annotationCount) {
+          const badge = document.createElement('span');
+          badge.className = 'shrink-0 rounded-md bg-red-500/12 px-1.5 py-0.5 text-[9px] font-medium text-red-500';
+          badge.textContent = `${tokenData.annotationCount} 条标注`;
+          token.appendChild(badge);
+        }
+        if (tokenData.uploadStatus === 'failed') {
+          const retry = document.createElement('button');
+          retry.type = 'button';
+          retry.setAttribute('data-reference-action', 'retry');
+          retry.className = 'inline-flex h-5 shrink-0 items-center justify-center rounded-md px-1 text-[9px] text-red-500';
+          retry.setAttribute('aria-label', '重试上传参考图');
+          retry.textContent = '重试';
+          token.appendChild(retry);
+        } else if (!tokenData.uploadStatus) {
+          const pin = document.createElement('button');
+          pin.type = 'button';
+          pin.setAttribute('data-reference-action', 'pin');
+          pin.className = `inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-md ${tokenData.pinned ? 'opacity-100' : 'opacity-0 group-hover/reference:opacity-70'}`;
+          pin.setAttribute('aria-label', tokenData.pinned ? '取消固定参考图' : '固定参考图');
+          pin.textContent = tokenData.pinned ? '●' : '○';
+          token.appendChild(pin);
+        }
+        const remove = document.createElement('button');
+        remove.type = 'button';
+        remove.setAttribute('data-reference-action', 'remove');
+        remove.className = 'inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-md opacity-50 hover:opacity-100';
+        remove.setAttribute('aria-label', '移除参考图');
+        remove.textContent = '×';
+        token.appendChild(remove);
+        editor.appendChild(token);
+      }
+      chatComposerSegmentsRef.current = segments;
       if (moveCaretToEnd) {
         moveCaretToEditorEnd();
       }
+    } else {
+      chatComposerSegmentsRef.current = segments;
     }
 
     syncEditorHeight();
-  }, [activeSkill, extractEditorPlainText, moveCaretToEditorEnd, syncEditorHeight]);
+  }, [activeSkill, moveCaretToEditorEnd, parseChatEditorSegments, resolvedChatReferenceTokens, syncEditorHeight]);
 
   const isCaretAtEditorStart = (): boolean => {
     const editor = chatInputEditorRef.current;
@@ -5591,8 +6613,8 @@ export default function AIWorkspace() {
     const fragment = prefixRange.cloneContents();
     const wrapper = document.createElement("div");
     wrapper.appendChild(fragment);
-    wrapper.querySelectorAll(SKILL_TOKEN_SELECTOR).forEach((node) => node.remove());
-    return (wrapper.textContent || "").replace(/\u00A0/g, "").length === 0;
+    if (wrapper.querySelector(REFERENCE_TOKEN_SELECTOR)) return false;
+    return getChatComposerPlainText(parseChatEditorSegments(wrapper)).trim().length === 0;
   };
 
   const parseSkillChoicePayload = (raw: string): SkillChoicePayload | null => {
@@ -5741,8 +6763,9 @@ export default function AIWorkspace() {
       if (!messageId) return;
       if (!streamQueueRef.current) return;
 
-      const nextChunk = streamQueueRef.current.slice(0, 2);
-      streamQueueRef.current = streamQueueRef.current.slice(2);
+      const nextChunkSize = Math.max(4, Math.min(24, Math.ceil(streamQueueRef.current.length / 16)));
+      const nextChunk = streamQueueRef.current.slice(0, nextChunkSize);
+      streamQueueRef.current = streamQueueRef.current.slice(nextChunkSize);
 
       setChatMessages((prev) => prev.map((msg) => {
         if (msg.id !== messageId) return msg;
@@ -5751,7 +6774,7 @@ export default function AIWorkspace() {
           content: `${msg.content}${nextChunk}`,
         };
       }));
-    }, 30);
+    }, 80);
   };
 
   const enqueueStreamDelta = (messageId: string, delta: string) => {
@@ -5832,6 +6855,100 @@ export default function AIWorkspace() {
       reader.readAsDataURL(file);
     });
   };
+
+  const uploadChatReferenceFile = useCallback(async (file: File) => {
+    const imageData = await readAsDataURL(file);
+    const response = await fetch('/api/upload', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        imageData,
+        fileName: file.name || `chat-reference-${Date.now()}.${file.type.split('/')[1] || 'png'}`,
+      }),
+    });
+    if (!response.ok) {
+      throw new Error(`Upload failed: ${response.status}`);
+    }
+    const payload = await response.json();
+    if (typeof payload?.url !== 'string' || !payload.url) {
+      throw new Error('Upload did not return a usable image URL');
+    }
+    return payload.url as string;
+  }, []);
+
+  const enqueueChatReferenceUploads = useCallback((files: File[]) => {
+    const pendingTokens = files.map((file, index): ChatReferenceToken => {
+      const previewObjectUrl = URL.createObjectURL(file);
+      return {
+        id: `upload:${Date.now()}:${index}:${Math.random().toString(36).slice(2, 7)}`,
+        src: previewObjectUrl,
+        label: file.name || '上传图片',
+        source: 'upload',
+        transient: false,
+        pinned: false,
+        role: 'reference',
+        uploadStatus: 'uploading',
+        uploadFile: file,
+        previewObjectUrl,
+      };
+    });
+
+    setChatReferenceTokens((current) => [...current, ...pendingTokens].slice(0, 14));
+
+    pendingTokens.forEach((pendingToken) => {
+      void uploadChatReferenceFile(pendingToken.uploadFile!).then((src) => {
+        if (pendingToken.previewObjectUrl) URL.revokeObjectURL(pendingToken.previewObjectUrl);
+        setChatReferenceTokens((tokens) => tokens.map((token) => token.id === pendingToken.id
+          ? {
+              ...token,
+              src,
+              label: getReferenceTokenLabel(src, pendingToken.label),
+              uploadStatus: undefined,
+              uploadError: undefined,
+              uploadFile: undefined,
+              previewObjectUrl: undefined,
+            }
+          : token));
+      }).catch((error) => {
+        setChatReferenceTokens((tokens) => tokens.map((token) => token.id === pendingToken.id
+          ? {
+              ...token,
+              uploadStatus: 'failed',
+              uploadError: error instanceof Error ? error.message : '图片上传失败',
+            }
+          : token));
+      });
+    });
+  }, [uploadChatReferenceFile]);
+
+  const retryChatReferenceUpload = useCallback((targetToken: ChatReferenceToken) => {
+    if (!targetToken.uploadFile) return;
+    setChatReferenceTokens((tokens) => tokens.map((token) => token.id === targetToken.id
+      ? { ...token, uploadStatus: 'uploading', uploadError: undefined }
+      : token));
+    void uploadChatReferenceFile(targetToken.uploadFile).then((src) => {
+      if (targetToken.previewObjectUrl) URL.revokeObjectURL(targetToken.previewObjectUrl);
+      setChatReferenceTokens((tokens) => tokens.map((token) => token.id === targetToken.id
+        ? {
+            ...token,
+            src,
+            label: getReferenceTokenLabel(src, targetToken.label),
+            uploadStatus: undefined,
+            uploadError: undefined,
+            uploadFile: undefined,
+            previewObjectUrl: undefined,
+          }
+        : token));
+    }).catch((error) => {
+      setChatReferenceTokens((tokens) => tokens.map((token) => token.id === targetToken.id
+        ? {
+            ...token,
+            uploadStatus: 'failed',
+            uploadError: error instanceof Error ? error.message : '图片上传失败',
+          }
+        : token));
+    });
+  }, [uploadChatReferenceFile]);
 
   const getViewportCenterCanvasPoint = useCallback(
     (overrideViewport?: { x: number; y: number; scale: number }) => {
@@ -6193,11 +7310,39 @@ export default function AIWorkspace() {
     ]
   );
 
+  const appendChatReferenceSources = useCallback((
+    sources: string[],
+    source: Exclude<ChatReferenceTokenSource, 'canvas'>
+  ) => {
+    setChatReferenceTokens((currentTokens) => {
+      const existingSources = new Set(currentTokens.map((token) => token.src));
+      const nextTokens = [...currentTokens];
+      for (const src of sources) {
+        if (!src || existingSources.has(src) || nextTokens.length >= 14) continue;
+        existingSources.add(src);
+        nextTokens.push({
+          id: `${source}:${Date.now()}:${Math.random().toString(36).slice(2, 7)}`,
+          src,
+          label: getReferenceTokenLabel(src, source === 'upload' ? '上传图片' : '历史图片'),
+          source,
+          transient: false,
+          pinned: false,
+          role: 'reference',
+        });
+      }
+      return nextTokens;
+    });
+  }, []);
+
+  const clearSentChatReferenceTokens = useCallback(() => {
+    setChatReferenceTokens((tokens) => tokens.filter((token) => token.pinned));
+  }, []);
+
   const handleChatImageUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (!files) return;
 
-    const currentCount = chatReferenceImages.length;
+    const currentCount = chatReferenceTokenCount;
     const remainingSlots = 14 - currentCount;
     
     if (remainingSlots <= 0) {
@@ -6207,18 +7352,7 @@ export default function AIWorkspace() {
 
     const filesToProcess = Array.from(files).slice(0, remainingSlots);
 
-    try {
-      const uploadedImages = await Promise.all(filesToProcess.map((file) => readAsDataURL(file)));
-      if (isGeneratingRef.current) {
-        e.target.value = '';
-        return;
-      }
-      setChatReferenceImages((currentReferences) =>
-        mergeGeneratedHistoryReferences(currentReferences, uploadedImages, 14)
-      );
-    } catch (error) {
-      console.error('Chat reference upload failed:', error);
-    }
+    if (!isGeneratingRef.current) enqueueChatReferenceUploads(filesToProcess);
     
     e.target.value = '';
   };
@@ -6251,7 +7385,7 @@ export default function AIWorkspace() {
 
     e.preventDefault();
 
-    const currentCount = chatReferenceImages.length;
+    const currentCount = chatReferenceTokenCount;
     const remainingSlots = 14 - currentCount;
 
     if (remainingSlots <= 0) {
@@ -6261,29 +7395,37 @@ export default function AIWorkspace() {
 
     const filesToProcess = imageFiles.slice(0, remainingSlots);
 
-    const readAsDataURL = (file: File) => {
-      return new Promise<string>((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = (event) => resolve(event.target?.result as string);
-        reader.onerror = () => reject(new Error(`读取文件失败: ${file.name}`));
-        reader.readAsDataURL(file);
-      });
-    };
-
-    try {
-      const uploadedImages = await Promise.all(filesToProcess.map((file) => readAsDataURL(file)));
-      if (isGeneratingRef.current) return;
-      setChatReferenceImages((currentReferences) =>
-        mergeGeneratedHistoryReferences(currentReferences, uploadedImages, 14)
-      );
-    } catch (error) {
-      console.error('Chat paste image upload failed:', error);
-    }
+    if (!isGeneratingRef.current) enqueueChatReferenceUploads(filesToProcess);
   };
 
   const handleChatEditorInput = () => {
-    const editorText = chatInputEditorRef.current ? extractEditorPlainText(chatInputEditorRef.current) : '';
+    const editor = chatInputEditorRef.current;
+    if (!editor) return;
+    const nextSegments = parseChatEditorSegments(editor);
+    const previousTokenIds = new Set(
+      chatComposerSegmentsRef.current
+        .filter((segment): segment is Extract<ChatComposerSegment, { type: 'reference' }> => segment.type === 'reference')
+        .map((segment) => segment.tokenId)
+    );
+    const nextTokenIds = new Set(
+      nextSegments
+        .filter((segment): segment is Extract<ChatComposerSegment, { type: 'reference' }> => segment.type === 'reference')
+        .map((segment) => segment.tokenId)
+    );
+    const removedTokenIds = [...previousTokenIds].filter((tokenId) => !nextTokenIds.has(tokenId));
+    if (removedTokenIds.length > 0) {
+      const removedTokens = resolvedChatReferenceTokens.filter((token) => removedTokenIds.includes(token.id));
+      removedTokens.forEach((token) => {
+        if (token.source === 'canvas' && token.canvasItemId) {
+          dismissedCanvasReferenceIdsRef.current.add(token.canvasItemId);
+        }
+      });
+      setChatReferenceTokens((tokens) => tokens.filter((token) => !removedTokenIds.includes(token.id)));
+    }
+    chatComposerSegmentsRef.current = nextSegments;
+    const editorText = getChatComposerPlainText(nextSegments);
     setChatInput(editorText);
+    rememberChatEditorCaretOffset();
     syncEditorHeight();
   };
 
@@ -6336,6 +7478,39 @@ export default function AIWorkspace() {
       )
     );
   }, []);
+
+  const handleAnnotationTextChange = useCallback((itemId: string, value: string, height: number) => {
+    setItems((prev) =>
+      prev.map((item) =>
+        item.id === itemId && isCanvasAnnotationTextItem(item)
+          ? {
+              ...item,
+              text: value,
+              height: Math.max(ANNOTATION_TEXT_DEFAULT_HEIGHT, height),
+            }
+          : item
+      )
+    );
+  }, [setItems]);
+
+  const finalizeAnnotationTextEditing = (itemId: string) => {
+    const shouldDelete = !(itemsRef.current.find((candidate) => candidate.id === itemId)?.text || '').trim();
+    setItems((prev) => {
+      const item = prev.find((candidate) => candidate.id === itemId);
+      if (!item || !isCanvasAnnotationTextItem(item)) return prev;
+      if (!(item.text || '').trim()) {
+        return prev.filter((candidate) => candidate.id !== itemId);
+      }
+      return prev;
+    });
+    if (shouldDelete) {
+      setSelectedIds((current) => current.filter((id) => id !== itemId));
+      setSelectedId((current) => (current === itemId ? null : current));
+    }
+    setEditingAnnotationTextId((current) => (current === itemId ? null : current));
+    setTool('select');
+    if (currentSessionIdRef.current) scheduleCurrentSessionSave();
+  };
 
   const handleImageCardOutputSelect = useCallback((itemId: string, outputIndex: number) => {
     recordCurrentCanvasUndoSnapshot();
@@ -6404,6 +7579,21 @@ export default function AIWorkspace() {
     setEditingTextCardId(itemId);
   }, [activeCanvasTextGenerationItemIds, connections, createCurrentCanvasUndoSnapshot]);
 
+  const handleCanvasItemDoubleClick = useCallback((itemId: string) => {
+    const item = itemsRef.current.find((candidate) => candidate.id === itemId);
+    if (isCanvasAnnotationTextItem(item)) {
+      if (editingAnnotationTextId !== itemId) {
+        recordCurrentCanvasUndoSnapshot();
+      }
+      setEditingAnnotationTextId(itemId);
+      setSelectedConnectionIds([]);
+      setSelectedId(itemId);
+      setSelectedIds([itemId]);
+      return;
+    }
+    handleTextCardDoubleClick(itemId);
+  }, [editingAnnotationTextId, handleTextCardDoubleClick, recordCurrentCanvasUndoSnapshot]);
+
   useEffect(() => {
     setTextCardPanelDrafts((prev) => {
       const next = normalizeTextCardPanelDrafts(prev, items);
@@ -6432,19 +7622,41 @@ export default function AIWorkspace() {
       e.preventDefault();
       if (isGenerating) {
         void handleCancelGenerate();
-      } else {
+      } else if (!hasPendingChatReferenceUploads) {
         void handleGenerate();
       }
     }
   };
 
-  const removeChatImage = (index: number) => {
-    setChatReferenceImages(prev => prev.filter((_, i) => i !== index));
+  const removeChatReferenceToken = (token: ChatReferenceToken) => {
+    if (token.source === 'canvas' && token.canvasItemId) {
+      dismissedCanvasReferenceIdsRef.current.add(token.canvasItemId);
+    }
+    if (token.previewObjectUrl) URL.revokeObjectURL(token.previewObjectUrl);
+    setChatReferenceTokens((tokens) => tokens.filter((candidate) => candidate.id !== token.id));
+  };
+
+  const toggleChatReferenceTokenPin = (targetToken: ChatReferenceToken) => {
+    setChatReferenceTokens((tokens) => {
+      if (targetToken.source === 'canvas') {
+        if (targetToken.pinned) {
+          return tokens.filter((token) => token.id !== targetToken.id);
+        }
+        return [
+          ...tokens.filter((token) => token.canvasItemId !== targetToken.canvasItemId),
+          { ...targetToken, pinned: true, transient: false },
+        ].slice(0, 14);
+      }
+
+      return tokens.map((token) =>
+        token.id === targetToken.id ? { ...token, pinned: !token.pinned } : token
+      );
+    });
   };
 
   const reorderChatImages = (fromIndex: number, toIndex: number) => {
     if (fromIndex === toIndex) return;
-    setChatReferenceImages((prev) => {
+    setChatReferenceTokens((prev) => {
       const next = [...prev];
       const [moved] = next.splice(fromIndex, 1);
       next.splice(toIndex, 0, moved);
@@ -6584,6 +7796,31 @@ export default function AIWorkspace() {
     setSelectedId(newItem.id);
     setSelectedIds([newItem.id]);
   };
+
+  const createAnnotationTextAtCanvasPoint = useCallback((canvasPoint: { x: number; y: number }) => {
+    const newItem: CanvasItem = {
+      id: `annotation-text-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      type: 'text',
+      textVariant: 'annotation',
+      text: '',
+      textColor: annotationColor,
+      fontSize: ANNOTATION_TEXT_DEFAULT_FONT_SIZE,
+      x: canvasPoint.x,
+      y: canvasPoint.y,
+      width: ANNOTATION_TEXT_DEFAULT_WIDTH,
+      height: ANNOTATION_TEXT_DEFAULT_HEIGHT,
+      rotation: 0,
+      visible: true,
+      locked: false,
+    };
+    recordCurrentCanvasUndoSnapshot();
+    setItems((prev) => [...prev, newItem]);
+    setSelectedConnectionIds([]);
+    setSelectedId(newItem.id);
+    setSelectedIds([newItem.id]);
+    setEditingAnnotationTextId(newItem.id);
+    setTool('select');
+  }, [annotationColor, recordCurrentCanvasUndoSnapshot, setItems]);
 
   const addImageCard = useCallback(() => {
     const newItem: CanvasItem = {
@@ -7488,6 +8725,10 @@ export default function AIWorkspace() {
       return;
     }
 
+    if (editingAnnotationTextId && !target.closest('[data-annotation-text-editor="true"]')) {
+      finalizeAnnotationTextEditing(editingAnnotationTextId);
+    }
+
     if (e.button === 0) {
       e.preventDefault();
     }
@@ -7519,6 +8760,36 @@ export default function AIWorkspace() {
       return;
     }
 
+    if (e.button === 0 && tool === 'draw') {
+      const relativePoint = getCanvasRelativePoint(e.clientX, e.clientY);
+      if (!relativePoint) return;
+      const canvasPoint = toCanvasPoint(relativePoint);
+      const nextDraft: DraftStroke = {
+        pointerId: e.pointerId,
+        points: [{ x: canvasPoint.x, y: canvasPoint.y, pressure: e.pressure }],
+        color: annotationColor,
+        width: annotationStrokeWidth,
+      };
+      try {
+        canvasRef.current?.setPointerCapture(e.pointerId);
+      } catch {}
+      draftStrokeRef.current = nextDraft;
+      setDraftStroke(nextDraft);
+      setSelectedConnectionIds([]);
+      setSelectedId(null);
+      setSelectedIds([]);
+      e.preventDefault();
+      return;
+    }
+
+    if (e.button === 0 && tool === 'annotation-text') {
+      const relativePoint = getCanvasRelativePoint(e.clientX, e.clientY);
+      if (!relativePoint) return;
+      e.preventDefault();
+      createAnnotationTextAtCanvasPoint(toCanvasPoint(relativePoint));
+      return;
+    }
+
     if (e.button === 0 && target.dataset.canvas === 'true') {
       if (pendingConnectionMenu) {
         clearPendingConnectionMenu();
@@ -7542,6 +8813,28 @@ export default function AIWorkspace() {
   };
 
   const handleCanvasPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    const activeDraftStroke = draftStrokeRef.current;
+    if (activeDraftStroke && activeDraftStroke.pointerId === e.pointerId) {
+      const coalescedEvents = typeof e.nativeEvent.getCoalescedEvents === 'function'
+        ? e.nativeEvent.getCoalescedEvents()
+        : [e.nativeEvent];
+      const nextPoints = coalescedEvents.flatMap((pointerEvent) => {
+        const relativePoint = getCanvasRelativePoint(pointerEvent.clientX, pointerEvent.clientY);
+        if (!relativePoint) return [];
+        const canvasPoint = toCanvasPoint(relativePoint);
+        return [{ x: canvasPoint.x, y: canvasPoint.y, pressure: pointerEvent.pressure }];
+      });
+      if (nextPoints.length > 0) {
+        const nextDraft = {
+          ...activeDraftStroke,
+          points: [...activeDraftStroke.points, ...nextPoints],
+        };
+        draftStrokeRef.current = nextDraft;
+        setDraftStroke(nextDraft);
+      }
+      return;
+    }
+
     if (isCornerResizing && selectedId && cornerResizeStart.current) {
       latestInteractionPointerRef.current = { x: e.clientX, y: e.clientY };
       scheduleInteractionFrame();
@@ -7590,6 +8883,27 @@ export default function AIWorkspace() {
   };
 
   const handleCanvasPointerUp = (e?: React.PointerEvent<HTMLDivElement>) => {
+    const activeDraftStroke = draftStrokeRef.current;
+    if (activeDraftStroke && (!e || activeDraftStroke.pointerId === e.pointerId)) {
+      if (e) {
+        try {
+          canvasRef.current?.releasePointerCapture(e.pointerId);
+        } catch {}
+      }
+      const strokeItem = createStrokeCanvasItem(activeDraftStroke);
+      draftStrokeRef.current = null;
+      setDraftStroke(null);
+      if (strokeItem) {
+        recordCurrentCanvasUndoSnapshot();
+        setItems((prev) => [...prev, strokeItem]);
+        setSelectedConnectionIds([]);
+        setSelectedId(strokeItem.id);
+        setSelectedIds([strokeItem.id]);
+      }
+      if (currentSessionId) scheduleCurrentSessionSave();
+      return;
+    }
+
     if (isMarqueeSelecting && marqueeRect) {
       const rectInCanvas = {
         left: (marqueeRect.x - viewport.x) / viewport.scale,
@@ -7712,6 +9026,7 @@ export default function AIWorkspace() {
 
   const handleConnectionPointerDown = useCallback(
     (e: React.PointerEvent<SVGPathElement>, connectionId: string) => {
+      if (tool !== 'select') return;
       e.preventDefault();
       e.stopPropagation();
       if (connectionSessionRef.current) {
@@ -7725,7 +9040,7 @@ export default function AIWorkspace() {
       setSelectedId(null);
       setSelectedIds([]);
     },
-    [resetConnectionInteraction]
+    [resetConnectionInteraction, tool]
   );
 
   const handleInputPortEnter = useCallback((itemId: string) => {
@@ -7751,6 +9066,7 @@ export default function AIWorkspace() {
 
   const handleOutputPortPointerDown = (e: React.PointerEvent<HTMLElement>, item: CanvasItem, _source: 'bridge' | 'button') => {
     if (e.button !== 0) return;
+    if (tool !== 'select') return;
     e.preventDefault();
     e.stopPropagation();
     beginConnectionDragFromItem(item, e.pointerId);
@@ -7760,6 +9076,7 @@ export default function AIWorkspace() {
     (e: React.PointerEvent<HTMLDivElement>) => {
       if (e.button !== 0) return;
       if (isSpacePressed) return;
+      if (tool !== 'select') return;
       e.preventDefault();
       e.stopPropagation();
       if (e.altKey) {
@@ -7778,7 +9095,7 @@ export default function AIWorkspace() {
         getPrimarySelectedId(selectedIds)
       );
     },
-    [beginAltDragCopiedItems, beginDraggingSelectedItems, getPrimarySelectedId, isSpacePressed, selectedIds]
+    [beginAltDragCopiedItems, beginDraggingSelectedItems, getPrimarySelectedId, isSpacePressed, selectedIds, tool]
   );
 
   const handleItemMouseEnter = useCallback((itemId: string) => {
@@ -7792,6 +9109,7 @@ export default function AIWorkspace() {
 
   const handleItemClick = useCallback((e: React.MouseEvent<HTMLDivElement>, itemId: string) => {
     e.stopPropagation();
+    if (tool !== 'select') return;
     const suppressedItemClickId = suppressNextItemClickRef.current;
     if (suppressedItemClickId) {
       suppressNextItemClickRef.current = null;
@@ -7817,7 +9135,7 @@ export default function AIWorkspace() {
     setSelectedId(itemId);
     setSelectedIds([itemId]);
     setItems((prev) => moveCanvasItemsToFront(prev, [itemId]));
-  }, [getPrimarySelectedId]);
+  }, [getPrimarySelectedId, tool]);
 
   const handleItemPointerDown = useCallback(
     (e: React.PointerEvent<HTMLDivElement>, itemId: string) => {
@@ -7825,6 +9143,7 @@ export default function AIWorkspace() {
       if (target.dataset.cornerResize) return;
       if (target.dataset.port) return;
       if (isSpacePressed) return;
+      if (tool !== 'select') return;
       if (e.shiftKey) return;
       if (editingTextCardId === itemId) {
         finalizeManualTextCardEditing(itemId);
@@ -7838,11 +9157,12 @@ export default function AIWorkspace() {
       }
       beginDraggingSelectedItems(e.clientX, e.clientY, draggingIds, itemId);
     },
-    [beginAltDragCopiedItems, beginDraggingSelectedItems, editingTextCardId, finalizeManualTextCardEditing, isSpacePressed, selectedIds]
+    [beginAltDragCopiedItems, beginDraggingSelectedItems, editingTextCardId, finalizeManualTextCardEditing, isSpacePressed, selectedIds, tool]
   );
 
   const handleCornerResizePointerDown = useCallback(
     (e: React.PointerEvent<HTMLButtonElement>, item: CanvasItem) => {
+      if (tool !== 'select') return;
       pendingCanvasHistorySnapshotRef.current = createCurrentCanvasUndoSnapshot();
       cancelZoomAnimation();
       e.preventDefault();
@@ -7859,7 +9179,7 @@ export default function AIWorkspace() {
         itemId: item.id,
       };
     },
-    [cancelZoomAnimation, createCurrentCanvasUndoSnapshot]
+    [cancelZoomAnimation, createCurrentCanvasUndoSnapshot, tool]
   );
 
   useEffect(() => {
@@ -8664,6 +9984,7 @@ export default function AIWorkspace() {
     agentClarification?: AgentClarificationPayload;
     agentClarificationResponse?: AgentClarificationResponse;
     selectedContextEntityIds?: string[];
+    suppressUserMessage?: boolean;
   }) => {
     const currentChatInput = options?.input ?? chatInput;
     if (!currentChatInput.trim()) return;
@@ -8702,9 +10023,39 @@ export default function AIWorkspace() {
     const overrideReferencePayload = options?.referenceImagesOverride
       ? buildReferenceImageRequestPayload(options.referenceImagesOverride)
       : null;
+    const persistedReferenceContext = effectiveAgentClarification?.state.referenceContext
+      || [...chatMessages].reverse().find((message) => message.role === 'user' && message.referenceContext)?.referenceContext;
     const currentReferenceImages = overrideReferencePayload
       ? [...overrideReferencePayload.referenceImages]
-      : [...chatReferenceImages];
+      : chatReferenceImages.length > 0
+        ? [...chatReferenceImages]
+        : [...(persistedReferenceContext?.references || []).map((reference) => reference.src)];
+    const currentComposerSegments: ChatComposerSegment[] = options?.input === undefined
+      ? replaceChatComposerTextPreservingReferences(chatComposerSegmentsRef.current, currentChatInput)
+      : [{ type: 'text', text: currentChatInput }];
+    const composerReferenceIds = new Set(
+      currentComposerSegments
+        .filter((segment): segment is Extract<ChatComposerSegment, { type: 'reference' }> => segment.type === 'reference')
+        .map((segment) => segment.tokenId)
+    );
+    const currentReferenceContext: AgentReferenceContext | undefined = options?.input === undefined
+      ? {
+          references: resolvedChatReferenceTokens
+            .filter((token) => composerReferenceIds.has(token.id))
+            .map((token) => ({
+              id: token.id,
+              src: token.src,
+              label: token.label,
+              source: token.source,
+              ...(token.canvasItemId ? { canvasItemId: token.canvasItemId } : {}),
+              role: token.role,
+              ...(token.annotationCount ? { annotationCount: token.annotationCount } : {}),
+            })),
+          composerSegments: currentComposerSegments.map((segment) => segment.type === 'text'
+            ? { type: 'text' as const, text: segment.text }
+            : { type: 'reference' as const, referenceId: segment.tokenId }),
+        }
+      : persistedReferenceContext;
     const currentSkill = options?.skill ?? retrySourceMessage?.skill ?? activeSkill;
     const selectedChatProviderId = resolvedChatSelection.providerId || chatProviderId || undefined;
     const selectedChatModelId = resolvedChatSelection.model || chatModelId || undefined;
@@ -8788,7 +10139,7 @@ export default function AIWorkspace() {
         id: userMessageId,
         role: 'user',
         content: currentChatInput,
-        referenceImages: currentReferenceImages.length > 0 ? currentReferenceImages : undefined,
+        referenceContext: currentReferenceContext,
         skill: currentSkill,
       }, {
         id: assistantPlaceholderId,
@@ -8799,7 +10150,7 @@ export default function AIWorkspace() {
       setChatInput('');
       setIsGenerating(true);
       setHasStartedChat(true);
-      setChatReferenceImages([]);
+      clearSentChatReferenceTokens();
       
       try {
         const response = await fetch('/api/skills/jobs', {
@@ -8890,7 +10241,7 @@ export default function AIWorkspace() {
         id: userMessageId,
         role: 'user',
         content: currentChatInput,
-        referenceImages: currentReferenceImages.length > 0 ? currentReferenceImages : undefined,
+        referenceContext: currentReferenceContext,
         skill: currentSkill,
       }, {
         id: assistantPlaceholderId,
@@ -8901,7 +10252,7 @@ export default function AIWorkspace() {
       setChatInput('');
       setIsGenerating(true);
       setHasStartedChat(true);
-      setChatReferenceImages([]);
+      clearSentChatReferenceTokens();
 
       try {
         const response = await fetch('/api/skills/jobs', {
@@ -8978,7 +10329,7 @@ export default function AIWorkspace() {
       id: `msg-${Date.now()}`,
       role: 'user',
       content: currentChatInput,
-      referenceImages: currentReferenceImages.length > 0 ? currentReferenceImages : undefined,
+      referenceContext: currentReferenceContext,
       skill: currentSkill || undefined,
       agentClarificationResponsePayload: effectiveAgentClarification && effectiveAgentClarificationResponse
         ? {
@@ -8989,6 +10340,15 @@ export default function AIWorkspace() {
     };
     const assistantPlaceholderId = `msg-${Date.now()}-assistant-pending`;
     const agentRunId = `agent-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    if (generationMode === 'agent') {
+      setActiveAgentRunMarker({
+        runId: agentRunId,
+        userMessageId: userMessage.id,
+        assistantMessageId: assistantPlaceholderId,
+        startedAt: Date.now(),
+        status: 'running',
+      });
+    }
     
     const messagesForAPI = chatMessages
       .filter(msg => msg.role === 'user' || msg.role === 'assistant')
@@ -9005,7 +10365,7 @@ export default function AIWorkspace() {
     messagesForAPI.push({ role: 'user', content: currentChatInput });
     
     pendingAssistantMessageIdRef.current = assistantPlaceholderId;
-    setChatMessages(prev => [...prev, userMessage, {
+    setChatMessages(prev => [...prev, ...(options?.suppressUserMessage ? [] : [userMessage]), {
       id: assistantPlaceholderId,
       role: 'assistant',
       content: generationMode === 'agent' ? '' : '...',
@@ -9014,10 +10374,10 @@ export default function AIWorkspace() {
         ? createInitialAgentRunProgress(agentRunId)
         : undefined,
     }]);
-    setChatInput('');
+    if (!options?.suppressUserMessage) setChatInput('');
     setIsGenerating(true);
     setHasStartedChat(true);
-    setChatReferenceImages([]);
+    if (!options?.suppressUserMessage) clearSentChatReferenceTokens();
     const processedAgentActionKeysForRun = new Set<string>();
     let runController: AbortController | null = null;
 
@@ -9164,20 +10524,86 @@ export default function AIWorkspace() {
         requestBody.chatProviderId = selectedChatProviderId;
       }
       const clarificationReferenceImages = effectiveAgentClarification?.state.referenceImages || [];
-      const referencesForRequest = currentSkill?.id === 'brand'
+      const baseReferencesForRequest = currentSkill?.id === 'brand'
         ? mergedBrandLogoReferences
         : clarificationReferenceImages.length > 0
           ? clarificationReferenceImages
           : overrideReferencePayload
             ? overrideReferencePayload.referenceImages
             : currentReferenceImages;
-      const referenceLabelsForRequest = currentSkill?.id === 'brand'
+      const baseReferenceLabelsForRequest = currentSkill?.id === 'brand'
         ? mergedBrandLogoReferences.map((_, index) => `image${index + 1}`)
         : clarificationReferenceImages.length > 0
           ? clarificationReferenceImages.map((_, index) => `image${index + 1}`)
           : overrideReferencePayload
             ? overrideReferencePayload.referenceLabels
             : currentReferenceImages.map((_, index) => `image${index + 1}`);
+      const annotationContextForRequest: CanvasAnnotationContext = {
+        ...selectedCanvasAnnotationContext,
+        annotations: selectedCanvasAnnotationContext.annotations.map((annotation) => ({ ...annotation })),
+        annotationItemIds: [...selectedCanvasAnnotationContext.annotationItemIds],
+      };
+      if (
+        generationMode === 'agent' &&
+        annotationContextForRequest.targetImage &&
+        annotationContextForRequest.annotationCount > 0 &&
+        !annotationContextForRequest.ambiguousImageTarget
+      ) {
+        const compositeResult = await uploadAnnotationCompositePreview({
+          context: annotationContextForRequest,
+          items,
+        });
+        if (compositeResult.url) {
+          annotationContextForRequest.compositePreviewUrl = compositeResult.url;
+        }
+        if (compositeResult.error) {
+          annotationContextForRequest.compositePreviewError = compositeResult.error;
+        }
+      }
+      const referencesForRequest = [...baseReferencesForRequest];
+      const referenceLabelsForRequest = [...baseReferenceLabelsForRequest];
+      if (
+        annotationContextForRequest.compositePreviewUrl &&
+        !referencesForRequest.includes(annotationContextForRequest.compositePreviewUrl)
+      ) {
+        referencesForRequest.push(annotationContextForRequest.compositePreviewUrl);
+        referenceLabelsForRequest.push('annotation-preview');
+      }
+      const referenceContextForRequest: AgentReferenceContext | undefined = currentReferenceContext
+        ? {
+            references: currentReferenceContext.references.map((reference) => ({ ...reference })),
+            composerSegments: currentReferenceContext.composerSegments.map((segment) => ({ ...segment })),
+            ...(currentReferenceContext.evidenceImages?.length
+              ? { evidenceImages: currentReferenceContext.evidenceImages.map((evidence) => ({ ...evidence })) }
+              : {}),
+          }
+        : undefined;
+      if (annotationContextForRequest.compositePreviewUrl && referenceContextForRequest) {
+        const targetCanvasItemId = annotationContextForRequest.targetImage?.id;
+        const parentReference = referenceContextForRequest.references.find((reference) => (
+          reference.role === 'annotation_bundle'
+          || Boolean(targetCanvasItemId && reference.canvasItemId === targetCanvasItemId)
+        ));
+        if (parentReference) {
+          const evidenceImages = referenceContextForRequest.evidenceImages || [];
+          if (!evidenceImages.some((evidence) => evidence.src === annotationContextForRequest.compositePreviewUrl)) {
+            evidenceImages.push({
+              id: `${parentReference.id}:annotation-composite`,
+              referenceId: parentReference.id,
+              src: annotationContextForRequest.compositePreviewUrl,
+              kind: 'annotation_composite',
+            });
+          }
+          referenceContextForRequest.evidenceImages = evidenceImages;
+        }
+      }
+      if (referenceContextForRequest !== currentReferenceContext) {
+        setChatMessages((previous) => previous.map((message) => (
+          message.id === userMessage.id
+            ? { ...message, referenceContext: referenceContextForRequest }
+            : message
+        )));
+      }
       const shouldRequestStream = generationMode !== 'image' && referencesForRequest.length === 0;
       if (shouldRequestStream) {
         requestBody.stream = true;
@@ -9201,12 +10627,27 @@ export default function AIWorkspace() {
         topicId: getCurrentSession()?.activeTopicId || 'default',
         messages: messagesForAPI,
         contextEntities,
-        selectedContextEntityIds: options?.selectedContextEntityIds,
+        selectedContextEntityIds: options?.selectedContextEntityIds ?? selectedIds.map((id) => `canvas:${id}`),
         activeSkillId: currentSkill?.id,
         referenceImages: referencesForRequest,
+        referenceContext: referenceContextForRequest,
         canvasContext: {
           itemCount: items.length,
           selectedItemIds: selectedIds,
+          selectedItems: items
+            .filter((item) => selectedIds.includes(item.id))
+            .map((item) => ({
+              id: item.id,
+              type: item.type,
+              textVariant: item.textVariant,
+              text: item.text,
+              src: item.src,
+              x: item.x,
+              y: item.y,
+              width: item.width,
+              height: item.height,
+            })),
+          annotationContext: annotationContextForRequest,
         },
         chatOptions: {
           providerId: selectedChatProviderId,
@@ -9296,12 +10737,20 @@ export default function AIWorkspace() {
               model?: string;
               error?: string;
               message?: string;
+              stage?: string;
+              reason?: 'transport' | 'invalid_reference' | 'invalid_context' | 'invalid_plan' | 'vision_unsupported' | 'vision_unavailable';
+              retryable?: boolean;
+              runId?: string;
+              title?: string;
+              operation?: 'generate' | 'edit';
+              succeeded?: number;
+              failed?: number;
+              addedToCanvas?: boolean;
               intent?: 'chat' | 'image' | 'skill_action';
               summary?: string;
               label?: string;
               skillId?: string;
               source?: 'manual' | 'auto';
-              runId?: string;
               operationId?: string;
               sequence?: number;
               stepId?: string;
@@ -9313,7 +10762,19 @@ export default function AIWorkspace() {
                 type?: string;
                 runId?: string;
                 model?: string;
-                assets?: Array<{ src?: string; naturalWidth?: number; naturalHeight?: number; model?: string; itemId?: string; index?: number; label?: string }>;
+                providerId?: string;
+                sourceReferenceId?: string;
+                presentation?: { title?: string; summary?: string; operation?: 'generate' | 'edit' };
+                assets?: Array<{
+                  src?: string;
+                  naturalWidth?: number;
+                  naturalHeight?: number;
+                  model?: string;
+                  itemId?: string;
+                  index?: number;
+                  label?: string;
+                  promptTrace?: ChatMessage['promptTrace'];
+                }>;
                 batch?: { total?: number; settled?: number; succeeded?: number; failed?: number };
               };
               request?: {
@@ -9348,6 +10809,9 @@ export default function AIWorkspace() {
                 error?: string;
                 delta?: string;
                 message?: string;
+                stage?: string;
+                reason?: 'transport' | 'invalid_reference' | 'invalid_context' | 'invalid_plan' | 'vision_unsupported' | 'vision_unavailable';
+                retryable?: boolean;
                 intent?: 'chat' | 'image' | 'skill_action';
                 summary?: string;
                 label?: string;
@@ -9366,6 +10830,9 @@ export default function AIWorkspace() {
                   type?: string;
                   runId?: string;
                   model?: string;
+                  providerId?: string;
+                  sourceReferenceId?: string;
+                  presentation?: { title?: string; summary?: string; operation?: 'generate' | 'edit' };
                   assets?: Array<{ src?: string; naturalWidth?: number; naturalHeight?: number; model?: string; itemId?: string; index?: number; label?: string }>;
                   batch?: { total?: number; settled?: number; succeeded?: number; failed?: number };
                 };
@@ -9632,7 +11099,16 @@ export default function AIWorkspace() {
             if (event.type === 'client_action' && event.action?.type === 'add_generated_assets') {
               const actionRunId = event.action.runId || agentRunId;
               const assets = (event.action.assets || []).filter(
-                (asset): asset is { src: string; naturalWidth?: number; naturalHeight?: number; model?: string; itemId?: string; index?: number; label?: string } => Boolean(asset.src)
+                (asset): asset is {
+                  src: string;
+                  naturalWidth?: number;
+                  naturalHeight?: number;
+                  model?: string;
+                  itemId?: string;
+                  index?: number;
+                  label?: string;
+                  promptTrace?: ChatMessage['promptTrace'];
+                } => Boolean(asset.src)
               );
               const getAssetActionKey = (asset: typeof assets[number]) => {
                 const itemKey = asset.itemId || (typeof asset.index === 'number' ? `index-${asset.index}` : asset.src);
@@ -9704,12 +11180,25 @@ export default function AIWorkspace() {
                     imageUrl: asset.src,
                     imageName: asset.label || `image ${firstImageNumber + index}`,
                     model: asset.model || resolvedModel,
+                    ...(event.action?.providerId ? { imageProviderId: event.action.providerId } : {}),
+                    ...(event.action?.sourceReferenceId ? { sourceReferenceId: event.action.sourceReferenceId } : {}),
+                    ...(asset.promptTrace ? { promptTrace: asset.promptTrace } : {}),
+                    ...(index === 0 && event.action?.presentation?.title
+                      ? { resultTitle: event.action.presentation.title }
+                      : {}),
+                    ...(index === 0 && event.action?.presentation?.operation
+                      ? { imageOperation: event.action.presentation.operation }
+                      : {}),
                   }));
                   const canvasItems = loadedAssets.map(({ asset, naturalWidth, naturalHeight }, index) => {
                     const displaySize = getConstrainedImageDisplaySize(naturalWidth, naturalHeight);
-                    const spawnPosition = getSpawnPosition(displaySize, firstStreamedOrdinal + index, currentViewport);
+                    const spawnPosition = getSpawnPosition(
+                      displaySize,
+                      firstStreamedOrdinal + index,
+                      currentViewport
+                    );
                     return createImageCanvasItem({
-                      id: `${actionRunId}-asset-${asset.itemId || asset.index || firstStreamedOrdinal + index}-${Date.now()}`,
+                      id: `generated-${Date.now()}-${asset.itemId || asset.index || firstStreamedOrdinal + index}-${index}`,
                       src: asset.src,
                       naturalWidth,
                       naturalHeight,
@@ -9725,10 +11214,15 @@ export default function AIWorkspace() {
                       naturalHeight,
                       source: 'chat',
                       messageId: imageMessages[index]?.id,
+                      operation: event.action?.presentation?.operation,
+                      sourceReferenceId: event.action?.sourceReferenceId,
+                      providerId: event.action?.providerId,
+                      model: asset.model || resolvedModel,
+                      promptTrace: asset.promptTrace,
                     })),
                   );
-                  recordCurrentCanvasUndoSnapshot();
                   setChatMessages(prev => [...prev, ...imageMessages]);
+                  recordCurrentCanvasUndoSnapshot();
                   setItems(prev => [...prev, ...canvasItems]);
                   setImageCount((prev) => prev + loadedAssets.length);
                 }
@@ -9741,11 +11235,38 @@ export default function AIWorkspace() {
               continue;
             }
 
+            if (event.type === 'agent_completion_summary') {
+              const summaryRunId = event.runId || agentRunId;
+              if (
+                event.summary
+                && event.succeeded
+                && event.succeeded > 0
+                && !processedAgentCompletionSummariesRef.current.has(summaryRunId)
+              ) {
+                processedAgentCompletionSummariesRef.current.add(summaryRunId);
+                setChatMessages(prev => [...prev, {
+                  id: `${assistantId}-completion-${summaryRunId}`,
+                  role: 'assistant',
+                  content: event.summary,
+                }]);
+              }
+              continue;
+            }
+
             if (event.type === 'agent_error') {
-              updatePendingAssistantMessage((msg) => ({
-                ...updateAgentRunProgress(msg, { type: 'agent_error' }),
-                taskStatus: 'failed',
-              }));
+              updatePendingAssistantMessage((msg) => {
+                const failedClarificationOwnsMessage = msg.agentClarification?.request.failed === true;
+                return {
+                  ...updateAgentRunProgress(msg, { type: 'agent_error' }),
+                  taskStatus: 'failed',
+                  ...(event.stage === 'planning' && event.message && !failedClarificationOwnsMessage
+                    ? { content: event.message }
+                    : {}),
+                };
+              });
+              if (event.stage === 'planning' && event.retryable) {
+                continue;
+              }
               throw new Error(event.message || event.error || 'Agent 运行失败');
             }
 
@@ -9897,13 +11418,6 @@ export default function AIWorkspace() {
             );
             recordCurrentCanvasUndoSnapshot();
             setItems(prev => [...prev, newItem]);
-            
-            setTimeout(() => {
-              chatContainerRef.current?.scrollTo({
-                top: chatContainerRef.current.scrollHeight,
-                behavior: 'smooth'
-              });
-            }, 100);
           };
           img.src = imageUrl;
         } else {
@@ -9949,6 +11463,7 @@ export default function AIWorkspace() {
           });
     } finally {
       stopStreamTypewriter();
+      if (generationMode === 'agent') setActiveAgentRunMarker(undefined);
       for (const key of processedAgentActionKeysForRun) {
         processedAgentActionsRef.current.delete(key);
       }
@@ -10206,17 +11721,22 @@ export default function AIWorkspace() {
 
   const retryAgentClarification = () => {
     const clarification = pendingAgentClarification;
-    if (!clarification || isGenerating) return;
+    if (!clarification || isGenerating || agentReanalysisInFlightRef.current) return;
+    agentReanalysisInFlightRef.current = true;
     resolveAgentClarificationMessage(clarification.request.id);
     setPendingAgentClarification(null);
     setShowAgentClarificationModal(false);
     void handleGenerate({
-      input: '重新分析需求',
+      input: clarification.state.originalRequest,
       agentClarification: clarification,
+      suppressUserMessage: true,
       agentClarificationResponse: {
         requestId: clarification.request.id,
         retry: true,
+        retryMode: 'replan',
       },
+    }).finally(() => {
+      agentReanalysisInFlightRef.current = false;
     });
   };
 
@@ -10290,6 +11810,7 @@ export default function AIWorkspace() {
           title,
           messages: liveState.chatMessages,
           activeSkill: liveState.activeSkill || null,
+          activeSkillExplicit: Boolean(liveState.activeSkill),
           updatedAt: Date.now(),
         };
       });
@@ -10316,6 +11837,7 @@ export default function AIWorkspace() {
       imageModelId: liveState.imageModelId,
       topics,
       activeTopicId: activeId,
+      activeAgentRun: activeAgentRunMarkerRef.current,
       generatedImageHistory:
         liveState.generatedImageHistoryBySession[session.id] ??
         persistedGeneratedImageHistoryBySessionRef.current[session.id] ??
@@ -10337,10 +11859,28 @@ export default function AIWorkspace() {
 
   const applyResolvedSessionState = useCallback((resolvedState: any) => {
     isHydratingSessionRef.current = true;
+    const interruptedRun = resolvedState.normalizedSession?.activeAgentRun?.status === 'running'
+      ? resolvedState.normalizedSession.activeAgentRun as NonNullable<ProjectSession['activeAgentRun']>
+      : null;
+    const resolvedChatMessages = (resolvedState.chatMessages || []).map((message: ChatMessage) => (
+      interruptedRun && message.id === interruptedRun.assistantMessageId
+        ? {
+            ...message,
+            taskStatus: 'failed' as const,
+            content: message.content || '上次任务因页面异常中断，请重试。',
+            agentRunProgress: message.agentRunProgress
+              ? reduceAgentRunProgress(message.agentRunProgress, { type: 'agent_error' }) || undefined
+              : undefined,
+          }
+        : message
+    ));
+    activeAgentRunMarkerRef.current = undefined;
+    setActiveAgentRunMarker(undefined);
+    setInterruptedRunRecoveryPending(Boolean(interruptedRun));
     syncSessionLiveState({
       items: resolvedState.items,
       connections: resolvedState.connections || [],
-      chatMessages: resolvedState.chatMessages || [],
+      chatMessages: resolvedChatMessages,
       activeSkill: resolvedState.activeSkill || null,
       chatProviderId: resolvedState.normalizedSession?.chatProviderId || '',
       chatModelId: resolvedState.normalizedSession?.chatModelId || '',
@@ -10360,7 +11900,7 @@ export default function AIWorkspace() {
     });
     setItemsState(resolvedState.items);
     setConnectionsState(resolvedState.connections || []);
-    setChatMessagesState(resolvedState.chatMessages || []);
+    setChatMessagesState(resolvedChatMessages);
     setActiveSkillState(resolvedState.activeSkill || null);
     setChatProviderIdState(resolvedState.normalizedSession?.chatProviderId || '');
     setChatModelIdState(resolvedState.normalizedSession?.chatModelId || '');
@@ -10394,6 +11934,10 @@ export default function AIWorkspace() {
   const isHighFrequencyInteractionActive =
     isDragging || isCornerResizing || isPanning || isMarqueeSelecting;
 
+  useLayoutEffect(() => {
+    activeAgentRunMarkerRef.current = activeAgentRunMarker;
+  }, [activeAgentRunMarker]);
+
   const sessionSaveSignal = React.useMemo(
     () => ({
       items,
@@ -10402,6 +11946,7 @@ export default function AIWorkspace() {
       imageCardProviderById,
       imageCardModelById,
       imageCardSizeById,
+      imageCardQualityById,
       imageCardCountById,
       imageCardAspectRatioById,
       connections,
@@ -10413,9 +11958,10 @@ export default function AIWorkspace() {
       viewport,
       imageCount,
       activeSkill,
+      activeAgentRunMarker,
       generatedImageHistoryBySession,
     }),
-    [activeSkill, chatMessages, chatModelId, chatProviderId, connections, generatedImageHistoryBySession, imageCardAspectRatioById, imageCardCountById, imageCardModelById, imageCardPanelDrafts, imageCardProviderById, imageCardQualityById, imageCardSizeById, imageCount, imageModelId, imageProviderId, items, textCardPanelDrafts, viewport]
+    [activeAgentRunMarker, activeSkill, chatMessages, chatModelId, chatProviderId, connections, generatedImageHistoryBySession, imageCardAspectRatioById, imageCardCountById, imageCardModelById, imageCardPanelDrafts, imageCardProviderById, imageCardQualityById, imageCardSizeById, imageCount, imageModelId, imageProviderId, items, textCardPanelDrafts, viewport]
   );
 
   const {
@@ -10440,6 +11986,83 @@ export default function AIWorkspace() {
     isHighFrequencyInteractionActive,
     sessionSaveSignal,
   });
+
+  useEffect(() => {
+    if (!currentSessionId) return;
+    const getMigrationKey = (src: string) => `${currentSessionId}:${src.length}:${src.slice(-64)}`;
+    const pendingSources = Array.from(new Set(
+      chatMessages.flatMap((message) => (
+        message.referenceContext?.references
+          .map((reference) => reference.src)
+          .filter((src) => src.startsWith('data:image/')) || []
+      ))
+    )).filter((src) => !attemptedLegacyChatReferenceMigrationsRef.current.has(getMigrationKey(src)));
+    if (pendingSources.length === 0) return;
+
+    const migrationSessionId = currentSessionId;
+    pendingSources.forEach((src) => attemptedLegacyChatReferenceMigrationsRef.current.add(getMigrationKey(src)));
+    void (async () => {
+      const migrated = new Map<string, string>();
+      for (const [index, src] of pendingSources.entries()) {
+        if (currentSessionIdRef.current !== migrationSessionId) return;
+        try {
+          const response = await fetch('/api/upload', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              imageData: src,
+              fileName: `migrated-chat-reference-${Date.now()}-${index}.png`,
+            }),
+          });
+          const payload = response.ok ? await response.json() : null;
+          if (typeof payload?.url === 'string' && payload.url) migrated.set(src, payload.url);
+        } catch (error) {
+          console.warn('Legacy chat reference migration failed:', error);
+        }
+      }
+      if (currentSessionIdRef.current !== migrationSessionId || migrated.size === 0) return;
+      setChatMessages((messages) => messages.map((message) => {
+        if (!message.referenceContext) return message;
+        let changed = false;
+        const references = message.referenceContext.references.map((reference) => {
+          const migratedSrc = migrated.get(reference.src);
+          if (!migratedSrc) return reference;
+          changed = true;
+          return { ...reference, src: migratedSrc };
+        });
+        const evidenceImages = message.referenceContext.evidenceImages?.map((evidence) => {
+          const migratedSrc = migrated.get(evidence.src);
+          if (!migratedSrc) return evidence;
+          changed = true;
+          return { ...evidence, src: migratedSrc };
+        });
+        return changed ? {
+          ...message,
+          referenceContext: {
+            ...message.referenceContext,
+            references,
+            ...(evidenceImages ? { evidenceImages } : {}),
+          },
+        } : message;
+      }));
+    })();
+  }, [chatMessages, currentSessionId, setChatMessages]);
+
+  useEffect(() => {
+    setVisibleChatMessageLimit(80);
+  }, [currentSessionId]);
+
+  const hiddenChatMessageCount = Math.max(0, chatMessages.length - visibleChatMessageLimit);
+  const visibleChatMessages = React.useMemo(
+    () => chatMessages.slice(Math.max(0, chatMessages.length - visibleChatMessageLimit)),
+    [chatMessages, visibleChatMessageLimit]
+  );
+
+  useEffect(() => {
+    if (!interruptedRunRecoveryPending || !currentSessionId) return;
+    scheduleCurrentSessionSave();
+    setInterruptedRunRecoveryPending(false);
+  }, [currentSessionId, interruptedRunRecoveryPending, scheduleCurrentSessionSave]);
 
   useEffect(() => {
     persistedGeneratedImageHistoryBySessionRef.current = sessions.reduce<Record<string, GeneratedImageHistoryEntry[]>>((result, session) => {
@@ -10565,12 +12188,10 @@ export default function AIWorkspace() {
       .filter((entry) => selectedIds.has(entry.id))
       .map((entry) => entry.src);
 
-    setChatReferenceImages((currentReferences) =>
-      mergeGeneratedHistoryReferences(currentReferences, selectedSources, 14)
-    );
+    appendChatReferenceSources(selectedSources, 'history');
     setSelectedChatHistoryAssetIds([]);
     setShowChatAssetPicker(false);
-  }, [generatedImageHistoryEntries, selectedChatHistoryAssetIds]);
+  }, [appendChatReferenceSources, generatedImageHistoryEntries, selectedChatHistoryAssetIds]);
   
   const currentProjectName = getCurrentSession()?.name || '新画布';
 
@@ -10626,7 +12247,9 @@ export default function AIWorkspace() {
         ...session,
         updatedAt: Date.now(),
         topics: session.topics.map((topic) =>
-          topic.id === session.activeTopicId ? { ...topic, activeSkill: skill } : topic
+          topic.id === session.activeTopicId
+            ? { ...topic, activeSkill: skill, activeSkillExplicit: Boolean(skill) }
+            : topic
         ),
       };
     }));
@@ -10640,6 +12263,7 @@ export default function AIWorkspace() {
       title: '新对话',
       messages: [],
       activeSkill: null,
+      activeSkillExplicit: false,
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
@@ -10765,10 +12389,22 @@ export default function AIWorkspace() {
     }
   };
 
-  const handleCanvasBottomToolbarAction = (action?: CanvasBottomToolbarAction) => {
+  const handleCanvasBottomToolbarAction = (
+    toolId: (typeof CANVAS_BOTTOM_TOOLBAR_ITEMS)[number]['id'],
+    action?: CanvasBottomToolbarAction
+  ) => {
+    if (toolId === 'select' || toolId === 'draw' || toolId === 'text') {
+      clearPendingConnectionMenu();
+      setShowAddNodeMenu(false);
+      setEditingAnnotationTextId(null);
+      setTool(toolId === 'text' ? 'annotation-text' : toolId);
+      return;
+    }
+
     if (!action || action === 'video-placeholder') return;
     clearPendingConnectionMenu();
     setShowAddNodeMenu(false);
+    setTool('select');
 
     if (action === 'add-image-card') {
       addImageCard();
@@ -11779,6 +13415,12 @@ export default function AIWorkspace() {
       }
 
       if (e.key === 'Escape') {
+        if (tool !== 'select' || draftStrokeRef.current) {
+          draftStrokeRef.current = null;
+          setDraftStroke(null);
+          setTool('select');
+          return;
+        }
         if (connectionSessionRef.current) {
           resetConnectionInteraction();
           return;
@@ -11826,7 +13468,7 @@ export default function AIWorkspace() {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
     };
-  }, [selectedId, selectedIds, connectionPointerId, selectedConnectionIds, pendingConnectionMenu, applyViewportScale, clearPendingConnectionMenu, copySelectedCanvasItemsToClipboard, deleteItem, fitCanvasItemsToViewport, hasActiveNonEditableTextSelection, recordCurrentCanvasUndoSnapshot, redoCanvasEdit, resetConnectionInteraction, undoCanvasEdit]);
+  }, [selectedId, selectedIds, connectionPointerId, selectedConnectionIds, pendingConnectionMenu, applyViewportScale, clearPendingConnectionMenu, copySelectedCanvasItemsToClipboard, deleteItem, fitCanvasItemsToViewport, hasActiveNonEditableTextSelection, recordCurrentCanvasUndoSnapshot, redoCanvasEdit, resetConnectionInteraction, tool, undoCanvasEdit]);
 
   useEffect(() => {
     const handleWindowPaste = (e: ClipboardEvent) => {
@@ -11994,20 +13636,45 @@ export default function AIWorkspace() {
   }, [hasActiveAssistantTextSelection]);
 
   useEffect(() => {
-    const container = chatContainerRef.current;
-    if (container) {
-      setTimeout(() => {
-        container.scrollTo({
-          top: container.scrollHeight,
-          behavior: 'smooth'
-        });
-      }, 150);
-    }
-  }, [chatMessages]);
+    const shouldFollowLatest = isChatNearBottomRef.current;
+    const frameId = window.requestAnimationFrame(() => {
+      if (shouldFollowLatest) {
+        scrollChatToBottom('auto');
+      } else {
+        updateChatNearBottomState();
+      }
+    });
+    return () => window.cancelAnimationFrame(frameId);
+  }, [chatMessages, scrollChatToBottom, updateChatNearBottomState]);
+
+  useEffect(() => {
+    const content = chatMessagesContentRef.current;
+    if (!content || typeof ResizeObserver === 'undefined') return;
+    const observer = new ResizeObserver(() => {
+      if (isChatNearBottomRef.current) {
+        scrollChatToBottom('auto');
+      } else {
+        updateChatNearBottomState();
+      }
+    });
+    observer.observe(content);
+    return () => observer.disconnect();
+  }, [chatMessages.length, scrollChatToBottom, updateChatNearBottomState]);
+
+  useEffect(() => {
+    isChatNearBottomRef.current = true;
+    setIsChatNearBottom(true);
+    const frameId = window.requestAnimationFrame(() => scrollChatToBottom('auto'));
+    return () => window.cancelAnimationFrame(frameId);
+  }, [currentSessionId, scrollChatToBottom]);
 
   useEffect(() => {
     syncEditorTextFromState(chatInput);
   }, [chatInput, syncEditorTextFromState]);
+
+  useEffect(() => {
+    syncEditorTextFromState(latestChatInputRef.current);
+  }, [resolvedChatReferenceTokens, syncEditorTextFromState]);
 
   useEffect(() => {
     syncEditorTextFromState(latestChatInputRef.current, true);
@@ -12507,6 +14174,7 @@ export default function AIWorkspace() {
         <CanvasViewport
         canvasRef={canvasRef}
         widthStyle="calc(100% - var(--chat-panel-reserved-width, 0px))"
+        tool={tool}
         isSpacePressed={isSpacePressed}
         isPanning={isPanning}
         viewport={viewport}
@@ -12610,6 +14278,9 @@ export default function AIWorkspace() {
         imageCardSettingsPopoverRef={imageCardSettingsPopoverRef}
         editingTextCardId={editingTextCardId}
         editingTextCardTextareaRef={editingTextCardTextareaRef}
+        editingAnnotationTextId={editingAnnotationTextId}
+        editingAnnotationTextRef={editingAnnotationTextRef}
+        draftStroke={draftStroke}
         onToggleTextPanelProviderMenu={() => {
           setShowTextPanelModelMenu(false);
           setShowTextPanelProviderMenu((prev) => !prev);
@@ -12833,9 +14504,11 @@ export default function AIWorkspace() {
         onSelectedImageCardPanelBlur={commitPendingCanvasUndoSnapshot}
         onSelectedImageCardPanelSubmit={handleSelectedImageCardPanelSubmit}
         onSelectedImageCardPanelCancel={() => handleCancelCanvasImageGenerate(selectedImageCardPanelItem?.id ?? null)}
-        onItemDoubleClick={handleTextCardDoubleClick}
+        onItemDoubleClick={handleCanvasItemDoubleClick}
         onManualTextCardInputChange={handleManualTextCardInputChange}
         onManualTextCardBlur={finalizeManualTextCardEditing}
+        onAnnotationTextChange={handleAnnotationTextChange}
+        onAnnotationTextBlur={finalizeAnnotationTextEditing}
         onImageCardOutputSelect={handleImageCardOutputSelect}
         draggingPanelReference={draggingPanelReference}
         dragOverPanelReference={dragOverPanelReference}
@@ -13641,8 +15314,56 @@ export default function AIWorkspace() {
         className={`workspace-bottom-toolbar absolute bottom-4 z-50 flex -translate-x-1/2 items-center gap-2 rounded-[14px] px-1.5 py-1.5 ${canvasBottomToolbarReservedRightClassName}`}
         style={canvasBottomToolbarStyle}
       >
+        {tool === 'draw' && (
+          <div
+            className="workspace-menu-panel absolute bottom-full left-1/2 mb-2 flex -translate-x-1/2 items-center gap-2 rounded-xl px-2.5 py-2"
+            role="group"
+            aria-label="画笔设置"
+          >
+            <div className="flex items-center gap-1" aria-label="画笔颜色">
+              {ANNOTATION_COLORS.map((color) => (
+                <button
+                  key={color}
+                  type="button"
+                  onClick={() => setAnnotationColor(color)}
+                  className={`h-5 w-5 rounded-full border transition-transform ${
+                    annotationColor === color
+                      ? 'scale-110 border-[var(--workspace-text)] ring-1 ring-[var(--workspace-text)]'
+                      : 'border-[var(--workspace-border)]'
+                  }`}
+                  style={{ backgroundColor: color }}
+                  aria-label={`选择画笔颜色 ${color}`}
+                  aria-pressed={annotationColor === color}
+                />
+              ))}
+            </div>
+            <div className="h-5 w-px bg-[var(--workspace-border)]" />
+            <div className="flex items-center gap-1" aria-label="画笔粗细">
+              {ANNOTATION_STROKE_WIDTHS.map((option) => (
+                <button
+                  key={option.value}
+                  type="button"
+                  onClick={() => setAnnotationStrokeWidth(option.value)}
+                  className={`workspace-control-chip inline-flex h-7 min-w-7 items-center justify-center rounded-lg px-1.5 text-[10px] ${
+                    annotationStrokeWidth === option.value ? 'is-active' : ''
+                  }`}
+                  aria-pressed={annotationStrokeWidth === option.value}
+                  title={`${option.label}画笔`}
+                >
+                  <span
+                    className="block rounded-full bg-current"
+                    style={{ width: 14, height: Math.max(2, Math.min(8, option.value)) }}
+                  />
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
         {CANVAS_BOTTOM_TOOLBAR_ITEMS.map((item) => {
-          const isActive = 'active' in item && item.active === true;
+          const isActive =
+            (item.id === 'select' && tool === 'select') ||
+            (item.id === 'draw' && tool === 'draw') ||
+            (item.id === 'text' && tool === 'annotation-text');
           const svgOpacity = 'svgOpacity' in item ? item.svgOpacity : 0.9;
 
           return (
@@ -13651,7 +15372,7 @@ export default function AIWorkspace() {
               type="button"
               aria-label={item.label}
               title={item.label}
-              onClick={() => handleCanvasBottomToolbarAction('action' in item ? item.action : undefined)}
+              onClick={() => handleCanvasBottomToolbarAction(item.id, 'action' in item ? item.action : undefined)}
               className={`workspace-bottom-toolbar-item inline-flex h-8 w-8 items-center justify-center rounded-[9px] transition-colors ${
                 isActive
                   ? 'is-active'
@@ -13878,13 +15599,37 @@ export default function AIWorkspace() {
 
           {/* Chat Messages */}
           {chatMessages.length > 0 && (
-            <div ref={chatContainerRef} className="panel-scrollbar flex-1 overflow-y-auto px-6 py-4">
-              <div className="space-y-4">
-                {chatMessages.map((msg) => {
+            <div className="relative min-h-0 flex-1">
+              <div
+                ref={chatContainerRef}
+                className="panel-scrollbar h-full overflow-y-auto px-6 py-4"
+                onScroll={handleChatContainerScroll}
+                onWheel={cancelProgrammaticChatScroll}
+                onPointerDown={cancelProgrammaticChatScroll}
+              >
+              <div ref={chatMessagesContentRef} className="space-y-4 pb-11">
+                {hiddenChatMessageCount > 0 && (
+                  <div className="flex justify-center pb-1">
+                    <button
+                      type="button"
+                      className="workspace-control-chip rounded-full px-3 py-1.5 text-[11px]"
+                      onClick={() => setVisibleChatMessageLimit((current) => current + 80)}
+                    >
+                      加载更早的消息（剩余 {hiddenChatMessageCount} 条）
+                    </button>
+                  </div>
+                )}
+                {visibleChatMessages.map((msg) => {
                   const isAgentProgressMessage = msg.role === 'assistant'
                     && shouldShowAgentRunProgress(msg.agentRunProgress);
+                  const userInlineContent = msg.role === 'user'
+                    ? resolveChatMessageInlineContent(msg)
+                    : [];
                   return (
-                    <div key={msg.id} className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                    <div
+                      key={msg.id}
+                      className={`chat-message-window-row flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
+                    >
                   {msg.role === 'user' ? (
                     <div className="flex flex-col items-end max-w-[90%]">
                       {msg.skill && (
@@ -13893,32 +15638,38 @@ export default function AIWorkspace() {
                           <span className="text-[10px] font-bold leading-none">{msg.skill.label}</span>
                         </div>
                       )}
-                      {msg.referenceImages && msg.referenceImages.length > 0 && (
-                        <div className="w-full flex justify-end mb-2">
-                          <div className="flex flex-wrap justify-end gap-2">
-                            {msg.referenceImages.map((img, index) => (
-                              <div key={`${msg.id}-ref-${index}`} className="relative h-16 w-16">
-                                <Image
-                                  src={img}
-                                  alt={`参考图 image${index + 1}`}
-                                  fill
-                                  unoptimized
-                                  sizes="64px"
-                                  className="rounded-md border border-[var(--workspace-border)] object-cover"
-                                />
-                                <span className="absolute left-0 top-0 px-1 py-0.5 rounded-br-md rounded-tl-md bg-black/75 text-white text-[9px] leading-none">
-                                  {`image${index + 1}`}
-                                </span>
-                              </div>
-                            ))}
-                          </div>
-                        </div>
-                      )}
                       <div
-                        className="workspace-message-user panel-scrollbar overflow-y-auto rounded-[22px] p-4"
+                        className="workspace-message-user panel-scrollbar overflow-y-auto rounded-[20px] px-3.5 py-2.5"
                         style={{ maxHeight: '240px' }}
                       >
-                        <p className="text-sm whitespace-pre-wrap">{msg.content}</p>
+                        <div className="text-sm leading-7 whitespace-pre-wrap break-words">
+                          {userInlineContent.map((segment, index) => segment.type === 'text' ? (
+                            <React.Fragment key={`${msg.id}-text-${index}`}>{segment.text}</React.Fragment>
+                          ) : (
+                            <span
+                              key={`${msg.id}-reference-${segment.id}-${index}`}
+                              className="workspace-reference-token mx-0.5 inline-flex h-7 max-w-[172px] items-center gap-1 rounded-lg px-1.5 align-middle text-[11px] leading-none"
+                              title={segment.label}
+                            >
+                              <span className="relative h-5 w-5 shrink-0 overflow-hidden rounded-md">
+                                <Image
+                                  src={segment.src}
+                                  alt=""
+                                  fill
+                                  unoptimized
+                                  sizes="20px"
+                                  className="object-cover"
+                                />
+                              </span>
+                              <span className="min-w-0 truncate font-medium">{segment.label}</span>
+                              {segment.annotationCount ? (
+                                <span className="shrink-0 rounded-md bg-red-500/12 px-1 py-0.5 text-[9px] font-medium text-red-500">
+                                  {segment.annotationCount} 条
+                                </span>
+                              ) : null}
+                            </span>
+                          ))}
+                        </div>
                       </div>
                     </div>
                   ) : msg.role === 'skill' ? (
@@ -14126,7 +15877,14 @@ export default function AIWorkspace() {
                           <span>{getPendingAgentDecisionLabel(msg)}</span>
                         </button>
                       )}
-                      {msg.imageName && <div className="mb-1.5 text-sm font-medium text-zinc-200">{msg.imageName}</div>}
+                      {msg.imageUrl && msg.resultTitle && msg.model && (
+                        <div className="workspace-text-muted mb-2 text-xs">{msg.model}</div>
+                      )}
+                      {(msg.resultTitle || msg.imageName) && (
+                        <div className="workspace-text-primary mb-2 text-sm font-semibold">
+                          {msg.resultTitle || msg.imageName}
+                        </div>
+                      )}
                       {msg.imageUrl && (
                         <Image
                           src={msg.imageUrl}
@@ -14138,13 +15896,27 @@ export default function AIWorkspace() {
                           className="h-auto w-full rounded-lg"
                         />
                       )}
-                      {!isAgentProgressMessage && msg.model && <div className="mt-1.5 text-xs text-zinc-500">模型: {msg.model}</div>}
+                      {!isAgentProgressMessage && msg.model && !msg.resultTitle && (
+                        <div className="workspace-text-muted mt-1.5 text-xs">模型: {msg.model}</div>
+                      )}
                     </div>
                   )}
                     </div>
                   );
                 })}
               </div>
+              </div>
+              {!isChatNearBottom && (
+                <button
+                  type="button"
+                  className="workspace-chat-scroll-bottom absolute bottom-3 left-1/2 z-10 inline-flex h-8 w-8 -translate-x-1/2 items-center justify-center rounded-full transition-[background-color,border-color,color,opacity,transform] duration-150 hover:-translate-x-1/2 hover:scale-105 active:-translate-x-1/2 active:scale-95"
+                  onClick={() => scrollChatToBottom()}
+                  aria-label="滚动到最新消息"
+                  title="滚动到最新消息"
+                >
+                  <ArrowDown size={15} strokeWidth={2} />
+                </button>
+              )}
             </div>
           )}
 
@@ -14187,7 +15959,7 @@ export default function AIWorkspace() {
             <AgentDecisionPopover
               title={pendingAgentClarification.request.question}
               options={pendingAgentClarification.request.failed
-                ? [{ id: 'retry', label: '重新分析需求', description: '保留当前任务并重新检查需求。', recommended: true }]
+                ? [{ id: 'retry', label: '重新分析', description: '保留当前任务并发起一次新的多模态分析。', recommended: true, disabled: isGenerating }]
                 : pendingAgentClarification.request.options.map((option, index) => ({
                     id: option.id,
                     label: option.label,
@@ -14199,7 +15971,8 @@ export default function AIWorkspace() {
                 else submitAgentClarification(false, optionId);
               }}
               onClose={closeAgentClarificationModal}
-              {...(!['creative_direction', 'context_reference'].includes(pendingAgentClarification.request.dimension)
+              {...(!pendingAgentClarification.request.failed
+                && !['creative_direction', 'context_reference'].includes(pendingAgentClarification.request.dimension)
                 ? { skipLabel: '按当前信息开始制作', onSkip: () => submitAgentClarification(true) }
                 : {})}
               {...(!pendingAgentClarification.request.failed
@@ -14234,38 +16007,6 @@ export default function AIWorkspace() {
             />
           )}
 
-          {/* Reference Images */}
-          {chatReferenceImages.length > 0 && (
-            <div className="workspace-divider-dark flex-shrink-0 border-t px-4 py-2">
-              <div className="flex flex-wrap gap-2">
-                {chatReferenceImages.map((img, index) => (
-                  <div
-                    key={index}
-                    draggable
-                    onDragStart={() => handleReferenceDragStart(index)}
-                    onDragOver={(e) => handleReferenceDragOver(e, index)}
-                    onDrop={(e) => handleReferenceDrop(e, index)}
-                    onDragEnd={handleReferenceDragEnd}
-                    className={`relative h-14 w-14 group cursor-move transition-all ${draggingImageIndex === index ? 'opacity-50' : ''} ${dragOverImageIndex === index ? 'rounded-md ring-1 ring-zinc-100' : ''}`}
-                  >
-                    <Image
-                      src={img}
-                      alt={`参考图 ${index + 1}`}
-                      fill
-                      unoptimized
-                      sizes="56px"
-                      className="rounded-md border border-white/10 object-cover"
-                    />
-                    <span className="absolute left-0 top-0 px-1 py-0.5 rounded-br-md rounded-tl-md bg-black/75 text-white text-[9px] leading-none">
-                      {`image${index + 1}`}
-                    </span>
-                    <button onClick={() => removeChatImage(index)} className="absolute -top-1 -right-1 w-4 h-4 bg-red-500 text-white rounded-full text-xs flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">×</button>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
           {/* Input Bar */}
           <div className="p-4 flex-shrink-0">
             <input ref={chatFileInputRef} type="file" accept="image/*" multiple className="hidden" onChange={handleChatImageUpload} />
@@ -14282,12 +16023,39 @@ export default function AIWorkspace() {
                     onInput={handleChatEditorInput}
                     onPaste={handleChatPaste}
                     onKeyDown={handleChatEditorKeyDown}
-                    onFocus={() => setChatInputFocused(true)}
-                    onBlur={() => setChatInputFocused(false)}
+                    onMouseDown={(event) => {
+                      const target = event.target as HTMLElement;
+                      if (target.closest('[data-reference-action]')) {
+                        event.preventDefault();
+                      }
+                    }}
+                    onClick={(event) => {
+                      const target = event.target as HTMLElement;
+                      const action = target.closest('[data-reference-action]')?.getAttribute('data-reference-action');
+                      if (!action) return;
+                      const tokenNode = target.closest(REFERENCE_TOKEN_SELECTOR) as HTMLElement | null;
+                      const tokenId = tokenNode?.getAttribute('data-reference-id');
+                      const token = resolvedChatReferenceTokens.find((candidate) => candidate.id === tokenId);
+                      if (!token) return;
+                      event.stopPropagation();
+                      if (action === 'pin') toggleChatReferenceTokenPin(token);
+                      if (action === 'retry') retryChatReferenceUpload(token);
+                      if (action === 'remove') removeChatReferenceToken(token);
+                    }}
+                    onKeyUp={rememberChatEditorCaretOffset}
+                    onMouseUp={rememberChatEditorCaretOffset}
+                    onFocus={() => {
+                      setChatInputFocused(true);
+                      rememberChatEditorCaretOffset();
+                    }}
+                    onBlur={() => {
+                      rememberChatEditorCaretOffset();
+                      setChatInputFocused(false);
+                    }}
                     className="panel-scrollbar w-full overflow-y-auto bg-transparent text-sm leading-5 outline-none whitespace-pre-wrap break-words"
                     style={{ minHeight: '72px', maxHeight: '240px', height: `${chatInputHeight}px` }}
                   />
-                  {!chatInput.trim() && !activeSkill && !chatInputFocused && (
+                  {!chatInput.trim() && !activeSkill && resolvedChatReferenceTokens.length === 0 && !chatInputFocused && (
                     <span className="workspace-text-muted pointer-events-none absolute left-0 top-0 text-sm leading-5">
                       请输入你的设计需求
                     </span>
@@ -14350,7 +16118,7 @@ export default function AIWorkspace() {
                           <div>
                             <div className="text-xs font-semibold">素材库</div>
                             <div className="workspace-text-muted mt-0.5 text-[10px]">
-                              还可添加 {Math.max(0, 14 - chatReferenceImages.length)} 张参考图
+                              还可添加 {Math.max(0, 14 - chatReferenceTokenCount)} 张参考图
                             </div>
                           </div>
                           <button
@@ -14371,7 +16139,7 @@ export default function AIWorkspace() {
                             {generatedImageHistoryEntries.map((entry, index) => {
                               const isAttached = chatReferenceImages.includes(entry.src);
                               const isSelected = selectedChatHistoryAssetIds.includes(entry.id);
-                              const selectionLimitReached = selectedChatHistoryAssetIds.length >= Math.max(0, 14 - chatReferenceImages.length);
+                              const selectionLimitReached = selectedChatHistoryAssetIds.length >= Math.max(0, 14 - chatReferenceTokenCount);
                               return (
                                 <button
                                   key={entry.id}
@@ -14674,7 +16442,7 @@ export default function AIWorkspace() {
                 <button
                     data-chat-composer-control="send"
                     onClick={isGenerating ? handleCancelGenerate : () => { void handleGenerate(); }}
-                    disabled={!isGenerating && !chatInput.trim()}
+                    disabled={!isGenerating && (!chatInput.trim() || hasPendingChatReferenceUploads)}
                     aria-label={isGenerating ? '终止任务' : '发送'}
                     title={isGenerating ? '终止任务' : '发送'}
                     className="ml-2 inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-zinc-950 text-white transition-[transform,opacity] hover:scale-[1.03] active:scale-95 disabled:cursor-not-allowed disabled:opacity-30 dark:bg-zinc-100 dark:text-zinc-950"
@@ -14697,6 +16465,11 @@ export default function AIWorkspace() {
         .panel-scrollbar {
           scrollbar-width: thin;
           scrollbar-color: rgba(161, 161, 170, 0.34) rgba(255, 255, 255, 0.04);
+        }
+
+        .chat-message-window-row {
+          content-visibility: auto;
+          contain-intrinsic-size: auto 96px;
         }
 
         [data-assistant-selectable],

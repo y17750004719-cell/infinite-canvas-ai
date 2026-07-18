@@ -148,6 +148,8 @@ export function buildPromptOptimizerMessages(userPrompt, skillLabel, {
   skillContent = '',
   promptStyle = 'text',
   plannerItems = [],
+  imageTask = null,
+  visualContext = null,
 } = {}) {
   const isSeries = batchMode === 'series' && outputCount > 1;
   const isComposite = batchMode === 'composite';
@@ -160,6 +162,25 @@ export function buildPromptOptimizerMessages(userPrompt, skillLabel, {
       ? 'finalPrompt and every item.prompt remain string fields in this outer response, but each string must contain one complete valid JSON object following the active skill template. Escape the nested JSON correctly. Do not flatten it into prose.'
       : 'Write finalPrompt in precise English, but preserve brand names, literal copy, product names, and explicit user constraints verbatim.',
     'Improve composition, materials, lighting, and art direction without changing model, size, aspect ratio, or quality. Outer image count is handled by orchestration and must not appear as an instruction inside a single-image prompt.',
+    ...(imageTask?.operation === 'edit' ? [
+      'The planning model has authoritatively classified this as an edit of a supplied target image. Do not reinterpret it as a new design or a style-reference generation.',
+      'The first supplied image is the mandatory edit target. Every later supplied image is supporting material, content, style, or layout reference only and must never replace the target canvas.',
+      `Authoritative edit instruction: ${String(imageTask.instruction || '').trim()}`,
+      `Required changes: ${JSON.stringify(Array.isArray(imageTask.mustChange) ? imageTask.mustChange : [])}`,
+      `Required preservation: ${JSON.stringify(Array.isArray(imageTask.mustPreserve) ? imageTask.mustPreserve : [])}`,
+      ...(visualContext?.references?.length
+        ? [`Planner visual grounding: ${JSON.stringify(visualContext.references.map((reference) => ({
+            referenceId: reference.referenceId,
+            summary: reference.summary,
+            salientSubjects: reference.salientSubjects,
+            visibleText: reference.visibleText,
+            styleAndComposition: reference.styleAndComposition,
+            inferredRole: reference.inferredRole,
+          })))}`]
+        : []),
+      'Write finalPrompt as an instruction to edit the first supplied image. Modify only the required changes. Preserve every unspecified visual element. Preserve every required element, and do not introduce new copy, layout, subjects, scenery, camera changes, or restyling unless required by the edit contract.',
+      'Never rewrite this edit as “create a new image inspired by the references” or any equivalent reference-based generation instruction.',
+    ] : []),
     isComposite
       ? 'The user explicitly wants one composite image. Describe one intentional grid or multi-panel canvas and map the requested content across its panels.'
       : 'Every finalPrompt and item.prompt describes exactly one standalone image on one canvas. Never request a collage, contact sheet, split screen, multi-panel layout, or grid of alternatives.',

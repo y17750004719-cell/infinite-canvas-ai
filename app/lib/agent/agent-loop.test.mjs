@@ -294,13 +294,67 @@ test('public tool event helper keeps image URLs only in client actions for every
       toolCallId: `tool-${source}`,
       toolName: 'generate_image',
       rawResult: {
-        result: { outputs: [{ localUrl: `https://example.test/${source}.png?token=secret` }] },
+        result: { outputs: [{
+          localUrl: `https://example.test/${source}.png?token=secret`,
+          promptTrace: {
+            sourcePrompt: 'replace the bottle',
+            finalPrompt: 'Edit the first reference image and replace only the bottle.',
+            optimized: true,
+            operation: 'edit',
+            targetReferenceId: 'scene-token',
+          },
+        }] },
         requestStats: { requested: 1, succeeded: 1, failed: 0 },
       },
     });
     assert.deepEqual(events.map((event) => event.type), ['tool_result', 'client_action']);
     assert.doesNotMatch(JSON.stringify(events[0]), /https?:\/\/|token=secret/);
     assert.match(JSON.stringify(events[1]), new RegExp(`${source}\\.png`));
+    assert.equal(events[1].action.assets[0].promptTrace.finalPrompt, 'Edit the first reference image and replace only the bottle.');
+  }
+});
+
+test('public tool event helper forwards image presentation only to the generated-assets action', () => {
+  const events = agentLoopModule.createAgentToolResultEvents({
+    runId: 'run-presented',
+    toolCallId: 'tool-presented',
+    toolName: 'generate_image',
+    rawResult: {
+      result: { outputs: [{ localUrl: 'https://example.test/presented.png?token=secret' }] },
+      requestStats: { requested: 1, succeeded: 1, failed: 0 },
+      presentation: {
+        title: '  Vogue Cover – Fashionable Dogs  ',
+        summary: '  已将人物替换为时尚的狗。  ',
+        operation: 'edit',
+      },
+    },
+  });
+
+  assert.deepEqual(events[1].action.presentation, {
+    title: 'Vogue Cover – Fashionable Dogs',
+    summary: '已将人物替换为时尚的狗。',
+    operation: 'edit',
+  });
+  assert.doesNotMatch(JSON.stringify(events[0]), /Fashionable Dogs|时尚的狗|https?:\/\//);
+  assert.match(JSON.stringify(events[1]), /presented\.png/);
+});
+
+test('public tool event helper ignores incomplete or invalid image presentation metadata', () => {
+  for (const presentation of [
+    { title: '', summary: '完成', operation: 'generate' },
+    { title: '标题', summary: '', operation: 'edit' },
+    { title: '标题', summary: '完成', operation: 'analysis' },
+  ]) {
+    const events = agentLoopModule.createAgentToolResultEvents({
+      runId: 'run-invalid-presentation',
+      toolCallId: 'tool-invalid-presentation',
+      toolName: 'generate_image',
+      rawResult: {
+        assets: [{ src: 'https://example.test/asset.png' }],
+        presentation,
+      },
+    });
+    assert.equal(events[1].action.presentation, undefined);
   }
 });
 

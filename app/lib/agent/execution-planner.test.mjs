@@ -3,8 +3,10 @@ import assert from 'node:assert/strict';
 
 import {
   AGENT_EXECUTION_PLAN_TOOL,
+  buildAgentExecutionPlanTool,
   buildAgentExecutionPlannerMessages,
   buildFallbackAgentExecutionPlan,
+  executionPlanToBrief,
   executionPlanToImageDeliveryPlan,
   parseAgentExecutionPlan,
   planAgentExecutionRequest,
@@ -20,23 +22,46 @@ const manifests = [{
   allowedTools: ['generate_image'],
   executionMode: 'image_pipeline',
   promptStyle: 'json-text',
+  generationContract: 'Return supplier-ready valid JSON text prompts.',
   enabled: true,
 }];
 
 function plan(overrides = {}) {
-  return {
-    version: 1,
+  const mustChange = ['Create the requested deliverables'];
+  const mustPreserve = ['Literal copy and explicit constraints'];
+  const literalCopy = ['DISASSEMBLED GODS', 'Truths are torn, not told'];
+  const finalPrompt = (variation) => JSON.stringify({
+    subject: 'fragmented Greek statue',
+    variation,
+    mustChange,
+    mustPreserve,
+    literalCopy,
+  });
+  const result = {
+    version: 2,
     intent: 'image',
     skillId: 'magazine-poster',
     confidence: 'high',
     needsClarification: false,
     clarification: null,
     contextReferences: [],
+    imageTask: {
+      operation: 'generate',
+      targetReferenceId: null,
+      supportingReferenceIds: [],
+      instruction: 'Generate the requested standalone poster series.',
+      mustChange,
+      mustPreserve,
+    },
+    presentation: {
+      title: 'Generated Poster Series',
+      completionSummary: 'Created the requested standalone poster series.',
+    },
     brief: {
       deliverable: 'four standalone posters',
       subject: 'fragmented Greek statue',
       style: ['surreal hand-cut collage'],
-      literalCopy: ['DISASSEMBLED GODS', 'Truths are torn, not told'],
+      literalCopy,
       constraints: ['gold and red stripes across the eyes'],
     },
     delivery: {
@@ -53,9 +78,44 @@ function plan(overrides = {}) {
         { index: 4, label: 'Poster 4', subject: 'Greek statue bust', variation: 'layered diagonal layout' },
       ],
     },
+    generation: {
+      promptFormat: 'json-text',
+      prompt: finalPrompt('shared editorial system'),
+      items: [
+        { index: 1, label: 'Poster 1', prompt: finalPrompt('asymmetric editorial layout') },
+        { index: 2, label: 'Poster 2', prompt: finalPrompt('centered monumental layout') },
+        { index: 3, label: 'Poster 3', prompt: finalPrompt('vertical typographic layout') },
+        { index: 4, label: 'Poster 4', prompt: finalPrompt('layered diagonal layout') },
+      ],
+    },
     execution: { kind: 'image_pipeline', requiresConfirmation: true, tool: 'generate_image' },
     ...overrides,
   };
+  if (overrides.delivery && !Object.hasOwn(overrides, 'generation')) {
+    result.generation = {
+      ...result.generation,
+      items: result.delivery.mode === 'series'
+        ? result.generation.items.slice(0, result.delivery.outputCount)
+        : [],
+    };
+  }
+  if (overrides.imageTask && !Object.hasOwn(overrides, 'generation')) {
+    const contractPrompt = (variation) => JSON.stringify({
+      subject: result.brief.subject,
+      variation,
+      mustChange: result.imageTask.mustChange,
+      mustPreserve: result.imageTask.mustPreserve,
+      literalCopy: result.brief.literalCopy,
+    });
+    result.generation = {
+      ...result.generation,
+      prompt: contractPrompt('shared direction'),
+      items: result.delivery.mode === 'series'
+        ? result.delivery.items.map((item) => ({ index: item.index, label: item.label, prompt: contractPrompt(item.variation) }))
+        : [],
+    };
+  }
+  return result;
 }
 
 function toolResponse(value, content = '') {
@@ -73,6 +133,21 @@ function toolResponse(value, content = '') {
         }],
       },
     }],
+  };
+}
+
+function visualContext(referenceIds, targetReferenceId = null, confidence = null) {
+  return {
+    references: referenceIds.map((referenceId) => ({
+      referenceId,
+      summary: referenceId === targetReferenceId ? 'A magazine cover with a central fashion subject.' : 'A visual reference image.',
+      salientSubjects: referenceId === targetReferenceId ? ['fashion subject'] : [],
+      visibleText: referenceId === targetReferenceId ? ['VOGUE'] : [],
+      styleAndComposition: 'Editorial composition with a strong central hierarchy.',
+      inferredRole: referenceId === targetReferenceId ? 'edit_target' : 'style_reference',
+    })),
+    targetSelectionReason: targetReferenceId ? 'The user asked to modify this supplied cover.' : null,
+    targetSelectionConfidence: confidence,
   };
 }
 
@@ -98,29 +173,132 @@ test('planner prompt requires the structured tool and separates collage style fr
   assert.match(messages[0].content, /must call submit_agent_execution_plan exactly once/i);
   assert.match(messages[0].content, /collage, hand-cut collage.*visual style or content/i);
   assert.match(messages[0].content, /composite only when each output file/i);
+  assert.match(messages[0].content, /only analysis request/i);
   assert.match(messages[1].content, /planningGuidance/);
+  assert.match(messages[1].content, /generationContract/);
   assert.equal(AGENT_EXECUTION_PLAN_TOOL.function.name, 'submit_agent_execution_plan');
   assert.deepEqual(AGENT_EXECUTION_PLAN_TOOL.function.parameters.required, ['plan']);
 });
 
-test('planner tool schema is Gemini-compatible while runtime validation enforces version 1', () => {
+test('planner receives sanitized inline reference context and is the sole semantic intent decider', () => {
+  const messages = buildAgentExecutionPlannerMessages({
+    userMessage: '把它换成狗',
+    manifests,
+    referenceContext: {
+      references: [{
+        id: 'vogue-cover',
+        src: 'https://private.example/original.png',
+        label: 'Vogue Cover',
+        source: 'canvas',
+        canvasItemId: 'canvas-1',
+        role: 'edit_target',
+        annotationCount: 2,
+      }],
+      composerSegments: [
+        { type: 'text', text: '把 ' },
+        { type: 'reference', referenceId: 'vogue-cover' },
+        { type: 'text', text: ' 换成狗' },
+      ],
+    },
+    canvasContext: {
+      itemCount: 1,
+      selectedItemIds: ['canvas-1'],
+      selectedItems: [{
+        id: 'canvas-1',
+        type: 'image',
+        src: 'https://private.example/canvas.png',
+        x: 10,
+        y: 20,
+        width: 300,
+        height: 400,
+      }],
+      annotationContext: {
+        targetImage: { id: 'canvas-1', src: 'https://private.example/target.png', x: 10, y: 20, width: 300, height: 400 },
+        annotations: [],
+        annotationItemIds: [],
+        annotationCount: 0,
+        ambiguousImageTarget: false,
+        compositePreviewUrl: 'https://private.example/preview.png',
+      },
+    },
+  });
+  assert.match(messages[0].content, /only component that decides whether the user wants chat, analysis, a new image, or an edit/i);
+  assert.match(messages[0].content, /runtime will not infer intent from keywords or regular expressions/i);
+  assert.ok(Array.isArray(messages[1].content));
+  const structuredPart = messages[1].content[0];
+  assert.equal(structuredPart.type, 'text');
+  const payload = JSON.parse(structuredPart.text.split('\n').slice(1).join('\n'));
+  assert.deepEqual(payload.referenceContext, {
+    references: [{
+      id: 'vogue-cover',
+      label: 'Vogue Cover',
+      source: 'canvas',
+      canvasItemId: 'canvas-1',
+      role: 'edit_target',
+      annotationCount: 2,
+    }],
+    composerSegments: [
+      { type: 'text', text: '把 ' },
+      { type: 'reference', referenceId: 'vogue-cover' },
+      { type: 'text', text: ' 换成狗' },
+    ],
+  });
+  assert.doesNotMatch(structuredPart.text, /private\.example/);
+  assert.ok(messages[1].content.some((part) => part.type === 'image_url' && part.image_url.url === 'https://private.example/original.png'));
+  const imageIndex = messages[1].content.findIndex((part) => part.type === 'image_url');
+  assert.match(messages[1].content[imageIndex - 1].text, /Reference ID: vogue-cover/);
+  assert.deepEqual(payload.canvasContext.selectedItems[0], {
+    id: 'canvas-1',
+    type: 'image',
+    x: 10,
+    y: 20,
+    width: 300,
+    height: 400,
+  });
+});
+
+test('planner tool schema is Gemini-compatible while runtime validation enforces version 2', () => {
   const versionSchema = AGENT_EXECUTION_PLAN_TOOL.function.parameters.properties.plan.properties.version;
   assert.equal(versionSchema.type, 'integer');
   assert.equal(versionSchema.enum, undefined);
-  assert.match(versionSchema.description, /must be 1/i);
+  assert.match(versionSchema.description, /must be 2/i);
   assertStringEnums(AGENT_EXECUTION_PLAN_TOOL.function.parameters);
 
   const options = {
     allowedSkillIds: ['magazine-poster'],
     skillToolsById: { 'magazine-poster': ['generate_image'] },
   };
-  const valid = validateAgentExecutionPlan(plan({ version: 1 }), options);
+  const valid = validateAgentExecutionPlan(plan({ version: 2 }), options);
   assert.ok(valid.plan);
-  assert.equal(valid.plan.version, 1);
+  assert.equal(valid.plan.version, 2);
 
-  const invalid = validateAgentExecutionPlan(plan({ version: 2 }), options);
+  const invalid = validateAgentExecutionPlan(plan({ version: 1 }), options);
   assert.equal(invalid.plan, null);
   assert.ok(invalid.validationErrors.some((entry) => entry.path === 'version' && entry.code === 'unsupported_version'));
+});
+
+test('planner tool schema keeps image references and context entities in separate id namespaces', () => {
+  const tool = buildAgentExecutionPlanTool({
+    contextEntities: [{ id: 'canvas:scene', label: 'Scene' }],
+    referenceContext: {
+      references: [{ id: 'token:bottle', src: '/api/local-assets/bottle.png', label: 'Bottle', source: 'upload', role: 'reference' }],
+      composerSegments: [{ type: 'reference', referenceId: 'token:bottle' }],
+    },
+  });
+  const schema = tool.function.parameters.properties.plan;
+  assert.deepEqual(schema.properties.contextReferences.items.enum, ['canvas:scene']);
+  assert.deepEqual(schema.properties.visualContext.properties.references.items.properties.referenceId.enum, ['token:bottle']);
+  assert.deepEqual(schema.properties.imageTask.properties.targetReferenceId.enum, ['token:bottle']);
+  assert.deepEqual(schema.properties.imageTask.properties.supportingReferenceIds.items.enum, ['token:bottle']);
+  assert.deepEqual(tool.function.parameters.required, ['plan']);
+
+  const noContextTool = buildAgentExecutionPlanTool({
+    referenceContext: {
+      references: [{ id: 'token:image', src: 'https://example.test/image.png', label: 'Image', source: 'upload', role: 'reference' }],
+      composerSegments: [],
+    },
+  });
+  assert.equal(noContextTool.function.parameters.properties.plan.properties.contextReferences.maxItems, 0);
 });
 
 test('planner parses a four-poster collage-style request as a standalone series', () => {
@@ -170,6 +348,356 @@ test('field-level validation fills safe optional fields without guessing semanti
   assert.ok(invalid.validationErrors.some((entry) => entry.path === 'delivery.mode' && entry.code === 'required'));
 });
 
+test('imageTask and presentation are model-authored optional fields with structural reference validation', () => {
+  const imageTask = {
+    operation: 'edit',
+    targetReferenceId: 'vogue-cover',
+    supportingReferenceIds: ['style-board'],
+    instruction: '将封面人物替换为两只时尚的狗。',
+    mustChange: ['人物主体替换为狗'],
+    mustPreserve: ['杂志版式', '原有文字', '红色背景'],
+  };
+  const presentation = {
+    title: 'Vogue Cover – Fashionable Dogs',
+    completionSummary: '将人物替换为时尚的狗，并保留原有封面设计。',
+  };
+  const options = {
+    allowedSkillIds: ['magazine-poster'],
+    skillToolsById: { 'magazine-poster': ['generate_image'] },
+    referenceIds: ['vogue-cover', 'style-board'],
+  };
+  const groundedVisualContext = visualContext(['vogue-cover', 'style-board'], 'vogue-cover', 'high');
+  const validated = validateAgentExecutionPlan(plan({ visualContext: groundedVisualContext, imageTask, presentation }), options);
+  assert.ok(validated.plan);
+  assert.deepEqual(validated.plan.imageTask, imageTask);
+  assert.deepEqual(validated.plan.presentation, presentation);
+
+  const brief = executionPlanToBrief(validated.plan, '换成狗');
+  assert.match(brief.plainText, /将封面人物替换为两只时尚的狗。/);
+  assert.match(brief.plainText, /人物主体替换为狗/);
+  assert.match(brief.plainText, /杂志版式/);
+  assert.deepEqual(brief.mustPreserve.slice(0, 3), ['杂志版式', '原有文字', '红色背景']);
+
+  const missingTarget = validateAgentExecutionPlan(plan({
+    visualContext: groundedVisualContext,
+    imageTask: { ...imageTask, targetReferenceId: null },
+  }), options);
+  assert.equal(missingTarget.plan, null);
+  assert.ok(missingTarget.validationErrors.some((entry) => entry.path === 'imageTask.targetReferenceId' && entry.code === 'required'));
+
+  const unknownTarget = validateAgentExecutionPlan(plan({
+    visualContext: groundedVisualContext,
+    imageTask: { ...imageTask, targetReferenceId: 'missing' },
+  }), options);
+  assert.equal(unknownTarget.plan, null);
+  assert.ok(unknownTarget.validationErrors.some((entry) => entry.path === 'imageTask.targetReferenceId' && entry.code === 'unknown_reference'));
+
+  const duplicateTarget = validateAgentExecutionPlan(plan({
+    visualContext: groundedVisualContext,
+    imageTask: { ...imageTask, supportingReferenceIds: ['vogue-cover', 'style-board'] },
+  }), options);
+  assert.ok(duplicateTarget.plan);
+  assert.deepEqual(duplicateTarget.plan.imageTask.supportingReferenceIds, ['style-board']);
+  assert.ok(duplicateTarget.normalizedFields.includes('imageTask.supportingReferenceIds'));
+
+  const missingContractArray = structuredClone(plan({ imageTask }));
+  delete missingContractArray.imageTask.mustPreserve;
+  const incompleteContract = validateAgentExecutionPlan(missingContractArray, options);
+  assert.equal(incompleteContract.plan, null);
+  assert.ok(incompleteContract.validationErrors.some((entry) => entry.path === 'imageTask.mustPreserve' && entry.code === 'required'));
+});
+
+test('image-bearing plans require complete grounded visual context and reject ambiguous edit execution', () => {
+  const options = {
+    allowedSkillIds: ['magazine-poster'],
+    skillToolsById: { 'magazine-poster': ['generate_image'] },
+    referenceIds: ['person-photo', 'building-photo'],
+  };
+  const imageTask = {
+    operation: 'edit',
+    targetReferenceId: 'person-photo',
+    supportingReferenceIds: [],
+    instruction: 'Replace the visible person with a dog.',
+    mustChange: ['person becomes a dog'],
+    mustPreserve: ['background', 'composition'],
+  };
+
+  const missingVisualContext = validateAgentExecutionPlan(plan({ imageTask }), options);
+  assert.equal(missingVisualContext.plan, null);
+  assert.ok(missingVisualContext.validationErrors.some((entry) => entry.path === 'visualContext' && entry.code === 'required'));
+
+  const incompleteVisualContext = visualContext(['person-photo'], 'person-photo', 'high');
+  const missingReference = validateAgentExecutionPlan(plan({
+    visualContext: incompleteVisualContext,
+    imageTask,
+  }), options);
+  assert.equal(missingReference.plan, null);
+  assert.ok(missingReference.validationErrors.some((entry) => entry.code === 'missing_reference'));
+
+  const lowConfidence = validateAgentExecutionPlan(plan({
+    visualContext: visualContext(['person-photo', 'building-photo'], 'person-photo', 'low'),
+    imageTask,
+  }), options);
+  assert.equal(lowConfidence.plan, null);
+  assert.ok(lowConfidence.validationErrors.some((entry) => entry.code === 'ambiguous_target'));
+
+  const clarificationPlan = plan({
+    needsClarification: true,
+    clarification: {
+      dimension: 'edit_target',
+      question: '你希望修改哪一张图片？',
+      options: [
+        { id: 'person-photo', label: '人物图', answer: '修改人物图' },
+        { id: 'building-photo', label: '建筑图', answer: '修改建筑图' },
+      ],
+    },
+    visualContext: {
+      ...visualContext(['person-photo', 'building-photo']),
+      targetSelectionReason: 'Both images remain plausible targets.',
+      targetSelectionConfidence: 'low',
+    },
+    imageTask: undefined,
+    presentation: undefined,
+  });
+  const clarified = validateAgentExecutionPlan(clarificationPlan, options);
+  assert.ok(clarified.plan);
+  assert.equal(clarified.plan.imageTask, undefined);
+});
+
+test('visual context rejects unknown and duplicate reference ids', () => {
+  const options = {
+    allowedSkillIds: ['magazine-poster'],
+    skillToolsById: { 'magazine-poster': ['generate_image'] },
+    referenceIds: ['known'],
+  };
+  const duplicate = visualContext(['known', 'known']);
+  const duplicateResult = validateAgentExecutionPlan(plan({ visualContext: duplicate }), options);
+  assert.equal(duplicateResult.plan, null);
+  assert.ok(duplicateResult.validationErrors.some((entry) => entry.code === 'duplicate_reference'));
+
+  const unknown = visualContext(['evidence-preview']);
+  const unknownResult = validateAgentExecutionPlan(plan({ visualContext: unknown }), options);
+  assert.equal(unknownResult.plan, null);
+  assert.ok(unknownResult.validationErrors.some((entry) => entry.code === 'unknown_reference'));
+});
+
+test('executable image plans without imageTask or presentation fail closed', () => {
+  const legacyPlan = plan();
+  delete legacyPlan.imageTask;
+  delete legacyPlan.presentation;
+  const validated = validateAgentExecutionPlan(legacyPlan, {
+    allowedSkillIds: ['magazine-poster'],
+    skillToolsById: { 'magazine-poster': ['generate_image'] },
+  });
+  assert.equal(validated.plan, null);
+  assert.ok(validated.validationErrors.some((entry) => entry.path === 'imageTask' && entry.code === 'required'));
+  assert.ok(validated.validationErrors.some((entry) => entry.path === 'presentation' && entry.code === 'required'));
+});
+
+test('image plans require supplier-ready generation prompts with skill-compatible formats', () => {
+  const options = {
+    allowedSkillIds: ['magazine-poster'],
+    skillToolsById: { 'magazine-poster': ['generate_image'] },
+    skillPromptStylesById: { 'magazine-poster': 'json-text' },
+  };
+  const missing = plan();
+  delete missing.generation;
+  const missingResult = validateAgentExecutionPlan(missing, options);
+  assert.equal(missingResult.plan, null);
+  assert.ok(missingResult.validationErrors.some((entry) => entry.path === 'generation' && entry.code === 'required'));
+
+  const wrongFormat = validateAgentExecutionPlan(plan({
+    generation: { promptFormat: 'text', prompt: 'Create the requested deliverables and preserve Literal copy and explicit constraints', items: [] },
+  }), options);
+  assert.equal(wrongFormat.plan, null);
+  assert.ok(wrongFormat.validationErrors.some((entry) => entry.code === 'skill_prompt_style_mismatch'));
+
+  const incompleteSeries = validateAgentExecutionPlan(plan({
+    generation: { ...plan().generation, items: plan().generation.items.slice(0, 3) },
+  }), options);
+  assert.equal(incompleteSeries.plan, null);
+  assert.ok(incompleteSeries.validationErrors.some((entry) => entry.path === 'generation.items' && entry.code === 'item_count_mismatch'));
+
+  const nonImage = validateAgentExecutionPlan(plan({
+    intent: 'analysis',
+    generation: plan().generation,
+    execution: { kind: 'none', requiresConfirmation: false, tool: null },
+  }), options);
+  assert.equal(nonImage.plan, null);
+  assert.ok(nonImage.validationErrors.some((entry) => entry.path === 'generation' && entry.code === 'intent_mismatch'));
+
+  const indirectImage = validateAgentExecutionPlan(plan({
+    execution: { kind: 'agent_loop', requiresConfirmation: false, tool: 'generate_image' },
+  }), options);
+  assert.equal(indirectImage.plan, null);
+  assert.ok(indirectImage.validationErrors.some((entry) => entry.code === 'image_execution_kind_mismatch'));
+});
+
+test('non-clarifying plans ignore empty clarification placeholders from tool schemas', () => {
+  const result = validateAgentExecutionPlan(plan({
+    needsClarification: false,
+    clarification: {
+      dimension: '',
+      question: '',
+      options: [
+        { id: '', label: '', answer: '' },
+        { id: '', label: '', answer: '' },
+      ],
+    },
+  }), {
+    allowedSkillIds: ['magazine-poster'],
+    skillToolsById: { 'magazine-poster': ['generate_image'] },
+    skillPromptStylesById: { 'magazine-poster': 'json-text' },
+  });
+  assert.ok(result.plan);
+  assert.equal(result.plan.clarification, null);
+  assert.ok(result.normalizedFields.includes('clarification'));
+  assert.doesNotMatch(JSON.stringify(result.validationErrors), /clarification\./);
+});
+
+test('single planner request materializes omitted prompt constraints and deterministic image tool', async () => {
+  let calls = 0;
+  const draft = plan({
+    delivery: {
+      ...plan().delivery,
+      mode: 'single',
+      outputCount: 1,
+      panelCount: null,
+      items: [],
+    },
+    generation: {
+      promptFormat: 'json-text',
+      prompt: JSON.stringify({
+        subject: 'fragmented Greek statue',
+        direction: 'Create a cohesive editorial poster while retaining its intended copy and constraints.',
+        visible_copy: 'disassembled gods',
+      }),
+      items: [],
+    },
+    execution: { kind: 'image_pipeline', requiresConfirmation: false },
+  });
+  const result = await planAgentExecutionRequest({
+    userMessage: '生成这张编辑海报',
+    messages: [{ role: 'user', content: '生成这张编辑海报' }],
+    manifests,
+    model: 'planner-model',
+    providerId: 'provider',
+    chatFn: async () => {
+      calls += 1;
+      return toolResponse(draft);
+    },
+  });
+
+  assert.equal(calls, 1);
+  assert.ok(result.plan);
+  assert.equal(result.plan.execution.tool, 'generate_image');
+  assert.ok(result.normalizedFields.includes('execution.tool'));
+  assert.ok(result.normalizedFields.includes('generation.prompt'));
+  const parsedPrompt = JSON.parse(result.plan.generation.prompt);
+  assert.equal(parsedPrompt.subject, 'fragmented Greek statue');
+  assert.deepEqual(parsedPrompt.agent_requirements.must_change, draft.imageTask.mustChange);
+  assert.deepEqual(parsedPrompt.agent_requirements.must_preserve, draft.imageTask.mustPreserve);
+  assert.deepEqual(parsedPrompt.agent_requirements.literal_copy, draft.brief.literalCopy);
+});
+
+test('text prompt contracts avoid duplicate semantic constraints and preserve literal-copy casing', () => {
+  const imageTask = {
+    operation: 'generate',
+    targetReferenceId: null,
+    supportingReferenceIds: [],
+    instruction: 'Create a fashion magazine cover.',
+    mustChange: ['Replace person with dogs'],
+    mustPreserve: ['Keep the red background'],
+  };
+  const validated = validateAgentExecutionPlan(plan({
+    skillId: null,
+    imageTask,
+    brief: {
+      deliverable: 'one magazine cover',
+      subject: 'fashionable dogs',
+      style: ['editorial'],
+      literalCopy: ['VOGUE'],
+      constraints: [],
+    },
+    delivery: {
+      ...plan().delivery,
+      mode: 'single',
+      outputCount: 1,
+      panelCount: null,
+      items: [],
+    },
+    generation: {
+      promptFormat: 'text',
+      prompt: 'Replace PERSON with DOGS. Add the exact cover text vogue.',
+      items: [],
+    },
+    execution: { kind: 'image_pipeline', requiresConfirmation: false },
+  }));
+
+  assert.ok(validated.plan);
+  const finalPrompt = validated.plan.generation.prompt;
+  assert.equal((finalPrompt.match(/Replace person with dogs/gi) || []).length, 1);
+  assert.match(finalPrompt, /Keep the red background/);
+  assert.match(finalPrompt, /Literal copy \(reproduce exactly\):\n- VOGUE/);
+  assert.equal(validated.plan.execution.tool, 'generate_image');
+});
+
+test('series prompts receive complete per-item contracts while invalid JSON objects still fail closed', () => {
+  const incompleteJsonPrompt = (label) => JSON.stringify({ subject: label, composition: 'editorial cover' });
+  const seriesDraft = plan({
+    generation: {
+      promptFormat: 'json-text',
+      prompt: incompleteJsonPrompt('shared direction'),
+      items: plan().delivery.items.map((item) => ({
+        index: item.index,
+        label: item.label,
+        prompt: incompleteJsonPrompt(item.label),
+      })),
+    },
+  });
+  const seriesResult = validateAgentExecutionPlan(seriesDraft, {
+    allowedSkillIds: ['magazine-poster'],
+    skillToolsById: { 'magazine-poster': ['generate_image'] },
+    skillPromptStylesById: { 'magazine-poster': 'json-text' },
+  });
+  assert.ok(seriesResult.plan);
+  for (const item of seriesResult.plan.generation.items) {
+    const parsed = JSON.parse(item.prompt);
+    assert.deepEqual(parsed.agent_requirements.must_change, seriesDraft.imageTask.mustChange);
+    assert.deepEqual(parsed.agent_requirements.must_preserve, seriesDraft.imageTask.mustPreserve);
+    assert.deepEqual(parsed.agent_requirements.literal_copy, seriesDraft.brief.literalCopy);
+  }
+
+  const invalidArray = validateAgentExecutionPlan(plan({
+    delivery: {
+      ...plan().delivery,
+      mode: 'single',
+      outputCount: 1,
+      panelCount: null,
+      items: [],
+    },
+    generation: { promptFormat: 'json-text', prompt: '[]', items: [] },
+  }), {
+    allowedSkillIds: ['magazine-poster'],
+    skillToolsById: { 'magazine-poster': ['generate_image'] },
+    skillPromptStylesById: { 'magazine-poster': 'json-text' },
+  });
+  assert.equal(invalidArray.plan, null);
+  assert.ok(invalidArray.validationErrors.some((entry) => entry.path === 'generation.prompt' && entry.code === 'invalid_json_text'));
+});
+
+test('explicitly mismatched deterministic tools remain invalid', () => {
+  const result = validateAgentExecutionPlan(plan({
+    execution: { kind: 'image_pipeline', requiresConfirmation: false, tool: 'start_skill_job' },
+  }), {
+    allowedSkillIds: ['magazine-poster'],
+    skillToolsById: { 'magazine-poster': ['generate_image', 'start_skill_job'] },
+    skillPromptStylesById: { 'magazine-poster': 'json-text' },
+  });
+  assert.equal(result.plan, null);
+  assert.ok(result.validationErrors.some((entry) => entry.path === 'execution.tool' && entry.code === 'execution_tool_mismatch'));
+});
+
 test('planner validates composite scope, skill ids, tools, contexts, and batch limits locally', () => {
   const options = {
     allowedSkillIds: ['magazine-poster'],
@@ -198,7 +726,7 @@ test('planner validates composite scope, skill ids, tools, contexts, and batch l
   })), options), null);
 });
 
-test('hard fallback ignores collage and poster semantics but recognizes explicit one-file panels', () => {
+test('planner has no local semantic fallback, including explicit one-file panel wording', () => {
   const semanticOnly = buildFallbackAgentExecutionPlan({
     userMessage: '生成4张不同版式的海报，采用 hand-cut collage 拼贴艺术风格',
     manifests,
@@ -209,10 +737,7 @@ test('hard fallback ignores collage and poster semantics but recognizes explicit
     userMessage: '做一张四宫格，每格一个方向',
     manifests,
   });
-  assert.ok(explicit);
-  assert.equal(explicit.delivery.mode, 'composite');
-  assert.equal(explicit.delivery.outputCount, 1);
-  assert.equal(explicit.delivery.panelCount, 4);
+  assert.equal(explicit, null);
 });
 
 test('required tool arguments win over compatibility text and preserve magazine-poster series semantics', async () => {
@@ -240,32 +765,204 @@ test('required tool arguments win over compatibility text and preserve magazine-
   assert.equal(request.tools[0].function.name, 'submit_agent_execution_plan');
 });
 
-test('planner repairs one invalid structured draft and does not silently fall back', async () => {
+test('model-authored edit intent survives request planning without local reinterpretation', async () => {
+  const imageTask = {
+    operation: 'edit',
+    targetReferenceId: 'vogue-cover',
+    supportingReferenceIds: [],
+    instruction: '将封面人物替换为两只时尚的狗。',
+    mustChange: ['人物主体替换为狗'],
+    mustPreserve: ['杂志版式', '原有文字', '红色背景'],
+  };
+  const presentation = {
+    title: 'Vogue Cover – Fashionable Dogs',
+    completionSummary: '将人物替换为时尚的狗，并保留原有封面设计。',
+  };
+  const result = await planAgentExecutionRequest({
+    userMessage: '换成狗',
+    messages: [{ role: 'user', content: '换成狗' }],
+    manifests,
+    referenceContext: {
+      references: [{ id: 'vogue-cover', src: 'https://example.test/vogue.png', label: 'Vogue Cover', source: 'canvas', role: 'edit_target' }],
+      composerSegments: [
+        { type: 'reference', referenceId: 'vogue-cover' },
+        { type: 'text', text: ' 换成狗' },
+      ],
+    },
+    model: 'planner-model',
+    providerId: 'provider',
+    chatFn: async () => toolResponse(plan({
+      visualContext: visualContext(['vogue-cover'], 'vogue-cover', 'high'),
+      imageTask,
+      presentation,
+    })),
+  });
+  assert.equal(result.source, 'model');
+  assert.deepEqual(result.plan.imageTask, imageTask);
+  assert.deepEqual(result.plan.presentation, presentation);
+});
+
+test('planner rejects one invalid structured draft without a repair request', async () => {
   let calls = 0;
   const invalid = structuredClone(plan());
   delete invalid.delivery.mode;
+  delete invalid.execution.tool;
   const result = await planAgentExecutionRequest({
     userMessage: 'Generate four posters',
     messages: [{ role: 'user', content: 'Generate four posters' }],
     manifests,
     model: 'planner-model',
     providerId: 'provider',
-    chatFn: async (request) => {
+    chatFn: async () => {
       calls += 1;
-      if (calls === 1) return toolResponse(invalid);
-      assert.match(request.messages.at(-1).content, /delivery\.mode/);
+      return toolResponse(invalid);
+    },
+  });
+  assert.equal(calls, 1);
+  assert.equal(result.plan, null);
+  assert.equal(result.sourceDetail, 'planner_failed');
+  assert.equal(result.repairAttempted, false);
+  assert.equal(result.attempts, 1);
+  assert.ok(result.validationErrors.some((entry) => entry.path === 'delivery.mode'));
+  assert.ok(result.normalizedFields.includes('execution.tool'));
+});
+
+test('planner never retries a transport interruption', async () => {
+  let calls = 0;
+  const result = await planAgentExecutionRequest({
+    userMessage: 'Generate one poster',
+    messages: [{ role: 'user', content: 'Generate one poster' }],
+    manifests,
+    model: 'planner-model',
+    providerId: 'provider',
+    chatFn: async () => {
+      calls += 1;
+      const error = new Error('response aborted');
+      error.name = 'ResponseAborted';
+      throw error;
+    },
+  });
+  assert.equal(calls, 1);
+  assert.equal(result.plan, null);
+  assert.equal(result.failureReason, 'transport');
+  assert.equal(result.attempts, 1);
+  assert.equal(result.diagnostics[0].attempt, 1);
+  assert.equal(result.diagnostics[0].providerId, 'provider');
+});
+
+test('planner classifies a single request timeout without retrying', async () => {
+  let calls = 0;
+  const result = await planAgentExecutionRequest({
+    userMessage: 'Generate one poster',
+    messages: [{ role: 'user', content: 'Generate one poster' }],
+    manifests,
+    model: 'planner-model',
+    providerId: 'provider',
+    chatFn: async () => {
+      calls += 1;
+      const error = new Error('The operation was aborted due to timeout');
+      error.name = 'TimeoutError';
+      throw error;
+    },
+  });
+  assert.equal(calls, 1);
+  assert.equal(result.failureReason, 'timeout');
+  assert.equal(result.attempts, 1);
+  assert.equal(result.diagnostics.length, 1);
+});
+
+test('planner classifies unsupported and unreadable multimodal inputs without producing a plan', async () => {
+  const referenceContext = {
+    references: [{
+      id: 'photo',
+      src: 'https://example.test/photo.png',
+      label: 'Photo',
+      source: 'upload',
+      role: 'reference',
+    }],
+    composerSegments: [{ type: 'reference', referenceId: 'photo' }],
+  };
+  const unsupported = await planAgentExecutionRequest({
+    userMessage: '分析这张图',
+    messages: [{ role: 'user', content: '分析这张图' }],
+    manifests,
+    referenceContext,
+    model: 'text-only-model',
+    providerId: 'provider',
+    chatFn: async () => {
+      throw new Error('Unsupported modality: image input is not supported');
+    },
+  });
+  assert.equal(unsupported.plan, null);
+  assert.equal(unsupported.failureReason, 'vision_unsupported');
+
+  let unreadableCalls = 0;
+  const unreadable = await planAgentExecutionRequest({
+    userMessage: '分析这张图',
+    messages: [{ role: 'user', content: '分析这张图' }],
+    manifests,
+    referenceContext,
+    model: 'vision-model',
+    providerId: 'provider',
+    chatFn: async () => {
+      unreadableCalls += 1;
+      throw new TypeError('Image fetch failed while downloading the supplied image');
+    },
+  });
+  assert.equal(unreadableCalls, 1);
+  assert.equal(unreadable.plan, null);
+  assert.equal(unreadable.failureReason, 'vision_unavailable');
+});
+
+test('planner does not call the model for an already-aborted request', async () => {
+  const controller = new AbortController();
+  controller.abort();
+  let calls = 0;
+  await assert.rejects(() => planAgentExecutionRequest({
+      userMessage: 'Generate one poster',
+      messages: [{ role: 'user', content: 'Generate one poster' }],
+      manifests,
+      model: 'planner-model',
+      providerId: 'provider',
+      signal: controller.signal,
+      chatFn: async () => {
+        calls += 1;
+        return toolResponse(plan());
+      },
+    }), /abort/i);
+  assert.equal(calls, 0);
+});
+
+test('planner does not retry a typed local reference image failure', async () => {
+  let calls = 0;
+  const result = await planAgentExecutionRequest({
+    userMessage: '分析这张图',
+    messages: [{ role: 'user', content: '分析这张图' }],
+    manifests,
+    referenceContext: {
+      references: [{ id: 'photo', src: '/api/local-assets/uploads/missing.png', label: 'Photo', source: 'upload', role: 'reference' }],
+      composerSegments: [{ type: 'reference', referenceId: 'photo' }],
+    },
+    model: 'vision-model',
+    providerId: 'provider',
+    chatFn: async () => {
+      calls += 1;
       return toolResponse(plan());
     },
   });
-  assert.equal(calls, 2);
-  assert.equal(result.source, 'model');
-  assert.equal(result.sourceDetail, 'repaired_tool_call');
-  assert.equal(result.repairAttempted, true);
-  assert.equal(result.plan.delivery.mode, 'series');
+  assert.equal(calls, 0);
+  assert.equal(result.plan, null);
+  assert.equal(result.failureReason, 'vision_unavailable');
+  assert.equal(result.attempts, 0);
+  assert.deepEqual(result.diagnostics, []);
 });
 
-test('planner fails closed after two invalid attempts and only hard literals may fall back', async () => {
-  const chatFn = async () => ({ choices: [{ message: { content: 'invalid' } }] });
+test('planner fails closed after one invalid attempt without local semantic fallback', async () => {
+  let calls = 0;
+  const chatFn = async () => {
+    calls += 1;
+    return { choices: [{ message: { content: 'invalid' } }] };
+  };
   const failed = await planAgentExecutionRequest({
     userMessage: 'Generate four different collage posters',
     messages: [{ role: 'user', content: 'Generate four different collage posters' }],
@@ -277,9 +974,10 @@ test('planner fails closed after two invalid attempts and only hard literals may
   assert.equal(failed.plan, null);
   assert.equal(failed.source, 'fallback');
   assert.equal(failed.sourceDetail, 'planner_failed');
-  assert.equal(failed.attempts, 2);
+  assert.equal(failed.attempts, 1);
+  assert.equal(calls, 1);
 
-  const hardFallback = await planAgentExecutionRequest({
+  const explicitCompositeFailure = await planAgentExecutionRequest({
     userMessage: '做一张四宫格',
     messages: [{ role: 'user', content: '做一张四宫格' }],
     manifests,
@@ -287,6 +985,53 @@ test('planner fails closed after two invalid attempts and only hard literals may
     providerId: 'provider',
     chatFn,
   });
-  assert.equal(hardFallback.sourceDetail, 'hard_literal');
-  assert.equal(hardFallback.plan.delivery.mode, 'composite');
+  assert.equal(explicitCompositeFailure.sourceDetail, 'planner_failed');
+  assert.equal(explicitCompositeFailure.plan, null);
+});
+
+test('planner distinguishes unknown canvas context ids from unknown image reference ids', async () => {
+  const unknownContextPlan = plan({ contextReferences: ['token:image'] });
+  const invalidContext = await planAgentExecutionRequest({
+    userMessage: '生成海报',
+    messages: [{ role: 'user', content: '生成海报' }],
+    manifests,
+    contextEntities: [{ id: 'canvas:scene', label: 'Scene' }],
+    referenceContext: {
+      references: [{ id: 'token:image', src: 'https://example.test/image.png', label: 'Image', source: 'upload', role: 'reference' }],
+      composerSegments: [{ type: 'reference', referenceId: 'token:image' }],
+    },
+    model: 'planner-model',
+    providerId: 'provider',
+    chatFn: async () => toolResponse(unknownContextPlan),
+  });
+  assert.equal(invalidContext.plan, null);
+  assert.equal(invalidContext.failureReason, 'invalid_context');
+
+  const bothNamespacesInvalid = plan({
+    contextReferences: ['missing-context'],
+    visualContext: visualContext(['token:image'], 'token:image', 'high'),
+    imageTask: {
+      operation: 'edit',
+      targetReferenceId: 'missing-image',
+      supportingReferenceIds: [],
+      instruction: 'Edit the selected image.',
+      mustChange: ['subject'],
+      mustPreserve: ['composition'],
+    },
+  });
+  const invalidBoth = await planAgentExecutionRequest({
+    userMessage: '编辑图片',
+    messages: [{ role: 'user', content: '编辑图片' }],
+    manifests,
+    contextEntities: [{ id: 'canvas:scene', label: 'Scene' }],
+    referenceContext: {
+      references: [{ id: 'token:image', src: 'https://example.test/image.png', label: 'Image', source: 'upload', role: 'reference' }],
+      composerSegments: [{ type: 'reference', referenceId: 'token:image' }],
+    },
+    model: 'planner-model',
+    providerId: 'provider',
+    chatFn: async () => toolResponse(bothNamespacesInvalid),
+  });
+  assert.equal(invalidBoth.plan, null);
+  assert.equal(invalidBoth.failureReason, 'invalid_plan');
 });

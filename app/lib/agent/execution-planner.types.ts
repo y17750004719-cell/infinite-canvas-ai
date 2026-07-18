@@ -1,5 +1,83 @@
+export interface AgentImageTask {
+  operation: 'generate' | 'edit';
+  targetReferenceId: string | null;
+  supportingReferenceIds: string[];
+  instruction: string;
+  mustChange: string[];
+  mustPreserve: string[];
+}
+
+export interface AgentPlanPresentation {
+  title: string;
+  completionSummary: string;
+}
+
+export interface AgentGenerationContract {
+  promptFormat: 'text' | 'json-text';
+  prompt: string;
+  items: Array<{
+    index: number;
+    label: string;
+    prompt: string;
+  }>;
+}
+
+export type AgentVisualReferenceRole =
+  | 'edit_target'
+  | 'style_reference'
+  | 'content_reference'
+  | 'layout_reference'
+  | 'unresolved';
+
+export interface AgentVisualContext {
+  references: Array<{
+    referenceId: string;
+    summary: string;
+    salientSubjects: string[];
+    visibleText: string[];
+    styleAndComposition: string;
+    inferredRole: AgentVisualReferenceRole;
+  }>;
+  targetSelectionReason: string | null;
+  targetSelectionConfidence: 'high' | 'medium' | 'low' | null;
+}
+
+export interface AgentPlannerReference {
+  id: string;
+  src?: string;
+  label: string;
+  source: 'upload' | 'history' | 'canvas';
+  canvasItemId?: string;
+  role: 'reference' | 'edit_target' | 'annotation_bundle';
+  annotationCount?: number;
+}
+
+export type AgentPlannerComposerSegment =
+  | { type: 'text'; text: string }
+  | { type: 'reference'; referenceId: string };
+
+export interface AgentPlannerReferenceContext {
+  references: AgentPlannerReference[];
+  composerSegments: AgentPlannerComposerSegment[];
+  evidenceImages?: Array<{
+    id: string;
+    referenceId: string;
+    src: string;
+    kind: 'annotation_composite';
+  }>;
+}
+
+export interface AgentExecutionPlannerInput extends Record<string, unknown> {
+  userMessage?: string;
+  referenceContext?: AgentPlannerReferenceContext | null;
+}
+
+export interface AgentExecutionPlanValidationOptions extends Record<string, unknown> {
+  referenceIds?: string[];
+}
+
 export interface AgentExecutionPlan {
-  version: 1;
+  version: 2;
   intent: 'chat' | 'image' | 'skill_action' | 'analysis';
   skillId: string | null;
   confidence: 'high' | 'medium' | 'low';
@@ -11,6 +89,10 @@ export interface AgentExecutionPlan {
     options: Array<{ id: string; label: string; answer: string; description?: string }>;
   } | null;
   contextReferences: string[];
+  visualContext?: AgentVisualContext;
+  imageTask?: AgentImageTask;
+  presentation?: AgentPlanPresentation;
+  generation: AgentGenerationContract | null;
   brief: {
     deliverable: string;
     subject: string;
@@ -47,18 +129,29 @@ export interface PlanValidationIssue {
 
 export type AgentPlannerSourceDetail =
   | 'tool_call'
-  | 'repaired_tool_call'
-  | 'text_json'
   | 'hard_literal'
   | 'planner_failed';
 
 export interface AgentPlannerAttemptDiagnostic {
-  attempt: number;
-  responseMode: string;
+  attempt: 1;
+  providerId: string;
+  model: string;
+  durationMs: number;
+  responseMode: 'tool_call' | 'text_json' | 'transport_error' | 'missing' | 'wrong_tool_call' | 'invalid_text';
   toolCallPresent: boolean;
   validationErrors: PlanValidationIssue[];
   normalizedFields: string[];
+  error?: { name: string; message: string; code?: string };
 }
+
+export type AgentPlannerFailureReason =
+  | 'timeout'
+  | 'transport'
+  | 'invalid_reference'
+  | 'invalid_context'
+  | 'invalid_plan'
+  | 'vision_unsupported'
+  | 'vision_unavailable';
 
 export interface AgentPlannerResolution {
   plan: AgentExecutionPlan | null;
@@ -70,5 +163,6 @@ export interface AgentPlannerResolution {
   normalizedFields: string[];
   repairAttempted: boolean;
   diagnostics: AgentPlannerAttemptDiagnostic[];
+  failureReason?: AgentPlannerFailureReason;
   usage?: unknown;
 }

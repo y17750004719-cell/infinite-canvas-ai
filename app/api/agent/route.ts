@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { POST as generatePost } from '../generate/route';
 import { chat, chatStream } from '../../lib/api-client';
 import { optimizeImagePrompt } from '../../lib/agent/image-pipeline.mjs';
@@ -67,6 +67,8 @@ import type {
 } from '../../lib/agent/context-reference.types';
 import type {
   AgentExecutionPlan,
+  AgentImageTask,
+  AgentPlanPresentation,
   AgentPlannerSourceDetail,
 } from '../../lib/agent/execution-planner.types';
 import type {
@@ -87,6 +89,18 @@ const DEFAULT_AGENT_MODEL = 'gemini-3.1-flash-lite-preview-thinking-medium';
 const CONFIRMATION_TTL_MS = 10 * 60 * 1000;
 const encoder = new TextEncoder();
 
+function summarizePlannerNormalizations(fields: unknown) {
+  const normalizedFields = Array.isArray(fields)
+    ? fields.filter((field): field is string => typeof field === 'string')
+    : [];
+  return {
+    generationContractNormalizedCount: normalizedFields.filter((field) => (
+      field === 'generation.prompt' || /^generation\.items\[\d+\]\.prompt$/.test(field)
+    )).length,
+    executionToolNormalized: normalizedFields.includes('execution.tool'),
+  };
+}
+
 type ConfirmationRecord = {
   operationId: string;
   skillSource: 'manual' | 'auto' | null;
@@ -101,6 +115,7 @@ type ConfirmationRecord = {
   canvasContext?: Record<string, unknown>;
   imageOptions?: AgentRequestBody['imageOptions'];
   imageCountSource?: AgentImageCountSource;
+  promptOptimized?: boolean;
   requestedTotalImageCount?: number;
   imageBatchPlan?: AgentImageBatchPlan;
   nextConfirmationId?: string;
@@ -111,6 +126,10 @@ type ConfirmationRecord = {
   optimizePrompt?: boolean;
   generationBrief?: string;
   executionBrief?: ExecutionBrief;
+  imageTask?: AgentImageTask;
+  visualContext?: AgentExecutionPlan['visualContext'];
+  presentation?: AgentPlanPresentation;
+  referenceContext?: AgentRuntimeReferenceContext;
   expiresAt: number;
   execution?: Promise<Record<string, unknown>>;
   result?: Record<string, unknown>;
@@ -135,6 +154,28 @@ type AgentImageBatchPlan = {
   batchSize: number;
 };
 
+type AgentRuntimeReferenceContext = {
+  references: Array<{
+    id: string;
+    src: string;
+    label: string;
+    source: 'upload' | 'history' | 'canvas';
+    canvasItemId?: string;
+    role: 'reference' | 'edit_target' | 'annotation_bundle';
+    annotationCount?: number;
+  }>;
+  composerSegments: Array<
+    | { type: 'text'; text: string }
+    | { type: 'reference'; referenceId: string }
+  >;
+  evidenceImages?: Array<{
+    id: string;
+    referenceId: string;
+    src: string;
+    kind: 'annotation_composite';
+  }>;
+};
+
 const agentGlobals = globalThis as unknown as {
   __agentConfirmationStore?: Map<string, ConfirmationRecord>;
   __agentClarificationSubmissionStore?: Map<string, number>;
@@ -144,12 +185,173 @@ agentGlobals.__agentConfirmationStore = confirmationStore;
 const clarificationSubmissionStore = agentGlobals.__agentClarificationSubmissionStore || new Map<string, number>();
 agentGlobals.__agentClarificationSubmissionStore = clarificationSubmissionStore;
 
+function resolveAgentImageCardReferences({
+  referenceContext,
+  referenceImages = [],
+  imageTask,
+}: {
+  referenceContext?: AgentRuntimeReferenceContext;
+  referenceImages?: string[];
+  imageTask?: AgentImageTask;
+}) {
+  const contextualPreviews = (referenceContext?.references || [])
+    .filter((reference) => reference.id && reference.src)
+    .map((reference) => ({ id: reference.id, src: reference.src, label: reference.label }));
+  const contextualSources = new Set(contextualPreviews.map((reference) => reference.src));
+  const extraPreviews = referenceImages
+    .filter((src) => typeof src === 'string' && src.trim() && !contextualSources.has(src))
+    .map((src, index) => ({
+      id: `runtime-reference-${index + 1}`,
+      src,
+      label: `image${contextualPreviews.length + index + 1}`,
+    }));
+  const linkedImagePreviews = [...contextualPreviews, ...extraPreviews];
+  const referenceIds = imageTask
+    ? [
+        ...(imageTask.targetReferenceId ? [imageTask.targetReferenceId] : []),
+        ...imageTask.supportingReferenceIds,
+        ...extraPreviews.map((reference) => reference.id),
+      ]
+    : undefined;
+  const previewById = new Map(linkedImagePreviews.map((reference) => [reference.id, reference]));
+  const orderedLinkedImagePreviews = referenceIds
+    ? referenceIds.flatMap((referenceId) => {
+        const preview = previewById.get(referenceId);
+        return preview ? [preview] : [];
+      })
+    : linkedImagePreviews;
+  return {
+    linkedImagePreviews,
+    referenceIds,
+    orderedReferenceImages: orderedLinkedImagePreviews.map((reference) => reference.src),
+  };
+}
+
+function normalizeAgentRuntimeReferenceContext(value: unknown): AgentRuntimeReferenceContext | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const input = value as Record<string, unknown>;
+  const references: AgentRuntimeReferenceContext['references'] = (Array.isArray(input.references) ? input.references : []).flatMap((entry): AgentRuntimeReferenceContext['references'] => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return [];
+    const reference = entry as Record<string, unknown>;
+    const id = typeof reference.id === 'string' ? reference.id.trim() : '';
+    const src = typeof reference.src === 'string' ? reference.src.trim() : '';
+    const label = typeof reference.label === 'string' ? reference.label.trim() : '';
+    const source: AgentRuntimeReferenceContext['references'][number]['source'] | null = reference.source === 'upload' || reference.source === 'history' || reference.source === 'canvas'
+      ? reference.source
+      : null;
+    const role: AgentRuntimeReferenceContext['references'][number]['role'] | null = reference.role === 'edit_target' || reference.role === 'annotation_bundle'
+      ? reference.role
+      : reference.role === 'reference'
+        ? 'reference'
+        : null;
+    if (!id || !src || !label || !source || !role) return [];
+    return [{
+      id,
+      src,
+      label,
+      source,
+      role,
+      ...(typeof reference.canvasItemId === 'string' && reference.canvasItemId.trim()
+        ? { canvasItemId: reference.canvasItemId.trim() }
+        : {}),
+      ...(Number.isFinite(reference.annotationCount) && Number(reference.annotationCount) > 0
+        ? { annotationCount: Math.floor(Number(reference.annotationCount)) }
+        : {}),
+    }];
+  }).slice(0, 14);
+  const knownIds = new Set(references.map((reference) => reference.id));
+  const composerSegments: AgentRuntimeReferenceContext['composerSegments'] = (Array.isArray(input.composerSegments) ? input.composerSegments : []).flatMap((entry): AgentRuntimeReferenceContext['composerSegments'] => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return [];
+    const segment = entry as Record<string, unknown>;
+    if (segment.type === 'text' && typeof segment.text === 'string') {
+      return [{ type: 'text' as const, text: segment.text }];
+    }
+    if (segment.type === 'reference' && typeof segment.referenceId === 'string' && knownIds.has(segment.referenceId)) {
+      return [{ type: 'reference' as const, referenceId: segment.referenceId }];
+    }
+    return [];
+  }).slice(0, 64);
+  const evidenceImages: NonNullable<AgentRuntimeReferenceContext['evidenceImages']> = (Array.isArray(input.evidenceImages) ? input.evidenceImages : []).flatMap((entry) => {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return [];
+    const evidence = entry as Record<string, unknown>;
+    const id = typeof evidence.id === 'string' ? evidence.id.trim() : '';
+    const referenceId = typeof evidence.referenceId === 'string' ? evidence.referenceId.trim() : '';
+    const src = typeof evidence.src === 'string' ? evidence.src.trim() : '';
+    if (!id || !referenceId || !src || evidence.kind !== 'annotation_composite' || !knownIds.has(referenceId)) return [];
+    return [{ id, referenceId, src, kind: 'annotation_composite' as const }];
+  }).slice(0, 14);
+  return references.length > 0 || composerSegments.length > 0 || evidenceImages.length > 0
+    ? { references, composerSegments, ...(evidenceImages.length > 0 ? { evidenceImages } : {}) }
+    : undefined;
+}
+
+function runtimeReferenceId(src: string): string {
+  return `runtime-reference:${createHash('sha256').update(src).digest('hex').slice(0, 16)}`;
+}
+
+function buildCanonicalAgentReferenceContext({
+  referenceContext,
+  referenceImages,
+  canvasContext,
+}: {
+  referenceContext?: AgentRuntimeReferenceContext;
+  referenceImages: string[];
+  canvasContext?: Record<string, unknown>;
+}): AgentRuntimeReferenceContext | undefined {
+  const references = [...(referenceContext?.references || [])];
+  const composerSegments = [...(referenceContext?.composerSegments || [])];
+  const evidenceImages = [...(referenceContext?.evidenceImages || [])];
+  const knownSources = new Set(references.map((reference) => reference.src));
+  const knownEvidenceSources = new Set(evidenceImages.map((evidence) => evidence.src));
+  const annotationContext = canvasContext?.annotationContext && typeof canvasContext.annotationContext === 'object'
+    ? canvasContext.annotationContext as Record<string, unknown>
+    : undefined;
+  const compositePreviewUrl = typeof annotationContext?.compositePreviewUrl === 'string'
+    ? annotationContext.compositePreviewUrl.trim()
+    : '';
+  const targetImage = annotationContext?.targetImage && typeof annotationContext.targetImage === 'object'
+    ? annotationContext.targetImage as Record<string, unknown>
+    : undefined;
+  const targetCanvasItemId = typeof targetImage?.id === 'string' ? targetImage.id.trim() : '';
+  const annotationParent = references.find((reference) => (
+    reference.role === 'annotation_bundle'
+    || Boolean(targetCanvasItemId && reference.canvasItemId === targetCanvasItemId)
+  ));
+
+  if (compositePreviewUrl && annotationParent && !knownEvidenceSources.has(compositePreviewUrl)) {
+    evidenceImages.push({
+      id: `${annotationParent.id}:annotation-composite`,
+      referenceId: annotationParent.id,
+      src: compositePreviewUrl,
+      kind: 'annotation_composite',
+    });
+    knownEvidenceSources.add(compositePreviewUrl);
+  }
+
+  for (const [index, rawSrc] of referenceImages.entries()) {
+    const src = typeof rawSrc === 'string' ? rawSrc.trim() : '';
+    if (!src || knownSources.has(src) || knownEvidenceSources.has(src)) continue;
+    const id = runtimeReferenceId(src);
+    references.push({
+      id,
+      src,
+      label: `image${references.length + index + 1}`,
+      source: 'upload',
+      role: 'reference',
+    });
+    knownSources.add(src);
+  }
+
+  return normalizeAgentRuntimeReferenceContext({ references, composerSegments, evidenceImages });
+}
+
 type AgentRequestBody = {
   runId?: string;
   topicId?: string;
   messages?: Array<{ role: 'user' | 'assistant'; content: string }>;
   activeSkillId?: string;
   referenceImages?: string[];
+  referenceContext?: AgentRuntimeReferenceContext;
   contextEntities?: AgentContextEntity[];
   selectedContextEntityIds?: string[];
   executionBrief?: ExecutionBrief;
@@ -175,6 +377,7 @@ type AgentRequestBody = {
     customText?: string;
     proceedWithCurrent?: boolean;
     retry?: boolean;
+    retryMode?: 'replan';
   };
 };
 
@@ -358,6 +561,10 @@ export async function POST(request: NextRequest) {
   if (!body || !Array.isArray(body.messages)) {
     return NextResponse.json({ error: 'Messages are required' }, { status: 400 });
   }
+  // Treat the client-provided reference context as untrusted runtime data. Keep
+  // only the fields needed by the planner/execution bridge and drop malformed
+  // or unknown references before any downstream use.
+  const runtimeReferenceContext = normalizeAgentRuntimeReferenceContext(body.referenceContext);
 
   const runId = typeof body.runId === 'string' && body.runId.trim()
     ? body.runId.trim()
@@ -379,7 +586,7 @@ export async function POST(request: NextRequest) {
     ? body.contextEntities.filter((entity) => entity && typeof entity.id === 'string').slice(-200)
     : [];
   const selectedContextEntityIds = Array.isArray(body.selectedContextEntityIds)
-    ? body.selectedContextEntityIds.filter((id): id is string => typeof id === 'string').slice(0, 8)
+    ? body.selectedContextEntityIds.filter((id): id is string => typeof id === 'string').slice(0, 64)
     : [];
   const initialBriefSource = conversationIntent.brief || latestUserMessage;
   const rawUserCountResolution = plannerAuthoritative
@@ -398,7 +605,7 @@ export async function POST(request: NextRequest) {
     ? rawUserDeliveryPlan
     : resolveImageDeliveryPlan(initialBriefSource, briefCountResolution.count || 1);
   const initialDeliveryPlan = rawUserDeliveryPlan.evidence.length > 0 ? rawUserDeliveryPlan : briefDeliveryPlan;
-  const explicitBatchImageRequest = !body.activeSkillId
+  const explicitBatchImageRequest = !plannerAuthoritative && !body.activeSkillId
     && (
       conversationIntent.intent === 'image'
       || isPotentialDesignExecutionRequest(initialBriefSource)
@@ -471,6 +678,30 @@ export async function POST(request: NextRequest) {
   const resolvedRouterSelection = requestedRouterSelection.reason === 'exact'
     ? requestedRouterSelection
     : resolvedChatSelection;
+  const configuredPlannerProviderId = process.env.AGENT_PLANNER_PROVIDER_ID?.trim() || '';
+  const configuredPlannerModel = process.env.AGENT_PLANNER_MODEL?.trim() || '';
+  if (Boolean(configuredPlannerProviderId) !== Boolean(configuredPlannerModel)) {
+    return NextResponse.json({ error: 'AGENT_PLANNER_PROVIDER_ID and AGENT_PLANNER_MODEL must be configured together' }, { status: 500 });
+  }
+  const explicitPlannerSelection = configuredPlannerProviderId && configuredPlannerModel
+    ? resolveProviderModelSelection({
+        providers,
+        purpose: 'chat',
+        requestedProviderId: configuredPlannerProviderId,
+        requestedModel: configuredPlannerModel,
+      })
+    : null;
+  if (
+    explicitPlannerSelection
+    && (
+      explicitPlannerSelection.reason !== 'exact'
+      || explicitPlannerSelection.providerId !== configuredPlannerProviderId
+      || explicitPlannerSelection.model !== configuredPlannerModel
+    )
+  ) {
+    return NextResponse.json({ error: 'Configured Agent Planner provider and model are not an enabled registry pair' }, { status: 500 });
+  }
+  const plannerTimeoutMs = Math.min(120_000, Math.max(10_000, Number(process.env.AGENT_PLANNER_TIMEOUT_MS) || 60_000));
 
   const timeoutMs = Math.min(300_000, Math.max(10_000, Number(process.env.AGENT_RUN_TIMEOUT_MS) || 180_000));
   const timeoutSignal = AbortSignal.timeout(timeoutMs);
@@ -492,6 +723,19 @@ export async function POST(request: NextRequest) {
       let activeClarificationState = body.clarificationState
         ? structuredClone(body.clarificationState)
         : null;
+      if (activeClarificationState?.referenceContext) {
+        activeClarificationState.referenceContext = normalizeAgentRuntimeReferenceContext(
+          activeClarificationState.referenceContext,
+        );
+      }
+      if (executionReferenceImages.length === 0 && activeClarificationState?.referenceImages?.length) {
+        executionReferenceImages = [...activeClarificationState.referenceImages];
+      }
+      const runReferenceContext = buildCanonicalAgentReferenceContext({
+        referenceContext: runtimeReferenceContext || activeClarificationState?.referenceContext,
+        referenceImages: executionReferenceImages,
+        canvasContext: body.canvasContext,
+      });
       let resumedClarification = false;
       let proceedWithCurrentBrief = false;
       let clarificationSubmissionKey: string | null = null;
@@ -510,6 +754,13 @@ export async function POST(request: NextRequest) {
             }
           : {}),
       };
+      const legacyExecutionPlanDetected = Boolean(
+        activeClarificationState?.executionPlan
+        && Number((activeClarificationState.executionPlan as any).version) !== 2,
+      );
+      if (legacyExecutionPlanDetected && activeClarificationState) {
+        activeClarificationState.executionPlan = undefined;
+      }
       let executionPlan: AgentExecutionPlan | null = activeClarificationState?.executionPlan || null;
       let executionPlanSource: 'model' | 'fallback' | null = executionPlan ? 'model' : null;
       let executionPlanSourceDetail: AgentPlannerSourceDetail | null = executionPlan ? 'tool_call' : null;
@@ -583,10 +834,14 @@ export async function POST(request: NextRequest) {
         imageOptions = body.imageOptions,
         referenceImages = body.referenceImages,
         generationPrompt = sourcePrompt,
-        countMetadata?: { source?: AgentImageCountSource; totalCount?: number },
+        countMetadata?: { source?: AgentImageCountSource; totalCount?: number; promptOptimized?: boolean },
         generationItems: AgentImageGenerationItem[] = [],
         streamOptions?: { enabled?: boolean; toolCallId?: string },
         deliveryPlan?: ImageDeliveryPlan,
+        imageTask: AgentImageTask | undefined = executionPlan?.imageTask,
+        visualContext: AgentExecutionPlan['visualContext'] | undefined = executionPlan?.visualContext,
+        presentation: AgentPlanPresentation | undefined = executionPlan?.presentation,
+        referenceContext: AgentRuntimeReferenceContext | undefined = runReferenceContext,
       ) => {
         const payloadOutputCount = normalizeAgentImageCount(imageOptions?.count);
         const payloadDeliveryPlan = deliveryPlan
@@ -609,6 +864,8 @@ export async function POST(request: NextRequest) {
               chatFn: chat,
               outputCount: payloadOutputCount,
               batchMode: payloadBatchMode,
+              imageTask,
+              visualContext,
             })
           : { prompt: generationPrompt, optimized: false };
         const optimized = {
@@ -663,11 +920,17 @@ export async function POST(request: NextRequest) {
         const allowedModelIds = Array.isArray(resolvedProvider?.imageModels)
           ? resolvedProvider.imageModels
           : [resolvedImageSelection.model];
+        const resolvedReferences = resolveAgentImageCardReferences({
+          referenceContext,
+          referenceImages,
+          imageTask,
+        });
         const { options: resolvedImageOptions, requests } = buildAgentImageGenerationRequests({
           prompt: sourcePrompt,
           generationPrompt: optimized.prompt,
           generationPrompts: effectiveGenerationItems.map((item) => item.prompt),
-          referenceImages,
+          linkedImagePreviews: resolvedReferences.linkedImagePreviews,
+          referenceIds: resolvedReferences.referenceIds,
           providerId: resolvedImageSelection.providerId,
           modelId: resolvedImageSelection.model,
           allowedModelIds,
@@ -691,6 +954,8 @@ export async function POST(request: NextRequest) {
           deliveryMode: payloadDeliveryPlan.mode,
           panelCount: payloadDeliveryPlan.panelCount || null,
           promptCount: effectiveGenerationItems.length || 1,
+          imageOperation: imageTask?.operation || 'generate',
+          editTargetReferenceId: imageTask?.targetReferenceId || null,
           streamed: streamOptions?.enabled === true && requests.length > 1,
         });
         const executionMode = resolveCanvasImageTaskExecutionMode({
@@ -699,9 +964,18 @@ export async function POST(request: NextRequest) {
           count: resolvedImageOptions.count,
         });
         const streamIncrementally = streamOptions?.enabled === true && requests.length > 1;
+        const promptWasOptimized = countMetadata?.promptOptimized ?? optimized.optimized;
+        const promptTraceForRequest = (requestIndex: number) => ({
+          sourcePrompt,
+          finalPrompt: effectiveGenerationItems[requestIndex]?.prompt || optimized.prompt,
+          optimized: promptWasOptimized,
+          operation: imageTask?.operation || 'generate' as const,
+          targetReferenceId: imageTask?.targetReferenceId || null,
+        });
         let streamedSettled = 0;
         let streamedSucceeded = 0;
         let streamedFailed = 0;
+        let streamedPresentationSent = false;
         const taskResults = await settleCanvasImageGenerationRequests({
           requests,
           executionMode,
@@ -738,6 +1012,8 @@ export async function POST(request: NextRequest) {
                         type: 'add_generated_assets',
                         runId,
                         model: resolvedImageSelection.model,
+                        providerId: resolvedImageSelection.providerId,
+                        ...(imageTask?.targetReferenceId ? { sourceReferenceId: imageTask.targetReferenceId } : {}),
                         assets: assets.map((asset) => ({
                           src: asset.src,
                           naturalWidth: asset.naturalWidth,
@@ -746,6 +1022,7 @@ export async function POST(request: NextRequest) {
                           ...(item?.id ? { itemId: item.id } : {}),
                           index: item?.index || requestIndex + 1,
                           label: item?.label || `图片 ${requestIndex + 1}`,
+                          promptTrace: promptTraceForRequest(requestIndex),
                         })),
                         batch: {
                           total: requests.length,
@@ -753,8 +1030,18 @@ export async function POST(request: NextRequest) {
                           succeeded: streamedSucceeded,
                           failed: streamedFailed,
                         },
+                        ...(!streamedPresentationSent && presentation
+                          ? {
+                              presentation: {
+                                title: presentation.title,
+                                summary: presentation.completionSummary,
+                                operation: imageTask?.operation || 'generate',
+                              },
+                            }
+                          : {}),
                       },
                     });
+                    streamedPresentationSent = true;
                   } else {
                     streamedFailed += 1;
                   }
@@ -797,7 +1084,12 @@ export async function POST(request: NextRequest) {
             ? firstFailure.reason
             : new Error('Image generation returned no usable outputs');
         }
-        const assets = successfulPayloads.flatMap((payload: any) => generatedAssetsFromResult(payload));
+        const assets = usableTaskResults.flatMap(({ assets: requestAssets }, requestIndex) => (
+          requestAssets.map((asset) => ({
+            ...asset,
+            promptTrace: promptTraceForRequest(requestIndex),
+          }))
+        ));
         if (assets.length === 0) throw new Error('Image generation returned no usable assets');
         const partialFailureMessage = buildCanvasImageGenerationFailureMessage({
           requestedCount: requests.length,
@@ -812,6 +1104,7 @@ export async function POST(request: NextRequest) {
               localUrl: asset.src,
               naturalWidth: asset.naturalWidth,
               naturalHeight: asset.naturalHeight,
+              promptTrace: asset.promptTrace,
             })),
           },
           optimized: optimized.optimized,
@@ -822,6 +1115,7 @@ export async function POST(request: NextRequest) {
             ...(effectiveGenerationItems.length ? { succeededItemIds, failedItemIds } : {}),
           },
           partialFailureMessage,
+          ...(imageTask?.targetReferenceId ? { sourceReferenceId: imageTask.targetReferenceId } : {}),
           streamedAssets: streamIncrementally && streamedSucceeded > 0,
           resolvedImageOptions: {
             providerId: resolvedImageSelection.providerId,
@@ -832,6 +1126,17 @@ export async function POST(request: NextRequest) {
             deliveryMode: payloadDeliveryPlan.mode,
             panelCount: payloadDeliveryPlan.panelCount,
           },
+          ...(presentation
+            ? {
+                presentation: {
+                  title: presentation.title,
+                  summary: requestFailureCount > 0
+                    ? `${presentation.completionSummary} 实际完成 ${successfulPayloads.length}/${requests.length} 张。`
+                    : presentation.completionSummary,
+                  operation: imageTask?.operation || 'generate',
+                },
+              }
+            : {}),
         };
         return payload;
       };
@@ -852,8 +1157,71 @@ export async function POST(request: NextRequest) {
           writeEvent(controller, { type: 'tool_update', toolCallId, message });
         }
       };
+      const writeImageCompletionSummary = (result: any) => {
+        const presentation = result?.presentation;
+        const requestStats = result?.requestStats;
+        const succeeded = Number.isFinite(requestStats?.succeeded) ? Math.max(0, requestStats.succeeded) : 0;
+        const failed = Number.isFinite(requestStats?.failed) ? Math.max(0, requestStats.failed) : 0;
+        if (!presentation?.title || !presentation?.summary || succeeded <= 0) return;
+        const summary = String(presentation.summary).includes('画布')
+          ? String(presentation.summary)
+          : `${String(presentation.summary)} 结果已添加到画布。`;
+        writeEvent(controller, {
+          type: 'agent_completion_summary',
+          runId,
+          title: String(presentation.title),
+          summary,
+          operation: presentation.operation === 'edit' ? 'edit' : 'generate',
+          succeeded,
+          failed,
+          addedToCanvas: true,
+        });
+      };
       try {
         writeEvent(controller, { type: 'agent_start', runId });
+        if (legacyExecutionPlanDetected) {
+          const message = '该任务使用旧版分析计划，需要重新分析。';
+          const failedTaskId = activeClarificationState?.taskId || randomUUID();
+          const failedRequest: AgentClarificationRequest = {
+            id: randomUUID(),
+            taskId: failedTaskId,
+            question: message,
+            dimension: 'planner_failure',
+            options: [],
+            allowCustom: true,
+            allowProceed: true,
+            failed: true,
+          };
+          writeProgress({ stepId: 'routing', phase: 'planning', status: 'failed', label: '旧版计划需要重新分析' });
+          const failedCheckpoint = progressTracker.snapshot();
+          writeEvent(controller, {
+            type: 'clarification_required',
+            message,
+            request: failedRequest,
+            state: {
+              ...(activeClarificationState || {
+                taskId: failedTaskId,
+                intent: 'image' as const,
+                originalRequest: latestUserMessage,
+                workingBrief: latestUserMessage,
+                askedDimensions: [],
+                answers: [],
+              }),
+              taskId: failedTaskId,
+              operationId: failedCheckpoint.operationId,
+              lastSequence: failedCheckpoint.lastSequence,
+              executionPlan: undefined,
+              plannerFailure: {
+                reason: 'invalid_plan',
+                retryMode: 'replan',
+                failedAt: Date.now(),
+              },
+            },
+          });
+          writeEvent(controller, { type: 'agent_error', stage: 'planning', message, reason: 'invalid_plan', retryable: true });
+          writeEvent(controller, { type: 'agent_done', stopReason: 'planner_failed' });
+          return;
+        }
         const requestedConfirmationId = body.confirmation?.confirmationId;
         if (requestedConfirmationId) {
           pruneConfirmationStore();
@@ -911,6 +1279,7 @@ export async function POST(request: NextRequest) {
                   {
                     source: confirmationRecord.imageCountSource,
                     totalCount: confirmationRecord.requestedTotalImageCount,
+                    promptOptimized: confirmationRecord.promptOptimized,
                   },
                   confirmationRecord.generationItems || [],
                   {
@@ -918,6 +1287,10 @@ export async function POST(request: NextRequest) {
                     toolCallId,
                   },
                   confirmationRecord.imageDeliveryPlan,
+                  confirmationRecord.imageTask,
+                  confirmationRecord.visualContext,
+                  confirmationRecord.presentation,
+                  confirmationRecord.referenceContext,
                 );
               }
               const registry = createAgentToolRegistry({ createSkillJob, getSkillJob });
@@ -963,6 +1336,9 @@ export async function POST(request: NextRequest) {
             rawResult: result,
             includeAssets: !(result as any)?.streamedAssets,
           })) writeEvent(controller, event as AgentEvent);
+          if (confirmationRecord.toolName === 'generate_image') {
+            writeImageCompletionSummary(result);
+          }
           writeToolProgress(confirmationRecord.toolName, 'completed', toolCallId);
           if (confirmationRecord.toolName === 'generate_image' && confirmationRecord.generationItems?.length) {
             const requestStats = (result as any)?.requestStats || {};
@@ -1079,6 +1455,11 @@ export async function POST(request: NextRequest) {
           && process.env.AGENT_UNIFIED_PLANNER_ENABLED !== '0'
         ) {
           const plannerStartedAt = Date.now();
+          const plannerHasVisualReferences = Boolean(runReferenceContext?.references.length);
+          const plannerSelection = explicitPlannerSelection
+            || (plannerHasVisualReferences ? resolvedChatSelection : resolvedRouterSelection);
+          const plannerModel = plannerSelection.model;
+          const plannerProviderId = plannerSelection.providerId || undefined;
           const plannerResult = await planAgentExecutionRequest({
             userMessage: latestUserMessage,
             messages: body.messages,
@@ -1086,11 +1467,13 @@ export async function POST(request: NextRequest) {
             contextEntities,
             selectedContextEntityIds,
             activeSkillId: body.activeSkillId,
-            hasReferenceImages: Boolean(body.referenceImages?.length),
+            hasReferenceImages: plannerHasVisualReferences,
+            referenceContext: runReferenceContext,
             imageOptions: body.imageOptions,
             canvasContext: body.canvasContext,
-            model: process.env.AGENT_PLANNER_MODEL || resolvedRouterSelection.model,
-            providerId: process.env.AGENT_PLANNER_PROVIDER_ID || resolvedRouterSelection.providerId || undefined,
+            model: plannerModel,
+            providerId: plannerProviderId,
+            timeoutMs: plannerTimeoutMs,
             signal: runSignal,
             chatFn: chat,
           });
@@ -1098,8 +1481,10 @@ export async function POST(request: NextRequest) {
             const shadowPlan = plannerResult.plan;
             void contextLogger.info('planner.shadow', 'Unified planner shadow result', {
               durationMs: Date.now() - plannerStartedAt,
-              providerId: process.env.AGENT_PLANNER_PROVIDER_ID || resolvedRouterSelection.providerId || null,
-              model: process.env.AGENT_PLANNER_MODEL || resolvedRouterSelection.model,
+              providerId: plannerProviderId || null,
+              model: plannerModel,
+              plannerRequestCount: plannerResult.attempts > 0 ? 1 : 0,
+              userTextLength: latestUserMessage.length,
               usage: plannerResult.usage || null,
               decisionSource: plannerResult.source,
               sourceDetail: plannerResult.sourceDetail,
@@ -1108,6 +1493,7 @@ export async function POST(request: NextRequest) {
               error: plannerResult.error || null,
               validationErrors: plannerResult.validationErrors || [],
               normalizedFields: plannerResult.normalizedFields || [],
+              ...summarizePlannerNormalizations(plannerResult.normalizedFields),
               diagnostics: plannerResult.diagnostics || [],
               planSummary: shadowPlan ? {
                 intent: shadowPlan.intent,
@@ -1119,6 +1505,10 @@ export async function POST(request: NextRequest) {
                 outputCount: shadowPlan.delivery.outputCount,
                 panelCount: shadowPlan.delivery.panelCount,
                 contextReferenceCount: shadowPlan.contextReferences.length,
+                imageOperation: shadowPlan.imageTask?.operation || null,
+                editTargetReferenceId: shadowPlan.imageTask?.targetReferenceId || null,
+                visualReferenceCount: shadowPlan.visualContext?.references.length || 0,
+                targetSelectionConfidence: shadowPlan.visualContext?.targetSelectionConfidence || null,
               } : null,
               legacy: {
                 intent: conversationIntent.intent,
@@ -1136,25 +1526,82 @@ export async function POST(request: NextRequest) {
             });
           } else {
             if (!plannerResult.plan) {
+              const plannerFailureReason = plannerResult.failureReason || 'invalid_plan';
+              const plannerFailureMessage = plannerFailureReason === 'timeout'
+                ? 'Agent 分析超时，未生成有效执行计划。请重新分析。'
+                : plannerFailureReason === 'transport'
+                  ? 'Agent 分析连接中断，请重新分析。'
+                : plannerFailureReason === 'invalid_reference'
+                  ? '图片引用与当前任务不一致，请重新选择图片后分析。'
+                  : plannerFailureReason === 'invalid_context'
+                    ? 'Agent 混淆了图片引用和画布上下文，已停止执行。请重新分析。'
+                  : plannerFailureReason === 'vision_unsupported'
+                    ? '当前分析模型不支持图片输入，请切换模型后重新分析。'
+                    : plannerFailureReason === 'vision_unavailable'
+                      ? '引用图片无法读取，请重新选择图片后分析。'
+                  : 'Agent 未能生成完整的执行计划，请重新分析。';
               void contextLogger.warn('planner.failed', 'Unified planner failed closed before execution', {
                 durationMs: Date.now() - plannerStartedAt,
-                providerId: process.env.AGENT_PLANNER_PROVIDER_ID || resolvedRouterSelection.providerId || null,
-                model: process.env.AGENT_PLANNER_MODEL || resolvedRouterSelection.model,
+                providerId: plannerProviderId || null,
+                model: plannerModel,
+                plannerRequestCount: plannerResult.attempts > 0 ? 1 : 0,
+                userTextLength: latestUserMessage.length,
                 decisionSource: plannerResult.source,
                 sourceDetail: plannerResult.sourceDetail,
                 attempts: plannerResult.attempts,
                 repairAttempted: plannerResult.repairAttempted,
+                failureReason: plannerFailureReason,
                 error: plannerResult.error || null,
                 validationErrors: plannerResult.validationErrors || [],
                 normalizedFields: plannerResult.normalizedFields || [],
+                ...summarizePlannerNormalizations(plannerResult.normalizedFields),
                 diagnostics: plannerResult.diagnostics || [],
+                visualReferenceCount: runReferenceContext?.references.length || 0,
+                visualEvidenceCount: runReferenceContext?.evidenceImages?.length || 0,
                 mutationBlocked: true,
               });
               writeProgress({ stepId: 'routing', phase: 'planning', status: 'failed', label: '需求规划失败，已停止执行' });
+              const failedTaskId = randomUUID();
+              const failedRequest: AgentClarificationRequest = {
+                id: randomUUID(),
+                taskId: failedTaskId,
+                question: plannerFailureMessage,
+                dimension: 'planner_failure',
+                options: [],
+                allowCustom: true,
+                allowProceed: true,
+                failed: true,
+              };
+              const failedCheckpoint = progressTracker.snapshot();
+              writeEvent(controller, {
+                type: 'clarification_required',
+                message: plannerFailureMessage,
+                request: failedRequest,
+                state: {
+                  taskId: failedTaskId,
+                  operationId: failedCheckpoint.operationId,
+                  skillSource,
+                  lastSequence: failedCheckpoint.lastSequence,
+                  intent: 'image',
+                  originalRequest: latestUserMessage,
+                  workingBrief: latestUserMessage,
+                  askedDimensions: [],
+                  answers: [],
+                  referenceImages: executionReferenceImages,
+                  ...(runReferenceContext ? { referenceContext: structuredClone(runReferenceContext) } : {}),
+                  plannerFailure: {
+                    reason: plannerFailureReason,
+                    retryMode: 'replan',
+                    failedAt: Date.now(),
+                  },
+                },
+              });
               writeEvent(controller, {
                 type: 'agent_error',
                 stage: 'planning',
-                message: '模型暂时无法形成有效的执行计划，已停止工具调用。请重试当前请求。',
+                message: plannerFailureMessage,
+                reason: plannerFailureReason,
+                retryable: true,
               });
               writeEvent(controller, { type: 'agent_done', stopReason: 'planner_failed' });
               return;
@@ -1170,6 +1617,11 @@ export async function POST(request: NextRequest) {
               ...executionReferenceImages,
               ...executionBriefData.referenceImageUrls,
             ]));
+            executionReferenceImages = resolveAgentImageCardReferences({
+              referenceContext: runReferenceContext,
+              referenceImages: executionReferenceImages,
+              imageTask: executionPlan.imageTask,
+            }).orderedReferenceImages;
             intent = executionPlan.intent === 'analysis' ? 'chat' : executionPlan.intent;
             selectedSkill = executionPlan.skillId
               ? skillManifests.find((manifest) => manifest.id === executionPlan?.skillId) || null
@@ -1189,8 +1641,10 @@ export async function POST(request: NextRequest) {
               : { status: 'none', detected: false, confidence: 'none', candidates: [], entityIds: [] };
             void contextLogger.info('planner.resolved', 'Unified agent execution plan resolved', {
               durationMs: Date.now() - plannerStartedAt,
-              providerId: process.env.AGENT_PLANNER_PROVIDER_ID || resolvedRouterSelection.providerId || null,
-              model: process.env.AGENT_PLANNER_MODEL || resolvedRouterSelection.model,
+              providerId: plannerProviderId || null,
+              model: plannerModel,
+              plannerRequestCount: plannerResult.attempts > 0 ? 1 : 0,
+              userTextLength: latestUserMessage.length,
               usage: plannerResult.usage || null,
               decisionSource: plannerResult.source,
               sourceDetail: plannerResult.sourceDetail,
@@ -1199,6 +1653,7 @@ export async function POST(request: NextRequest) {
               error: plannerResult.error || null,
               validationErrors: plannerResult.validationErrors || [],
               normalizedFields: plannerResult.normalizedFields || [],
+              ...summarizePlannerNormalizations(plannerResult.normalizedFields),
               diagnostics: plannerResult.diagnostics || [],
               intent: executionPlan.intent,
               skillId: executionPlan.skillId,
@@ -1210,6 +1665,15 @@ export async function POST(request: NextRequest) {
               panelCount: executionPlan.delivery.panelCount,
               variationAxes: executionPlan.delivery.variationAxes,
               contextReferences: executionPlan.contextReferences,
+              imageOperation: executionPlan.imageTask?.operation || null,
+              editTargetReferenceId: executionPlan.imageTask?.targetReferenceId || null,
+              supportingReferenceIds: executionPlan.imageTask?.supportingReferenceIds || [],
+              visualReferenceCount: executionPlan.visualContext?.references.length || 0,
+              targetSelectionConfidence: executionPlan.visualContext?.targetSelectionConfidence || null,
+              targetClarificationRequired: executionPlan.needsClarification,
+              generationPromptFormat: executionPlan.generation?.promptFormat || null,
+              generationPromptLength: executionPlan.generation?.prompt.length || 0,
+              generationItemCount: executionPlan.generation?.items.length || 0,
             });
           if (executionPlan.needsClarification && executionPlan.clarification) {
             if (intent === 'chat') {
@@ -1251,6 +1715,7 @@ export async function POST(request: NextRequest) {
                 askedDimensions: [],
                 answers: [],
                 referenceImages: executionReferenceImages,
+                ...(runReferenceContext ? { referenceContext: structuredClone(runReferenceContext) } : {}),
                 requestedImageCountTotal: executionPlan.delivery.outputCount,
                 resolvedImageCount: executionPlan.delivery.outputCount,
                 resolvedImageCountSource: 'prompt',
@@ -1340,6 +1805,7 @@ export async function POST(request: NextRequest) {
                 askedDimensions: [],
                 answers: [],
                 referenceImages: executionReferenceImages,
+                ...(runReferenceContext ? { referenceContext: structuredClone(runReferenceContext) } : {}),
                 contextCandidates: candidates,
               },
             });
@@ -1357,6 +1823,14 @@ export async function POST(request: NextRequest) {
         let routingDecision = null;
         if (body.clarificationResponse && activeClarificationState && body.clarificationRequest) {
           const retryClarification = body.clarificationResponse.retry === true;
+          const isPlannerFailureRequest = body.clarificationRequest.dimension === 'planner_failure';
+          const isPlannerFailureRetry = isPlannerFailureRequest
+            && retryClarification
+            && body.clarificationResponse.retryMode === 'replan'
+            && activeClarificationState.plannerFailure?.retryMode === 'replan';
+          if (isPlannerFailureRequest && !isPlannerFailureRetry) {
+            throw new Error('Planner failure retry must use the saved replan mode');
+          }
           const applied = applyClarificationResponse({
             state: activeClarificationState,
             request: body.clarificationRequest,
@@ -1375,8 +1849,162 @@ export async function POST(request: NextRequest) {
             body.clarificationRequest,
             body.clarificationResponse,
           );
-          executionBrief = activeClarificationState.workingBrief || activeClarificationState.originalRequest;
+          executionBrief = isPlannerFailureRetry
+            ? activeClarificationState.originalRequest
+            : activeClarificationState.workingBrief || activeClarificationState.originalRequest;
           executionReferenceImages = [...(activeClarificationState.referenceImages || executionReferenceImages)];
+          const shouldReplan = process.env.AGENT_UNIFIED_PLANNER_ENABLED !== '0'
+            && (
+              isPlannerFailureRetry
+              || activeClarificationState.executionPlan?.needsClarification === true
+            );
+          if (shouldReplan) {
+            const plannerStartedAt = Date.now();
+            const plannerHasVisualReferences = Boolean(runReferenceContext?.references.length);
+            const plannerSelection = explicitPlannerSelection
+              || (plannerHasVisualReferences ? resolvedChatSelection : resolvedRouterSelection);
+            const plannerModel = plannerSelection.model;
+            const plannerProviderId = plannerSelection.providerId || undefined;
+            const replanned = await planAgentExecutionRequest({
+              userMessage: executionBrief,
+              messages: body.messages,
+              manifests: skillManifests,
+              contextEntities,
+              selectedContextEntityIds,
+              activeSkillId: body.activeSkillId || activeClarificationState.skillId,
+              hasReferenceImages: plannerHasVisualReferences,
+              referenceContext: runReferenceContext,
+              imageOptions: body.imageOptions,
+              canvasContext: body.canvasContext,
+              model: plannerModel,
+              providerId: plannerProviderId,
+              timeoutMs: plannerTimeoutMs,
+              signal: runSignal,
+              chatFn: chat,
+            });
+            if (!replanned.plan) {
+              const failureReason = replanned.failureReason || 'invalid_plan';
+              const message = failureReason === 'timeout'
+                ? 'Agent 分析超时，未生成有效执行计划。请重新分析。'
+                : failureReason === 'transport'
+                  ? 'Agent 分析连接中断，请重新分析。'
+                : failureReason === 'vision_unsupported'
+                ? '当前分析模型不支持图片输入，请切换模型后重新分析。'
+                : failureReason === 'vision_unavailable'
+                  ? '引用图片无法读取，请重新选择图片后分析。'
+                  : failureReason === 'invalid_reference'
+                    ? '图片引用与当前任务不一致，请重新选择图片后分析。'
+                    : failureReason === 'invalid_context'
+                      ? 'Agent 混淆了图片引用和画布上下文，已停止执行。请重新分析。'
+                      : 'Agent 未能生成完整的执行计划，请重新分析。';
+              writeProgress({ stepId: 'clarification', phase: 'planning', status: 'failed', label: '补充信息规划失败' });
+              const failedRequest: AgentClarificationRequest = {
+                id: randomUUID(),
+                taskId: activeClarificationState.taskId,
+                question: message,
+                dimension: 'planner_failure',
+                options: [],
+                allowCustom: true,
+                allowProceed: true,
+                failed: true,
+              };
+              const failedCheckpoint = progressTracker.snapshot();
+              const failedState: AgentClarificationState = {
+                ...activeClarificationState,
+                operationId: failedCheckpoint.operationId,
+                skillSource,
+                lastSequence: failedCheckpoint.lastSequence,
+                originalRequest: activeClarificationState.originalRequest,
+                workingBrief: activeClarificationState.originalRequest,
+                referenceImages: [...executionReferenceImages],
+                ...(runReferenceContext ? { referenceContext: structuredClone(runReferenceContext) } : {}),
+                executionPlan: undefined,
+                plannerFailure: {
+                  reason: failureReason,
+                  retryMode: 'replan',
+                  failedAt: Date.now(),
+                },
+              };
+              writeEvent(controller, {
+                type: 'clarification_required',
+                message,
+                request: failedRequest,
+                state: failedState,
+              });
+              writeEvent(controller, { type: 'agent_error', stage: 'planning', message, reason: failureReason, retryable: true });
+              writeEvent(controller, { type: 'agent_done', stopReason: 'planner_failed' });
+              void contextLogger.warn('planner.clarification_failed', 'Planner failed after clarification', {
+                durationMs: Date.now() - plannerStartedAt,
+                providerId: plannerProviderId || null,
+                model: plannerModel,
+                plannerRequestCount: replanned.attempts > 0 ? 1 : 0,
+                userTextLength: executionBrief.length,
+                failureReason,
+                validationErrors: replanned.validationErrors || [],
+                normalizedFields: replanned.normalizedFields || [],
+                ...summarizePlannerNormalizations(replanned.normalizedFields),
+                diagnostics: replanned.diagnostics || [],
+                visualReferenceCount: runReferenceContext?.references.length || 0,
+                mutationBlocked: true,
+              });
+              return;
+            }
+            executionPlan = replanned.plan;
+            executionPlanSource = replanned.source as 'model' | 'fallback';
+            executionPlanSourceDetail = replanned.sourceDetail as AgentPlannerSourceDetail;
+            executionKind = executionPlan.execution.kind;
+            executionBriefData = executionPlanToBrief(executionPlan, executionBrief, contextEntities) as ExecutionBrief;
+            executionBrief = executionBriefData.plainText;
+            imageDeliveryPlan = executionPlanToImageDeliveryPlan(executionPlan) as ImageDeliveryPlan;
+            executionReferenceImages = resolveAgentImageCardReferences({
+              referenceContext: runReferenceContext,
+              referenceImages: executionReferenceImages,
+              imageTask: executionPlan.imageTask,
+            }).orderedReferenceImages;
+            activeClarificationState.executionPlan = structuredClone(executionPlan);
+            activeClarificationState.workingBrief = executionBrief;
+            activeClarificationState.intent = executionPlan.intent === 'skill_action' ? 'skill_action' : 'image';
+            activeClarificationState.skillId = executionPlan.skillId || undefined;
+            activeClarificationState.plannerFailure = undefined;
+            void contextLogger.info('planner.clarification_resolved', 'Planner resolved a new execution plan after user-requested reanalysis', {
+              durationMs: Date.now() - plannerStartedAt,
+              providerId: plannerProviderId || null,
+              model: plannerModel,
+              plannerRequestCount: 1,
+              userTextLength: executionBrief.length,
+              diagnostics: replanned.diagnostics || [],
+              generationPromptFormat: executionPlan.generation?.promptFormat || null,
+              generationPromptLength: executionPlan.generation?.prompt.length || 0,
+              generationItemCount: executionPlan.generation?.items.length || 0,
+            });
+            if (executionPlan.needsClarification && executionPlan.clarification) {
+              const request: AgentClarificationRequest = {
+                id: randomUUID(),
+                taskId: activeClarificationState.taskId,
+                question: executionPlan.clarification.question,
+                dimension: executionPlan.clarification.dimension,
+                options: executionPlan.clarification.options,
+                allowCustom: true,
+                allowProceed: true,
+              };
+              const checkpoint = progressTracker.snapshot();
+              writeProgress({ stepId: 'clarification', phase: 'waiting_input', status: 'waiting', label: '仍需确认主要编辑图片' });
+              writeEvent(controller, {
+                type: 'clarification_required',
+                message: request.question,
+                request,
+                state: {
+                  ...activeClarificationState,
+                  operationId: checkpoint.operationId,
+                  lastSequence: checkpoint.lastSequence,
+                  referenceImages: executionReferenceImages,
+                  ...(runReferenceContext ? { referenceContext: structuredClone(runReferenceContext) } : {}),
+                },
+              });
+              writeEvent(controller, { type: 'agent_done', stopReason: 'clarification_required' });
+              return;
+            }
+          }
           const selectedContextEntity = body.clarificationRequest.dimension === 'context_reference'
             ? [...(activeClarificationState.contextCandidates || []), ...contextEntities]
                 .find((entity) => entity.id === body.clarificationResponse?.selectedOptionId)
@@ -1493,14 +2121,14 @@ export async function POST(request: NextRequest) {
           intent = routedIntent === 'image' && selectedSkill && !selectedSkill.allowedTools.includes('generate_image')
             ? 'chat'
             : routedIntent;
-          if (!executionPlan && intent === 'chat' && !selectedSkill && isPotentialDesignExecutionRequest(latestUserMessage)) {
+          if (!plannerAuthoritative && !executionPlan && intent === 'chat' && !selectedSkill && isPotentialDesignExecutionRequest(latestUserMessage)) {
             intent = 'image';
           }
         }
         const selectedSkillMayExecute = Boolean(selectedSkill?.allowedTools?.some(
           (toolName) => toolName === 'generate_image' || toolName === 'start_skill_job'
         ));
-        const selectedSkillExecutionRequest = selectedSkillMayExecute
+        const selectedSkillExecutionRequest = !plannerAuthoritative && selectedSkillMayExecute
           && (
             conversationIntent.inherited
             || (
@@ -1508,7 +2136,7 @@ export async function POST(request: NextRequest) {
               && !/(信息收集|访谈|分析|解释|点评|总结)/i.test(executionBrief)
             )
           );
-        if (!executionPlan && intent === 'chat' && selectedSkillExecutionRequest) {
+        if (!plannerAuthoritative && !executionPlan && intent === 'chat' && selectedSkillExecutionRequest) {
           intent = 'skill_action';
         }
         void contextLogger.info('routing.resolved', 'Agent routing decision resolved', {
@@ -1599,6 +2227,7 @@ export async function POST(request: NextRequest) {
                 askedDimensions: [],
                 answers: [],
                 referenceImages: executionReferenceImages,
+                ...(runReferenceContext ? { referenceContext: structuredClone(runReferenceContext) } : {}),
               }),
               taskId,
               operationId: checkpoint.operationId,
@@ -1704,6 +2333,7 @@ export async function POST(request: NextRequest) {
                 askedDimensions: [],
                 answers: [],
                 referenceImages: executionReferenceImages,
+                ...(runReferenceContext ? { referenceContext: structuredClone(runReferenceContext) } : {}),
               }),
               taskId,
               operationId: checkpoint.operationId,
@@ -1756,6 +2386,7 @@ export async function POST(request: NextRequest) {
             askedDimensions: [],
             answers: [],
             referenceImages: executionReferenceImages,
+            ...(runReferenceContext ? { referenceContext: structuredClone(runReferenceContext) } : {}),
             ...(executionPlan ? { executionPlan: structuredClone(executionPlan) } : {}),
           };
           const clarification = await resolveBriefClarification({
@@ -1851,6 +2482,74 @@ export async function POST(request: NextRequest) {
           ? executionKind === 'image_pipeline'
           : intent === 'image' && (!selectedSkill || selectedSkill.executionMode === 'image_pipeline');
         if (shouldUseImagePipeline) {
+          if (plannerAuthoritative) {
+            const availableReferenceIds = new Set((runReferenceContext?.references || []).map((reference) => reference.id));
+            const imageTask = executionPlan?.imageTask;
+            const presentation = executionPlan?.presentation;
+            const generation = executionPlan?.version === 2 ? executionPlan.generation : null;
+            const invalidExecutablePlan = !executionPlan
+              || executionPlan.version !== 2
+              || executionPlan.intent !== 'image'
+              || executionPlan.execution.kind !== 'image_pipeline'
+              || executionPlan.execution.tool !== 'generate_image'
+              || !imageTask
+              || !presentation
+              || !generation;
+            const invalidEditPlan = imageTask?.operation === 'edit' && (
+              !imageTask.targetReferenceId
+              || !availableReferenceIds.has(imageTask.targetReferenceId)
+              || imageTask.supportingReferenceIds.includes(imageTask.targetReferenceId)
+            );
+            const referencedTaskWithoutRoles = Boolean(runReferenceContext?.references.length) && !imageTask;
+            if (invalidExecutablePlan || invalidEditPlan || referencedTaskWithoutRoles) {
+              const message = '模型未能形成可安全执行的图片计划，系统已在生图前停止。请重新规划当前请求。';
+              const failedTaskId = activeClarificationState?.taskId || randomUUID();
+              const failedRequest: AgentClarificationRequest = {
+                id: randomUUID(),
+                taskId: failedTaskId,
+                question: message,
+                dimension: 'planner_failure',
+                options: [],
+                allowCustom: true,
+                allowProceed: true,
+                failed: true,
+              };
+              const failedCheckpoint = progressTracker.snapshot();
+              writeProgress({ stepId: 'routing', phase: 'planning', status: 'failed', label: '图片计划校验失败，已停止执行' });
+              writeEvent(controller, {
+                type: 'clarification_required',
+                message,
+                request: failedRequest,
+                state: {
+                  taskId: failedTaskId,
+                  operationId: failedCheckpoint.operationId,
+                  skillSource,
+                  lastSequence: failedCheckpoint.lastSequence,
+                  intent: 'image',
+                  originalRequest: activeClarificationState?.originalRequest || latestUserMessage,
+                  workingBrief: activeClarificationState?.originalRequest || latestUserMessage,
+                  askedDimensions: [],
+                  answers: [],
+                  referenceImages: [...executionReferenceImages],
+                  ...(runReferenceContext ? { referenceContext: structuredClone(runReferenceContext) } : {}),
+                  plannerFailure: {
+                    reason: 'invalid_plan',
+                    retryMode: 'replan',
+                    failedAt: Date.now(),
+                  },
+                },
+              });
+              writeEvent(controller, {
+                type: 'agent_error',
+                stage: 'planning',
+                message,
+                reason: 'invalid_plan',
+                retryable: true,
+              });
+              writeEvent(controller, { type: 'agent_done', stopReason: 'planner_failed' });
+              return;
+            }
+          }
           turns += 1;
           const refinedDeliveryPlan = executionPlan
             ? executionPlanToImageDeliveryPlan(executionPlan) as ImageDeliveryPlan
@@ -1863,19 +2562,27 @@ export async function POST(request: NextRequest) {
             };
           }
           const imageBatchMode = imageDeliveryPlan.mode as AgentImageBatchMode;
-          if (
-            (
-              (imageBatchMode === 'series' && requestedTotalImageCount > 1)
-              || selectedSkill?.promptStyle === 'json-text'
-            )
-            && process.env.PROMPT_PIPELINE_AGENT_ENABLED === '0'
-          ) {
-            throw new Error('当前 Skill 需要启用提示词优化流程。');
-          }
-          writeProgress({ stepId: 'prompt_optimization', phase: 'optimizing', status: 'active', label: '正在优化图片提示词' });
-          writeEvent(controller, { type: 'prompt_optimization_start' });
+          const plannerGeneration = executionPlan?.version === 2 ? executionPlan.generation : null;
+          const usesPlannerGeneration = Boolean(plannerAuthoritative && plannerGeneration);
+          writeProgress({
+            stepId: 'prompt_optimization',
+            phase: 'optimizing',
+            status: 'active',
+            label: usesPlannerGeneration ? '正在准备最终图片提示词' : '正在优化图片提示词',
+          });
+          if (!usesPlannerGeneration) writeEvent(controller, { type: 'prompt_optimization_start' });
           const optimizerModel = process.env.PROMPT_OPTIMIZER_MODEL || process.env.AGENT_CHAT_MODEL || DEFAULT_AGENT_MODEL;
-          const optimizedResult = process.env.PROMPT_PIPELINE_AGENT_ENABLED === '0'
+          const optimizedResult = usesPlannerGeneration
+            ? {
+                prompt: plannerGeneration!.prompt,
+                optimized: false,
+                summary: 'Agent 已在单次分析中生成最终图片提示词',
+                items: plannerGeneration!.items.map((item, index) => ({
+                  ...item,
+                  subject: executionPlan?.delivery.items[index]?.subject || item.label,
+                })),
+              }
+            : process.env.PROMPT_PIPELINE_AGENT_ENABLED === '0'
             ? { prompt: executionBrief, optimized: false, summary: '已保留你的原始设计要求' }
             : await optimizeImagePrompt({
                 userPrompt: executionBrief,
@@ -1889,10 +2596,12 @@ export async function POST(request: NextRequest) {
                 outputCount: requestedTotalImageCount,
                 batchMode: imageBatchMode,
                 plannerItems: executionPlan?.delivery.items || [],
+                imageTask: executionPlan?.imageTask || null,
+                visualContext: executionPlan?.visualContext || null,
               });
           const optimized = {
             ...optimizedResult,
-            prompt: selectedSkill?.promptStyle === 'json-text'
+            prompt: usesPlannerGeneration || selectedSkill?.promptStyle === 'json-text'
               ? optimizedResult.prompt
               : ensureOptimizedPromptCoverage(optimizedResult.prompt, executionBriefData),
           };
@@ -1910,7 +2619,7 @@ export async function POST(request: NextRequest) {
                   index: item.index,
                   label: item.label || `系列 ${item.index}`,
                   subject: item.subject || optimizedSubject || 'series item',
-                  prompt: selectedSkill?.promptStyle === 'json-text'
+                  prompt: usesPlannerGeneration || selectedSkill?.promptStyle === 'json-text'
                     ? item.prompt || executionBrief
                     : ensureOptimizedPromptCoverage(item.prompt || `${optimized.prompt}\n\nSpecific direction: ${item.variation || item.subject || item.label}`, executionBriefData),
                 }))
@@ -1936,12 +2645,19 @@ export async function POST(request: NextRequest) {
                 : [],
             });
           }
-          writeEvent(controller, {
-            type: 'prompt_optimization_done',
-            summary: optimized.summary,
-            optimized: optimized.optimized,
+          if (!usesPlannerGeneration) {
+            writeEvent(controller, {
+              type: 'prompt_optimization_done',
+              summary: optimized.summary,
+              optimized: optimized.optimized,
+            });
+          }
+          writeProgress({
+            stepId: 'prompt_optimization',
+            phase: 'optimizing',
+            status: 'completed',
+            label: usesPlannerGeneration ? '最终图片提示词已准备' : '图片提示词优化完成',
           });
-          writeProgress({ stepId: 'prompt_optimization', phase: 'optimizing', status: 'completed', label: '图片提示词优化完成' });
 
           if (requestedImageCount > 1 || executionPlan?.execution.requiresConfirmation === true) {
             const generationItems = allGenerationItems.slice(0, requestedImageCount);
@@ -1961,10 +2677,15 @@ export async function POST(request: NextRequest) {
               userMessage: latestUserMessage,
               generationBrief: executionBrief,
               executionBrief: structuredClone(executionBriefData),
+              imageTask: executionPlan?.imageTask ? structuredClone(executionPlan.imageTask) : undefined,
+              visualContext: executionPlan?.visualContext ? structuredClone(executionPlan.visualContext) : undefined,
+              presentation: executionPlan?.presentation ? structuredClone(executionPlan.presentation) : undefined,
+              referenceContext: runReferenceContext ? structuredClone(runReferenceContext) : undefined,
               referenceImages: [...executionReferenceImages],
               canvasContext: body.canvasContext ? structuredClone(body.canvasContext) : undefined,
               imageOptions: { ...structuredClone(body.imageOptions || {}), count: requestedImageCount },
               imageCountSource: requestedImageCountSource,
+              promptOptimized: optimized.optimized,
               requestedTotalImageCount,
               imageBatchPlan: imageBatchPlan ? structuredClone(imageBatchPlan) : undefined,
               imageBatchMode,
@@ -2004,7 +2725,11 @@ export async function POST(request: NextRequest) {
               body.imageOptions,
               executionReferenceImages,
               optimized.prompt,
-              { source: requestedImageCountSource, totalCount: requestedTotalImageCount },
+              {
+                source: requestedImageCountSource,
+                totalCount: requestedTotalImageCount,
+                promptOptimized: optimized.optimized,
+              },
               allGenerationItems,
               undefined,
               imageDeliveryPlan,
@@ -2024,6 +2749,7 @@ export async function POST(request: NextRequest) {
             toolName: 'generate_image',
             rawResult: generationPayload,
           })) writeEvent(controller, event as AgentEvent);
+          writeImageCompletionSummary(generationPayload);
           writeToolProgress('generate_image', 'completed', toolCallId);
           writeEvent(controller, { type: 'agent_done', stopReason: 'image_generated' });
           return;
@@ -2035,6 +2761,7 @@ export async function POST(request: NextRequest) {
           skillContent,
           canvasContext: body.canvasContext,
           referenceImages: executionReferenceImages,
+          referenceContext: runReferenceContext,
           resolvedBrief: executionPlan || shouldRunClarifier ? executionBrief : undefined,
           executionPlan: executionPlan || undefined,
         });
@@ -2123,6 +2850,9 @@ export async function POST(request: NextRequest) {
                 toolName: name,
                 rawResult: rawResult ?? result,
               })) writeEvent(controller, event as AgentEvent);
+              if (name === 'generate_image') {
+                writeImageCompletionSummary(rawResult ?? result);
+              }
               writeToolProgress(name, 'completed', id);
             },
           });
@@ -2169,6 +2899,7 @@ export async function POST(request: NextRequest) {
                 askedDimensions: [],
                 answers: [],
                 referenceImages: executionReferenceImages,
+                ...(runReferenceContext ? { referenceContext: structuredClone(runReferenceContext) } : {}),
               },
             });
             writeEvent(controller, { type: 'agent_done', stopReason: 'awaiting_user_intent' });
@@ -2197,6 +2928,10 @@ export async function POST(request: NextRequest) {
               userMessage: latestUserMessage,
               generationBrief: executionBrief,
               executionBrief: structuredClone(executionBriefData),
+              imageTask: executionPlan?.imageTask ? structuredClone(executionPlan.imageTask) : undefined,
+              visualContext: executionPlan?.visualContext ? structuredClone(executionPlan.visualContext) : undefined,
+              presentation: executionPlan?.presentation ? structuredClone(executionPlan.presentation) : undefined,
+              referenceContext: runReferenceContext ? structuredClone(runReferenceContext) : undefined,
               referenceImages: [...executionReferenceImages],
               canvasContext: body.canvasContext ? structuredClone(body.canvasContext) : undefined,
               imageOptions: { ...structuredClone(body.imageOptions || {}), count: requestedImageCount },

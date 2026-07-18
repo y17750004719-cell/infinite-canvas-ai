@@ -36,6 +36,7 @@ test('magazine skill opts into the direct image pipeline and JSON text prompts',
   const manifest = await getSkillManifest('magazine-poster', { projectRoot });
   assert.equal(manifest.executionMode, 'image_pipeline');
   assert.equal(manifest.promptStyle, 'json-text');
+  assert.match(manifest.generationContract, /supplier-ready prompt/i);
   assert.deepEqual(manifest.allowedTools, ['generate_image', 'get_canvas_context']);
   assert.match(manifest.description, /拼贴艺术编辑海报/);
   assert.match(manifest.planningGuidance, /typography-led cultural/i);

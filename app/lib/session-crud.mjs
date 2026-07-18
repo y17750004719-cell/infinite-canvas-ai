@@ -5,6 +5,7 @@ const createEmptyTopic = (now) => ({
   title: '新对话',
   messages: [],
   activeSkill: null,
+  activeSkillExplicit: false,
   createdAt: now,
   updatedAt: now,
 });

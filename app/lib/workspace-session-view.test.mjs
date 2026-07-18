@@ -29,6 +29,7 @@ import {
   createCanvasCardItemAtCanvasPoint,
   createWorkspaceModelOptions,
   buildReferenceImageRequestPayload,
+  orderLinkedImagePreviewsByReferenceIds,
   canEnterManualTextMode,
   canStartCanvasTextGeneration,
   finalizeManualTextCardItem,
@@ -1796,6 +1797,15 @@ test('canItemAcceptIncomingConnection rejects manual text cards', () => {
   assert.equal(result, false);
 });
 
+test('canItemAcceptIncomingConnection keeps canvas annotations outside the node graph', () => {
+  assert.equal(canItemAcceptIncomingConnection({ id: 'stroke-1', type: 'stroke' }), false);
+  assert.equal(canItemAcceptIncomingConnection({
+    id: 'annotation-text-1',
+    type: 'text',
+    textVariant: 'annotation',
+  }), false);
+});
+
 test('getAutoResizedTextareaMetrics keeps the minimum height for short content', () => {
   const result = getAutoResizedTextareaMetrics({
     scrollHeight: 44,
@@ -2010,6 +2020,34 @@ test('buildCanvasImageGenerationRequest only uses current prompt, direct image p
     reference_labels: ['image1', 'image2'],
     executionMode: 'async',
   });
+});
+
+test('orderLinkedImagePreviewsByReferenceIds preserves canvas order when no model order is provided', () => {
+  const previews = [
+    { id: 'reference-a', src: '/a.png', label: 'A' },
+    { id: 'reference-b', src: '/b.png', label: 'B' },
+  ];
+
+  assert.equal(orderLinkedImagePreviewsByReferenceIds(previews), previews);
+});
+
+test('orderLinkedImagePreviewsByReferenceIds follows the model-selected target and supporting reference order', () => {
+  const previews = [
+    { id: 'reference-a', src: '/a.png', label: 'A' },
+    { id: 'reference-b', src: '/b.png', label: 'B' },
+    { id: 'reference-c', src: '/c.png', label: 'C' },
+  ];
+
+  assert.deepEqual(
+    orderLinkedImagePreviewsByReferenceIds(previews, [
+      'reference-c',
+      'reference-a',
+      'reference-c',
+      'missing-reference',
+    ]),
+    [previews[2], previews[0]],
+  );
+  assert.deepEqual(orderLinkedImagePreviewsByReferenceIds(previews, []), []);
 });
 
 test('buildCanvasImageGenerationRequest preserves 4K size requests for image cards', () => {

@@ -1,4 +1,7 @@
 import type { AgentContextEntity, AgentProposal } from './agent/context-reference.types';
+import type { CanvasItem } from './canvas-types';
+
+export type { CanvasItem } from './canvas-types';
 
 const DB_NAME = 'zo-design-db';
 const DB_VERSION = 1;
@@ -13,28 +16,6 @@ export {
 
 let db: IDBDatabase | null = null;
 
-export interface CanvasItem {
-  id: string;
-  type: 'image' | 'frame' | 'shape' | 'text';
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  rotation: number;
-  src?: string;
-  naturalWidth?: number;
-  naturalHeight?: number;
-  imageVariant?: 'card';
-  imageOutputs?: Array<{ src: string; naturalWidth: number; naturalHeight: number }>;
-  activeImageOutputIndex?: number;
-  fill?: string;
-  text?: string;
-  textVariant?: 'legacy' | 'card';
-  textMode?: 'ai' | 'manual';
-  visible: boolean;
-  locked: boolean;
-}
-
 export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant' | 'skill';
@@ -44,6 +25,51 @@ export interface ChatMessage {
   imageUrl?: string;
   skill?: { id: string; label: string };
   referenceImages?: string[];
+  referenceContext?: {
+    references: Array<{
+      id: string;
+      src: string;
+      label: string;
+      source: 'upload' | 'history' | 'canvas';
+      canvasItemId?: string;
+      role: 'reference' | 'edit_target' | 'annotation_bundle';
+      annotationCount?: number;
+    }>;
+    composerSegments: Array<
+      | { type: 'text'; text: string }
+      | { type: 'reference'; referenceId: string }
+    >;
+    evidenceImages?: Array<{
+      id: string;
+      referenceId: string;
+      src: string;
+      kind: 'annotation_composite';
+    }>;
+  };
+  resultTitle?: string;
+  resultSummary?: string;
+  imageOperation?: 'generate' | 'edit';
+  imageProviderId?: string;
+  sourceReferenceId?: string;
+  promptTrace?: {
+    sourcePrompt: string;
+    finalPrompt: string;
+    optimized: boolean;
+    operation: 'generate' | 'edit';
+    targetReferenceId: string | null;
+  };
+  inlineContent?: Array<
+    | { type: 'text'; text: string }
+    | {
+        type: 'reference';
+        referenceId: string;
+        id?: string;
+        src?: string;
+        label?: string;
+        source?: 'upload' | 'history' | 'canvas';
+        annotationCount?: number;
+      }
+  >;
   model?: string;
   imageName?: string;
   agentClarification?: {
@@ -69,7 +95,13 @@ export interface ChatMessage {
       askedDimensions: string[];
       answers: Array<{ dimension: string; question: string; answer: string }>;
       referenceImages?: string[];
+      referenceContext?: ChatMessage['referenceContext'];
       contextCandidates?: AgentContextEntity[];
+      plannerFailure?: {
+        reason: 'timeout' | 'transport' | 'invalid_reference' | 'invalid_context' | 'invalid_plan' | 'vision_unsupported' | 'vision_unavailable';
+        retryMode: 'replan';
+        failedAt: number;
+      };
     };
   };
   agentClarificationResponsePayload?: {
@@ -80,6 +112,7 @@ export interface ChatMessage {
       customText?: string;
       proceedWithCurrent?: boolean;
       retry?: boolean;
+      retryMode?: 'replan';
     };
   };
   agentClarificationDismissed?: boolean;
@@ -101,6 +134,7 @@ export interface ChatTopic {
   title: string;
   messages: ChatMessage[];
   activeSkill?: { id: string; label: string } | null;
+  activeSkillExplicit?: boolean;
   createdAt: number;
   updatedAt: number;
 }
@@ -115,9 +149,15 @@ export interface GeneratedImageHistoryEntry {
   sourceItemId?: string;
   topicId?: string;
   messageId?: string;
+  operation?: 'generate' | 'edit';
+  sourceReferenceId?: string;
+  providerId?: string;
+  model?: string;
+  promptTrace?: ChatMessage['promptTrace'];
 }
 
 export interface ProjectSession {
+  schemaVersion?: 2;
   id: string;
   name: string;
   createdAt: number;
@@ -144,6 +184,13 @@ export interface ProjectSession {
   imageProviderId?: string;
   imageModelId?: string;
   generatedImageHistory?: GeneratedImageHistoryEntry[];
+  activeAgentRun?: {
+    runId: string;
+    userMessageId: string;
+    assistantMessageId: string;
+    startedAt: number;
+    status: 'running' | 'completed' | 'failed' | 'cancelled';
+  };
   viewport: { x: number; y: number; scale: number };
 }
 

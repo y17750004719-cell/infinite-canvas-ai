@@ -171,8 +171,23 @@ function extractAgentImageAssets(rawResult) {
             : '',
       ...(Number.isFinite(item?.naturalWidth) ? { naturalWidth: item.naturalWidth } : {}),
       ...(Number.isFinite(item?.naturalHeight) ? { naturalHeight: item.naturalHeight } : {}),
+      ...(item?.promptTrace && typeof item.promptTrace === 'object'
+        ? { promptTrace: item.promptTrace }
+        : {}),
     }))
     .filter((item) => item.src);
+}
+
+function extractAgentImagePresentation(rawResult) {
+  const value = rawResult?.presentation;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const title = typeof value.title === 'string' ? value.title.trim() : '';
+  const summary = typeof value.summary === 'string' ? value.summary.trim() : '';
+  const operation = value.operation === 'generate' || value.operation === 'edit'
+    ? value.operation
+    : '';
+  if (!title || !summary || !operation) return null;
+  return { title, summary, operation };
 }
 
 /** @param {{
@@ -196,9 +211,23 @@ export function createAgentToolResultEvents({
   if (toolName === 'generate_image' && includeAssets) {
     const assets = extractAgentImageAssets(rawResult);
     if (assets.length > 0) {
+      const presentation = extractAgentImagePresentation(rawResult);
+      const providerId = typeof rawResult?.resolvedImageOptions?.providerId === 'string'
+        ? rawResult.resolvedImageOptions.providerId
+        : '';
+      const sourceReferenceId = typeof rawResult?.sourceReferenceId === 'string'
+        ? rawResult.sourceReferenceId
+        : '';
       events.push({
         type: 'client_action',
-        action: { type: 'add_generated_assets', runId, assets },
+        action: {
+          type: 'add_generated_assets',
+          runId,
+          assets,
+          ...(providerId ? { providerId } : {}),
+          ...(sourceReferenceId ? { sourceReferenceId } : {}),
+          ...(presentation ? { presentation } : {}),
+        },
       });
     }
   }

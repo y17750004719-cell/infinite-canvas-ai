@@ -399,21 +399,26 @@ body {
 }
 
 .workspace-token-chip,
-.workspace-chat-input,
-.workspace-message-assistant,
-.workspace-message-user {
+.workspace-chat-input {
   border: 1px solid var(--workspace-border);
   background: var(--workspace-surface-soft);
   color: var(--workspace-text-primary);
 }
 
-.workspace-token-chip:hover {
-  background: var(--workspace-control-hover);
+.workspace-message-assistant {
+  border: 0;
+  background: transparent;
+  color: var(--workspace-text-primary);
 }
 
 .workspace-message-user {
+  border: 0;
   background: var(--workspace-message-user-bg);
   color: var(--workspace-message-user-fg);
+}
+
+.workspace-token-chip:hover {
+  background: var(--workspace-control-hover);
 }
 
 .workspace-chat-input {
@@ -499,6 +504,32 @@ body {
   cursor: not-allowed;
   color: var(--workspace-text-soft);
   opacity: 0.55;
+}
+
+.workspace-chat-scroll-bottom {
+  border: 1px solid color-mix(in srgb, var(--workspace-border-strong) 72%, transparent);
+  background: color-mix(in srgb, var(--workspace-surface-elevated) 90%, transparent);
+  color: var(--workspace-text-muted);
+  backdrop-filter: blur(16px);
+}
+
+.workspace-chat-scroll-bottom:hover,
+.workspace-chat-scroll-bottom:focus-visible {
+  border-color: var(--workspace-border-strong);
+  background: var(--workspace-control-hover);
+  color: var(--workspace-text-primary);
+  outline: none;
+}
+
+.workspace-reference-token {
+  border: 1px solid var(--workspace-border);
+  background: transparent;
+  color: inherit;
+  transition: border-color 160ms ease, opacity 160ms ease;
+}
+
+.workspace-reference-token:hover {
+  border-color: var(--workspace-border-strong);
 }
 
 .workspace-chat-icon-control {

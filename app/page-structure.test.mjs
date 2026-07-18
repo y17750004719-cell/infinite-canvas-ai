@@ -216,9 +216,11 @@ test('canvas bottom toolbar renders a screenshot-style icon-only dock', () => {
   assert.equal(configBlock.includes("id: 'image-enhance', label: '图片增强', action: 'add-image-card'"), true);
   assert.equal(configBlock.includes("id: 'video', label: '视频（即将支持）', action: 'video-placeholder'"), true);
   assert.equal(configBlock.includes("id: 'text-add', label: '添加文字', action: 'add-text-card'"), true);
-  assert.equal(configBlock.includes("active: true"), true);
+  assert.equal(configBlock.includes("active: true"), false);
   assert.equal(pageSource.includes('type CanvasBottomToolbarAction ='), true);
-  assert.equal(pageSource.includes('const handleCanvasBottomToolbarAction = (action?: CanvasBottomToolbarAction) => {'), true);
+  assert.equal(pageSource.includes('const handleCanvasBottomToolbarAction = ('), true);
+  assert.equal(pageSource.includes("toolId === 'select' || toolId === 'draw' || toolId === 'text'"), true);
+  assert.equal(pageSource.includes("setTool(toolId === 'text' ? 'annotation-text' : toolId)"), true);
   assert.equal(pageSource.includes("if (!action || action === 'video-placeholder') return;"), true);
   assert.equal(pageSource.includes("if (action === 'add-image-card')"), true);
   assert.equal(pageSource.includes('const canvasBottomToolbarReservedRightClassName ='), true);
@@ -238,12 +240,20 @@ test('canvas bottom toolbar renders a screenshot-style icon-only dock', () => {
   assert.equal(toolbarBlock.includes('workspace-bottom-toolbar'), true);
   assert.equal(toolbarBlock.includes('aria-label={item.label}'), true);
   assert.equal(toolbarBlock.includes('title={item.label}'), true);
-  assert.equal(toolbarBlock.includes("onClick={() => handleCanvasBottomToolbarAction('action' in item ? item.action : undefined)}"), true);
+  assert.equal(toolbarBlock.includes("onClick={() => handleCanvasBottomToolbarAction(item.id, 'action' in item ? item.action : undefined)}"), true);
   assert.equal(toolbarBlock.includes("? 'is-active'"), true);
   assert.equal(toolbarBlock.includes('<svg width="20" height="20" viewBox="0 0 24 24"'), true);
   assert.equal(toolbarBlock.includes("const svgOpacity = 'svgOpacity' in item ? item.svgOpacity : 0.9;"), true);
   assert.equal(toolbarBlock.includes('fillOpacity={svgOpacity}'), true);
-  assert.equal(toolbarBlock.includes('<span'), false);
+  assert.equal(toolbarBlock.includes('aria-label="画笔设置"'), true);
+});
+
+test('canvas annotations render above regular nodes and stay outside graph ports', () => {
+  assert.equal(pageSource.includes('const CanvasAnnotationsLayer = memo'), true);
+  assert.equal(pageSource.includes('className="absolute z-[3]"'), true);
+  assert.equal(pageSource.includes('const regularItems = items.filter((item) => !isCanvasAnnotationItem(item));'), true);
+  assert.equal(pageSource.includes('<CanvasPortsLayer\n        items={regularItems}'), true);
+  assert.equal(pageSource.includes('<CanvasNodesLayer\n        items={regularItems}'), true);
 });
 
 test('canvas zoom display opens a hover menu with zoom actions', () => {

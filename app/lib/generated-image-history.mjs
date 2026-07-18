@@ -86,6 +86,25 @@ export function normalizeGeneratedImageHistory(entries) {
       sourceItemId: toSafeString(entry?.sourceItemId) || undefined,
       topicId: toSafeString(entry?.topicId) || undefined,
       messageId: toSafeString(entry?.messageId) || undefined,
+      ...(entry?.operation === 'edit' || entry?.operation === 'generate' ? { operation: entry.operation } : {}),
+      ...(toSafeString(entry?.sourceReferenceId) ? { sourceReferenceId: toSafeString(entry.sourceReferenceId) } : {}),
+      ...(toSafeString(entry?.providerId) ? { providerId: toSafeString(entry.providerId) } : {}),
+      ...(toSafeString(entry?.model) ? { model: toSafeString(entry.model) } : {}),
+      ...(entry?.promptTrace
+        && typeof entry.promptTrace === 'object'
+        && toSafeString(entry.promptTrace.sourcePrompt)
+        && toSafeString(entry.promptTrace.finalPrompt)
+        && (entry.promptTrace.operation === 'generate' || entry.promptTrace.operation === 'edit')
+        ? {
+            promptTrace: {
+              sourcePrompt: entry.promptTrace.sourcePrompt,
+              finalPrompt: entry.promptTrace.finalPrompt,
+              optimized: entry.promptTrace.optimized === true,
+              operation: entry.promptTrace.operation,
+              targetReferenceId: toSafeString(entry.promptTrace.targetReferenceId) || null,
+            },
+          }
+        : {}),
     }];
   });
 }

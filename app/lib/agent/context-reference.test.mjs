@@ -97,6 +97,26 @@ test('resolves generated images and selected canvas objects without using image 
   assert.equal(resolveContextReference({ userMessage: '参考选中的图片生成', entities }).candidates[0].assetUrl, '/canvas.png');
 });
 
+test('treats deliberate multi-selection as explicit context instead of ambiguity', () => {
+  const entities = buildAgentContextEntities({
+    canvasItems: [
+      { id: 'canvas-image', type: 'image', src: '/canvas.png', x: 20, y: 0 },
+      { id: 'stroke-1', type: 'stroke', x: 20, y: 0 },
+      { id: 'annotation-text-1', type: 'text', textVariant: 'annotation', text: '改成红色', x: 30, y: 10 },
+    ],
+    selectedItemIds: ['canvas-image', 'stroke-1', 'annotation-text-1'],
+  });
+  const selectedEntityIds = entities.filter((entity) => entity.kind === 'canvas_item').map((entity) => entity.id);
+  const result = resolveContextReference({
+    userMessage: '按这些标注修改图片',
+    entities,
+    selectedEntityIds,
+  });
+
+  assert.equal(result.status, 'resolved');
+  assert.deepEqual(result.entityIds, selectedEntityIds);
+});
+
 test('recency pronouns prefer the most recently resolved entity over an unresolved proposal group', () => {
   const entities = buildAgentContextEntities({ messages: [
     { id: 'proposal-message', role: 'assistant', content: '', agentProposal: proposal },

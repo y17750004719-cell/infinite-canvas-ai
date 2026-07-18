@@ -4,6 +4,7 @@ import {
 } from '../image-provider-option-profiles.mjs';
 import {
   buildAsyncImageTaskRequests,
+  orderLinkedImagePreviewsByReferenceIds,
   resolveImageCardSize,
 } from '../workspace-session-view.mjs';
 
@@ -468,6 +469,8 @@ export function buildAgentImageGenerationRequests(input = {}) {
     prompt,
     generationPrompt,
     generationPrompts,
+    linkedImagePreviews: inputLinkedImagePreviews,
+    referenceIds,
     referenceImages = [],
     providerId,
     modelId,
@@ -491,13 +494,19 @@ export function buildAgentImageGenerationRequests(input = {}) {
     modelId,
     providerImageOptionProfiles,
   });
-  const linkedImagePreviews = (Array.isArray(referenceImages) ? referenceImages : [])
+  const compatibilityLinkedImagePreviews = (Array.isArray(referenceImages) ? referenceImages : [])
     .filter((src) => typeof src === 'string' && src.trim())
     .map((src, index) => ({
       id: `agent-reference-${index + 1}`,
       src,
       label: `image${index + 1}`,
     }));
+  const linkedImagePreviews = orderLinkedImagePreviewsByReferenceIds(
+    Array.isArray(inputLinkedImagePreviews)
+      ? inputLinkedImagePreviews
+      : compatibilityLinkedImagePreviews,
+    referenceIds,
+  );
   const fallbackPrompt = typeof generationPrompt === 'string' && generationPrompt.trim()
     ? generationPrompt.trim()
     : typeof prompt === 'string'

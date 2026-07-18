@@ -51,10 +51,36 @@ test('main agent messages keep one consistent system and skill hierarchy with re
   assert.equal(messages.at(-1).role, 'user');
   assert.ok(Array.isArray(messages.at(-1).content));
   assert.deepEqual(messages.at(-1).content[0], { type: 'text', text: '分析这张图' });
-  assert.deepEqual(messages.at(-1).content[1], {
+  assert.match(messages.at(-1).content[1].text, /Additional legacy image reference 1/);
+  assert.deepEqual(messages.at(-1).content[2], {
     type: 'image_url',
     image_url: { url: 'data:image/png;base64,AAAA' },
   });
+});
+
+test('main agent maps stable reference ids to images and preserves inline order', () => {
+  const messages = buildMainAgentMessages({
+    messages: [{ role: 'user', content: '把第一张做成第二张的风格' }],
+    referenceImages: ['https://example.test/a.png', 'https://example.test/b.png'],
+    referenceContext: {
+      references: [
+        { id: 'a', src: 'https://example.test/a.png', label: 'A', source: 'upload', role: 'reference' },
+        { id: 'b', src: 'https://example.test/b.png', label: 'B', source: 'upload', role: 'reference' },
+      ],
+      composerSegments: [
+        { type: 'reference', referenceId: 'a' },
+        { type: 'text', text: '做成' },
+        { type: 'reference', referenceId: 'b' },
+        { type: 'text', text: '的风格' },
+      ],
+    },
+  });
+  const content = messages.at(-1).content;
+  assert.ok(Array.isArray(content));
+  const imageUrls = content.filter((part) => part.type === 'image_url').map((part) => part.image_url.url);
+  assert.deepEqual(imageUrls, ['https://example.test/a.png', 'https://example.test/b.png']);
+  assert.match(content[1].text, /Reference ID: a/);
+  assert.match(content[4].text, /Reference ID: b/);
 });
 
 test('main agent messages do not load a skill when none was selected', () => {

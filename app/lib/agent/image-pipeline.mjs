@@ -18,6 +18,8 @@ export async function optimizeImagePrompt({
   outputCount = 1,
   batchMode = 'variants',
   plannerItems = [],
+  imageTask = null,
+  visualContext = null,
 }) {
   const originalPrompt = typeof userPrompt === 'string' ? userPrompt.trim() : '';
   if (!originalPrompt || typeof chatFn !== 'function' || !optimizerModel) {
@@ -37,6 +39,8 @@ export async function optimizeImagePrompt({
           skillContent,
           promptStyle,
           plannerItems: hasPlannerItems ? plannerItems : [],
+          imageTask,
+          visualContext,
           repair: attempt > 0,
         }),
         signal,

@@ -43,6 +43,11 @@ export interface AgentClarificationState {
     batchSize: number;
   };
   executionPlan?: AgentExecutionPlan;
+  plannerFailure?: {
+    reason: import('./execution-planner.types').AgentPlannerFailureReason;
+    retryMode: 'replan';
+    failedAt: number;
+  };
 }
 
 export function parseBriefClarifierResult(raw: string): BriefClarifierResult | null;
@@ -66,4 +71,5 @@ export function applyClarificationResponse(input?: Record<string, unknown>): {
   answer: string;
   proceedWithCurrent: boolean;
   retry?: boolean;
+  retryMode?: 'replan';
 } | null;

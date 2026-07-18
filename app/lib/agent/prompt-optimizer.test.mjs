@@ -159,10 +159,17 @@ test('delivery prompt contracts forbid accidental grids except for composite req
   assert.match(composite, /4-panel grid/);
   assert.doesNotMatch(composite, /No collage/);
 
-  const jsonPrompt = applyImagePromptDeliveryContract(magazineJsonPrompt('rabbit'), { mode: 'series', outputCount: 4 });
+  const jsonSource = JSON.parse(magazineJsonPrompt('rabbit'));
+  jsonSource.agent_requirements = {
+    must_change: ['Replace person with dogs'],
+    must_preserve: ['Keep the red background'],
+    literal_copy: ['VOGUE'],
+  };
+  const jsonPrompt = applyImagePromptDeliveryContract(JSON.stringify(jsonSource), { mode: 'series', outputCount: 4 });
   const parsed = JSON.parse(jsonPrompt);
   assert.match(parsed.constraints.must_preserve.join(' '), /one standalone image/);
   assert.ok(parsed.constraints.avoid.includes('multi-panel layout'));
+  assert.deepEqual(parsed.agent_requirements, jsonSource.agent_requirements);
 });
 
 test('optimizer messages demand JSON and preserve literal user text', () => {
@@ -320,6 +327,21 @@ test('same-subject series are detected explicitly instead of weakening all serie
     batchMode: 'series',
   });
   assert.match(messages[0].content, /explicitly requires the same subject/);
+});
+
+test('model-authored edit tasks constrain prompt optimization without local intent inference', () => {
+  const messages = buildPromptOptimizerMessages('换成狗', undefined, {
+    imageTask: {
+      operation: 'edit',
+      instruction: '将人物替换为两只狗',
+      mustChange: ['人物主体'],
+      mustPreserve: ['杂志版式', '原有文字'],
+    },
+  });
+  assert.match(messages[0].content, /authoritatively classified this as an edit/);
+  assert.match(messages[0].content, /将人物替换为两只狗/);
+  assert.match(messages[0].content, /杂志版式/);
+  assert.match(messages[0].content, /Preserve every unspecified visual element/);
 });
 
 test('agent intent distinguishes image requests from visual analysis with references', () => {

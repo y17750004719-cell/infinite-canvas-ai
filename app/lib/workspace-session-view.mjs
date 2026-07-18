@@ -1033,6 +1033,10 @@ export function canItemAcceptIncomingConnection(item) {
     return false;
   }
 
+  if (item.type === 'stroke' || (item.type === 'text' && item.textVariant === 'annotation')) {
+    return false;
+  }
+
   if (item.type === 'image') {
     return isImageCardItem(item);
   }
@@ -1399,6 +1403,29 @@ export function buildReferenceImageRequestPayload(previews) {
     },
     { referenceImages: [], referenceLabels: [] }
   );
+}
+
+export function orderLinkedImagePreviewsByReferenceIds(previews, referenceIds) {
+  const safePreviews = Array.isArray(previews) ? previews : [];
+  if (!Array.isArray(referenceIds)) {
+    return safePreviews;
+  }
+
+  const previewById = new Map(
+    safePreviews
+      .filter((preview) => preview && typeof preview.id === 'string' && preview.id.length > 0)
+      .map((preview) => [preview.id, preview])
+  );
+  const seenIds = new Set();
+
+  return referenceIds.flatMap((referenceId) => {
+    if (typeof referenceId !== 'string' || !referenceId || seenIds.has(referenceId)) {
+      return [];
+    }
+    seenIds.add(referenceId);
+    const preview = previewById.get(referenceId);
+    return preview ? [preview] : [];
+  });
 }
 
 export function getDirectTextInputsForTextCard({
@@ -2034,6 +2061,7 @@ export function resolveSessionPresentationState({
       title: session.messages[0].content?.substring(0, 20) || '初始对话',
       messages: session.messages,
       activeSkill: null,
+      activeSkillExplicit: false,
       createdAt: session.createdAt,
       updatedAt: session.updatedAt,
     };
@@ -2045,6 +2073,7 @@ export function resolveSessionPresentationState({
       title: '新对话',
       messages: [],
       activeSkill: null,
+      activeSkillExplicit: false,
       createdAt: now,
       updatedAt: now,
     };

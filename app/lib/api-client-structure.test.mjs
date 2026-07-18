@@ -829,6 +829,15 @@ test('api-client converts Gemini chat messages and image parts into official con
   );
 });
 
+test('api-client materializes local chat images before both Gemini and OpenAI-compatible transport', () => {
+  assert.equal(apiClientSource.includes('materializeChatMessageImages'), true);
+  assert.equal(apiClientSource.includes('const requestMessages = materialized.messages'), true);
+  assert.equal(apiClientSource.includes('messages: requestMessages'), true);
+  assert.equal(apiClientSource.includes('convertChatMessagesToGeminiRequest(requestMessages'), true);
+  assert.equal(apiClientSource.includes('localImageCount: materialized.localImageCount'), true);
+  assert.equal(apiClientSource.includes('referenceImageBytes: materialized.totalImageBytes'), true);
+});
+
 test('api-client adds Gemini no-image payload summaries and explicit failure classification', () => {
   assert.equal(
     apiClientSource.includes('summarizeGeminiImagePayload'),

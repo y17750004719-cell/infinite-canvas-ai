@@ -12,6 +12,7 @@ import {
   upsertSession,
 } from '../lib/db';
 import { shouldFlushScheduledSessionSave } from '../lib/session-persistence.mjs';
+import { collectSessionDiagnostics } from '../lib/session-diagnostics.mjs';
 import { mergeCurrentSessionSnapshotIntoSessions } from '../lib/session-transition-state.mjs';
 import { resolveStateUpdate } from '../lib/state-update.mjs';
 
@@ -64,8 +65,14 @@ export function useWorkspaceSessionController<TResolvedSessionState>({
   const pendingSessionActionRef = useRef<PendingSessionActionState | null>(null);
   const pendingSessionSaveRef = useRef<PendingSessionSaveState | null>(null);
   const pendingSessionSaveFrameRef = useRef<number | null>(null);
+  const pendingSessionSaveTimerRef = useRef<number | null>(null);
+  const lastSessionAutoSaveAtRef = useRef(0);
   const sessionPersistenceEpochRef = useRef(0);
   const sessionPersistenceQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const pendingCoalescedSessionRef = useRef<ProjectSession | null>(null);
+  const coalescedSessionWriteRunningRef = useRef(false);
+  const sessionDiagnosticsWarnedRef = useRef(new Set<string>());
+  const lastPersistedActiveRunIdRef = useRef<string | null>(null);
   const skipNextSessionAutoSaveRef = useRef(false);
   const initializedRef = useRef(false);
 
@@ -105,10 +112,41 @@ export function useWorkspaceSessionController<TResolvedSessionState>({
     return runTask;
   }, []);
 
+  const enqueueCoalescedSessionPersistence = useCallback((session: ProjectSession) => {
+    pendingCoalescedSessionRef.current = session;
+    if (coalescedSessionWriteRunningRef.current) return;
+    coalescedSessionWriteRunningRef.current = true;
+
+    void (async () => {
+      try {
+        while (pendingCoalescedSessionRef.current) {
+          const latestSession = pendingCoalescedSessionRef.current;
+          pendingCoalescedSessionRef.current = null;
+          const writeStartedAt = performance.now();
+          await upsertSession(latestSession);
+          if (process.env.NODE_ENV !== 'production') {
+            console.debug('[SESSION][PERSIST]', {
+              sessionId: latestSession.id,
+              durationMs: Math.round(performance.now() - writeStartedAt),
+            });
+          }
+        }
+      } catch (error) {
+        console.error('Failed to save current session:', error);
+      } finally {
+        coalescedSessionWriteRunningRef.current = false;
+      }
+    })();
+  }, []);
+
   const cancelPendingSessionSave = useCallback(() => {
     if (pendingSessionSaveFrameRef.current !== null) {
       cancelAnimationFrame(pendingSessionSaveFrameRef.current);
       pendingSessionSaveFrameRef.current = null;
+    }
+    if (pendingSessionSaveTimerRef.current !== null) {
+      window.clearTimeout(pendingSessionSaveTimerRef.current);
+      pendingSessionSaveTimerRef.current = null;
     }
     pendingSessionSaveRef.current = null;
   }, []);
@@ -217,18 +255,45 @@ export function useWorkspaceSessionController<TResolvedSessionState>({
     const currentSession = latestSessions.find((session) => session.id === pendingSave.sessionId);
     if (!currentSession) return;
 
+    const snapshotStartedAt = performance.now();
     const updatedSession = buildCurrentSessionSnapshot(currentSession);
+    const diagnostics = collectSessionDiagnostics(updatedSession);
+    const snapshotDurationMs = Math.round(performance.now() - snapshotStartedAt);
+    lastSessionAutoSaveAtRef.current = Date.now();
+    const isLargeRunningCheckpoint = diagnostics.estimatedBytes > 8 * 1024 * 1024
+      && updatedSession.activeAgentRun?.status === 'running'
+      && lastPersistedActiveRunIdRef.current === updatedSession.activeAgentRun.runId;
+    if (isLargeRunningCheckpoint) {
+      const warningKey = `${updatedSession.id}:${updatedSession.activeAgentRun?.runId || 'run'}`;
+      if (!sessionDiagnosticsWarnedRef.current.has(warningKey)) {
+        sessionDiagnosticsWarnedRef.current.add(warningKey);
+        console.warn('[SESSION][CHECKPOINT_SKIPPED]', {
+          sessionId: updatedSession.id,
+          estimatedBytes: diagnostics.estimatedBytes,
+          messageCount: diagnostics.messageCount,
+          referenceCount: diagnostics.referenceCount,
+          dataUrlCount: diagnostics.dataUrlCount,
+        });
+      }
+      return;
+    }
+    lastPersistedActiveRunIdRef.current = updatedSession.activeAgentRun?.status === 'running'
+      ? updatedSession.activeAgentRun.runId
+      : null;
+    if (process.env.NODE_ENV !== 'production') {
+      console.debug('[SESSION][SNAPSHOT]', {
+        sessionId: updatedSession.id,
+        snapshotDurationMs,
+        ...diagnostics,
+      });
+    }
 
     setSessions((prev) =>
       prev.map((session) => (session.id === pendingSave.sessionId ? updatedSession : session))
     );
 
-    void enqueueSessionPersistenceTask(async () => {
-      await upsertSession(updatedSession);
-    }).catch((error) => {
-      console.error('Failed to save current session:', error);
-    });
-  }, [buildCurrentSessionSnapshot, enqueueSessionPersistenceTask]);
+    enqueueCoalescedSessionPersistence(updatedSession);
+  }, [buildCurrentSessionSnapshot, enqueueCoalescedSessionPersistence]);
 
   const commitCurrentSessionSnapshotBeforeTransition = useCallback(() => {
     cancelPendingSessionSave();
@@ -269,14 +334,25 @@ export function useWorkspaceSessionController<TResolvedSessionState>({
       epoch: sessionPersistenceEpochRef.current,
     };
 
-    if (pendingSessionSaveFrameRef.current !== null) {
-      cancelAnimationFrame(pendingSessionSaveFrameRef.current);
+    if (pendingSessionSaveFrameRef.current !== null || pendingSessionSaveTimerRef.current !== null) return;
+
+    const elapsed = Date.now() - lastSessionAutoSaveAtRef.current;
+    const remainingDelay = Math.max(0, 2000 - elapsed);
+    if (remainingDelay === 0) {
+      pendingSessionSaveFrameRef.current = requestAnimationFrame(() => {
+        pendingSessionSaveFrameRef.current = null;
+        flushCurrentSessionSave();
+      });
+      return;
     }
 
-    pendingSessionSaveFrameRef.current = requestAnimationFrame(() => {
-      pendingSessionSaveFrameRef.current = null;
-      flushCurrentSessionSave();
-    });
+    pendingSessionSaveTimerRef.current = window.setTimeout(() => {
+      pendingSessionSaveTimerRef.current = null;
+      pendingSessionSaveFrameRef.current = requestAnimationFrame(() => {
+        pendingSessionSaveFrameRef.current = null;
+        flushCurrentSessionSave();
+      });
+    }, remainingDelay);
   }, [flushCurrentSessionSave]);
 
   const loadSession = useCallback((sessionId: string) => {

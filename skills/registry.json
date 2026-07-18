@@ -31,6 +31,7 @@
     "description": "设计高级杂志封面、期刊主视觉、文字主导的文化海报、报纸或杂志排版语言海报、拼贴艺术编辑海报，并生成 JSON 文本形式的生图提示词。",
     "triggerHints": ["杂志封面", "杂志海报", "编辑海报", "文化海报", "拼贴艺术海报", "报纸排版", "期刊封面", "刊物主视觉", "杂志感海报", "magazine cover", "editorial poster", "editorial typography poster", "collage editorial poster", "fashion editorial"],
     "planningGuidance": "Use for magazine covers and editorial posters, including typography-led cultural posters, newspaper or magazine visual language, and art-directed collage posters. Do not select it from the generic word poster alone; require a clear editorial, publication, typographic, or art-directed poster context. Do not use it for image analysis, magazine articles, web magazine layouts, or complete brand identity systems.",
+    "generationContract": "Return the final supplier-ready prompt as valid JSON text. It must fully specify subject, editorial composition, typography hierarchy, literal copy, palette, lighting, texture, print treatment, aspect ratio, and all must-change/must-preserve constraints. Do not wrap the JSON text in Markdown fences. For series delivery, provide one complete and distinct JSON-text prompt per output item.",
     "allowedTools": ["generate_image", "get_canvas_context"],
     "executionMode": "image_pipeline",
     "promptStyle": "json-text",

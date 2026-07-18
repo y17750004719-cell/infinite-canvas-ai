@@ -23,7 +23,7 @@ export interface ImageDeliveryPlan {
   requiresClarification: boolean;
 }
 export function parseOptimizedImagePrompt(raw: string, options?: { outputCount?: number; batchMode?: ImageDeliveryMode; allowRepeatedSubjects?: boolean; promptStyle?: 'text' | 'json-text'; userPrompt?: string }): OptimizedImagePrompt | null;
-export function buildPromptOptimizerMessages(userPrompt: string, skillLabel?: string, options?: { outputCount?: number; batchMode?: ImageDeliveryMode; repair?: boolean; skillContent?: string; promptStyle?: 'text' | 'json-text'; plannerItems?: Array<{ index: number; label: string; subject: string; variation: string }> }): Array<{ role: 'system' | 'user'; content: string }>;
+export function buildPromptOptimizerMessages(userPrompt: string, skillLabel?: string, options?: { outputCount?: number; batchMode?: ImageDeliveryMode; repair?: boolean; skillContent?: string; promptStyle?: 'text' | 'json-text'; plannerItems?: Array<{ index: number; label: string; subject: string; variation: string }>; imageTask?: { operation: 'generate' | 'edit'; targetReferenceId?: string | null; supportingReferenceIds?: string[]; instruction: string; mustChange: string[]; mustPreserve: string[] } | null; visualContext?: import('./execution-planner.types').AgentVisualContext | null }): Array<{ role: 'system' | 'user'; content: string }>;
 export function allowsRepeatedSeriesSubjects(text: string): boolean;
 export function resolveImageDeliveryPlan(text: string, fallbackOutputCount?: number): ImageDeliveryPlan;
 export function resolveImageBatchMode(text: string, outputCount?: number): ImageDeliveryMode;

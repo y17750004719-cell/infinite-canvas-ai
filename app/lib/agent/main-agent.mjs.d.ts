@@ -1,3 +1,5 @@
+import type { AgentPlannerReferenceContext } from './execution-planner.types';
+
 export type MainAgentMessage = {
   role: 'system' | 'user' | 'assistant';
   content: string | Array<
@@ -13,6 +15,7 @@ export function buildMainAgentMessages(input?: {
   skillContent?: string;
   canvasContext?: Record<string, unknown>;
   referenceImages?: string[];
+  referenceContext?: AgentPlannerReferenceContext;
   resolvedBrief?: string;
   executionPlan?: Record<string, unknown>;
 }): MainAgentMessage[];

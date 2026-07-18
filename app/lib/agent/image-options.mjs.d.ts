@@ -75,6 +75,13 @@ export function buildAgentImageGenerationRequests(input?: {
   prompt?: string;
   generationPrompt?: string;
   generationPrompts?: string[];
+  linkedImagePreviews?: Array<{
+    id: string;
+    src: string;
+    label: string;
+    alt?: string;
+  }>;
+  referenceIds?: string[];
   referenceImages?: string[];
   providerId?: string;
   modelId?: string;

@@ -132,7 +132,7 @@ test('agent route resolves continuation context and final execution intent befor
   assert.match(source, /const initialBriefSource = conversationIntent\.brief \|\| latestUserMessage/);
   assert.match(source, /let executionBrief = executionBriefData\.plainText/);
   assert.match(source, /conversationIntent\.inherited[\s\S]{0,120}conversationIntent\.intent/);
-  assert.match(source, /if \(!executionPlan && intent === 'chat' && selectedSkillExecutionRequest\) \{[\s\S]{0,80}intent = 'skill_action'/);
+  assert.match(source, /if \(!plannerAuthoritative && !executionPlan && intent === 'chat' && selectedSkillExecutionRequest\) \{[\s\S]{0,80}intent = 'skill_action'/);
   const executionIntentIndex = source.indexOf("intent = 'skill_action';");
   const resolvedEventIndex = source.indexOf("writeEvent(controller, { type: 'intent_resolved', intent });", executionIntentIndex);
   assert.ok(executionIntentIndex >= 0 && resolvedEventIndex > executionIntentIndex);
@@ -240,11 +240,26 @@ test('agent image execution reuses the canvas image-card request builders', () =
   assert.match(source, /resolveCanvasImageTaskExecutionMode/);
   assert.match(source, /settleCanvasImageGenerationRequests/);
   assert.match(source, /resolvedImageOptions/);
+  assert.match(source, /runtimeReferenceContext\s*=\s*normalizeAgentRuntimeReferenceContext/);
+  assert.match(source, /referenceContext:\s*runReferenceContext/);
+  assert.match(source, /linkedImagePreviews:\s*resolvedReferences\.linkedImagePreviews/);
+  assert.match(source, /referenceIds:\s*resolvedReferences\.referenceIds/);
+  assert.match(source, /imageOperation:\s*imageTask\?\.operation \|\| 'generate'/);
   assert.match(source, /ratioFallback/);
   assert.doesNotMatch(source, /aspect_ratio:\s*imageOptions\?\.aspectRatio/);
   assert.doesNotMatch(source, /size:\s*imageOptions\?\.size/);
   assert.doesNotMatch(source, /quality:\s*imageOptions\?\.quality/);
   assert.doesNotMatch(source, /n:\s*imageOptions\?\.count/);
+});
+
+test('agent preserves model-authored image task and result presentation through confirmations and asset actions', () => {
+  const source = fs.readFileSync(routePath, 'utf8');
+  assert.match(source, /imageTask:\s*executionPlan\?\.imageTask \? structuredClone/);
+  assert.match(source, /presentation:\s*executionPlan\?\.presentation \? structuredClone/);
+  assert.match(source, /confirmationRecord\.imageTask/);
+  assert.match(source, /confirmationRecord\.presentation/);
+  assert.match(source, /presentation\.completionSummary/);
+  assert.match(source, /operation:\s*imageTask\?\.operation \|\| 'generate'/);
 });
 
 test('agent image confirmations keep optimizer control server-side and report partial request results', () => {
@@ -283,19 +298,63 @@ test('unified planner is authoritative, supports shadow mode, and survives clari
   assert.match(source, /planner\.shadow/);
   assert.match(source, /executionPlan:\s*structuredClone\(executionPlan\)/);
   assert.match(source, /activeClarificationState\?\.executionPlan/);
+  assert.match(source, /legacyExecutionPlanDetected/);
+  assert.match(source, /该任务使用旧版分析计划，需要重新分析/);
   assert.match(source, /executionPlan\.execution\.kind/);
   assert.match(source, /plannerSeriesItems/);
   assert.match(source, /sourceDetail: plannerResult\.sourceDetail/);
   assert.match(source, /mutationBlocked: true/);
   assert.match(source, /stage: 'planning'/);
   assert.match(source, /stopReason: 'planner_failed'/);
+  assert.match(source, /failureReason/);
+  assert.match(source, /reason: plannerFailureReason/);
+  assert.match(source, /dimension: 'planner_failure'/);
+  assert.match(source, /referenceContext: structuredClone\(runReferenceContext\)/);
   assert.match(source, /const shouldRunClarifier = \(intent === 'image' \|\| intent === 'skill_action'\)[\s\S]*&& !executionPlan/);
   assert.match(source, /deliveryPlan[\s\S]*executionPlanToImageDeliveryPlan\(executionPlan\)/);
+  assert.match(source, /buildCanonicalAgentReferenceContext/);
+  assert.match(source, /runtimeReferenceId[\s\S]*createHash\('sha256'\)/);
+  assert.match(source, /explicitPlannerSelection[\s\S]*plannerHasVisualReferences \? resolvedChatSelection : resolvedRouterSelection/);
+  assert.match(source, /AGENT_PLANNER_TIMEOUT_MS/);
+  assert.match(source, /referenceContext:\s*runReferenceContext/);
+  assert.match(source, /vision_unsupported/);
+  assert.match(source, /vision_unavailable/);
+  assert.match(source, /const isPlannerFailureRetry/);
+  assert.match(source, /body\.clarificationResponse\.retryMode === 'replan'/);
+  assert.match(source, /activeClarificationState\.plannerFailure\?\.retryMode === 'replan'/);
+  assert.match(source, /isPlannerFailureRetry[\s\S]*activeClarificationState\.executionPlan\?\.needsClarification === true/);
+  assert.match(source, /isPlannerFailureRetry[\s\S]*activeClarificationState\.originalRequest/);
+  assert.match(source, /plannerFailure:\s*\{[\s\S]*retryMode: 'replan'/);
+  assert.match(source, /Agent 混淆了图片引用和画布上下文/);
+  assert.match(source, /planner\.clarification_failed/);
+  assert.match(source, /activeClarificationState\.executionPlan = structuredClone\(executionPlan\)/);
+});
+
+test('authoritative image execution fails closed without a complete planner contract', () => {
+  const source = fs.readFileSync(routePath, 'utf8');
+  assert.match(source, /if \(plannerAuthoritative\)/);
+  assert.match(source, /executionPlan\.execution\.tool !== 'generate_image'/);
+  assert.match(source, /!imageTask/);
+  assert.match(source, /!presentation/);
+  assert.match(source, /executionPlan\.version !== 2/);
+  assert.match(source, /!generation/);
+  assert.match(source, /referencedTaskWithoutRoles/);
+  assert.match(source, /图片计划校验失败，已停止执行/);
+});
+
+test('image completion summaries and prompt traces follow generated asset delivery', () => {
+  const source = fs.readFileSync(routePath, 'utf8');
+  assert.match(source, /promptTraceForRequest/);
+  assert.match(source, /finalPrompt: effectiveGenerationItems\[requestIndex\]\?\.prompt \|\| optimized\.prompt/);
+  assert.match(source, /type: 'agent_completion_summary'/);
+  const directActionIndex = source.indexOf("source: 'direct'");
+  const directSummaryIndex = source.indexOf('writeImageCompletionSummary(generationPayload)', directActionIndex);
+  assert.ok(directActionIndex >= 0 && directSummaryIndex > directActionIndex);
 });
 
 test('explicit multi-image requests preserve deterministic image skills while bypassing proposals', () => {
   const source = fs.readFileSync(routePath, 'utf8');
-  assert.match(source, /const explicitBatchImageRequest = !body\.activeSkillId/);
+  assert.match(source, /const explicitBatchImageRequest = !plannerAuthoritative && !body\.activeSkillId/);
   assert.match(source, /conversationIntent\.intent === 'image'[\s\S]*\|\| isPotentialDesignExecutionRequest\(initialBriefSource\)/);
   assert.match(source, /isPotentialDesignExecutionRequest\(initialBriefSource\)/);
   assert.match(source, /isReferentialShorthand\(latestUserMessage\)/);
@@ -311,12 +370,13 @@ test('explicit multi-image requests preserve deterministic image skills while by
   assert.ok(batchGate >= 0 && contextResolution > batchGate && modelRouting > contextResolution);
 });
 
-test('image pipeline skills pass their full instructions and JSON text style to prompt optimization', () => {
+test('authoritative image plans use their final generation prompt without prompt optimization', () => {
   const source = fs.readFileSync(routePath, 'utf8');
-  assert.match(source, /skillContent,/);
-  assert.match(source, /promptStyle: selectedSkill\?\.promptStyle \|\| 'text'/);
-  assert.match(source, /selectedSkill\?\.promptStyle === 'json-text'/);
-  assert.match(source, /当前 Skill 需要启用提示词优化流程/);
+  assert.match(source, /const plannerGeneration = executionPlan\?\.version === 2 \? executionPlan\.generation : null/);
+  assert.match(source, /const usesPlannerGeneration = Boolean\(plannerAuthoritative && plannerGeneration\)/);
+  assert.match(source, /prompt: plannerGeneration!\.prompt/);
+  assert.match(source, /usesPlannerGeneration[\s\S]*await optimizeImagePrompt/);
+  assert.match(source, /optimizePrompt: false/);
 });
 
 test('series batches persist distinct prompts and retry failed issue ids', () => {

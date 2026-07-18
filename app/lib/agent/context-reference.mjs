@@ -378,7 +378,7 @@ export function resolveContextReference({ userMessage, entities = [], selectedEn
   if (!message) return resolution('none', false);
   const selected = available.filter((entity) => selectedEntityIds.includes(entity.id));
   if (selected.length === 1) return resolution('resolved', true, selected, 'high');
-  if (selected.length > 1) return resolution('ambiguous', true, selected, 'high');
+  if (selected.length > 1) return resolution('resolved', true, selected, 'high');
   if (LITERAL_NUMBER_PATTERN.test(message)) return resolution('none', false);
 
   const withoutRatios = message.replace(RATIO_PATTERN, ' ');

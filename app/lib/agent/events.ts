@@ -33,6 +33,23 @@ export type AgentProgressPhase =
 
 export type AgentProgressStatus = 'active' | 'waiting' | 'completed' | 'failed';
 
+export type AgentPlannerFailureReason =
+  | 'timeout'
+  | 'transport'
+  | 'invalid_reference'
+  | 'invalid_context'
+  | 'invalid_plan'
+  | 'vision_unsupported'
+  | 'vision_unavailable';
+
+export type AgentPromptTrace = {
+  sourcePrompt: string;
+  finalPrompt: string;
+  optimized: boolean;
+  operation: 'generate' | 'edit';
+  targetReferenceId: string | null;
+};
+
 export type AgentClarificationOption = {
   id: string;
   label: string;
@@ -52,6 +69,27 @@ export type AgentClarificationState = {
   askedDimensions: string[];
   answers: Array<{ dimension: string; question: string; answer: string }>;
   referenceImages?: string[];
+  referenceContext?: {
+    references: Array<{
+      id: string;
+      src: string;
+      label: string;
+      source: 'upload' | 'history' | 'canvas';
+      canvasItemId?: string;
+      role: 'reference' | 'edit_target' | 'annotation_bundle';
+      annotationCount?: number;
+    }>;
+    composerSegments: Array<
+      | { type: 'text'; text: string }
+      | { type: 'reference'; referenceId: string }
+    >;
+    evidenceImages?: Array<{
+      id: string;
+      referenceId: string;
+      src: string;
+      kind: 'annotation_composite';
+    }>;
+  };
   contextCandidates?: AgentContextEntity[];
   resolvedImageCount?: number;
   resolvedImageCountSource?: 'clarification' | 'prompt' | 'interface' | 'default' | 'batch';
@@ -66,6 +104,11 @@ export type AgentClarificationState = {
     batchSize: number;
   };
   executionPlan?: AgentExecutionPlan;
+  plannerFailure?: {
+    reason: AgentPlannerFailureReason;
+    retryMode: 'replan';
+    failedAt: number;
+  };
 };
 
 export type AgentClarificationRequest = {
@@ -83,6 +126,13 @@ export type AgentClientAction = {
   type: 'add_generated_assets';
   runId: string;
   model?: string;
+  providerId?: string;
+  sourceReferenceId?: string;
+  presentation?: {
+    title: string;
+    summary: string;
+    operation: 'generate' | 'edit';
+  };
   assets: Array<{
     src: string;
     naturalWidth?: number;
@@ -91,6 +141,7 @@ export type AgentClientAction = {
     itemId?: string;
     index?: number;
     label?: string;
+    promptTrace?: AgentPromptTrace;
   }>;
   batch?: { total: number; settled: number; succeeded: number; failed: number };
 };
@@ -139,6 +190,22 @@ export type AgentEvent =
   | { type: 'tool_result'; toolCallId: string; result: unknown }
   | { type: 'assistant_delta'; delta: string; channel?: 'content' | 'reasoning'; model?: string }
   | { type: 'client_action'; action: AgentClientAction }
+  | {
+      type: 'agent_completion_summary';
+      runId: string;
+      title: string;
+      summary: string;
+      operation: 'generate' | 'edit';
+      succeeded: number;
+      failed: number;
+      addedToCanvas: boolean;
+    }
   | { type: 'confirmation_required'; request: { confirmationId: string; toolName: string; message: string } }
   | { type: 'agent_done'; stopReason: string }
-  | { type: 'agent_error'; stage: string; message: string };
+  | {
+      type: 'agent_error';
+      stage: string;
+      message: string;
+      reason?: AgentPlannerFailureReason;
+      retryable?: boolean;
+    };

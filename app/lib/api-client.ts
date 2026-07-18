@@ -7,6 +7,11 @@ import {
 } from "./gemini-image-response.mjs";
 import { getGeminiImageSizeEnum, getImageModelCapability, normalizeImageModelCapabilityId, resolveImageRequestModel, getGptImage2SizeValidationError, supportsImageModelImageSizeConfig, supportsImageModelRequestedSize } from "./image-model-capabilities.mjs";
 import { effectiveProviderProtocol, getProviderById, providerEndpointUrl, readProviderRegistry, resolveProviderRequestTargets } from "./provider-config.mjs";
+import {
+  materializeChatMessageImages,
+  readLocalReferenceImage,
+  ReferenceImageUnavailableError,
+} from "./reference-image-source.mjs";
 const LOG_LEVEL = (process.env.LOG_LEVEL || "basic").toLowerCase();
 const LOG_ENABLED = LOG_LEVEL !== "off";
 const LOG_DEBUG = LOG_LEVEL === "debug";
@@ -847,7 +852,7 @@ function summarizeImagePayloadCounts(payload: unknown): {
 function dataUrlToBlob(dataUrl: string): { blob: Blob; mimeType: string } {
   const match = dataUrl.match(/^data:([^;]+);base64,(.+)$/);
   if (!match) {
-    throw new ImageGenerationError("Invalid data URL for edit image", 400);
+    throw new ReferenceImageUnavailableError("Reference image data URL is invalid");
   }
   const mimeType = match[1] || "image/png";
   const base64 = match[2];
@@ -872,6 +877,18 @@ async function referenceToBlob(input: string, signal?: AbortSignal): Promise<{ b
     return dataUrlToBlob(input);
   }
 
+  if (input.startsWith("/")) {
+    const { bytes, mimeType } = await readLocalReferenceImage(input);
+    return {
+      blob: new Blob([new Uint8Array(bytes)], { type: mimeType }),
+      mimeType,
+    };
+  }
+
+  if (!input.startsWith("http://") && !input.startsWith("https://")) {
+    throw new ReferenceImageUnavailableError("Reference image URL is invalid");
+  }
+
   try {
     const response = await fetch(input, { signal });
     if (!response.ok) {
@@ -884,7 +901,7 @@ async function referenceToBlob(input: string, signal?: AbortSignal): Promise<{ b
     };
   } catch (error) {
     basicLog("[SUPPLIER][REFERENCE_ERR]", {
-      referencePreview: input.slice(0, 120),
+      referenceType: input.startsWith("https://") ? "https" : "http",
       ...getErrorDiagnostics(error),
     });
     throw error;
@@ -1814,6 +1831,8 @@ export interface ChatRequest {
   tools?: ChatToolDefinition[];
   toolChoice?: ChatToolChoice;
   signal?: AbortSignal;
+  imagesMaterialized?: boolean;
+  imageMaterializationStats?: { localImageCount: number; totalImageBytes: number };
 }
 
 export interface ChatStreamRequest extends ChatRequest {
@@ -2056,13 +2075,23 @@ export async function chat(
 
   try {
     requestStartedAt = Date.now();
+    const materialized = request.imagesMaterialized
+      ? {
+          messages: request.messages,
+          localImageCount: request.imageMaterializationStats?.localImageCount || 0,
+          totalImageBytes: request.imageMaterializationStats?.totalImageBytes || 0,
+        }
+      : await materializeChatMessageImages(request.messages);
+    const requestMessages = materialized.messages as ChatRequest["messages"];
     basicLog("[SUPPLIER][REQ]", {
       method: "POST",
       endpoint,
       host: getEndpointHost(endpoint),
       mode: "chat",
       model,
-      messageCount: request.messages.length,
+      messageCount: requestMessages.length,
+      localImageCount: materialized.localImageCount,
+      referenceImageBytes: materialized.totalImageBytes,
       providerId: provider.id,
       attempt,
       maxAttempts,
@@ -2070,7 +2099,7 @@ export async function chat(
 
     const requestBody = isGeminiModel
       ? {
-          ...await convertChatMessagesToGeminiRequest(request.messages, request.signal),
+          ...await convertChatMessagesToGeminiRequest(requestMessages, request.signal),
           ...(request.tools?.length
             ? {
                 tools: [{
@@ -2088,7 +2117,7 @@ export async function chat(
         }
       : {
           model,
-          messages: request.messages,
+          messages: requestMessages,
           ...(request.tools?.length
             ? {
                 tools: request.tools,
@@ -2195,23 +2224,33 @@ export async function* chatStream(
 
   try {
     requestStartedAt = Date.now();
+    const materialized = request.imagesMaterialized
+      ? {
+          messages: request.messages,
+          localImageCount: request.imageMaterializationStats?.localImageCount || 0,
+          totalImageBytes: request.imageMaterializationStats?.totalImageBytes || 0,
+        }
+      : await materializeChatMessageImages(request.messages);
+    const requestMessages = materialized.messages as ChatRequest["messages"];
     basicLog("[SUPPLIER][REQ]", {
       method: "POST",
       endpoint,
       host: getEndpointHost(endpoint),
       mode: "chat_stream",
       model,
-      messageCount: request.messages.length,
+      messageCount: requestMessages.length,
+      localImageCount: materialized.localImageCount,
+      referenceImageBytes: materialized.totalImageBytes,
       providerId: provider.id,
       attempt,
       maxAttempts,
     });
 
     const requestBody = isGeminiModel
-      ? await convertChatMessagesToGeminiRequest(request.messages, request.signal)
+      ? await convertChatMessagesToGeminiRequest(requestMessages, request.signal)
       : {
           model,
-          messages: request.messages,
+          messages: requestMessages,
           stream: true,
         };
 

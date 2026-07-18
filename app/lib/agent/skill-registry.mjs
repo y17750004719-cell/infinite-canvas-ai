@@ -20,6 +20,8 @@ function isManifest(value) {
     (value.executionMode === undefined || ['agent_loop', 'image_pipeline'].includes(value.executionMode)) &&
     (value.promptStyle === undefined || ['text', 'json-text'].includes(value.promptStyle)) &&
     (value.planningGuidance === undefined || typeof value.planningGuidance === 'string') &&
+    (value.generationContract === undefined || typeof value.generationContract === 'string') &&
+    (value.executionMode !== 'image_pipeline' || (typeof value.generationContract === 'string' && value.generationContract.trim().length > 0)) &&
     typeof value.enabled === 'boolean';
 }
 

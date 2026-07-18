@@ -11,6 +11,8 @@ export function optimizeImagePrompt(input: {
   outputCount?: number;
   batchMode?: 'series' | 'variants' | 'composite';
   plannerItems?: Array<{ index: number; label: string; subject: string; variation: string }>;
+  imageTask?: { operation: 'generate' | 'edit'; targetReferenceId?: string | null; supportingReferenceIds?: string[]; instruction: string; mustChange: string[]; mustPreserve: string[] } | null;
+  visualContext?: import('./execution-planner.types').AgentVisualContext | null;
 }): Promise<{
   prompt: string;
   optimized: boolean;

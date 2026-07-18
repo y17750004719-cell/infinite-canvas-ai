@@ -1,4 +1,5 @@
 import { normalizeGeneratedImageHistory } from './generated-image-history.mjs';
+import { normalizeSessionChatMessages } from './chat-message-persistence.mjs';
 
 const isRecord = (value) => typeof value === 'object' && value !== null;
 const cloneValue = (value) => {
@@ -194,9 +195,11 @@ export function normalizeImageCardAspectRatioById(values, items) {
 
 export function normalizeProjectSession(session) {
   const normalizedItems = Array.isArray(session?.items) ? session.items : [];
+  const normalizedChat = normalizeSessionChatMessages(session);
 
   return {
     ...session,
+    schemaVersion: 2,
     items: normalizedItems,
     connections: normalizeConnections(session?.connections, normalizedItems),
     textCardPanelDrafts: normalizeTextCardPanelDrafts(session?.textCardPanelDrafts, normalizedItems),
@@ -214,53 +217,35 @@ export function normalizeProjectSession(session) {
     imageProviderId: normalizeOptionalId(session?.imageProviderId),
     imageModelId: normalizeOptionalId(session?.imageModelId),
     generatedImageHistory: normalizeGeneratedImageHistory(session?.generatedImageHistory),
+    messages: normalizedChat.messages,
+    topics: normalizedChat.topics,
   };
 }
 
 export function buildPersistedSession(session, patch) {
-  const nextSession = {
+  const nextSession = cloneValue({
     ...session,
     ...patch,
-  };
+  });
 
-  const normalizedItems = Array.isArray(nextSession.items) ? cloneValue(nextSession.items) : [];
-  const normalizedConnections = cloneValue(normalizeConnections(nextSession.connections, normalizedItems));
-  const normalizedTextCardPanelDrafts = cloneValue(
-    normalizeTextCardPanelDrafts(nextSession.textCardPanelDrafts, normalizedItems)
-  );
-  const normalizedTextCardProviderById = cloneValue(
-    normalizeTextCardProviderById(nextSession.textCardProviderById, normalizedItems)
-  );
-  const normalizedTextCardModelById = cloneValue(
-    normalizeTextCardModelById(nextSession.textCardModelById, normalizedItems)
-  );
-  const normalizedImageCardPanelDrafts = cloneValue(
-    normalizeImageCardPanelDrafts(nextSession.imageCardPanelDrafts, normalizedItems)
-  );
-  const normalizedImageCardModelById = cloneValue(
-    normalizeImageCardModelById(nextSession.imageCardModelById, normalizedItems)
-  );
-  const normalizedImageCardProviderById = cloneValue(
-    normalizeImageCardProviderById(nextSession.imageCardProviderById, normalizedItems)
-  );
-  const normalizedImageCardSizeById = cloneValue(
-    normalizeImageCardSizeById(nextSession.imageCardSizeById, normalizedItems)
-  );
-  const normalizedImageCardQualityById = cloneValue(
-    normalizeImageCardQualityById(nextSession.imageCardQualityById, normalizedItems)
-  );
-  const normalizedImageCardCountById = cloneValue(
-    normalizeImageCardCountById(nextSession.imageCardCountById, normalizedItems)
-  );
-  const normalizedImageCardAspectRatioById = cloneValue(
-    normalizeImageCardAspectRatioById(nextSession.imageCardAspectRatioById, normalizedItems)
-  );
-  const normalizedGeneratedImageHistory = cloneValue(
-    normalizeGeneratedImageHistory(nextSession.generatedImageHistory)
-  );
+  const normalizedItems = Array.isArray(nextSession.items) ? nextSession.items : [];
+  const normalizedConnections = normalizeConnections(nextSession.connections, normalizedItems);
+  const normalizedTextCardPanelDrafts = normalizeTextCardPanelDrafts(nextSession.textCardPanelDrafts, normalizedItems);
+  const normalizedTextCardProviderById = normalizeTextCardProviderById(nextSession.textCardProviderById, normalizedItems);
+  const normalizedTextCardModelById = normalizeTextCardModelById(nextSession.textCardModelById, normalizedItems);
+  const normalizedImageCardPanelDrafts = normalizeImageCardPanelDrafts(nextSession.imageCardPanelDrafts, normalizedItems);
+  const normalizedImageCardModelById = normalizeImageCardModelById(nextSession.imageCardModelById, normalizedItems);
+  const normalizedImageCardProviderById = normalizeImageCardProviderById(nextSession.imageCardProviderById, normalizedItems);
+  const normalizedImageCardSizeById = normalizeImageCardSizeById(nextSession.imageCardSizeById, normalizedItems);
+  const normalizedImageCardQualityById = normalizeImageCardQualityById(nextSession.imageCardQualityById, normalizedItems);
+  const normalizedImageCardCountById = normalizeImageCardCountById(nextSession.imageCardCountById, normalizedItems);
+  const normalizedImageCardAspectRatioById = normalizeImageCardAspectRatioById(nextSession.imageCardAspectRatioById, normalizedItems);
+  const normalizedGeneratedImageHistory = normalizeGeneratedImageHistory(nextSession.generatedImageHistory);
+  const normalizedChat = normalizeSessionChatMessages(nextSession);
 
   return {
     ...nextSession,
+    schemaVersion: 2,
     items: normalizedItems,
     connections: normalizedConnections,
     textCardPanelDrafts: normalizedTextCardPanelDrafts,
@@ -278,9 +263,9 @@ export function buildPersistedSession(session, patch) {
     imageProviderId: normalizeOptionalId(nextSession.imageProviderId),
     imageModelId: normalizeOptionalId(nextSession.imageModelId),
     generatedImageHistory: normalizedGeneratedImageHistory,
-    viewport: isRecord(nextSession.viewport) ? cloneValue(nextSession.viewport) : nextSession.viewport,
-    messages: Array.isArray(nextSession.messages) ? cloneValue(nextSession.messages) : nextSession.messages,
-    topics: Array.isArray(nextSession.topics) ? cloneValue(nextSession.topics) : nextSession.topics,
+    viewport: nextSession.viewport,
+    messages: normalizedChat.messages,
+    topics: normalizedChat.topics,
   };
 }
 

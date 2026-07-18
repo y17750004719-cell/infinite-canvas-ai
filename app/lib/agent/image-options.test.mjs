@@ -236,6 +236,48 @@ test('agent generation requests are the canvas image-card builder output', () =>
   assert.deepEqual(resolved.options.requestSizes, ['2048x1536']);
 });
 
+test('agent generation requests preserve the model-selected linked image order with canvas request parity', () => {
+  const profiles = buildProviderImageOptionProfiles([
+    { id: 'comfly', imageModels: ['gpt-image-2'] },
+  ]);
+  const linkedImagePreviews = [
+    { id: 'supporting-reference', src: '/style.png', label: 'Style reference' },
+    { id: 'edit-target', src: '/target.png', label: 'Vogue cover' },
+    { id: 'unused-reference', src: '/unused.png', label: 'Unused reference' },
+  ];
+  const sharedInput = {
+    input: 'replace the subjects with fashionable dogs',
+    linkedImagePreviews: [linkedImagePreviews[1], linkedImagePreviews[0]],
+    modelId: 'gpt-image-2',
+    allowedModelIds: ['gpt-image-2'],
+    fallbackModel: 'gpt-image-2',
+    imageProviderId: 'comfly',
+    providerImageOptionProfiles: profiles,
+    size: '2048x2048',
+    quality: 'auto',
+    count: 1,
+    aspectRatio: '3:4',
+  };
+
+  const agentResult = buildAgentImageGenerationRequests({
+    generationPrompt: sharedInput.input,
+    linkedImagePreviews,
+    referenceIds: ['edit-target', 'supporting-reference'],
+    providerId: sharedInput.imageProviderId,
+    modelId: sharedInput.modelId,
+    allowedModelIds: sharedInput.allowedModelIds,
+    providerImageOptionProfiles: profiles,
+    selectedAspectRatio: sharedInput.aspectRatio,
+    requestedSize: sharedInput.size,
+    requestedQuality: sharedInput.quality,
+    requestedCount: sharedInput.count,
+  });
+
+  assert.deepEqual(agentResult.requests, buildAsyncImageTaskRequests(sharedInput));
+  assert.deepEqual(agentResult.requests[0].reference_images, ['/target.png', '/style.png']);
+  assert.deepEqual(agentResult.requests[0].reference_labels, ['Vogue cover', 'Style reference']);
+});
+
 test('agent series generation creates one request per distinct issue prompt', () => {
   const profiles = buildProviderImageOptionProfiles([
     { id: 'comfly', imageModels: ['gpt-image-2'] },

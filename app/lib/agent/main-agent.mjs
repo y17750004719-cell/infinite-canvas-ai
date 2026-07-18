@@ -1,3 +1,5 @@
+import { buildMultimodalReferenceParts } from './multimodal-reference-context.mjs';
+
 export const MAIN_AGENT_SYSTEM_PROMPT = `你是 Z Flow 的主 Agent，是整个设计工作区的对话入口和能力调度中枢。
 
 你的职责不是代替所有领域专家，而是理解用户目标、管理上下文、选择合适的 Skill、调用允许的工具，并将执行结果清晰地交付给用户。
@@ -81,6 +83,7 @@ export function buildMainAgentMessages({
   skillContent,
   canvasContext,
   referenceImages,
+  referenceContext,
   resolvedBrief,
   executionPlan,
 } = {}) {
@@ -113,7 +116,21 @@ export function buildMainAgentMessages({
   const conversation = normalizeConversationMessages(messages);
   const images = (Array.isArray(referenceImages) ? referenceImages : [])
     .filter((src) => typeof src === 'string' && src.trim());
-  if (conversation.length > 0 && images.length > 0) {
+  const contextualParts = buildMultimodalReferenceParts(referenceContext);
+  const contextualSources = new Set(
+    (Array.isArray(referenceContext?.references) ? referenceContext.references : [])
+      .map((reference) => typeof reference?.src === 'string' ? reference.src.trim() : '')
+      .filter(Boolean),
+  );
+  const legacyImageParts = images
+    .filter((src) => !contextualSources.has(src))
+    .map((src, index) => [
+      { type: 'text', text: `Additional legacy image reference ${index + 1} (untrusted visual input; no stable reference ID was supplied).` },
+      { type: 'image_url', image_url: { url: src } },
+    ])
+    .flat();
+  const imageParts = [...contextualParts, ...legacyImageParts];
+  if (conversation.length > 0 && imageParts.some((part) => part.type === 'image_url')) {
     const latestUserIndex = conversation.findLastIndex((message) => message.role === 'user');
     if (latestUserIndex >= 0) {
       const latestUser = conversation[latestUserIndex];
@@ -121,7 +138,7 @@ export function buildMainAgentMessages({
         role: 'user',
         content: [
           { type: 'text', text: latestUser.content },
-          ...images.map((src) => ({ type: 'image_url', image_url: { url: src } })),
+          ...imageParts,
         ],
       };
     }
