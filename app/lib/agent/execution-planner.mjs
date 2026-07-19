@@ -7,7 +7,7 @@ const CONFIDENCES = new Set(['high', 'medium', 'low']);
 const EXECUTION_KINDS = new Set(['image_pipeline', 'skill_job', 'agent_loop', 'none']);
 const IMAGE_OPERATIONS = new Set(['generate', 'edit']);
 const REFERENCE_SOURCES = new Set(['upload', 'history', 'canvas']);
-const REFERENCE_ROLES = new Set(['reference', 'edit_target', 'annotation_bundle']);
+const REFERENCE_ROLES = new Set(['reference', 'edit_target', 'annotation_bundle', 'region_target']);
 const VISUAL_REFERENCE_ROLES = new Set(['edit_target', 'style_reference', 'content_reference', 'layout_reference', 'unresolved']);
 const MAX_TOTAL_COUNT = 100;
 const PLANNER_TOOL_NAME = 'submit_agent_execution_plan';
@@ -23,6 +23,23 @@ const isObject = (value) => Boolean(value) && typeof value === 'object' && !Arra
 const nonNegativeInteger = (value) => {
   const parsed = Number(value);
   return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : null;
+};
+const normalizedUnit = (value) => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? Math.min(1, Math.max(0, parsed)) : null;
+};
+
+const compactNormalizedBox = (value) => {
+  if (!isObject(value)) return undefined;
+  const x = normalizedUnit(value.x);
+  const y = normalizedUnit(value.y);
+  const width = normalizedUnit(value.width);
+  const height = normalizedUnit(value.height);
+  if ([x, y, width, height].some((entry) => entry === null)) return undefined;
+  const boundedWidth = Math.min(width, 1 - x);
+  const boundedHeight = Math.min(height, 1 - y);
+  if (boundedWidth < 0.002 || boundedHeight < 0.002) return undefined;
+  return { x, y, width: boundedWidth, height: boundedHeight };
 };
 
 export const AGENT_EXECUTION_PLAN_SCHEMA = {
@@ -95,6 +112,7 @@ export const AGENT_EXECUTION_PLAN_SCHEMA = {
           description: 'Required for edit. Omit for generate.',
         },
         supportingReferenceIds: { type: 'array', items: { type: 'string' } },
+        targetRegionIds: { type: 'array', items: { type: 'string' } },
         instruction: { type: 'string' },
         mustChange: { type: 'array', items: { type: 'string' } },
         mustPreserve: { type: 'array', items: { type: 'string' } },
@@ -207,11 +225,21 @@ export function buildAgentExecutionPlanTool(input = {}) {
       .map((reference) => reference.id)
       .filter(Boolean),
   ));
+  const regionIds = Array.from(new Set(
+    (compactCanvasContext(input.canvasContext)?.regionSelections || [])
+      .map((region) => region.regionId)
+      .filter(Boolean),
+  ));
 
   if (contextEntityIds.length > 0) {
     schema.properties.contextReferences.items.enum = contextEntityIds;
   } else {
     schema.properties.contextReferences.maxItems = 0;
+  }
+  if (regionIds.length > 0) {
+    schema.properties.imageTask.properties.targetRegionIds.items.enum = regionIds;
+  } else {
+    schema.properties.imageTask.properties.targetRegionIds.maxItems = 0;
   }
   if (referenceIds.length > 0) {
     schema.properties.visualContext.properties.references.items.properties.referenceId.enum = referenceIds;
@@ -270,6 +298,10 @@ function compactReferenceContext(value) {
         ...(text(reference.canvasItemId) ? { canvasItemId: text(reference.canvasItemId) } : {}),
         role,
         ...(annotationCount !== null ? { annotationCount } : {}),
+        ...(text(reference.regionId) ? { regionId: text(reference.regionId) } : {}),
+        ...(text(reference.candidateId) ? { candidateId: text(reference.candidateId) } : {}),
+        ...(isObject(reference.targetPoint) ? { targetPoint: reference.targetPoint } : {}),
+        ...(isObject(reference.targetBox) ? { targetBox: reference.targetBox } : {}),
       };
     })
     .filter(Boolean);
@@ -305,7 +337,7 @@ function compactReferenceContext(value) {
   };
 }
 
-function compactCanvasContext(value) {
+export function compactCanvasContext(value) {
   if (!isObject(value)) return null;
   const selectedItems = (Array.isArray(value.selectedItems) ? value.selectedItems : [])
     .slice(0, 40)
@@ -345,6 +377,26 @@ function compactCanvasContext(value) {
         ...(text(annotation.compositePreviewError) ? { compositePreviewError: text(annotation.compositePreviewError) } : {}),
       }
     : null;
+  const regionSelections = (Array.isArray(value.regionSelections) ? value.regionSelections : [])
+    .slice(0, 50)
+    .map((region) => {
+      if (!isObject(region) || !text(region.regionId) || !text(region.imageItemId) || !text(region.label)) return null;
+      if (!isObject(region.point)) return null;
+      const pointX = normalizedUnit(region.point.x);
+      const pointY = normalizedUnit(region.point.y);
+      if (pointX === null || pointY === null) return null;
+      const box = compactNormalizedBox(region.box);
+      return {
+        regionId: text(region.regionId).slice(0, 160),
+        imageItemId: text(region.imageItemId).slice(0, 160),
+        label: text(region.label).slice(0, 120),
+        point: { x: pointX, y: pointY },
+        ...(box ? { box } : {}),
+        ...(text(region.candidateId) ? { candidateId: text(region.candidateId).slice(0, 160) } : {}),
+        ...(CONFIDENCES.has(text(region.confidence)) ? { confidence: text(region.confidence) } : {}),
+      };
+    })
+    .filter(Boolean);
   return {
     itemCount: nonNegativeInteger(value.itemCount) || 0,
     selectedItemIds: Array.isArray(value.selectedItemIds)
@@ -352,6 +404,7 @@ function compactCanvasContext(value) {
       : [],
     selectedItems,
     annotationContext,
+    regionSelections,
   };
 }
 
@@ -456,7 +509,7 @@ function normalizeDeliveryItems(value, mode, outputCount, validationErrors, norm
   }).filter(Boolean);
 }
 
-function normalizeImageTask(value, intent, referenceIds, validationErrors, normalizedFields) {
+function normalizeImageTask(value, intent, referenceIds, regionIds, validationErrors, normalizedFields) {
   if (value === undefined || value === null) return undefined;
   if (!isObject(value)) {
     validationErrors.push(issue('imageTask', 'invalid_type', 'Expected an image task object.'));
@@ -505,6 +558,20 @@ function normalizeImageTask(value, intent, referenceIds, validationErrors, norma
   if (!instruction) validationErrors.push(issue('imageTask.instruction', 'required', 'Image task instruction is required.'));
   const mustChange = normalizeRequiredStringArray(value.mustChange, 'imageTask.mustChange', validationErrors, normalizedFields);
   const mustPreserve = normalizeRequiredStringArray(value.mustPreserve, 'imageTask.mustPreserve', validationErrors, normalizedFields);
+  const targetRegionIds = normalizeStringArray(
+    value.targetRegionIds,
+    'imageTask.targetRegionIds',
+    validationErrors,
+    normalizedFields,
+    50,
+  );
+  const knownRegionIds = new Set(regionIds);
+  const uniqueTargetRegionIds = Array.from(new Set(targetRegionIds));
+  for (const [index, id] of uniqueTargetRegionIds.entries()) {
+    if (!knownRegionIds.has(id)) {
+      validationErrors.push(issue(`imageTask.targetRegionIds[${index}]`, 'unknown_region', 'The target region is not available in canvasContext.'));
+    }
+  }
   return IMAGE_OPERATIONS.has(operation) && instruction
     ? {
         operation,
@@ -513,6 +580,7 @@ function normalizeImageTask(value, intent, referenceIds, validationErrors, norma
         instruction,
         mustChange,
         mustPreserve,
+        ...(uniqueTargetRegionIds.length > 0 ? { targetRegionIds: uniqueTargetRegionIds } : {}),
       }
     : undefined;
 }
@@ -767,6 +835,7 @@ export function validateAgentExecutionPlan(value, {
   contextEntityIds = [],
   requiredContextEntityIds = [],
   referenceIds = [],
+  regionIds = [],
   manualSkillId = null,
   skillPromptStylesById = {},
   userMessage = '',
@@ -838,7 +907,7 @@ export function validateAgentExecutionPlan(value, {
   }
 
   const visualContext = normalizeVisualContext(value.visualContext, referenceIds, validationErrors, normalizedFields);
-  const imageTask = normalizeImageTask(value.imageTask, intent, referenceIds, validationErrors, normalizedFields);
+  const imageTask = normalizeImageTask(value.imageTask, intent, referenceIds, regionIds, validationErrors, normalizedFields);
   const presentation = normalizePresentation(value.presentation, intent, validationErrors);
   if (needsClarification === true && imageTask) {
     validationErrors.push(issue('imageTask', 'clarification_conflict', 'Do not create an executable image task until target ambiguity is resolved.'));
@@ -1019,6 +1088,9 @@ export function buildAgentExecutionPlannerMessages({
     'If a unique edit target is supported with high or medium confidence, identify it as edit_target and explain the choice briefly. If confidence is low or two targets remain equally plausible, request clarification and omit imageTask.',
     'Annotation composite images are evidence attached to their parent reference. They are never independent references and must never appear in targetReferenceId or supportingReferenceIds.',
     'There are two separate opaque ID namespaces and they must never be mixed. contextReferences may copy only contextEntities[].id. visualContext referenceId, imageTask.targetReferenceId, and imageTask.supportingReferenceIds may copy only referenceContext.references[].id.',
+    'Region IDs are a third opaque namespace. imageTask.targetRegionIds may copy only canvasContext.regionSelections[].regionId and must never contain a reference id, canvas item id, label, or invented value.',
+    'When the user includes region_target references, use their region ids in imageTask.targetRegionIds, keep targetReferenceId pointed at the parent source image, and describe each selected label and normalized location in instruction and mustChange.',
+    'For region-targeted edits, preserve unmarked subjects, typography, layout, background, and lighting unless the user explicitly requests otherwise.',
     'Never substitute a filename, URL, canvas node id, label, an id from an earlier turn, or a newly invented id for either namespace.',
     'For an executable image request, include imageTask. Use operation edit only when the user wants to change a specific supplied image, set its id as targetReferenceId, and put any other visual references in supportingReferenceIds. Use operation generate for a new image and omit targetReferenceId.',
     'For edit, instruction must be a complete image-editing instruction, mustChange must list the requested changes, and mustPreserve must list the relevant existing visual properties that should remain unchanged. Do not redesign unspecified content.',
@@ -1132,6 +1204,7 @@ function validationOptions(input) {
   const manifests = Array.isArray(input.manifests) ? input.manifests : [];
   const contextEntities = Array.isArray(input.contextEntities) ? input.contextEntities : [];
   const referenceContext = compactReferenceContext(input.referenceContext);
+  const canvasContext = compactCanvasContext(input.canvasContext);
   return {
     allowedSkillIds: manifests.map((item) => item.id),
     skillToolsById: Object.fromEntries(manifests.map((item) => [item.id, item.allowedTools || []])),
@@ -1139,6 +1212,7 @@ function validationOptions(input) {
     contextEntityIds: contextEntities.map((item) => item.id),
     requiredContextEntityIds: input.selectedContextEntityIds || [],
     referenceIds: referenceContext?.references.map((reference) => reference.id) || [],
+    regionIds: canvasContext?.regionSelections.map((region) => region.regionId) || [],
     manualSkillId: input.activeSkillId,
     userMessage: input.userMessage,
   };

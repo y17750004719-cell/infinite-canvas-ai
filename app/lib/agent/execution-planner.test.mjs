@@ -6,12 +6,36 @@ import {
   buildAgentExecutionPlanTool,
   buildAgentExecutionPlannerMessages,
   buildFallbackAgentExecutionPlan,
+  compactCanvasContext,
   executionPlanToBrief,
   executionPlanToImageDeliveryPlan,
   parseAgentExecutionPlan,
   planAgentExecutionRequest,
   validateAgentExecutionPlan,
 } from './execution-planner.mjs';
+
+test('compact canvas context bounds and limits region prompt data', () => {
+  const compacted = compactCanvasContext({
+    regionSelections: [{
+      regionId: `region-${'x'.repeat(240)}`,
+      imageItemId: `image-${'y'.repeat(240)}`,
+      label: 'z'.repeat(240),
+      point: { x: -2, y: 3 },
+      box: { x: 0.9, y: 0.8, width: 0.5, height: 0.7 },
+      candidateId: 'candidate-id',
+      confidence: 'high',
+    }],
+  });
+  const region = compacted.regionSelections[0];
+  assert.equal(region.regionId.length, 160);
+  assert.equal(region.imageItemId.length, 160);
+  assert.equal(region.label.length, 120);
+  assert.deepEqual(region.point, { x: 0, y: 1 });
+  assert.equal(region.box.x, 0.9);
+  assert.equal(region.box.y, 0.8);
+  assert.ok(Math.abs(region.box.width - 0.1) < 1e-12);
+  assert.ok(Math.abs(region.box.height - 0.2) < 1e-12);
+});
 
 const manifests = [{
   id: 'magazine-poster',

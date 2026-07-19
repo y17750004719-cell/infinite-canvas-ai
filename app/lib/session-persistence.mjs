@@ -13,6 +13,33 @@ const cloneValue = (value) => {
 const normalizeOptionalId = (value) =>
   typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
 
+const normalizeRegionSelections = (regions, items) => {
+  if (!Array.isArray(regions)) return [];
+  const validImageIds = new Set((Array.isArray(items) ? items : [])
+    .filter((item) => isRecord(item) && item.type === 'image' && typeof item.src === 'string' && item.src)
+    .map((item) => item.id));
+  return regions.slice(0, 50).flatMap((region) => {
+    if (!isRecord(region) || typeof region.id !== 'string' || !validImageIds.has(region.imageItemId)) return [];
+    const point = region.point;
+    if (!isRecord(point) || !Number.isFinite(Number(point.x)) || !Number.isFinite(Number(point.y))) return [];
+    const candidates = Array.isArray(region.candidates) ? region.candidates.slice(0, 5) : [];
+    return [{
+      ...region,
+      point: { x: Math.min(1, Math.max(0, Number(point.x))), y: Math.min(1, Math.max(0, Number(point.y))) },
+      ...(isRecord(region.box) ? { box: {
+        x: Math.min(1, Math.max(0, Number(region.box.x) || 0)),
+        y: Math.min(1, Math.max(0, Number(region.box.y) || 0)),
+        width: Math.min(1, Math.max(0, Number(region.box.width) || 0)),
+        height: Math.min(1, Math.max(0, Number(region.box.height) || 0)),
+      } } : {}),
+      candidates,
+      recognitionRevision: Number.isFinite(Number(region.recognitionRevision))
+        ? Math.max(0, Math.floor(Number(region.recognitionRevision)))
+        : 0,
+    }];
+  });
+};
+
 const normalizeConnections = (connections, items) => {
   if (!Array.isArray(connections)) return [];
 
@@ -219,6 +246,7 @@ export function normalizeProjectSession(session) {
     generatedImageHistory: normalizeGeneratedImageHistory(session?.generatedImageHistory),
     messages: normalizedChat.messages,
     topics: normalizedChat.topics,
+    regionSelections: normalizeRegionSelections(session?.regionSelections, normalizedItems),
   };
 }
 
@@ -241,6 +269,7 @@ export function buildPersistedSession(session, patch) {
   const normalizedImageCardCountById = normalizeImageCardCountById(nextSession.imageCardCountById, normalizedItems);
   const normalizedImageCardAspectRatioById = normalizeImageCardAspectRatioById(nextSession.imageCardAspectRatioById, normalizedItems);
   const normalizedGeneratedImageHistory = normalizeGeneratedImageHistory(nextSession.generatedImageHistory);
+  const normalizedRegionSelections = normalizeRegionSelections(nextSession.regionSelections, normalizedItems);
   const normalizedChat = normalizeSessionChatMessages(nextSession);
 
   return {
@@ -266,6 +295,7 @@ export function buildPersistedSession(session, patch) {
     viewport: nextSession.viewport,
     messages: normalizedChat.messages,
     topics: normalizedChat.topics,
+    regionSelections: normalizedRegionSelections,
   };
 }
 

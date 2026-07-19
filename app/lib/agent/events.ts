@@ -76,8 +76,12 @@ export type AgentClarificationState = {
       label: string;
       source: 'upload' | 'history' | 'canvas';
       canvasItemId?: string;
-      role: 'reference' | 'edit_target' | 'annotation_bundle';
+      role: 'reference' | 'edit_target' | 'annotation_bundle' | 'region_target';
       annotationCount?: number;
+      regionId?: string;
+      candidateId?: string;
+      targetPoint?: { x: number; y: number };
+      targetBox?: { x: number; y: number; width: number; height: number };
     }>;
     composerSegments: Array<
       | { type: 'text'; text: string }

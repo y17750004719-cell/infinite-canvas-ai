@@ -64,6 +64,17 @@ test('failed clarification submissions preserve their structured retry context',
   assert.match(source, /persistedReferenceContext\?\.references/);
 });
 
+test('region targets are snapshotted before composer cleanup and submitted from the frozen data', () => {
+  const snapshotIndex = source.indexOf('const regionSelectionSnapshot = buildAgentRegionSelectionSnapshot');
+  const cleanupIndex = source.indexOf('if (!options?.suppressUserMessage) clearSentChatReferenceTokens()', snapshotIndex);
+  const requestIndex = source.indexOf('const response = await fetch(resolvedRequestEndpoint', cleanupIndex);
+  assert.ok(snapshotIndex >= 0);
+  assert.ok(cleanupIndex > snapshotIndex);
+  assert.ok(requestIndex > cleanupIndex);
+  assert.match(source, /regionSelections:\s*regionSelectionSnapshot\.regionSelections/);
+  assert.match(source, /定位对象数据已失效，请重新定位/);
+});
+
 test('planner failures use one message owner and expose a disabled reanalysis action while running', () => {
   assert.match(source, /failedClarificationOwnsMessage/);
   assert.match(source, /label: '重新分析'/);

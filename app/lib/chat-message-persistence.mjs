@@ -7,9 +7,13 @@ function createLegacyReference(messageId, src, index, overrides = {}) {
     src,
     label: text(overrides.label) || `image${index + 1}`,
     source: ['upload', 'history', 'canvas'].includes(overrides.source) ? overrides.source : 'upload',
-    role: ['reference', 'edit_target', 'annotation_bundle'].includes(overrides.role) ? overrides.role : 'reference',
+    role: ['reference', 'edit_target', 'annotation_bundle', 'region_target'].includes(overrides.role) ? overrides.role : 'reference',
     ...(text(overrides.canvasItemId) ? { canvasItemId: overrides.canvasItemId } : {}),
     ...(Number.isFinite(overrides.annotationCount) ? { annotationCount: overrides.annotationCount } : {}),
+    ...(text(overrides.regionId) ? { regionId: overrides.regionId } : {}),
+    ...(text(overrides.candidateId) ? { candidateId: overrides.candidateId } : {}),
+    ...(overrides.targetPoint && typeof overrides.targetPoint === 'object' ? { targetPoint: overrides.targetPoint } : {}),
+    ...(overrides.targetBox && typeof overrides.targetBox === 'object' ? { targetBox: overrides.targetBox } : {}),
   };
 }
 
@@ -19,11 +23,23 @@ export function normalizeChatMessageReferences(message) {
   const existingContext = isRecord(message.referenceContext) ? message.referenceContext : null;
   const references = [];
   const referenceById = new Map();
+  const referenceIdByKey = new Map();
   const referenceIdBySrc = new Map();
+
+  const referenceKey = (candidate) => {
+    if (candidate?.role !== 'region_target') return `src:${candidate?.src || ''}`;
+    const regionIdentity = text(candidate.regionId) || text(candidate.id) || [
+      candidate?.src,
+      JSON.stringify(candidate?.targetPoint || null),
+      JSON.stringify(candidate?.targetBox || null),
+    ].join(':');
+    return `region:${regionIdentity}`;
+  };
 
   const addReference = (candidate) => {
     if (!isRecord(candidate) || !text(candidate.src)) return null;
-    const existingId = referenceIdBySrc.get(candidate.src);
+    const dedupeKey = referenceKey(candidate);
+    const existingId = referenceIdByKey.get(dedupeKey);
     if (existingId) return existingId;
     const normalized = createLegacyReference(messageId, candidate.src, references.length, candidate);
     let id = normalized.id;
@@ -31,7 +47,8 @@ export function normalizeChatMessageReferences(message) {
     normalized.id = id;
     references.push(normalized);
     referenceById.set(id, normalized);
-    referenceIdBySrc.set(normalized.src, id);
+    referenceIdByKey.set(dedupeKey, id);
+    if (!referenceIdBySrc.has(normalized.src)) referenceIdBySrc.set(normalized.src, id);
     return id;
   };
 
@@ -59,7 +76,7 @@ export function normalizeChatMessageReferences(message) {
     const referenceId = referenceById.has(requestedId)
       ? requestedId
       : text(segment.src)
-        ? referenceIdBySrc.get(segment.src) || addReference(segment)
+        ? referenceIdByKey.get(referenceKey(segment)) || referenceIdBySrc.get(segment.src) || addReference(segment)
         : null;
     if (referenceId) composerSegments.push({ type: 'reference', referenceId });
   };

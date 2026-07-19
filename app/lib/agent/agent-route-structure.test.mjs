@@ -57,6 +57,13 @@ test('agent route exposes NDJSON orchestration events and reuses the generate ro
   assert.match(source, /application\/x-ndjson/);
 });
 
+test('agent region prompts use compacted context and preserve the region-aware planner prompt', () => {
+  const source = fs.readFileSync(routePath, 'utf8');
+  assert.match(source, /compactCanvasContext\(canvasContext\)/);
+  assert.match(source, /\? regionAwareOptimizedResult\.prompt/);
+  assert.match(source, /ensureOptimizedPromptCoverage\(regionAwareOptimizedResult\.prompt/);
+});
+
 test('agent route resolves context references before clarification optimization and tools', () => {
   const source = fs.readFileSync(routePath, 'utf8');
   assert.match(source, /resolveContextReference/);

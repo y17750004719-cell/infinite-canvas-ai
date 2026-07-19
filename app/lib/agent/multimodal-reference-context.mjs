@@ -18,6 +18,10 @@ function normalizeReferences(referenceContext) {
           ...(Number.isFinite(Number(reference.annotationCount)) && Number(reference.annotationCount) > 0
             ? { annotationCount: Math.floor(Number(reference.annotationCount)) }
             : {}),
+          ...(text(reference.regionId) ? { regionId: text(reference.regionId) } : {}),
+          ...(text(reference.candidateId) ? { candidateId: text(reference.candidateId) } : {}),
+          ...(reference.targetPoint && typeof reference.targetPoint === 'object' ? { targetPoint: reference.targetPoint } : {}),
+          ...(reference.targetBox && typeof reference.targetBox === 'object' ? { targetBox: reference.targetBox } : {}),
         };
       })
       .filter(Boolean)
@@ -64,6 +68,10 @@ function referenceMarker(reference, aliasOf = '') {
     `Declared role: ${reference.role}`,
   ];
   if (reference.annotationCount) lines.push(`Annotation count: ${reference.annotationCount}`);
+  if (reference.regionId) lines.push(`Region ID: ${reference.regionId}`);
+  if (reference.candidateId) lines.push(`Selected candidate ID: ${reference.candidateId}`);
+  if (reference.targetPoint) lines.push(`Target point (normalized): ${JSON.stringify(reference.targetPoint)}`);
+  if (reference.targetBox) lines.push(`Approximate target box (normalized): ${JSON.stringify(reference.targetBox)}`);
   if (aliasOf) lines.push(`Image pixels are identical to reference ${aliasOf}; use this ID only when the user's inline expression points to it.`);
   return lines.join('\n');
 }

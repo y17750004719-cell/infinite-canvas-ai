@@ -19,6 +19,7 @@ export type {
   AgentPlannerComposerSegment,
   AgentPlannerReference,
   AgentPlannerReferenceContext,
+  AgentRegionSelection,
   AgentPlannerResolution,
   AgentPlannerFailureReason,
   PlanValidationIssue,
@@ -26,6 +27,7 @@ export type {
 
 export const AGENT_EXECUTION_PLAN_SCHEMA: Record<string, unknown>;
 export const AGENT_EXECUTION_PLAN_TOOL: Record<string, unknown>;
+export function compactCanvasContext(value: unknown): Record<string, unknown> | null;
 export function buildAgentExecutionPlanTool(input?: AgentExecutionPlannerInput): Record<string, unknown>;
 export function buildAgentExecutionPlannerMessages(input?: AgentExecutionPlannerInput): Array<{
   role: string;

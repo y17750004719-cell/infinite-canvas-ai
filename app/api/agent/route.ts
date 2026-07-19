@@ -16,6 +16,7 @@ import {
 import { buildMainAgentMessages } from '../../lib/agent/main-agent.mjs';
 import { routeAgentRequest } from '../../lib/agent/skill-router.mjs';
 import {
+  compactCanvasContext,
   executionPlanToBrief,
   executionPlanToImageDeliveryPlan,
   planAgentExecutionRequest,
@@ -101,6 +102,42 @@ function summarizePlannerNormalizations(fields: unknown) {
   };
 }
 
+function buildRegionTargetContract(canvasContext: Record<string, unknown> | undefined, imageTask?: AgentImageTask) {
+  const normalizedCanvasContext = compactCanvasContext(canvasContext);
+  const regions = Array.isArray(normalizedCanvasContext?.regionSelections) ? normalizedCanvasContext.regionSelections : [];
+  const targetIds = new Set(imageTask?.targetRegionIds || []);
+  return regions
+    .filter((region) => region && typeof region === 'object' && (!targetIds.size || targetIds.has(String((region as Record<string, unknown>).regionId))))
+    .map((region) => {
+      const value = region as Record<string, unknown>;
+      return {
+        regionId: String(value.regionId || ''),
+        label: String(value.label || 'target object'),
+        point: value.point,
+        ...(value.box ? { approximateBox: value.box } : {}),
+        ...(value.confidence ? { confidence: value.confidence } : {}),
+      };
+    })
+    .filter((region) => region.regionId);
+}
+
+function appendRegionTargetContract(prompt: string, contract: Array<Record<string, unknown>>) {
+  if (!contract.length) return prompt;
+  const source = String(prompt || '').trim();
+  try {
+    const parsed = JSON.parse(source);
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+      parsed.target_regions = contract;
+      return JSON.stringify(parsed);
+    }
+  } catch {
+    // Text prompts use the explicit contract below.
+  }
+  return `${source}\n\nTarget region contract (semantic guidance, no pixel mask):\n${contract.map((region, index) => (
+    `${index + 1}. ${JSON.stringify(region)}`
+  )).join('\n')}\nPreserve all unmarked subjects, typography, layout, background, and lighting unless explicitly changed.`;
+}
+
 type ConfirmationRecord = {
   operationId: string;
   skillSource: 'manual' | 'auto' | null;
@@ -161,8 +198,12 @@ type AgentRuntimeReferenceContext = {
     label: string;
     source: 'upload' | 'history' | 'canvas';
     canvasItemId?: string;
-    role: 'reference' | 'edit_target' | 'annotation_bundle';
+    role: 'reference' | 'edit_target' | 'annotation_bundle' | 'region_target';
     annotationCount?: number;
+    regionId?: string;
+    candidateId?: string;
+    targetPoint?: { x: number; y: number };
+    targetBox?: { x: number; y: number; width: number; height: number };
   }>;
   composerSegments: Array<
     | { type: 'text'; text: string }
@@ -239,7 +280,7 @@ function normalizeAgentRuntimeReferenceContext(value: unknown): AgentRuntimeRefe
     const source: AgentRuntimeReferenceContext['references'][number]['source'] | null = reference.source === 'upload' || reference.source === 'history' || reference.source === 'canvas'
       ? reference.source
       : null;
-    const role: AgentRuntimeReferenceContext['references'][number]['role'] | null = reference.role === 'edit_target' || reference.role === 'annotation_bundle'
+    const role: AgentRuntimeReferenceContext['references'][number]['role'] | null = reference.role === 'edit_target' || reference.role === 'annotation_bundle' || reference.role === 'region_target'
       ? reference.role
       : reference.role === 'reference'
         ? 'reference'
@@ -257,6 +298,10 @@ function normalizeAgentRuntimeReferenceContext(value: unknown): AgentRuntimeRefe
       ...(Number.isFinite(reference.annotationCount) && Number(reference.annotationCount) > 0
         ? { annotationCount: Math.floor(Number(reference.annotationCount)) }
         : {}),
+      ...(typeof reference.regionId === 'string' && reference.regionId.trim() ? { regionId: reference.regionId.trim() } : {}),
+      ...(typeof reference.candidateId === 'string' && reference.candidateId.trim() ? { candidateId: reference.candidateId.trim() } : {}),
+      ...(normalizeRuntimePoint(reference.targetPoint) ? { targetPoint: normalizeRuntimePoint(reference.targetPoint)! } : {}),
+      ...(normalizeRuntimeBox(reference.targetBox) ? { targetBox: normalizeRuntimeBox(reference.targetBox)! } : {}),
     }];
   }).slice(0, 14);
   const knownIds = new Set(references.map((reference) => reference.id));
@@ -287,6 +332,24 @@ function normalizeAgentRuntimeReferenceContext(value: unknown): AgentRuntimeRefe
 
 function runtimeReferenceId(src: string): string {
   return `runtime-reference:${createHash('sha256').update(src).digest('hex').slice(0, 16)}`;
+}
+
+function normalizeRuntimePoint(value: unknown): { x: number; y: number } | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const point = value as Record<string, unknown>;
+  const x = Number(point.x);
+  const y = Number(point.y);
+  return Number.isFinite(x) && Number.isFinite(y) ? { x, y } : undefined;
+}
+
+function normalizeRuntimeBox(value: unknown): { x: number; y: number; width: number; height: number } | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  const box = value as Record<string, unknown>;
+  const x = Number(box.x);
+  const y = Number(box.y);
+  const width = Number(box.width);
+  const height = Number(box.height);
+  return [x, y, width, height].every(Number.isFinite) ? { x, y, width, height } : undefined;
 }
 
 function buildCanonicalAgentReferenceContext({
@@ -843,6 +906,8 @@ export async function POST(request: NextRequest) {
         presentation: AgentPlanPresentation | undefined = executionPlan?.presentation,
         referenceContext: AgentRuntimeReferenceContext | undefined = runReferenceContext,
       ) => {
+        const regionTargetContract = buildRegionTargetContract(body.canvasContext, imageTask);
+        const regionAwareGenerationPrompt = appendRegionTargetContract(generationPrompt, regionTargetContract);
         const payloadOutputCount = normalizeAgentImageCount(imageOptions?.count);
         const payloadDeliveryPlan = deliveryPlan
           || (executionPlan
@@ -854,7 +919,7 @@ export async function POST(request: NextRequest) {
         }
         const optimizedResult = optimizePrompt && process.env.PROMPT_PIPELINE_AGENT_ENABLED !== '0'
           ? await optimizeImagePrompt({
-              userPrompt: generationPrompt,
+              userPrompt: regionAwareGenerationPrompt,
               skillLabel: selectedSkill?.name,
               skillContent,
               promptStyle: selectedSkill?.promptStyle || 'text',
@@ -867,7 +932,7 @@ export async function POST(request: NextRequest) {
               imageTask,
               visualContext,
             })
-          : { prompt: generationPrompt, optimized: false };
+          : { prompt: regionAwareGenerationPrompt, optimized: false };
         const optimized = {
           ...optimizedResult,
           prompt: applyImagePromptDeliveryContract(selectedSkill?.promptStyle === 'json-text'
@@ -2599,17 +2664,38 @@ export async function POST(request: NextRequest) {
                 imageTask: executionPlan?.imageTask || null,
                 visualContext: executionPlan?.visualContext || null,
               });
-          const optimized = {
-            ...optimizedResult,
-            prompt: usesPlannerGeneration || selectedSkill?.promptStyle === 'json-text'
-              ? optimizedResult.prompt
-              : ensureOptimizedPromptCoverage(optimizedResult.prompt, executionBriefData),
-          };
-          const optimizedItems = 'items' in optimizedResult && Array.isArray(optimizedResult.items)
+          const sourceOptimizedItems = 'items' in optimizedResult && Array.isArray(optimizedResult.items)
             ? optimizedResult.items
+            : null;
+          const regionAwareOptimizedResult = usesPlannerGeneration
+            ? {
+                ...optimizedResult,
+                prompt: appendRegionTargetContract(
+                  optimizedResult.prompt,
+                  buildRegionTargetContract(body.canvasContext, executionPlan?.imageTask),
+                ),
+                ...(sourceOptimizedItems ? {
+                  items: sourceOptimizedItems.map((item: any) => ({
+                    ...item,
+                    prompt: appendRegionTargetContract(
+                      item.prompt,
+                      buildRegionTargetContract(body.canvasContext, executionPlan?.imageTask),
+                    ),
+                  })),
+                } : {}),
+              }
+            : optimizedResult;
+          const optimized = {
+            ...regionAwareOptimizedResult,
+            prompt: usesPlannerGeneration || selectedSkill?.promptStyle === 'json-text'
+              ? regionAwareOptimizedResult.prompt
+              : ensureOptimizedPromptCoverage(regionAwareOptimizedResult.prompt, executionBriefData),
+          };
+          const optimizedItems = 'items' in regionAwareOptimizedResult && Array.isArray(regionAwareOptimizedResult.items)
+            ? regionAwareOptimizedResult.items
             : [];
-          const optimizedSubject = 'structured' in optimizedResult
-            ? optimizedResult.structured?.subject
+          const optimizedSubject = 'structured' in regionAwareOptimizedResult
+            ? regionAwareOptimizedResult.structured?.subject
             : undefined;
           const plannerSeriesItems = executionPlan?.delivery?.items || [];
           const allGenerationItems: AgentImageGenerationItem[] = requestedTotalImageCount > 1

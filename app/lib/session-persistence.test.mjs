@@ -64,6 +64,31 @@ test('project sessions normalize and persist chat panel provider model selection
   assert.equal(persisted.imageModelId, 'next-image-model');
 });
 
+test('project sessions preserve normalized image region selections and request revisions', () => {
+  const normalized = normalizeProjectSession({
+    id: 'session-regions',
+    name: 'Regions',
+    createdAt: 1,
+    updatedAt: 1,
+    items: [{ id: 'image-1', type: 'image', src: '/image.png', x: 0, y: 0, width: 100, height: 100 }],
+    messages: [],
+    viewport: { x: 0, y: 0, scale: 1 },
+    regionSelections: [{
+      id: 'region-1',
+      imageItemId: 'image-1',
+      imageSrc: '/image.png',
+      mode: 'point',
+      point: { x: 1.2, y: -0.2 },
+      candidates: [],
+      status: 'recognizing',
+      recognitionRevision: 3.8,
+    }],
+  });
+
+  assert.deepEqual(normalized.regionSelections?.[0]?.point, { x: 1, y: 0 });
+  assert.equal(normalized.regionSelections?.[0]?.recognitionRevision, 3);
+});
+
 test('buildPersistedSession preserves normalized generated image history entries', () => {
   const session = {
     id: 'session-1',

@@ -1,5 +1,6 @@
 import type { AgentContextEntity, AgentProposal } from './agent/context-reference.types';
 import type { CanvasItem } from './canvas-types';
+import type { RegionSelection } from './image-region-selection.types';
 
 export type { CanvasItem } from './canvas-types';
 
@@ -32,8 +33,12 @@ export interface ChatMessage {
       label: string;
       source: 'upload' | 'history' | 'canvas';
       canvasItemId?: string;
-      role: 'reference' | 'edit_target' | 'annotation_bundle';
+      role: 'reference' | 'edit_target' | 'annotation_bundle' | 'region_target';
       annotationCount?: number;
+      regionId?: string;
+      candidateId?: string;
+      targetPoint?: { x: number; y: number };
+      targetBox?: { x: number; y: number; width: number; height: number };
     }>;
     composerSegments: Array<
       | { type: 'text'; text: string }
@@ -192,6 +197,7 @@ export interface ProjectSession {
     status: 'running' | 'completed' | 'failed' | 'cancelled';
   };
   viewport: { x: number; y: number; scale: number };
+  regionSelections?: RegionSelection[];
 }
 
 function openDB(): Promise<IDBDatabase> {

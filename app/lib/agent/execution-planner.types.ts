@@ -5,6 +5,7 @@ export interface AgentImageTask {
   instruction: string;
   mustChange: string[];
   mustPreserve: string[];
+  targetRegionIds?: string[];
 }
 
 export interface AgentPlanPresentation {
@@ -48,8 +49,12 @@ export interface AgentPlannerReference {
   label: string;
   source: 'upload' | 'history' | 'canvas';
   canvasItemId?: string;
-  role: 'reference' | 'edit_target' | 'annotation_bundle';
+  role: 'reference' | 'edit_target' | 'annotation_bundle' | 'region_target';
   annotationCount?: number;
+  regionId?: string;
+  candidateId?: string;
+  targetPoint?: { x: number; y: number };
+  targetBox?: { x: number; y: number; width: number; height: number };
 }
 
 export type AgentPlannerComposerSegment =
@@ -67,6 +72,16 @@ export interface AgentPlannerReferenceContext {
   }>;
 }
 
+export interface AgentRegionSelection {
+  regionId: string;
+  imageItemId: string;
+  point: { x: number; y: number };
+  box?: { x: number; y: number; width: number; height: number };
+  label: string;
+  candidateId?: string;
+  confidence?: 'high' | 'medium' | 'low';
+}
+
 export interface AgentExecutionPlannerInput extends Record<string, unknown> {
   userMessage?: string;
   referenceContext?: AgentPlannerReferenceContext | null;
@@ -74,6 +89,7 @@ export interface AgentExecutionPlannerInput extends Record<string, unknown> {
 
 export interface AgentExecutionPlanValidationOptions extends Record<string, unknown> {
   referenceIds?: string[];
+  regionIds?: string[];
 }
 
 export interface AgentExecutionPlan {
