@@ -5,6 +5,10 @@ import path from 'node:path';
 
 const source = fs.readFileSync(path.resolve(import.meta.dirname, '../../page.tsx'), 'utf8');
 const globalStyles = fs.readFileSync(path.resolve(import.meta.dirname, '../../globals.css'), 'utf8');
+const motionControllerSource = fs.readFileSync(
+  path.resolve(import.meta.dirname, '../../components/GsapMotionController.tsx'),
+  'utf8',
+);
 const decisionPopoverSource = fs.readFileSync(
   path.resolve(import.meta.dirname, '../../components/workspace/AgentDecisionPopover.tsx'),
   'utf8',
@@ -127,8 +131,10 @@ test('agent progress accumulates reached breadcrumbs without an assistant bubble
   assert.match(source, /shouldShowAgentRunProgress\(msg\.agentRunProgress\)/);
   assert.doesNotMatch(source, /模型推理/);
   assert.doesNotMatch(source, /animate-pulse/);
-  assert.match(globalStyles, /@keyframes agent-progress-enter/);
-  assert.match(globalStyles, /prefers-reduced-motion:[\s\S]{0,240}agent-progress-enter/);
+  assert.doesNotMatch(globalStyles, /@keyframes/);
+  assert.match(motionControllerSource, /'\.agent-progress-enter'/);
+  assert.match(motionControllerSource, /prefers-reduced-motion: reduce/);
+  assert.match(motionControllerSource, /gsap\.fromTo\(/);
 });
 
 test('every chat-generated image is materialized in both chat and the canvas', () => {

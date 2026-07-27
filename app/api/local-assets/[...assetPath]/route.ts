@@ -15,9 +15,9 @@ const NO_STORE_HEADERS = {
 
 export async function GET(
   _request: NextRequest,
-  { params }: { params: { assetPath?: string[] } }
+  { params }: { params: Promise<{ assetPath?: string[] }> }
 ) {
-  const assetPath = params?.assetPath;
+  const { assetPath } = await params;
   if (!Array.isArray(assetPath) || assetPath.length === 0) {
     return NextResponse.json({ error: 'Asset path is required' }, { status: 400 });
   }

@@ -81,7 +81,7 @@ export function AgentDecisionPopover({
             type="button"
             disabled={option.disabled}
             onClick={() => onSelect(option.id)}
-            className={`agent-decision-option group flex w-full items-center gap-2.5 rounded-[14px] px-2.5 py-2 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+            className={`agent-decision-option group flex w-full items-center gap-2.5 rounded-[14px] px-2.5 py-2 text-left  disabled:cursor-not-allowed disabled:opacity-40 ${
               option.recommended ? 'is-recommended' : ''
             }`}
           >
@@ -107,7 +107,8 @@ export function AgentDecisionPopover({
             </span>
             <ArrowRight
               size={14}
-              className="workspace-text-soft flex-none transition-transform duration-150 group-hover:translate-x-0.5"
+              className="workspace-text-soft flex-none"
+              data-gsap-hover-x="2"
               aria-hidden="true"
             />
           </button>
@@ -115,7 +116,7 @@ export function AgentDecisionPopover({
 
         {custom && (
           customOpen ? (
-            <div className="agent-decision-custom mt-1 rounded-[14px] px-2.5 py-2">
+            <div className="agent-decision-custom mt-1 rounded-[14px] px-2.5 py-2" data-gsap-enter="true">
               <div className="flex items-end gap-2">
                 <textarea
                   ref={customInputRef}
@@ -146,7 +147,7 @@ export function AgentDecisionPopover({
             <button
               type="button"
               onClick={() => setCustomOpen(true)}
-              className="agent-decision-option flex w-full items-center gap-2.5 rounded-[14px] px-2.5 py-2 text-left transition-colors"
+              className="agent-decision-option flex w-full items-center gap-2.5 rounded-[14px] px-2.5 py-2 text-left "
             >
               <span className="agent-decision-index inline-flex h-6 w-6 flex-none items-center justify-center rounded-full">
                 <Pencil size={11} />
@@ -162,7 +163,7 @@ export function AgentDecisionPopover({
           <button
             type="button"
             onClick={onSkip}
-            className="workspace-text-muted rounded-lg px-2 py-1 text-[11px] font-medium transition-colors hover:bg-[var(--workspace-control-hover)] hover:text-[var(--workspace-text-primary)]"
+            className="workspace-text-muted rounded-lg px-2 py-1 text-[11px] font-medium  hover:bg-[var(--workspace-control-hover)] hover:text-[var(--workspace-text-primary)]"
           >
             {skipLabel}
           </button>

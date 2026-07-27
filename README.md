@@ -1,6 +1,6 @@
 # Infinite Canvas AI
 
-一个基于 Next.js 14 的 AI 设计画布项目，支持在无限画布中进行图片生成、上传参考图、对话式创作和作品管理。
+一个基于 Next.js 16、React 19 和 Turbopack 的 AI 设计画布项目，支持在无限画布中进行图片生成、上传参考图、对话式创作和作品管理。
 
 ## 快速开始
 
@@ -24,8 +24,8 @@ npm run dev
 
 ## 运行环境
 
-- Node.js 18 或更高版本
-- npm 9 或更高版本
+- Node.js 24 LTS
+- npm 11 或更高版本
 
 仓库中包含 `.nvmrc`，如果你使用 `nvm`，可以先执行：
 
@@ -104,6 +104,8 @@ npm run dev
 
 默认开发服务器会监听本地 `3001` 端口。
 
+Next.js 16 默认使用 Turbopack；开发和生产构建都不需要额外的 `--turbopack` 参数。
+
 ## 生产构建
 
 构建项目：
@@ -111,6 +113,14 @@ npm run dev
 ```bash
 npm run build
 ```
+
+提交或部署前可以运行完整质量门禁：
+
+```bash
+npm run check
+```
+
+该命令会依次执行 ESLint、Next 路由类型生成、TypeScript 检查、Node 测试和生产构建。
 
 启动生产环境：
 
@@ -123,13 +133,13 @@ npm run start
 - `app/`：Next.js App Router 页面与接口
 - `app/components/`：画布、面板、工具栏等界面组件
 - `app/lib/`：接口调用、本地存储、状态逻辑
-- `public/uploads/`：本地上传与生成后的图片资源目录
+- `runtime/uploads/`：本地上传与生成后的图片资源目录
 
 ## 开发建议
 
 - 首次运行前先确认 `.env.local` 中已经填写可用的 API Key
 - 如果切换了 Node 版本，建议重新执行一次 `npm install`
-- `public/uploads/` 里的文件是本地产物，默认不会提交到 GitHub
+- `runtime/` 里的文件是本地产物，默认不会提交到 GitHub
 - 浏览器中的历史项目数据主要保存在 IndexedDB，本地清缓存后可能丢失
 
 ## 常见问题
@@ -147,13 +157,13 @@ npm run start
 上传与生成的图片会保存在：
 
 ```bash
-public/uploads/
+runtime/uploads/
 ```
 
 以及：
 
 ```bash
-public/uploads/generated/
+runtime/uploads/generated/
 ```
 
 ### 3. 为什么 GitHub 上没有 `.env.local`

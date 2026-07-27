@@ -19,27 +19,21 @@ type RegionImageContent = {
 export const CanvasRegionSelectionsLayer = memo(function CanvasRegionSelectionsLayer({
   items,
   regions,
-  viewport,
   activeRegionId,
   getImageContent,
   onRegionClick,
+  getItemTargetRef,
 }: {
   items: CanvasItem[];
   regions: RegionSelection[];
-  viewport: { x: number; y: number; scale: number };
   activeRegionId: string | null;
   getImageContent: (item: CanvasItem) => RegionImageContent;
   onRegionClick: (regionId: string) => void;
+  getItemTargetRef: (itemId: string, role: string) => (element: HTMLElement | null) => void;
 }) {
   const itemById = new Map(items.map((item) => [item.id, item]));
   return (
-    <div
-      className="pointer-events-none absolute z-[6]"
-      style={{
-        transform: `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.scale})`,
-        transformOrigin: '0 0',
-      }}
-    >
+    <div className="pointer-events-none absolute z-[6]">
       {regions.map((region, index) => {
         const item = itemById.get(region.imageItemId);
         if (!item || item.type !== 'image' || !item.visible) return null;
@@ -69,9 +63,13 @@ export const CanvasRegionSelectionsLayer = memo(function CanvasRegionSelectionsL
         const candidate = region.candidates.find((entry) => entry.id === region.selectedCandidateId)
           || region.candidates[0];
         const regionLabel = region.customLabel || candidate?.label;
+        const isDraftRegion = region.id === '__region-draft__';
         return (
           <div
             key={region.id}
+            ref={getItemTargetRef(item.id, `region-${region.id}`)}
+            data-canvas-region-item-id={item.id}
+            data-region-draft={isDraftRegion ? 'true' : undefined}
             className="pointer-events-none absolute"
             style={{
               left: item.x,
@@ -83,8 +81,18 @@ export const CanvasRegionSelectionsLayer = memo(function CanvasRegionSelectionsL
           >
             {boxStart && boxEnd && (
               <div
+                data-region-draft-box={isDraftRegion ? 'true' : undefined}
                 className={`absolute border-2 ${activeRegionId === region.id ? 'border-blue-400' : 'border-blue-500/75'} bg-blue-500/10`}
-                style={{
+                style={isDraftRegion ? {
+                  left: 0,
+                  top: 0,
+                  width: 1,
+                  height: 1,
+                  borderRadius: 6,
+                  transformOrigin: '0 0',
+                  willChange: 'transform',
+                  opacity: 0,
+                } : {
                   left: Math.min(boxStart.x, boxEnd.x),
                   top: Math.min(boxStart.y, boxEnd.y),
                   width: Math.abs(boxEnd.x - boxStart.x),
@@ -96,8 +104,15 @@ export const CanvasRegionSelectionsLayer = memo(function CanvasRegionSelectionsL
             <button
               type="button"
               data-region-marker="true"
-              className={`pointer-events-auto absolute flex h-6 min-w-6 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border-2 border-white bg-blue-500 px-1 text-[10px] font-bold text-white ${region.status === 'recognizing' ? 'animate-pulse opacity-70' : ''}`}
-              style={{ left: point.x, top: point.y }}
+              data-gsap-no-interaction="true"
+              data-region-draft-marker={isDraftRegion ? 'true' : undefined}
+              className={`pointer-events-auto absolute flex h-6 min-w-6 -translate-x-1/2 -translate-y-1/2 items-center justify-center rounded-full border-2 border-white bg-blue-500 px-1 text-[10px] font-bold text-white ${region.status === 'recognizing' && !isDraftRegion ? 'gsap-pulse opacity-70' : ''}`}
+              style={isDraftRegion ? {
+                left: 0,
+                top: 0,
+                willChange: 'transform',
+                opacity: 0,
+              } : { left: point.x, top: point.y }}
               title={regionLabel || region.error || '定位对象'}
               aria-label={`定位对象 ${regionLabel || index + 1}`}
               aria-busy={region.status === 'recognizing'}

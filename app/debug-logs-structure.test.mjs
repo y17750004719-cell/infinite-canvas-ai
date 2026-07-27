@@ -27,6 +27,8 @@ test('client debug logs route only accepts local development access and validate
 test('debug logs page reads the current startup log file and points old logs to the local directory', () => {
   assert.equal(debugLogsPageSource.includes('isLocalLogAccessAllowed()'), true);
   assert.equal(debugLogsPageSource.includes('getCurrentStartupSession()'), true);
+  assert.equal(debugLogsPageSource.includes('searchParams?: Promise<SearchParams>'), true);
+  assert.equal(debugLogsPageSource.includes('const resolvedSearchParams = await searchParams;'), true);
   assert.equal(debugLogsPageSource.includes('await readLogEntries({'), true);
   assert.equal(debugLogsPageSource.includes('const level ='), true);
   assert.equal(debugLogsPageSource.includes('const source ='), true);

@@ -6,6 +6,7 @@ import { createPortal } from 'react-dom';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import gsap from 'gsap';
+import { ScrollToPlugin } from 'gsap/ScrollToPlugin';
 import { useGSAP } from '@gsap/react';
 import { 
   MousePointer2, Type, Image as ImageIcon,
@@ -26,9 +27,16 @@ import {
   selectedRegionLabel,
   buildRegionBox,
   buildRegionEvidenceCrop,
+  imageNormalizedToItemLocal,
 } from './lib/image-region-selection.mjs';
 import type { RegionSelection, RegionCandidate } from './lib/image-region-selection.types';
 import { useImageRegionSelectionController } from './hooks/useImageRegionSelectionController';
+import {
+  isCanvasPerformanceEnabled,
+  useCanvasInteractionController,
+  type CanvasInteractionCancelReason,
+  type CanvasRegisteredTarget,
+} from './hooks/useCanvasInteractionController';
 import { ASPECT_RATIOS } from './lib/aspect-ratios';
 import {
   appendGeneratedImageHistoryEntries,
@@ -43,6 +51,35 @@ import {
 } from './lib/session-persistence.mjs';
 import { resolveStateUpdate } from './lib/state-update.mjs';
 import { resolveProviderModelSelection } from './lib/provider-model-selection.mjs';
+import {
+  clampCanvasAnchor,
+  getCanvasViewportAtAnchor,
+  normalizeCanvasWheelDelta,
+} from './lib/canvas-viewport-motion.mjs';
+import {
+  applyDirectItemResize,
+  applyDirectPan,
+  applyDirectZoom,
+  resolveDirectMarqueeSelection,
+} from './lib/canvas-direct-interaction.mjs';
+import {
+  applyCanvasItemDragPositions,
+  areCanvasPointsFullyContained,
+  getCanvasDragDelta,
+  getCanvasMarqueePath,
+  getRotatedRectAabb,
+  hasCanvasDragIntent,
+  isRectIntersecting,
+  matchesCanvasItemDragTransaction,
+  normalizeCanvasMarqueeRect,
+  projectCanvasPointToViewport,
+  projectScreenRectToCanvas,
+  resolveCanvasFixedOverlayAnchors,
+  resolveCanvasItemDragReleasePositions,
+  resolveCanvasMarqueeSelection,
+  resolveCanvasPointerGesture,
+} from './lib/canvas-interaction.mjs';
+import { getCanvasImageWorkingSetIds } from './lib/canvas-image-working-set.mjs';
 import {
   createInitialAgentRunProgress,
   createAgentProgressEventRouter,
@@ -63,7 +100,9 @@ import type {
 import {
   areCanvasUndoSnapshotsEqual,
   createCanvasUndoSnapshot,
+  createCanvasMoveHistoryCommand,
   createEmptySessionCanvasHistoryState,
+  pushUndoCommand,
   pushUndoSnapshot,
   redoSnapshot,
   undoSnapshot,
@@ -148,19 +187,44 @@ import { GalleryView, SessionActionErrorBanner } from './components/workspace/Ga
 import { AgentDecisionPopover } from './components/workspace/AgentDecisionPopover';
 import { useWorkspaceSessionController } from './hooks/useWorkspaceSessionController';
 
-gsap.registerPlugin(useGSAP);
+gsap.registerPlugin(useGSAP, ScrollToPlugin);
 
 const CANVAS_OVERLAY_Z = 120;
 const CHAT_PANEL_Z = 180;
 const GLOBAL_NOTICE_Z = 220;
 const CANVAS_CLIPBOARD_PASTE_OFFSET = { x: 32, y: 32 };
-const CANVAS_VIEWPORT_PASTE_ANIMATION_MS = 240;
-const CHAT_PANEL_GSAP_OPEN_DURATION = 0.54;
-const CHAT_PANEL_GSAP_CLOSE_DURATION = 0.46;
-const CHAT_PANEL_GSAP_EASE = 'expo.out';
-const FLOATING_PANEL_GSAP_DURATION = 0.18;
+const CANVAS_VIEWPORT_ANIMATION_SECONDS = 0.12;
+const CANVAS_SNAPSHOT_COMMIT_IDLE_MS = 500;
+const CANVAS_IMAGE_WORKING_SET_ENTER_SCREENS = 1;
+const CANVAS_IMAGE_WORKING_SET_RETAIN_SCREENS = 1.5;
+const CANVAS_IMAGE_WORKING_SET_RELEASE_MS = 500;
+const CHAT_PANEL_GSAP_OPEN_DURATION = 0.28;
+const CHAT_PANEL_GSAP_CLOSE_DURATION = 0.23;
+const CHAT_PANEL_GSAP_EASE = 'power3.out';
 const PROMPT_PIPELINE_AGENT_ENABLED = process.env.NEXT_PUBLIC_PROMPT_PIPELINE_AGENT_ENABLED !== '0';
 const GENERATED_IMAGE_HISTORY_PLACEHOLDER_PATTERN = /\[(?:Generated image[^\]]*omitted from chat history|聊天记录中省略了代理生成的图像)\]/gi;
+const canOptimizeCanvasImage = (src: string) => src.startsWith('/api/local-assets/');
+
+function useStableEvent<TArgs extends unknown[], TResult>(
+  handler: (...args: TArgs) => TResult
+) {
+  const handlerRef = useRef(handler);
+  useLayoutEffect(() => {
+    handlerRef.current = handler;
+  }, [handler]);
+  return useCallback((...args: TArgs) => handlerRef.current(...args), []);
+}
+
+const hasPendingBrowserInput = () => {
+  if (typeof navigator === 'undefined') return false;
+  const scheduling = (navigator as Navigator & {
+    scheduling?: {
+      isInputPending?: (options?: { includeContinuous?: boolean }) => boolean;
+    };
+  }).scheduling;
+  return scheduling?.isInputPending?.({ includeContinuous: true }) === true;
+};
+
 const AGENT_RETRY_CONFIRMATION_PATTERN = /^(?:同意|确认|可以|没问题|按(?:这个|此|上述)(?:方案)?来|就按(?:这个|此|上述)(?:方案)?|继续|开始吧)(?:[\s，,。.!！?？]*(?:(?:请)?(?:给我|帮我)?(?:继续)?(?:生成|制作|执行|出图)(?:这张|该张|图片|图像|封面|海报|任务)?))?[\s，,。.!！?？]*$/i;
 
 const extractPlainText = (value: React.ReactNode): string =>
@@ -238,9 +302,19 @@ interface CanvasUndoSnapshot {
   imageCardAspectRatioById: Record<string, string>;
 }
 
+interface CanvasMoveHistoryCommand {
+  kind: 'move-items';
+  before: Record<string, { x: number; y: number }>;
+  after: Record<string, { x: number; y: number }>;
+  orderBefore: string[];
+  orderAfter: string[];
+}
+
+type CanvasHistoryEntry = CanvasUndoSnapshot | CanvasMoveHistoryCommand;
+
 interface SessionCanvasHistoryState {
-  past: CanvasUndoSnapshot[];
-  future: CanvasUndoSnapshot[];
+  past: CanvasHistoryEntry[];
+  future: CanvasHistoryEntry[];
 }
 
 type ConnectionMode = 'idle' | 'armed' | 'dragging';
@@ -248,24 +322,25 @@ type ConnectionMode = 'idle' | 'armed' | 'dragging';
 interface ConnectionSession {
   mode: 'dragging';
   fromItemId: string;
-  pointerId: number | null;
-  startPoint: { x: number; y: number } | null;
-  point: { x: number; y: number } | null;
+  pointerId: number;
+  startPoint: { x: number; y: number };
+  fromPoint: { x: number; y: number };
+  point: { x: number; y: number };
+  inputPortCandidates: Array<{ targetId: string; x: number; y: number }>;
   snapTargetId: string | null;
   moved: boolean;
 }
 
-type PortSide = 'left' | 'right';
-
-interface MagneticPortState {
+interface ConnectionSnapTargetVisual {
   itemId: string;
-  side: PortSide;
-  point: { x: number; y: number };
-  isTracking: boolean;
-  isReturning: boolean;
+  element: HTMLElement;
+  opacity: string;
+  visibility: string;
+  pointerEvents: string;
+  willChange: string;
 }
 
-type MagneticPortMap = Record<string, MagneticPortState>;
+type PortSide = 'left' | 'right';
 
 interface FrozenPreviewConnection {
   from: { x: number; y: number };
@@ -930,7 +1005,7 @@ const ChatPanelModelSelector = memo(function ChatPanelModelSelector({
           <span className="workspace-text-muted">{purpose === 'chat' ? '对话 · ' : '生图 · '}</span>
           {hasSelection ? `${selectedProviderName} / ${model}` : emptyLabel}
         </span>
-        <ChevronDown size={12} className={`shrink-0 transition-transform ${open ? 'rotate-180' : ''}`} />
+        <ChevronDown size={12} className="shrink-0" data-gsap-chevron="true" />
       </button>
 
       {open && (
@@ -1189,11 +1264,17 @@ const PORT_ICON_SIZE = 46;
 const PORT_ICON_RADIUS = PORT_ICON_SIZE / 2;
 const PORT_OUTER_GAP = 26;
 const PORT_PROXIMITY_SIZE = 84;
-const PORT_ACTIVATION_RADIUS = 76;
-const PORT_TRACKING_RADIUS = 112;
-const PORT_RETURN_DURATION_MS = 220;
 const CONNECTION_ANCHOR_EDGE_GAP = 8;
 const IMAGE_DISPLAY_MIN_SIDE = 512;
+const IMAGE_NODE_OVERLAY_GAP_PX = 10;
+
+const getPortCanvasPoint = (item: CanvasItem, side: PortSide) => ({
+  x:
+    side === 'left'
+      ? item.x - PORT_ICON_RADIUS - PORT_OUTER_GAP
+      : item.x + item.width + PORT_ICON_RADIUS + PORT_OUTER_GAP,
+  y: item.y + item.height / 2,
+});
 const TEXT_CARD_DIMENSIONS = {
   width: 380,
   height: 430,
@@ -1288,6 +1369,8 @@ const LIGHT_THEME = {
   accentSurface: 'rgba(23, 23, 23, 0.05)',
   accentSurfaceStrong: 'rgba(23, 23, 23, 0.09)',
   canvasLine: 'rgba(23, 23, 23, 0.24)',
+  marqueeStroke: 'rgba(23, 23, 23, 0.78)',
+  marqueeFill: 'rgba(64, 64, 64, 0.08)',
   portFill: '#fafaf9',
   portStroke: 'rgba(64, 64, 64, 0.58)',
 };
@@ -1305,6 +1388,8 @@ const DARK_THEME = {
   accentSurface: 'rgba(255, 255, 255, 0.08)',
   accentSurfaceStrong: 'rgba(255, 255, 255, 0.12)',
   canvasLine: 'rgba(245, 245, 245, 0.84)',
+  marqueeStroke: 'rgba(255, 255, 255, 0.76)',
+  marqueeFill: 'rgba(255, 255, 255, 0.06)',
   portFill: '#1a1a1a',
   portStroke: 'rgba(245, 245, 245, 0.78)',
 };
@@ -1415,32 +1500,6 @@ const clampFloatingPanelToViewport = ({
   return {
     left: Math.min(Math.max(left, minLeft), maxLeft),
     top: Math.min(Math.max(top, minTop), maxTop),
-  };
-};
-
-const resolveImageToolbarViewportAnchor = ({
-  itemBounds,
-  toCanvasScreenPoint,
-  canvasRect,
-  screenGap = 12,
-}: {
-  itemBounds: { left: number; top: number; width: number; height: number } | null;
-  toCanvasScreenPoint: (point: { x: number; y: number }) => { x: number; y: number };
-  canvasRect: DOMRect | null | undefined;
-  screenGap?: number;
-}) => {
-  if (!itemBounds || !canvasRect) {
-    return null;
-  }
-
-  const canvasScreenPoint = toCanvasScreenPoint({
-    x: itemBounds.left + itemBounds.width / 2,
-    y: itemBounds.top,
-  });
-
-  return {
-    x: canvasRect.left + canvasScreenPoint.x,
-    y: canvasRect.top + canvasScreenPoint.y - screenGap,
   };
 };
 
@@ -2133,25 +2192,198 @@ const getRegionImageContent = (item: CanvasItem) => {
 const getRegionCandidate = (region: RegionSelection): RegionCandidate | undefined =>
   region.candidates.find((candidate) => candidate.id === region.selectedCandidateId) || region.candidates[0];
 
-const easeOutCubic = (t: number) => 1 - Math.pow(1 - t, 3);
-
 interface ViewportState {
   x: number;
   y: number;
   scale: number;
 }
 
+type CanvasInteractionPhase =
+  | 'idle'
+  | 'item-drag'
+  | 'connection-drag'
+  | 'canvas-pan'
+  | 'canvas-zoom'
+  | 'resize'
+  | 'marquee';
+
 interface CanvasSize {
   width: number;
   height: number;
 }
 
+interface CanvasMetrics extends CanvasSize {
+  left: number;
+  top: number;
+}
+
+type CanvasItemOverlayKind =
+  | 'selected-image-toolbar'
+  | 'selected-image-panel'
+  | 'selected-text-panel';
+
+interface CanvasItemOverlayGroup {
+  kind: CanvasItemOverlayKind;
+  itemId: string;
+  root: HTMLElement;
+}
+
+interface CanvasOverlayVisibilitySnapshot {
+  root: HTMLElement;
+  visibility: string;
+  pointerEvents: string;
+}
+
+interface PendingCanvasSelectionGesture {
+  itemIds: string[];
+  primaryId: string;
+  previousSelectedId: string | null;
+  previousSelectedIds: string[];
+  previousConnectionIds: string[];
+  overlayVisibility: CanvasOverlayVisibilitySnapshot[];
+  pointerDownAt: number;
+  firstDragVisualAt: number | null;
+  activated: boolean;
+}
+
+interface FinalizeCanvasSelectionGestureOptions {
+  itemIds?: string[];
+  items?: CanvasItem[];
+  reason: 'click' | 'drag' | 'alt-copy';
+  saveSession?: boolean;
+}
+
+interface CanvasMarqueeSession {
+  start: { x: number; y: number };
+  viewport: ViewportState;
+  additive: boolean;
+  activated: boolean;
+}
+
+interface CanvasPanMotion {
+  token: number;
+  startPointer: { x: number; y: number };
+  currentPointer: { x: number; y: number };
+  startViewport: ViewportState;
+  targetViewport: ViewportState;
+  visualViewport: ViewportState;
+  clearSelectionOnClick: boolean;
+  moved: boolean;
+}
+
+interface NativeViewportAnimation {
+  cancel: () => void;
+}
+
+interface CanvasItemDragPreviewTarget {
+  target: CanvasRegisteredTarget;
+  logicalStartX: number | null;
+  logicalStartY: number | null;
+  zIndex: string;
+  willChange: string;
+}
+
+interface CanvasItemDragConnectionPreview {
+  paths: SVGPathElement[];
+  originalPath: string;
+  originalTransforms: string[];
+  fromStart: { x: number; y: number };
+  toStart: { x: number; y: number };
+  fromPoint: { x: number; y: number };
+  toPoint: { x: number; y: number };
+  movesFrom: boolean;
+  movesTo: boolean;
+  translationOnly: boolean;
+}
+
+interface CanvasItemDragPreviewState {
+  targets: CanvasItemDragPreviewTarget[];
+  connections: CanvasItemDragConnectionPreview[];
+  connectionsPrepared: boolean;
+  delta: { x: number; y: number };
+}
+
+interface CachedCanvasItemDragConnection {
+  connection: Connection;
+  paths: SVGPathElement[];
+  movesFrom: boolean;
+  movesTo: boolean;
+}
+
+interface CachedCanvasItemDragPlan {
+  targets: CanvasRegisteredTarget[];
+  connections: CachedCanvasItemDragConnection[];
+}
+
+interface DirectItemDragSession {
+  sessionId: string | null;
+  token: number;
+  itemIds: string[];
+  startPositions: Record<string, { x: number; y: number }>;
+  delta: { x: number; y: number };
+  overlayVisibility: CanvasOverlayVisibilitySnapshot[];
+  isAltCopy: boolean;
+}
+
+type CanvasConnectionRuntimeIndex = Map<string, CachedCanvasItemDragPlan>;
+
+interface ChatPanelMotionController {
+  open: () => void;
+  close: () => void;
+  syncBreakpoint: (isDesktop: boolean) => void;
+  isCollapsed: () => boolean;
+}
+
+interface ChatPanelMotionPerformanceTrace {
+  targetCollapsed: boolean;
+  startedAt: number;
+  maxFrameIntervalMs: number;
+  frameCount: number;
+  longFrameCount: number;
+  ticker: (time: number, deltaTime: number) => void;
+}
+
+interface PendingCanvasCommit {
+  revision: number;
+  stagedAt: number;
+  items?: CanvasItem[];
+  viewport?: ViewportState;
+  connections?: Connection[];
+  selectedId?: string | null;
+  selectedIds?: string[];
+  selectedConnectionIds?: string[];
+  saveSession?: boolean;
+  viewportToken?: number;
+}
+
+interface CanvasCommitBuffer extends PendingCanvasCommit {
+  deadlineAt: number;
+}
+
+interface CornerResizePreview {
+  itemId: string;
+  target: CanvasRegisteredTarget | null;
+  startWidth: number;
+  startHeight: number;
+  nextWidth: number;
+  nextHeight: number;
+  overlayVisibility: CanvasOverlayVisibilitySnapshot[];
+}
+
+interface RegionDraftVisualController {
+  root: HTMLElement;
+  setMarkerX: (value: number) => void;
+  setMarkerY: (value: number) => void;
+  setBoxX: (value: number) => void;
+  setBoxY: (value: number) => void;
+  setBoxScaleX: (value: number) => void;
+  setBoxScaleY: (value: number) => void;
+}
+
 const CanvasBackgroundLayer = memo(function CanvasBackgroundLayer({
   theme,
-  viewport,
 }: {
   theme: typeof DARK_THEME;
-  viewport: ViewportState;
 }) {
   return (
     <div
@@ -2163,211 +2395,302 @@ const CanvasBackgroundLayer = memo(function CanvasBackgroundLayer({
   );
 });
 
+const CanvasConnectionPath = memo(function CanvasConnectionPath({
+  connectionId,
+  path,
+  role,
+  stroke,
+  strokeOpacity,
+  strokeWidth,
+  onPointerDown,
+  getConnectionPathRef,
+}: {
+  connectionId: string;
+  path: string;
+  role: 'visual' | 'hit';
+  stroke: string;
+  strokeOpacity?: number;
+  strokeWidth: number | string;
+  onPointerDown?: (e: React.PointerEvent<SVGPathElement>, connectionId: string) => void;
+  getConnectionPathRef: (connectionId: string, role: string) => (element: SVGPathElement | null) => void;
+}) {
+  const isHitPath = role === 'hit';
+  return (
+    <path
+      ref={getConnectionPathRef(connectionId, role)}
+      data-canvas-connection-id={connectionId}
+      d={path}
+      fill="none"
+      stroke={stroke}
+      {...(!isHitPath && strokeOpacity !== undefined ? { strokeOpacity } : {})}
+      strokeWidth={strokeWidth}
+      vectorEffect="non-scaling-stroke"
+      strokeLinecap="round"
+      pointerEvents={isHitPath ? undefined : 'none'}
+      className={isHitPath ? 'pointer-events-auto cursor-pointer' : undefined}
+      onPointerDown={isHitPath && onPointerDown
+        ? (event) => onPointerDown(event, connectionId)
+        : undefined}
+    />
+  );
+});
+
+const CanvasResolvedConnectionPath = memo(function CanvasResolvedConnectionPath({
+  connection,
+  fromItem,
+  toItem,
+  role,
+  stroke,
+  strokeOpacity,
+  strokeWidth,
+  onPointerDown,
+  getConnectionAnchorCanvasPoint,
+  buildConnectionPath,
+  getConnectionPathRef,
+}: {
+  connection: Connection;
+  fromItem: CanvasItem;
+  toItem: CanvasItem;
+  role: 'visual' | 'hit';
+  stroke: string;
+  strokeOpacity?: number;
+  strokeWidth: number | string;
+  onPointerDown?: (e: React.PointerEvent<SVGPathElement>, connectionId: string) => void;
+  getConnectionAnchorCanvasPoint: (item: CanvasItem, side: 'left' | 'right') => { x: number; y: number };
+  buildConnectionPath: (from: { x: number; y: number }, to: { x: number; y: number }) => string;
+  getConnectionPathRef: (connectionId: string, role: string) => (element: SVGPathElement | null) => void;
+}) {
+  const from = getConnectionAnchorCanvasPoint(fromItem, 'right');
+  const to = getConnectionAnchorCanvasPoint(toItem, 'left');
+  return (
+    <CanvasConnectionPath
+      connectionId={connection.id}
+      path={buildConnectionPath(from, to)}
+      role={role}
+      stroke={stroke}
+      strokeOpacity={strokeOpacity}
+      strokeWidth={strokeWidth}
+      onPointerDown={onPointerDown}
+      getConnectionPathRef={getConnectionPathRef}
+    />
+  );
+});
+
 const CanvasConnectionsLayer = memo(function CanvasConnectionsLayer({
-  canvasSize,
   connections,
   theme,
   itemById,
   selectedConnectionIds,
-  viewport,
-  previewFrom,
-  previewTo,
-  frozenPreviewConnection,
   onConnectionPointerDown,
   getConnectionAnchorCanvasPoint,
-  toCanvasScreenPoint,
   buildConnectionPath,
+  getConnectionPathRef,
 }: {
-  canvasSize: CanvasSize;
   connections: Connection[];
   theme: typeof DARK_THEME;
   itemById: Record<string, CanvasItem>;
   selectedConnectionIds: string[];
-  viewport: ViewportState;
-  previewFrom: { x: number; y: number } | null;
-  previewTo: { x: number; y: number } | null;
-  frozenPreviewConnection: FrozenPreviewConnection | null;
   onConnectionPointerDown: (e: React.PointerEvent<SVGPathElement>, connectionId: string) => void;
   getConnectionAnchorCanvasPoint: (item: CanvasItem, side: 'left' | 'right') => { x: number; y: number };
-  toCanvasScreenPoint: (point: { x: number; y: number }) => { x: number; y: number };
+  buildConnectionPath: (from: { x: number; y: number }, to: { x: number; y: number }) => string;
+  getConnectionPathRef: (connectionId: string, role: string) => (element: SVGPathElement | null) => void;
+}) {
+  const selectedConnectionIdSet = React.useMemo(
+    () => new Set(selectedConnectionIds),
+    [selectedConnectionIds]
+  );
+  const connectionStrokeWidth = 3.5;
+  const selectedConnectionStrokeWidth = 4.5;
+  return (
+      <div
+        data-canvas-world-connections="true"
+        className="pointer-events-none absolute left-0 top-0 z-[1]"
+      >
+        <svg className="pointer-events-none absolute left-0 top-0 overflow-visible" width="1" height="1">
+          {connections.map((connection) => {
+            const fromItem = itemById[connection.fromItemId];
+            const toItem = itemById[connection.toItemId];
+            if (!fromItem || !toItem) return null;
+            const isSelectedConnection = selectedConnectionIdSet.has(connection.id);
+            return (
+              <CanvasResolvedConnectionPath
+                key={`visual-${connection.id}`}
+                connection={connection}
+                fromItem={fromItem}
+                toItem={toItem}
+                role="visual"
+                stroke={theme.canvasLine}
+                strokeOpacity={isSelectedConnection ? 0.98 : 0.9}
+                strokeWidth={isSelectedConnection ? selectedConnectionStrokeWidth : connectionStrokeWidth}
+                getConnectionAnchorCanvasPoint={getConnectionAnchorCanvasPoint}
+                buildConnectionPath={buildConnectionPath}
+                getConnectionPathRef={getConnectionPathRef}
+              />
+            );
+          })}
+        </svg>
+        <svg
+          data-canvas-connection-hit-layer="true"
+          className="pointer-events-none absolute left-0 top-0 overflow-visible"
+          width="1"
+          height="1"
+        >
+          {connections.map((connection) => {
+            const fromItem = itemById[connection.fromItemId];
+            const toItem = itemById[connection.toItemId];
+            if (!fromItem || !toItem) return null;
+            return (
+              <CanvasResolvedConnectionPath
+                key={`hit-${connection.id}`}
+                connection={connection}
+                fromItem={fromItem}
+                toItem={toItem}
+                role="hit"
+                stroke="transparent"
+                strokeWidth="20"
+                onPointerDown={onConnectionPointerDown}
+                getConnectionAnchorCanvasPoint={getConnectionAnchorCanvasPoint}
+                buildConnectionPath={buildConnectionPath}
+                getConnectionPathRef={getConnectionPathRef}
+              />
+            );
+          })}
+        </svg>
+      </div>
+  );
+});
+
+const CanvasConnectionPreviewLayer = memo(function CanvasConnectionPreviewLayer({
+  canvasSize,
+  theme,
+  connectionMode,
+  connectionPreviewPathRef,
+  frozenPreviewConnection,
+  buildConnectionPath,
+}: {
+  canvasSize: CanvasSize;
+  theme: typeof DARK_THEME;
+  connectionMode: ConnectionMode;
+  connectionPreviewPathRef: React.RefObject<SVGPathElement | null>;
+  frozenPreviewConnection: FrozenPreviewConnection | null;
   buildConnectionPath: (from: { x: number; y: number }, to: { x: number; y: number }) => string;
 }) {
-  const scaledConnectionStrokeWidth = 3.5 * viewport.scale;
-  const scaledSelectedConnectionStrokeWidth = 4.5 * viewport.scale;
-  const resolvedConnections = connections
-    .map((connection) => {
-      const fromItem = itemById[connection.fromItemId];
-      const toItem = itemById[connection.toItemId];
-      if (!fromItem || !toItem) return null;
-
-      const connectionFrom = toCanvasScreenPoint(getConnectionAnchorCanvasPoint(fromItem, 'right'));
-      const connectionTo = toCanvasScreenPoint(getConnectionAnchorCanvasPoint(toItem, 'left'));
-
-      return {
-        connection,
-        path: buildConnectionPath(connectionFrom, connectionTo),
-        isSelectedConnection: selectedConnectionIds.includes(connection.id),
-      };
-    })
-    .filter(Boolean) as Array<{
-    connection: Connection;
-    path: string;
-    isSelectedConnection: boolean;
-  }>;
-
   return (
-    <>
-      <svg
-        className="pointer-events-none absolute inset-0 z-[1] h-full w-full overflow-hidden"
-        width={canvasSize.width}
-        height={canvasSize.height}
-        viewBox={`0 0 ${Math.max(canvasSize.width, 1)} ${Math.max(canvasSize.height, 1)}`}
-        preserveAspectRatio="none"
-      >
-        {resolvedConnections.map(({ connection, path, isSelectedConnection }) => (
-          <path
-            key={`visual-${connection.id}`}
-            d={path}
-            fill="none"
-            stroke={theme.canvasLine}
-            strokeOpacity={isSelectedConnection ? 0.98 : 0.9}
-            strokeWidth={isSelectedConnection ? scaledSelectedConnectionStrokeWidth : scaledConnectionStrokeWidth}
-            strokeLinecap="round"
-            pointerEvents="none"
-          />
-        ))}
-        {previewFrom && previewTo && (
-          <path
-            d={buildConnectionPath(previewFrom, previewTo)}
-            fill="none"
-            stroke={theme.canvasLine}
-            strokeOpacity="0.9"
-            strokeWidth={scaledConnectionStrokeWidth}
-            strokeLinecap="round"
-            pointerEvents="none"
-          />
-        )}
-        {frozenPreviewConnection && (
-          <path
-            d={buildConnectionPath(frozenPreviewConnection.from, frozenPreviewConnection.to)}
-            fill="none"
-            stroke={theme.canvasLine}
-            strokeOpacity="0.5"
-            strokeWidth={scaledConnectionStrokeWidth}
-            strokeLinecap="round"
-            pointerEvents="none"
-          />
-        )}
-      </svg>
-      <svg
-        className="pointer-events-none absolute inset-0 z-[1] h-full w-full overflow-hidden"
-        width={canvasSize.width}
-        height={canvasSize.height}
-        viewBox={`0 0 ${Math.max(canvasSize.width, 1)} ${Math.max(canvasSize.height, 1)}`}
-        preserveAspectRatio="none"
-      >
-        {resolvedConnections.map(({ connection, path }) => (
-          <path
-            key={`hit-${connection.id}`}
-            d={path}
-            fill="none"
-            stroke="transparent"
-            strokeWidth="20"
-            strokeLinecap="round"
-            className="pointer-events-auto cursor-pointer"
-            onPointerDown={(e) => onConnectionPointerDown(e, connection.id)}
-          />
-        ))}
-      </svg>
-    </>
+    <svg
+      data-canvas-screen-connection-preview="true"
+      className="pointer-events-none absolute inset-0 z-[1] h-full w-full overflow-hidden"
+      width={canvasSize.width}
+      height={canvasSize.height}
+      viewBox={`0 0 ${Math.max(canvasSize.width, 1)} ${Math.max(canvasSize.height, 1)}`}
+      preserveAspectRatio="none"
+    >
+      <path
+        ref={connectionPreviewPathRef}
+        data-canvas-connection-preview="true"
+        fill="none"
+        stroke={theme.canvasLine}
+        strokeOpacity="0.9"
+        strokeWidth={3.5}
+        strokeLinecap="round"
+        pointerEvents="none"
+        visibility={connectionMode === 'dragging' ? 'visible' : 'hidden'}
+      />
+      {frozenPreviewConnection && (
+        <path
+          d={buildConnectionPath(frozenPreviewConnection.from, frozenPreviewConnection.to)}
+          fill="none"
+          stroke={theme.canvasLine}
+          strokeOpacity="0.5"
+          strokeWidth={3.5}
+          strokeLinecap="round"
+          pointerEvents="none"
+        />
+      )}
+    </svg>
   );
 });
 
 const CanvasPortsLayer = memo(function CanvasPortsLayer({
   items,
-  viewport,
   hoveredCanvasItemId,
   hoveredInputPortItemId,
   hoveredOutputPortItemId,
-  magneticPorts,
   connectionFromItemId,
-  connectionMode,
-  connectionSnapTargetId,
-  getMagneticPortKey,
-  getRenderedPortOverlayPoint,
   onInputPortEnter,
   onInputPortLeave,
   onOutputPortEnter,
   onOutputPortLeave,
   onOutputPortPointerDown,
+  getItemTargetRef,
 }: {
   items: CanvasItem[];
-  viewport: ViewportState;
   hoveredCanvasItemId: string | null;
   hoveredInputPortItemId: string | null;
   hoveredOutputPortItemId: string | null;
-  magneticPorts: MagneticPortMap;
   connectionFromItemId: string | null;
-  connectionMode: ConnectionMode;
-  connectionSnapTargetId: string | null;
-  getMagneticPortKey: (itemId: string, side: PortSide) => string;
-  getRenderedPortOverlayPoint: (item: CanvasItem, side: PortSide) => { x: number; y: number };
   onInputPortEnter: (itemId: string) => void;
   onInputPortLeave: (itemId: string) => void;
   onOutputPortEnter: (itemId: string) => void;
   onOutputPortLeave: (itemId: string) => void;
   onOutputPortPointerDown: (
     e: React.PointerEvent<HTMLElement>,
-    item: CanvasItem,
-    source: 'bridge' | 'button'
+    item: CanvasItem
   ) => void;
+  getItemTargetRef: (itemId: string, role: string) => (element: HTMLElement | null) => void;
 }) {
+  const portsLayerRef = useRef<HTMLDivElement | null>(null);
+  const portVisibilityRef = useRef(new Map<string, boolean>());
+  const incomingPortItemIds = React.useMemo(
+    () => new Set(items.filter(canItemAcceptIncomingConnection).map((item) => item.id)),
+    [items]
+  );
+  useLayoutEffect(() => {
+    const root = portsLayerRef.current;
+    if (!root) return;
+    const elements = Array.from(root.querySelectorAll<HTMLElement>('[data-port][data-item-id]'));
+    elements.forEach((element) => {
+      const itemId = element.dataset.itemId;
+      const side = element.dataset.port;
+      if (!itemId || !side) return;
+      const acceptsIncomingConnection = side !== 'in' || incomingPortItemIds.has(itemId);
+      const isHoveredItem = hoveredCanvasItemId === itemId;
+      const isHoveredInputPort = hoveredInputPortItemId === itemId;
+      const isHoveredOutputPort = hoveredOutputPortItemId === itemId;
+      const isConnectionSource = connectionFromItemId === itemId;
+      const isNearPort = isHoveredInputPort || isHoveredOutputPort;
+      const visible = acceptsIncomingConnection && (side === 'out'
+        ? isHoveredItem || isNearPort || isConnectionSource
+        : isHoveredItem || isNearPort);
+      const key = `${itemId}:${side}`;
+      const previous = portVisibilityRef.current.get(key);
+      portVisibilityRef.current.set(key, visible);
+      if (previous === visible) return;
+      element.style.visibility = visible ? 'visible' : 'hidden';
+      element.style.opacity = visible ? '1' : '0';
+      element.style.pointerEvents = side === 'out' && visible ? 'auto' : 'none';
+    });
+  }, [
+    connectionFromItemId,
+    hoveredCanvasItemId,
+    hoveredInputPortItemId,
+    hoveredOutputPortItemId,
+    incomingPortItemIds,
+  ]);
+
   return (
-    <div className="absolute inset-0 z-[90] pointer-events-none">
-      <div
-        className="absolute z-[90] overflow-visible"
-        style={{
-          transform: `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.scale})`,
-          transformOrigin: '0 0',
-        }}
-      >
+    <div ref={portsLayerRef} data-canvas-ports-layer="true" className="absolute inset-0 z-[90] pointer-events-none">
+      <div className="absolute z-[90] overflow-visible">
         {items.map((item) => {
           const acceptsIncomingConnection = canItemAcceptIncomingConnection(item);
-          const isHoveredItem = hoveredCanvasItemId === item.id;
-          const isHoveredInputPort = hoveredInputPortItemId === item.id;
-          const isHoveredOutputPort = hoveredOutputPortItemId === item.id;
-          const inputMagneticState = magneticPorts[getMagneticPortKey(item.id, 'left')];
-          const outputMagneticState = magneticPorts[getMagneticPortKey(item.id, 'right')];
-          const isMagneticItem = Boolean(inputMagneticState || outputMagneticState);
-          const isConnectionSource = connectionFromItemId === item.id;
-          const isNearPort = isHoveredInputPort || isHoveredOutputPort;
-          const showOutputPort = isHoveredItem || isNearPort || isConnectionSource || isMagneticItem;
-          const showInputPort =
-            acceptsIncomingConnection &&
-            (isHoveredItem ||
-              isNearPort ||
-              isMagneticItem ||
-              (connectionMode === 'dragging' && connectionSnapTargetId === item.id));
-          const inputPoint = getRenderedPortOverlayPoint(item, 'left');
-          const outputPoint = getRenderedPortOverlayPoint(item, 'right');
-          const inputTransition =
-            inputMagneticState && !inputMagneticState.isTracking
-              ? `left ${PORT_RETURN_DURATION_MS}ms cubic-bezier(0.22, 1, 0.36, 1), top ${PORT_RETURN_DURATION_MS}ms cubic-bezier(0.22, 1, 0.36, 1), opacity 150ms ease`
-              : inputMagneticState
-                ? 'transform 100ms ease, opacity 150ms ease'
-                : 'opacity 150ms ease';
-          const outputTransition =
-            outputMagneticState && !outputMagneticState.isTracking
-              ? `left ${PORT_RETURN_DURATION_MS}ms cubic-bezier(0.22, 1, 0.36, 1), top ${PORT_RETURN_DURATION_MS}ms cubic-bezier(0.22, 1, 0.36, 1), opacity 150ms ease`
-              : outputMagneticState
-                ? 'transform 100ms ease, opacity 150ms ease'
-                : 'opacity 150ms ease';
+          const inputPoint = getPortCanvasPoint(item, 'left');
+          const outputPoint = getPortCanvasPoint(item, 'right');
 
           return (
             <React.Fragment key={`port-overlay-${item.id}`}>
               {acceptsIncomingConnection && (
                 <>
                   <div
+                    ref={getItemTargetRef(item.id, 'input-port-bridge')}
                     data-port-bridge="in"
                     data-item-id={item.id}
                     onPointerEnter={() => onInputPortEnter(item.id)}
@@ -2378,22 +2701,19 @@ const CanvasPortsLayer = memo(function CanvasPortsLayer({
                       top: inputPoint.y,
                       width: PORT_PROXIMITY_SIZE,
                       height: PORT_PROXIMITY_SIZE,
-                      transition: inputTransition,
                     }}
                   />
                   <div
+                    ref={getItemTargetRef(item.id, 'input-port')}
                     data-port="in"
                     data-item-id={item.id}
-                    className={`absolute -translate-x-1/2 -translate-y-1/2 pointer-events-none transition-opacity duration-150 ${
-                      showInputPort ? 'opacity-100' : 'opacity-0'
-                    }`}
+                    className="invisible absolute -translate-x-1/2 -translate-y-1/2 pointer-events-none opacity-0"
                     style={{
                       left: inputPoint.x,
                       top: inputPoint.y,
                       width: PORT_ICON_SIZE,
                       height: PORT_ICON_SIZE,
-                      transform: `translate(-50%, -50%) scale(${inputMagneticState?.isTracking ? 1.04 : 1})`,
-                      transition: inputTransition,
+                      transform: 'translate(-50%, -50%)',
                     }}
                   >
                     <ConnectionPortIcon className="h-full w-full" />
@@ -2401,37 +2721,34 @@ const CanvasPortsLayer = memo(function CanvasPortsLayer({
                 </>
               )}
               <div
+                ref={getItemTargetRef(item.id, 'output-port-bridge')}
                 data-port-bridge="out"
                 data-item-id={item.id}
                 onPointerEnter={() => onOutputPortEnter(item.id)}
                 onPointerLeave={() => onOutputPortLeave(item.id)}
-                onPointerDown={(e) => onOutputPortPointerDown(e, item, 'bridge')}
                 className="absolute -translate-x-1/2 -translate-y-1/2 bg-transparent pointer-events-auto"
                 style={{
                   left: outputPoint.x,
                   top: outputPoint.y,
                   width: PORT_PROXIMITY_SIZE,
                   height: PORT_PROXIMITY_SIZE,
-                  transition: outputTransition,
                 }}
               />
               <button
+                ref={getItemTargetRef(item.id, 'output-port')}
                 type="button"
                 data-port="out"
                 data-item-id={item.id}
                 onPointerEnter={() => onOutputPortEnter(item.id)}
                 onPointerLeave={() => onOutputPortLeave(item.id)}
-                onPointerDown={(e) => onOutputPortPointerDown(e, item, 'button')}
-                className={`absolute -translate-x-1/2 -translate-y-1/2 rounded-full bg-transparent transition-opacity duration-150 ${
-                  showOutputPort ? 'opacity-100 pointer-events-auto' : 'opacity-0 pointer-events-none'
-                }`}
+                onPointerDown={(e) => onOutputPortPointerDown(e, item)}
+                className="invisible pointer-events-none absolute -translate-x-1/2 -translate-y-1/2 rounded-full bg-transparent opacity-0"
                 style={{
                   left: outputPoint.x,
                   top: outputPoint.y,
                   width: PORT_ICON_SIZE,
                   height: PORT_ICON_SIZE,
-                  transform: `translate(-50%, -50%) scale(${outputMagneticState?.isTracking ? 1.04 : 1})`,
-                  transition: outputTransition,
+                  transform: 'translate(-50%, -50%)',
                 }}
                 aria-label="开始连线"
               >
@@ -2445,24 +2762,49 @@ const CanvasPortsLayer = memo(function CanvasPortsLayer({
   );
 });
 
-const CanvasNodesLayer = memo(function CanvasNodesLayer({
+const CanvasGenerationDurationBadge = memo(function CanvasGenerationDurationBadge({
+  startedAt,
+  lastDurationMs,
+}: {
+  startedAt: number | null;
+  lastDurationMs?: number;
+}) {
+  const [clockMs, setClockMs] = useState(() => Date.now());
+  useEffect(() => {
+    if (!Number.isFinite(startedAt)) return;
+    setClockMs(Date.now());
+    const timer = window.setInterval(() => setClockMs(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [startedAt]);
+
+  const label = getGenerationDurationDisplay(
+    Number.isFinite(startedAt)
+      ? Math.max(0, clockMs - (startedAt ?? 0))
+      : lastDurationMs
+  );
+  if (!label) return null;
+
+  return (
+    <div className="workspace-control-chip inline-flex h-6 items-center gap-1 rounded-lg px-2 text-[11px]">
+      <Clock3 size={12} strokeWidth={2} />
+      <span>{label}</span>
+    </div>
+  );
+});
+
+const CanvasNodesContent = memo(function CanvasNodesContent({
   tool,
   items,
   connections,
-  viewport,
-  multiSelectionBounds,
-  selectedIds,
-  selectedId,
   hoveredCanvasItemId,
   activeCanvasTextGenerationItemIds,
   activeCanvasImageGenerationItemIds,
   activeCanvasTextGenerations,
   activeCanvasImageGenerations,
-  generationClockMs,
+  activeCanvasImageIds,
   editingTextCardId,
   editingTextCardTextareaRef,
   onImageCardOutputSelect,
-  onSelectionGroupPointerDown,
   onItemMouseEnter,
   onItemMouseLeave,
   onItemClick,
@@ -2471,24 +2813,20 @@ const CanvasNodesLayer = memo(function CanvasNodesLayer({
   onCornerResizePointerDown,
   onManualTextCardInputChange,
   onManualTextCardBlur,
+  getItemTargetRef,
 }: {
   tool: Tool;
   items: CanvasItem[];
   connections: Connection[];
-  viewport: ViewportState;
-  multiSelectionBounds: { left: number; top: number; width: number; height: number } | null;
-  selectedIds: string[];
-  selectedId: string | null;
   hoveredCanvasItemId: string | null;
   activeCanvasTextGenerationItemIds: Set<string>;
   activeCanvasImageGenerationItemIds: Set<string>;
   activeCanvasTextGenerations: Record<string, { status: 'running'; startedAt: number }>;
   activeCanvasImageGenerations: Record<string, { status: 'running'; startedAt: number; total: number; completed: number; failed: number }>;
-  generationClockMs: number;
+  activeCanvasImageIds: Set<string>;
   editingTextCardId: string | null;
   editingTextCardTextareaRef: React.RefObject<HTMLTextAreaElement | null>;
   onImageCardOutputSelect: (itemId: string, outputIndex: number) => void;
-  onSelectionGroupPointerDown: (e: React.PointerEvent<HTMLDivElement>) => void;
   onItemMouseEnter: (itemId: string) => void;
   onItemMouseLeave: (itemId: string) => void;
   onItemClick: (e: React.MouseEvent<HTMLDivElement>, itemId: string) => void;
@@ -2497,35 +2835,60 @@ const CanvasNodesLayer = memo(function CanvasNodesLayer({
   onCornerResizePointerDown: (e: React.PointerEvent<HTMLButtonElement>, item: CanvasItem) => void;
   onManualTextCardInputChange: (itemId: string, value: string) => void;
   onManualTextCardBlur: (itemId: string) => void;
+  getItemTargetRef: (itemId: string, role: string) => (element: HTMLElement | null) => void;
 }) {
+  const itemRenderCacheRef = useRef(new Map<string, {
+    item: CanvasItem;
+    element: React.ReactElement;
+  }>());
+  const renderContextRef = useRef<unknown[]>([]);
+  const renderContext = [
+    tool,
+    connections,
+    activeCanvasTextGenerationItemIds,
+    activeCanvasImageGenerationItemIds,
+    activeCanvasTextGenerations,
+    activeCanvasImageGenerations,
+    activeCanvasImageIds,
+    editingTextCardId,
+    editingTextCardTextareaRef,
+    onImageCardOutputSelect,
+    onItemMouseEnter,
+    onItemMouseLeave,
+    onItemClick,
+    onItemDoubleClick,
+    onItemPointerDown,
+    onCornerResizePointerDown,
+    onManualTextCardInputChange,
+    onManualTextCardBlur,
+    getItemTargetRef,
+  ];
+  const previousRenderContext = renderContextRef.current;
+  const renderContextChanged =
+    previousRenderContext.length !== renderContext.length ||
+    renderContext.some((value, index) => previousRenderContext[index] !== value);
+  if (renderContextChanged) {
+    itemRenderCacheRef.current.clear();
+    renderContextRef.current = renderContext;
+  }
+  useEffect(() => {
+    const activeIds = new Set(items.map((item) => item.id));
+    itemRenderCacheRef.current.forEach((_, itemId) => {
+      if (!activeIds.has(itemId)) itemRenderCacheRef.current.delete(itemId);
+    });
+  }, [items]);
+
   return (
-    <div
-      className="absolute z-[2]"
-      style={{
-        transform: `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.scale})`,
-        transformOrigin: '0 0',
-      }}
-    >
-      {multiSelectionBounds && (
-        <div
-          data-selection-group="true"
-          className="absolute rounded-[28px] border border-white/20 bg-white/[0.06]"
-          style={{
-            left: multiSelectionBounds.left - 10,
-            top: multiSelectionBounds.top - 10,
-            width: multiSelectionBounds.width + 20,
-            height: multiSelectionBounds.height + 20,
-          }}
-          onPointerDown={onSelectionGroupPointerDown}
-        />
-      )}
+    <>
       {items.map((item) => {
-        const isItemSelected = selectedIds.includes(item.id) || selectedId === item.id;
-        const showMultiSelectionGroup = selectedIds.length > 1;
-        const isHoveredItem = hoveredCanvasItemId === item.id;
-        const showCornerResizeHandle = isHoveredItem;
+        const cached = itemRenderCacheRef.current.get(item.id);
+        if (cached?.item === item) return cached.element;
         const isTextCard = item.type === 'text' && item.textVariant === 'card';
         const isImageCard = isImageCardItem(item);
+        const isImageActive = !isImageCard && !isImageAssetItem(item)
+          ? true
+          : activeCanvasImageGenerationItemIds.has(item.id) ||
+            activeCanvasImageIds.has(item.id);
         const textCardFrameBounds = isTextCard || isImageCard ? getTextCardFrameBounds(item) : null;
         const textCardVisualState = isTextCard
           ? getTextCardVisualState({
@@ -2556,11 +2919,7 @@ const CanvasNodesLayer = memo(function CanvasNodesLayer({
         const itemCornerRadius = CANVAS_NODE_CORNER_RADIUS;
         const frameCornerRadius = CANVAS_NODE_CORNER_RADIUS;
         const selectedOutlineCornerRadius = CANVAS_NODE_CORNER_RADIUS;
-        const cardGenerationDurationLabel = getGenerationDurationDisplay(
-          Number.isFinite(activeGenerationStartedAt)
-            ? Math.max(0, generationClockMs - (activeGenerationStartedAt ?? 0))
-            : item.lastGenerationDurationMs
-        );
+        const hasGenerationDuration = Number.isFinite(activeGenerationStartedAt) || Number.isFinite(item.lastGenerationDurationMs);
         const currentImageDimensionsLabel = isImageCard && currentImageOutput
           ? Number.isFinite(currentImageOutput.naturalWidth) &&
             currentImageOutput.naturalWidth > 0 &&
@@ -2570,34 +2929,59 @@ const CanvasNodesLayer = memo(function CanvasNodesLayer({
               : null
           : null;
 
-        return (
+        const element = (
           <div
             key={item.id}
-            data-canvas-item-id={item.id}
-            className={`absolute group ${tool === 'target' && item.type === 'image' ? 'cursor-crosshair' : 'cursor-move'} ${!item.visible ? 'opacity-30' : ''}`}
+            ref={getItemTargetRef(item.id, 'node-drag')}
+            data-canvas-drag-shell="true"
+            className="pointer-events-none absolute left-0 top-0"
             style={{
-              left: item.x,
-              top: item.y,
               width: item.width,
               height: item.height,
-              transform: `rotate(${item.rotation}deg)`,
             }}
-            onMouseEnter={() => onItemMouseEnter(item.id)}
-            onMouseLeave={() => onItemMouseLeave(item.id)}
-            onClick={(e) => onItemClick(e, item.id)}
-            onDoubleClick={() => onItemDoubleClick(item.id)}
-            onPointerDown={(e) => onItemPointerDown(e, item.id)}
           >
-            {isImageAssetItem(item) && item.src && (
+            <div
+              ref={getItemTargetRef(item.id, 'node-base-position')}
+              data-canvas-base-position="true"
+              className="absolute left-0 top-0 h-full w-full"
+              style={{ transform: `translate3d(${item.x}px, ${item.y}px, 0)` }}
+            >
+              <div
+                data-canvas-rotation-shell="true"
+                className="h-full w-full"
+                style={{ transform: `rotate(${item.rotation}deg)` }}
+              >
+                <div
+                  ref={getItemTargetRef(item.id, 'node-resize')}
+                  data-canvas-resize-shell="true"
+                  data-canvas-item-id={item.id}
+                  className={`pointer-events-auto relative h-full w-full group ${tool === 'target' && item.type === 'image' ? 'cursor-crosshair' : 'cursor-move'} ${!item.visible ? 'opacity-30' : ''}`}
+                  onMouseEnter={() => onItemMouseEnter(item.id)}
+                  onMouseLeave={() => onItemMouseLeave(item.id)}
+                  onClick={(e) => onItemClick(e, item.id)}
+                  onDoubleClick={() => onItemDoubleClick(item.id)}
+                  onPointerDown={(e) => onItemPointerDown(e, item.id)}
+                >
+            {isImageAssetItem(item) && item.src && isImageActive && (
               <Image
                 src={item.src}
                 alt=""
                 fill
-                unoptimized
-                sizes={`${Math.max(1, Math.round(item.width))}px`}
+                unoptimized={!canOptimizeCanvasImage(item.src)}
+                quality={72}
+                sizes={`(max-width: 1600px) ${Math.min(1600, Math.max(1, Math.round(item.width)))}px, 1600px`}
+                loading="lazy"
+                decoding="async"
                 className="h-full w-full object-contain pointer-events-none"
-                style={{ borderRadius: `${itemCornerRadius}px` }}
+                style={{ borderRadius: `${itemCornerRadius}px`, contain: 'layout paint style' }}
                 draggable={false}
+              />
+            )}
+            {isImageAssetItem(item) && item.src && !isImageActive && (
+              <div
+                data-canvas-image-shell="true"
+                className="h-full w-full bg-black/10"
+                style={{ borderRadius: `${itemCornerRadius}px`, contain: 'layout paint style' }}
               />
             )}
             {isImageCard && (
@@ -2607,19 +2991,17 @@ const CanvasNodesLayer = memo(function CanvasNodesLayer({
                     <ImageIcon size={14} strokeWidth={2.1} />
                     <span>Image</span>
                   </div>
-                  {(currentImageDimensionsLabel || cardGenerationDurationLabel) && (
+                  {(currentImageDimensionsLabel || hasGenerationDuration) && (
                     <div className="inline-flex items-center gap-2">
                       {currentImageDimensionsLabel && (
                         <div className="workspace-control-chip inline-flex h-6 items-center gap-1 rounded-lg px-2 text-[11px]">
                           <span>{currentImageDimensionsLabel}</span>
                         </div>
                       )}
-                      {cardGenerationDurationLabel && (
-                        <div className="workspace-control-chip inline-flex h-6 items-center gap-1 rounded-lg px-2 text-[11px]">
-                          <Clock3 size={12} strokeWidth={2} />
-                          <span>{cardGenerationDurationLabel}</span>
-                        </div>
-                      )}
+                      <CanvasGenerationDurationBadge
+                        startedAt={activeGenerationStartedAt}
+                        lastDurationMs={item.lastGenerationDurationMs}
+                      />
                     </div>
                   )}
                 </div>
@@ -2666,21 +3048,25 @@ const CanvasNodesLayer = memo(function CanvasNodesLayer({
                     )}
                     {imageCardVisualState === 'waiting' && (
                       <div className="flex h-full w-full items-center justify-center px-8 py-10 text-center">
-                        <span className="workspace-text-card-waiting text-[17px] font-medium tracking-[-0.03em] text-zinc-500">
+                        <span className="text-[17px] font-medium tracking-[-0.03em] text-zinc-500">
                           图片生成中……
                         </span>
                       </div>
                     )}
-                    {imageCardVisualState === 'content' && item.src && (() => {
+                    {imageCardVisualState === 'content' && item.src && isImageActive && (() => {
                       return (
                         <div className="relative h-full w-full overflow-hidden bg-black/20">
                           <Image
                             src={item.src}
                             alt=""
                             fill
-                            unoptimized
-                            sizes={`${Math.max(1, Math.round(item.width - TEXT_CARD_FRAME_INSET_X * 2))}px`}
+                            unoptimized={!canOptimizeCanvasImage(item.src)}
+                            quality={72}
+                            sizes={`(max-width: 1600px) ${Math.min(1600, Math.max(1, Math.round(item.width - TEXT_CARD_FRAME_INSET_X * 2)))}px, 1600px`}
+                            loading="lazy"
+                            decoding="async"
                             className="object-cover pointer-events-none"
+                            style={{ contain: 'layout paint style' }}
                             draggable={false}
                           />
                           {imageOutputCount > 1 && (
@@ -2694,7 +3080,7 @@ const CanvasNodesLayer = memo(function CanvasNodesLayer({
                                   e.stopPropagation();
                                   onImageCardOutputSelect(item.id, activeImageOutputIndex - 1);
                                 }}
-                                className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-black/55 text-zinc-100 transition-colors hover:bg-black/70"
+                                className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-black/55 text-zinc-100  hover:bg-black/70"
                                 aria-label="查看上一张"
                               >
                                 <ArrowLeft size={15} />
@@ -2711,7 +3097,7 @@ const CanvasNodesLayer = memo(function CanvasNodesLayer({
                                   e.stopPropagation();
                                   onImageCardOutputSelect(item.id, activeImageOutputIndex + 1);
                                 }}
-                                className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-black/55 text-zinc-100 transition-colors hover:bg-black/70"
+                                className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-black/55 text-zinc-100  hover:bg-black/70"
                                 aria-label="查看下一张"
                               >
                                 <ArrowLeft size={15} className="rotate-180" />
@@ -2721,6 +3107,13 @@ const CanvasNodesLayer = memo(function CanvasNodesLayer({
                         </div>
                       );
                     })()}
+                    {imageCardVisualState === 'content' && item.src && !isImageActive && (
+                      <div
+                        data-canvas-image-shell="true"
+                        className="h-full w-full bg-black/20"
+                        style={{ contain: 'layout paint style' }}
+                      />
+                    )}
                   </div>
                 </div>
               </div>
@@ -2736,12 +3129,10 @@ const CanvasNodesLayer = memo(function CanvasNodesLayer({
                     <Type size={14} strokeWidth={2.1} />
                     <span>Text</span>
                   </div>
-                  {cardGenerationDurationLabel && (
-                    <div className="workspace-control-chip inline-flex h-6 items-center gap-1 rounded-lg px-2 text-[11px]">
-                      <Clock3 size={12} strokeWidth={2} />
-                      <span>{cardGenerationDurationLabel}</span>
-                    </div>
-                  )}
+                  <CanvasGenerationDurationBadge
+                    startedAt={activeGenerationStartedAt}
+                    lastDurationMs={item.lastGenerationDurationMs}
+                  />
                 </div>
                 <div
                   className="workspace-panel-surface absolute overflow-hidden"
@@ -2790,7 +3181,7 @@ const CanvasNodesLayer = memo(function CanvasNodesLayer({
                     )}
                     {textCardVisualState === 'waiting' && (
                       <div className="flex h-full w-full items-center justify-center px-8 text-center">
-                        <span className="workspace-text-card-waiting text-[17px] font-medium tracking-[-0.03em] text-zinc-500">
+                        <span className="text-[17px] font-medium tracking-[-0.03em] text-zinc-500">
                           等待生成中……
                         </span>
                       </div>
@@ -2858,11 +3249,11 @@ const CanvasNodesLayer = memo(function CanvasNodesLayer({
                 </div>
               </div>
             )}
-            {isItemSelected &&
-              !showMultiSelectionGroup &&
-              ((isTextCard || isImageCard) && textCardFrameBounds ? (
+            {(isTextCard || isImageCard) && textCardFrameBounds ? (
                 <div
-                  className="absolute z-10 pointer-events-none"
+                  ref={getItemTargetRef(item.id, 'node-selection-outline')}
+                  data-canvas-selection-outline="true"
+                  className="invisible absolute z-10 pointer-events-none"
                   style={{
                     left: `${textCardFrameBounds.left - NODE_SELECTED_OUTLINE_WIDTH}px`,
                     top: `${textCardFrameBounds.top - NODE_SELECTED_OUTLINE_WIDTH}px`,
@@ -2874,19 +3265,20 @@ const CanvasNodesLayer = memo(function CanvasNodesLayer({
                 />
               ) : (
                 <div
-                  className="absolute z-10 pointer-events-none"
+                  ref={getItemTargetRef(item.id, 'node-selection-outline')}
+                  data-canvas-selection-outline="true"
+                  className="invisible absolute z-10 pointer-events-none"
                   style={{
                     inset: `${-NODE_SELECTED_OUTLINE_WIDTH}px`,
                     borderRadius: `${selectedOutlineCornerRadius}px`,
                     border: `${NODE_SELECTED_OUTLINE_WIDTH}px solid ${NODE_SELECTED_OUTLINE_COLOR}`,
                   }}
                 />
-              ))}
-            {showCornerResizeHandle && (
-              <button
+              )}
+            <button
                 data-corner-resize="true"
                 onPointerDown={(e) => onCornerResizePointerDown(e, item)}
-                className="absolute flex cursor-nwse-resize items-center justify-center overflow-visible bg-transparent"
+                className="pointer-events-none absolute flex cursor-nwse-resize items-center justify-center overflow-visible bg-transparent opacity-0 group-hover:pointer-events-auto group-hover:opacity-100"
                 style={{
                   width: `${CORNER_HANDLE_HIT_SIZE}px`,
                   height: `${CORNER_HANDLE_HIT_SIZE}px`,
@@ -2918,23 +3310,60 @@ const CanvasNodesLayer = memo(function CanvasNodesLayer({
                   />
                 </svg>
               </button>
-            )}
+                </div>
+              </div>
+            </div>
           </div>
         );
+        itemRenderCacheRef.current.set(item.id, { item, element });
+        return element;
       })}
+    </>
+  );
+});
+
+type CanvasNodesContentProps = React.ComponentProps<typeof CanvasNodesContent>;
+
+const CanvasNodesLayer = memo(function CanvasNodesLayer({
+  multiSelectionBounds,
+  onSelectionGroupPointerDown,
+  selectionGroupRef,
+  ...contentProps
+}: CanvasNodesContentProps & {
+  multiSelectionBounds: { left: number; top: number; width: number; height: number } | null;
+  onSelectionGroupPointerDown: (e: React.PointerEvent<HTMLDivElement>) => void;
+  selectionGroupRef: (element: HTMLDivElement | null) => void;
+}) {
+  return (
+    <div className="pointer-events-none absolute z-[2]">
+      {multiSelectionBounds && (
+        <div
+          ref={selectionGroupRef}
+          data-selection-group="true"
+          className="pointer-events-auto absolute rounded-[28px] border border-white/20 bg-white/[0.06]"
+          style={{
+            left: multiSelectionBounds.left - 10,
+            top: multiSelectionBounds.top - 10,
+            width: multiSelectionBounds.width + 20,
+            height: multiSelectionBounds.height + 20,
+          }}
+          onPointerDown={onSelectionGroupPointerDown}
+        />
+      )}
+      <CanvasNodesContent {...contentProps} />
     </div>
   );
 });
 
-const CanvasAnnotationsLayer = memo(function CanvasAnnotationsLayer({
+const CanvasAnnotationsContent = memo(function CanvasAnnotationsContent({
   items,
-  viewport,
   selectedIds,
   selectedId,
   hoveredCanvasItemId,
   editingAnnotationTextId,
   editingAnnotationTextRef,
   draftStroke,
+  draftStrokePathRef,
   onItemMouseEnter,
   onItemMouseLeave,
   onItemClick,
@@ -2942,15 +3371,16 @@ const CanvasAnnotationsLayer = memo(function CanvasAnnotationsLayer({
   onItemPointerDown,
   onAnnotationTextChange,
   onAnnotationTextBlur,
+  getItemTargetRef,
 }: {
   items: CanvasItem[];
-  viewport: ViewportState;
   selectedIds: string[];
   selectedId: string | null;
   hoveredCanvasItemId: string | null;
   editingAnnotationTextId: string | null;
   editingAnnotationTextRef: React.RefObject<HTMLTextAreaElement | null>;
   draftStroke: DraftStroke | null;
+  draftStrokePathRef: React.RefObject<SVGPathElement | null>;
   onItemMouseEnter: (itemId: string) => void;
   onItemMouseLeave: (itemId: string) => void;
   onItemClick: (e: React.MouseEvent<HTMLDivElement>, itemId: string) => void;
@@ -2958,20 +3388,16 @@ const CanvasAnnotationsLayer = memo(function CanvasAnnotationsLayer({
   onItemPointerDown: (e: React.PointerEvent<HTMLDivElement>, itemId: string) => void;
   onAnnotationTextChange: (itemId: string, value: string, height: number) => void;
   onAnnotationTextBlur: (itemId: string) => void;
+  getItemTargetRef: (itemId: string, role: string) => (element: HTMLElement | null) => void;
 }) {
-  const annotationItems = items.filter(isCanvasAnnotationItem);
+  const annotationItems = React.useMemo(() => items.filter(isCanvasAnnotationItem), [items]);
 
   return (
-    <div
-      className="absolute z-[3]"
-      style={{
-        transform: `translate(${viewport.x}px, ${viewport.y}px) scale(${viewport.scale})`,
-        transformOrigin: '0 0',
-      }}
-    >
+    <>
       {draftStroke && draftStroke.points.length > 0 && (
         <svg className="pointer-events-none absolute left-0 top-0 overflow-visible" width="1" height="1" aria-hidden="true">
           <path
+            ref={draftStrokePathRef}
             d={buildStrokePath(draftStroke.points)}
             fill="none"
             stroke={draftStroke.color}
@@ -2984,30 +3410,44 @@ const CanvasAnnotationsLayer = memo(function CanvasAnnotationsLayer({
       {annotationItems.map((item) => {
         const isSelected = selectedIds.includes(item.id) || selectedId === item.id;
         const isEditingText = isCanvasAnnotationTextItem(item) && editingAnnotationTextId === item.id;
-        const isHovered = hoveredCanvasItemId === item.id;
 
         return (
           <div
             key={item.id}
-            data-canvas-item-id={item.id}
-            data-canvas-annotation="true"
-            className={`absolute group cursor-move ${!item.visible ? 'opacity-30' : ''}`}
+            ref={getItemTargetRef(item.id, 'annotation-drag')}
+            data-canvas-drag-shell="true"
+            className="pointer-events-none absolute left-0 top-0"
             style={{
-              left: item.x,
-              top: item.y,
               width: item.width,
               height: item.height,
-              transform: `rotate(${item.rotation}deg)`,
             }}
-            onMouseEnter={() => onItemMouseEnter(item.id)}
-            onMouseLeave={() => onItemMouseLeave(item.id)}
-            onClick={(event) => onItemClick(event, item.id)}
-            onDoubleClick={(event) => {
-              event.stopPropagation();
-              onItemDoubleClick(item.id);
-            }}
-            onPointerDown={(event) => onItemPointerDown(event, item.id)}
           >
+            <div
+              ref={getItemTargetRef(item.id, 'annotation-base-position')}
+              data-canvas-base-position="true"
+              className="absolute left-0 top-0 h-full w-full"
+              style={{ transform: `translate3d(${item.x}px, ${item.y}px, 0)` }}
+            >
+              <div
+                data-canvas-rotation-shell="true"
+                className="h-full w-full"
+                style={{ transform: `rotate(${item.rotation}deg)` }}
+              >
+                <div
+                  ref={getItemTargetRef(item.id, 'annotation-resize')}
+                  data-canvas-resize-shell="true"
+                  data-canvas-item-id={item.id}
+                  data-canvas-annotation="true"
+                  className={`pointer-events-auto relative h-full w-full group cursor-move ${!item.visible ? 'opacity-30' : ''}`}
+                  onMouseEnter={() => onItemMouseEnter(item.id)}
+                  onMouseLeave={() => onItemMouseLeave(item.id)}
+                  onClick={(event) => onItemClick(event, item.id)}
+                  onDoubleClick={(event) => {
+                    event.stopPropagation();
+                    onItemDoubleClick(item.id);
+                  }}
+                  onPointerDown={(event) => onItemPointerDown(event, item.id)}
+                >
             {item.type === 'stroke' && (
               <svg className="absolute inset-0 h-full w-full overflow-visible" viewBox={`0 0 ${Math.max(1, item.width)} ${Math.max(1, item.height)}`}>
                 <path
@@ -3083,25 +3523,42 @@ const CanvasAnnotationsLayer = memo(function CanvasAnnotationsLayer({
                 style={{ inset: -4, borderRadius: item.type === 'stroke' ? 8 : 4 }}
               />
             )}
-            {isHovered && !isSelected && !isEditingText && (
+            {!isSelected && !isEditingText && (
               <div
-                className="pointer-events-none absolute border border-blue-300/40"
+                className="pointer-events-none absolute border border-blue-300/40 opacity-0 group-hover:opacity-100"
                 style={{ inset: -3, borderRadius: item.type === 'stroke' ? 8 : 4 }}
               />
             )}
+                </div>
+              </div>
+            </div>
           </div>
         );
       })}
+    </>
+  );
+});
+
+type CanvasAnnotationsContentProps = React.ComponentProps<typeof CanvasAnnotationsContent>;
+
+const CanvasAnnotationsLayer = memo(function CanvasAnnotationsLayer({
+  ...contentProps
+}: CanvasAnnotationsContentProps) {
+  return (
+    <div className="pointer-events-none absolute z-[3]">
+      <CanvasAnnotationsContent {...contentProps} />
     </div>
   );
 });
 
 const CanvasViewport = memo(function CanvasViewport({
   canvasRef,
+  canvasSceneRef,
+  canvasSize,
+  canvasRect,
   widthStyle,
   tool,
   isSpacePressed,
-  isPanning,
   viewport,
   themePalette,
   items,
@@ -3115,26 +3572,27 @@ const CanvasViewport = memo(function CanvasViewport({
   hoveredCanvasItemId,
   hoveredInputPortItemId,
   hoveredOutputPortItemId,
-  magneticPorts,
   connectionMode,
-  connectionSnapTargetId,
   connectionFromItemId,
   frozenPreviewConnection,
   pendingConnectionMenu,
   multiSelectionBounds,
-  isMarqueeSelecting,
-  marqueeRect,
-  getPreviewRenderPoints,
+  marqueeElementRef,
+  marqueePathRef,
   getConnectionAnchorCanvasPoint,
   toCanvasScreenPoint,
   buildConnectionPath,
-  getRenderedPortOverlayPoint,
-  getMagneticPortKey,
+  getItemTargetRef,
+  getSelectionGroupRef,
+  getConnectionPathRef,
+  connectionPreviewPathRef,
+  getViewportOverlayRef,
   onPointerDown,
   onPointerMove,
   onPointerUp,
   onPointerLeave,
-  onWheel,
+  onNativeWheel,
+  onMetricsChange,
   onPaste,
   onConnectionPointerDown,
   onInputPortEnter,
@@ -3160,7 +3618,7 @@ const CanvasViewport = memo(function CanvasViewport({
   activeCanvasImageGenerationItemIds,
   activeCanvasTextGenerations,
   activeCanvasImageGenerations,
-  generationClockMs,
+  activeCanvasImageIds,
   selectedTextPanelModel,
   textPanelModelOptions,
   selectedTextCardProviderLabel,
@@ -3207,6 +3665,7 @@ const CanvasViewport = memo(function CanvasViewport({
   editingAnnotationTextId,
   editingAnnotationTextRef,
   draftStroke,
+  draftStrokePathRef,
   onToggleTextPanelProviderMenu,
   onSelectTextPanelProvider,
   onToggleTextPanelModelMenu,
@@ -3242,10 +3701,12 @@ const CanvasViewport = memo(function CanvasViewport({
   onPanelReferenceDragEnd,
 }: {
   canvasRef: React.RefObject<HTMLDivElement | null>;
+  canvasSceneRef: (element: HTMLDivElement | null) => void;
+  canvasSize: CanvasSize;
+  canvasRect: Pick<DOMRect, 'left' | 'top'>;
   widthStyle: string;
   tool: Tool;
   isSpacePressed: boolean;
-  isPanning: boolean;
   viewport: ViewportState;
   themePalette: typeof DARK_THEME;
   items: CanvasItem[];
@@ -3259,26 +3720,27 @@ const CanvasViewport = memo(function CanvasViewport({
   hoveredCanvasItemId: string | null;
   hoveredInputPortItemId: string | null;
   hoveredOutputPortItemId: string | null;
-  magneticPorts: MagneticPortMap;
   connectionMode: ConnectionMode;
-  connectionSnapTargetId: string | null;
   connectionFromItemId: string | null;
   frozenPreviewConnection: FrozenPreviewConnection | null;
   pendingConnectionMenu: PendingConnectionMenu | null;
   multiSelectionBounds: { left: number; top: number; width: number; height: number } | null;
-  isMarqueeSelecting: boolean;
-  marqueeRect: { x: number; y: number; width: number; height: number } | null;
-  getPreviewRenderPoints: () => { from: { x: number; y: number } | null; to: { x: number; y: number } | null };
+  marqueeElementRef: (element: SVGSVGElement | null) => void;
+  marqueePathRef: (element: SVGPathElement | null) => void;
   getConnectionAnchorCanvasPoint: (item: CanvasItem, side: 'left' | 'right') => { x: number; y: number };
   toCanvasScreenPoint: (point: { x: number; y: number }) => { x: number; y: number };
   buildConnectionPath: (from: { x: number; y: number }, to: { x: number; y: number }) => string;
-  getRenderedPortOverlayPoint: (item: CanvasItem, side: PortSide) => { x: number; y: number };
-  getMagneticPortKey: (itemId: string, side: PortSide) => string;
+  getItemTargetRef: (itemId: string, role: string) => (element: HTMLElement | null) => void;
+  getSelectionGroupRef: (element: HTMLDivElement | null) => void;
+  getConnectionPathRef: (connectionId: string, role: string) => (element: SVGPathElement | null) => void;
+  connectionPreviewPathRef: React.RefObject<SVGPathElement | null>;
+  getViewportOverlayRef: (key: string) => (element: HTMLElement | null) => void;
   onPointerDown: (e: React.PointerEvent<HTMLDivElement>) => void;
   onPointerMove: (e: React.PointerEvent<HTMLDivElement>) => void;
   onPointerUp: (e?: React.PointerEvent<HTMLDivElement>) => void;
   onPointerLeave: () => void;
-  onWheel: (e: React.WheelEvent<HTMLDivElement>) => void;
+  onNativeWheel: (event: WheelEvent) => void;
+  onMetricsChange: (metrics: CanvasMetrics) => void;
   onPaste: (e: React.ClipboardEvent<HTMLDivElement>) => void;
   onConnectionPointerDown: (e: React.PointerEvent<SVGPathElement>, connectionId: string) => void;
   onInputPortEnter: (itemId: string) => void;
@@ -3287,8 +3749,7 @@ const CanvasViewport = memo(function CanvasViewport({
   onOutputPortLeave: (itemId: string) => void;
   onOutputPortPointerDown: (
     e: React.PointerEvent<HTMLElement>,
-    item: CanvasItem,
-    source: 'bridge' | 'button'
+    item: CanvasItem
   ) => void;
   onSelectionGroupPointerDown: (e: React.PointerEvent<HTMLDivElement>) => void;
   onItemMouseEnter: (itemId: string) => void;
@@ -3308,7 +3769,7 @@ const CanvasViewport = memo(function CanvasViewport({
   activeCanvasImageGenerationItemIds: Set<string>;
   activeCanvasTextGenerations: Record<string, { status: 'running'; startedAt: number }>;
   activeCanvasImageGenerations: Record<string, { status: 'running'; startedAt: number; total: number; completed: number; failed: number }>;
-  generationClockMs: number;
+  activeCanvasImageIds: Set<string>;
   selectedTextPanelModel: { id: string; label: string };
   textPanelModelOptions: Array<{ id: string; label: string }>;
   selectedTextCardProviderLabel: string;
@@ -3355,6 +3816,7 @@ const CanvasViewport = memo(function CanvasViewport({
   editingAnnotationTextId: string | null;
   editingAnnotationTextRef: React.RefObject<HTMLTextAreaElement | null>;
   draftStroke: DraftStroke | null;
+  draftStrokePathRef: React.RefObject<SVGPathElement | null>;
   onToggleTextPanelProviderMenu: () => void;
   onSelectTextPanelProvider: (providerId: string) => void;
   onToggleTextPanelModelMenu: () => void;
@@ -3401,17 +3863,22 @@ const CanvasViewport = memo(function CanvasViewport({
   ) => void;
   onPanelReferenceDragEnd: () => void;
 }) {
-  const { from, to } = getPreviewRenderPoints();
-  const regularItems = items.filter((item) => !isCanvasAnnotationItem(item));
+  const regularItems = React.useMemo(
+    () => items.filter((item) => !isCanvasAnnotationItem(item)),
+    [items]
+  );
   const selectedTextCardPanelTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const selectedImageCardPanelTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const selectedTextCardPanelRootRef = useRef<HTMLDivElement | null>(null);
   const selectedImageCardPanelRootRef = useRef<HTMLDivElement | null>(null);
-  const [selectedTextCardProviderPopoverOffset, setSelectedTextCardProviderPopoverOffset] = useState<{ left: number; top: number } | null>(null);
-  const [selectedTextCardModelPopoverOffset, setSelectedTextCardModelPopoverOffset] = useState<{ left: number; top: number } | null>(null);
-  const [selectedImageCardProviderPopoverOffset, setSelectedImageCardProviderPopoverOffset] = useState<{ left: number; top: number } | null>(null);
-  const [selectedImageCardModelPopoverOffset, setSelectedImageCardModelPopoverOffset] = useState<{ left: number; top: number } | null>(null);
-  const [selectedImageCardSettingsPopoverOffset, setSelectedImageCardSettingsPopoverOffset] = useState<{ left: number; top: number } | null>(null);
+  const registerSelectedTextPanelOverlay = getViewportOverlayRef('selected-text-panel');
+  const registerSelectedImagePanelOverlay = getViewportOverlayRef('selected-image-panel');
+  const setSelectedTextCardPanelRoot = useCallback((element: HTMLDivElement | null) => {
+    selectedTextCardPanelRootRef.current = element;
+  }, []);
+  const setSelectedImageCardPanelRoot = useCallback((element: HTMLDivElement | null) => {
+    selectedImageCardPanelRootRef.current = element;
+  }, []);
   const [selectedImageCardCountInput, setSelectedImageCardCountInput] = useState(() => String(selectedImageCardPanelCount));
   const [selectedTextCardPanelInputMetrics, setSelectedTextCardPanelInputMetrics] = useState(() => ({
     height: TEXT_CARD_PANEL_INPUT_MIN_HEIGHT,
@@ -3421,63 +3888,55 @@ const CanvasViewport = memo(function CanvasViewport({
     height: TEXT_CARD_PANEL_INPUT_MIN_HEIGHT,
     isOverflowing: false,
   }));
-  const canvasRect = canvasRef.current?.getBoundingClientRect();
-  const canvasSize = {
-    width: canvasRect?.width ?? 0,
-    height: canvasRect?.height ?? 0,
-  };
 
-  useGSAP(
-    () => {
-      const floatingPanels = [
-        selectedImageCardPanelRootRef.current,
-        selectedTextCardPanelRootRef.current,
-        imageCardProviderPopoverRef.current,
-        imageCardModelPopoverRef.current,
-        imageCardSettingsPopoverRef.current,
-        textPanelProviderPopoverRef.current,
-        textPanelModelPopoverRef.current,
-      ].filter((element): element is HTMLDivElement => element !== null);
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    canvas.addEventListener('wheel', onNativeWheel, { passive: false, capture: true });
+    return () => {
+      canvas.removeEventListener('wheel', onNativeWheel, true);
+    };
+  }, [canvasRef, onNativeWheel]);
 
-      if (floatingPanels.length === 0) return;
+  useLayoutEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
 
-      const prefersReducedMotion =
-        typeof window !== 'undefined' &&
-        typeof window.matchMedia === 'function' &&
-        window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    let metricsFrame: number | null = null;
+    const updateMetrics = () => {
+      metricsFrame = null;
+      const rect = canvas.getBoundingClientRect();
+      onMetricsChange({
+        left: rect.left,
+        top: rect.top,
+        width: rect.width,
+        height: rect.height,
+      });
+    };
+    const scheduleMetricsUpdate = () => {
+      if (metricsFrame !== null) return;
+      metricsFrame = requestAnimationFrame(updateMetrics);
+    };
 
-      if (prefersReducedMotion) {
-        gsap.set(floatingPanels, { autoAlpha: 1, y: 0, scale: 1 });
-        return;
-      }
+    updateMetrics();
+    const observer = typeof ResizeObserver === 'undefined'
+      ? null
+      : new ResizeObserver(scheduleMetricsUpdate);
+    observer?.observe(canvas);
+    window.addEventListener('resize', scheduleMetricsUpdate, { passive: true });
+    window.addEventListener('scroll', scheduleMetricsUpdate, { passive: true, capture: true });
+    window.visualViewport?.addEventListener('resize', scheduleMetricsUpdate, { passive: true });
+    window.visualViewport?.addEventListener('scroll', scheduleMetricsUpdate, { passive: true });
 
-      gsap.fromTo(
-        floatingPanels,
-        { autoAlpha: 0, y: 8, scale: 0.985 },
-        {
-          autoAlpha: 1,
-          y: 0,
-          scale: 1,
-          duration: FLOATING_PANEL_GSAP_DURATION,
-          ease: 'power2.out',
-          overwrite: 'auto',
-        }
-      );
-    },
-    {
-      dependencies: [
-        selectedImageCardPanelItem?.id,
-        selectedTextCardPanelItem?.id,
-        showImageCardProviderMenu,
-        showImageCardModelMenu,
-        showImageCardSettingsMenu,
-        showTextPanelProviderMenu,
-        showTextPanelModelMenu,
-      ],
-      revertOnUpdate: true,
-    }
-  );
-
+    return () => {
+      if (metricsFrame !== null) cancelAnimationFrame(metricsFrame);
+      observer?.disconnect();
+      window.removeEventListener('resize', scheduleMetricsUpdate);
+      window.removeEventListener('scroll', scheduleMetricsUpdate, true);
+      window.visualViewport?.removeEventListener('resize', scheduleMetricsUpdate);
+      window.visualViewport?.removeEventListener('scroll', scheduleMetricsUpdate);
+    };
+  }, [canvasRef, onMetricsChange]);
   const connectionMenuWidth = 360;
   const connectionMenuHeight = 292;
   const connectionMenuPadding = 24;
@@ -3563,131 +4022,6 @@ const CanvasViewport = memo(function CanvasViewport({
       prev.height === nextMetrics.height && prev.isOverflowing === nextMetrics.isOverflowing ? prev : nextMetrics
     );
   }, [selectedImageCardPanelCanvasWidth, selectedImageCardPanelDisplayInput, selectedImageCardPanelItem]);
-  useLayoutEffect(() => {
-    if (!showTextPanelProviderMenu || !selectedTextCardPanelItem) {
-      setSelectedTextCardProviderPopoverOffset(null);
-      return;
-    }
-
-    const panelElement = selectedTextCardPanelRootRef.current;
-    const anchorElement = textPanelProviderMenuRef.current;
-    if (!panelElement || !anchorElement || viewport.scale <= 0) {
-      return;
-    }
-
-    const panelRect = panelElement.getBoundingClientRect();
-    const anchorRect = anchorElement.getBoundingClientRect();
-
-    setSelectedTextCardProviderPopoverOffset(
-      resolveFloatingPopoverOffset({
-        panelRect,
-        anchorRect,
-        scale: 1,
-        placement: 'below-panel',
-        gap: 12,
-      })
-    );
-  }, [selectedTextCardPanelItem, showTextPanelProviderMenu, textPanelProviderMenuRef, viewport.scale]);
-  useLayoutEffect(() => {
-    if (!showTextPanelModelMenu || !selectedTextCardPanelItem) {
-      setSelectedTextCardModelPopoverOffset(null);
-      return;
-    }
-
-    const panelElement = selectedTextCardPanelRootRef.current;
-    const anchorElement = textPanelModelMenuRef.current;
-    if (!panelElement || !anchorElement || viewport.scale <= 0) {
-      return;
-    }
-
-    const panelRect = panelElement.getBoundingClientRect();
-    const anchorRect = anchorElement.getBoundingClientRect();
-
-    setSelectedTextCardModelPopoverOffset(
-      resolveFloatingPopoverOffset({
-        panelRect,
-        anchorRect,
-        scale: 1,
-        placement: 'below-panel',
-        gap: 12,
-      })
-    );
-  }, [selectedTextCardPanelItem, showTextPanelModelMenu, textPanelModelMenuRef, viewport.scale]);
-  useLayoutEffect(() => {
-    if (!showImageCardProviderMenu || !selectedImageCardPanelItem) {
-      setSelectedImageCardProviderPopoverOffset(null);
-      return;
-    }
-
-    const panelElement = selectedImageCardPanelRootRef.current;
-    const anchorElement = imageCardProviderMenuRef.current;
-    if (!panelElement || !anchorElement || viewport.scale <= 0) {
-      return;
-    }
-
-    const panelRect = panelElement.getBoundingClientRect();
-    const anchorRect = anchorElement.getBoundingClientRect();
-
-    setSelectedImageCardProviderPopoverOffset(
-      resolveFloatingPopoverOffset({
-        panelRect,
-        anchorRect,
-        scale: 1,
-        placement: 'below-panel',
-        gap: 12,
-      })
-    );
-  }, [imageCardProviderMenuRef, selectedImageCardPanelItem, showImageCardProviderMenu, viewport.scale]);
-  useLayoutEffect(() => {
-    if (!showImageCardModelMenu || !selectedImageCardPanelItem) {
-      setSelectedImageCardModelPopoverOffset(null);
-      return;
-    }
-
-    const panelElement = selectedImageCardPanelRootRef.current;
-    const anchorElement = imageCardModelMenuRef.current;
-    if (!panelElement || !anchorElement || viewport.scale <= 0) {
-      return;
-    }
-
-    const panelRect = panelElement.getBoundingClientRect();
-    const anchorRect = anchorElement.getBoundingClientRect();
-
-    setSelectedImageCardModelPopoverOffset(
-      resolveFloatingPopoverOffset({
-        panelRect,
-        anchorRect,
-        scale: 1,
-        placement: 'below-panel',
-        gap: 12,
-      })
-    );
-  }, [imageCardModelMenuRef, selectedImageCardPanelItem, showImageCardModelMenu, viewport.scale]);
-  useLayoutEffect(() => {
-    if (!showImageCardSettingsMenu || !selectedImageCardPanelItem) {
-      setSelectedImageCardSettingsPopoverOffset(null);
-      return;
-    }
-
-    const panelElement = selectedImageCardPanelRootRef.current;
-    const anchorElement = imageCardSettingsMenuRef.current;
-    if (!panelElement || !anchorElement || viewport.scale <= 0) {
-      return;
-    }
-
-    const panelRect = panelElement.getBoundingClientRect();
-    const anchorRect = anchorElement.getBoundingClientRect();
-
-    setSelectedImageCardSettingsPopoverOffset(
-      resolveFloatingPopoverOffset({
-        panelRect,
-        anchorRect,
-        scale: 1,
-        placement: 'below-panel',
-        gap: 12,
-      })
-    );
-  }, [imageCardSettingsMenuRef, selectedImageCardPanelItem, showImageCardSettingsMenu, viewport.scale]);
   useEffect(() => {
     setSelectedImageCardCountInput(String(selectedImageCardPanelCount));
   }, [selectedImageCardPanelCount, selectedImageCardPanelItem?.id]);
@@ -3709,6 +4043,70 @@ const CanvasViewport = memo(function CanvasViewport({
     TEXT_CARD_GENERATION_PANEL_BASE_HEIGHT +
     (selectedImageCardPanelLinkedImagePreviews.length > 0 ? TEXT_CARD_GENERATION_PANEL_PREVIEW_HEIGHT : 0) +
     Math.max(0, selectedImageCardPanelInputMetrics.height - TEXT_CARD_PANEL_INPUT_MIN_HEIGHT);
+  useLayoutEffect(() => {
+    const panelElement = selectedTextCardPanelRootRef.current;
+    const overlayGroup = panelElement?.parentElement;
+    if (!panelElement || !overlayGroup || !selectedTextCardPanelItem) return;
+    const panelRect = panelElement.getBoundingClientRect();
+    const cacheOffset = (
+      anchorElement: HTMLElement | null,
+      leftProperty: string,
+      topProperty: string
+    ) => {
+      if (!anchorElement) return;
+      const offset = resolveFloatingPopoverOffset({
+        panelRect,
+        anchorRect: anchorElement.getBoundingClientRect(),
+        scale: 1,
+        placement: 'below-panel',
+        gap: 12,
+      });
+      if (!offset) return;
+      overlayGroup.style.setProperty(leftProperty, `${offset.left}px`);
+      overlayGroup.style.setProperty(topProperty, `${offset.top}px`);
+    };
+    cacheOffset(textPanelProviderMenuRef.current, '--canvas-text-provider-menu-left', '--canvas-text-provider-menu-top');
+    cacheOffset(textPanelModelMenuRef.current, '--canvas-text-model-menu-left', '--canvas-text-model-menu-top');
+  }, [
+    linkedImagePreviews.length,
+    selectedTextCardPanelCanvasHeight,
+    selectedTextCardPanelItem,
+    textPanelModelMenuRef,
+    textPanelProviderMenuRef,
+  ]);
+  useLayoutEffect(() => {
+    const panelElement = selectedImageCardPanelRootRef.current;
+    const overlayGroup = panelElement?.parentElement;
+    if (!panelElement || !overlayGroup || !selectedImageCardPanelItem) return;
+    const panelRect = panelElement.getBoundingClientRect();
+    const cacheOffset = (
+      anchorElement: HTMLElement | null,
+      leftProperty: string,
+      topProperty: string
+    ) => {
+      if (!anchorElement) return;
+      const offset = resolveFloatingPopoverOffset({
+        panelRect,
+        anchorRect: anchorElement.getBoundingClientRect(),
+        scale: 1,
+        placement: 'below-panel',
+        gap: 12,
+      });
+      if (!offset) return;
+      overlayGroup.style.setProperty(leftProperty, `${offset.left}px`);
+      overlayGroup.style.setProperty(topProperty, `${offset.top}px`);
+    };
+    cacheOffset(imageCardProviderMenuRef.current, '--canvas-image-provider-menu-left', '--canvas-image-provider-menu-top');
+    cacheOffset(imageCardModelMenuRef.current, '--canvas-image-model-menu-left', '--canvas-image-model-menu-top');
+    cacheOffset(imageCardSettingsMenuRef.current, '--canvas-image-settings-menu-left', '--canvas-image-settings-menu-top');
+  }, [
+    imageCardModelMenuRef,
+    imageCardProviderMenuRef,
+    imageCardSettingsMenuRef,
+    selectedImageCardPanelCanvasHeight,
+    selectedImageCardPanelItem,
+    selectedImageCardPanelLinkedImagePreviews.length,
+  ]);
   const selectedTextCardPanelPlaceholder = getTextCardPanelPlaceholder({
     linkedImageCount: linkedImagePreviews.length,
     linkedTextCount: selectedTextCardPanelLinkedTexts.length,
@@ -3732,15 +4130,6 @@ const CanvasViewport = memo(function CanvasViewport({
   const selectedImageCardPanelCanvasRect =
     selectedImageCardPanelItem && selectedImageCardPanelFrameBounds
       ? {
-          left:
-            selectedImageCardPanelItem.x +
-            selectedImageCardPanelFrameBounds.left +
-            (selectedImageCardPanelFrameBounds.width - selectedImageCardPanelCanvasWidth) / 2,
-          top:
-            selectedImageCardPanelItem.y +
-            selectedImageCardPanelFrameBounds.top +
-            selectedImageCardPanelFrameBounds.height +
-            18,
           width: selectedImageCardPanelCanvasWidth,
           height: selectedImageCardPanelCanvasHeight,
         }
@@ -3764,23 +4153,21 @@ const CanvasViewport = memo(function CanvasViewport({
         top: canvasRect.top + selectedTextCardPanelAnchorPoint.y + 18,
       }
     : null;
-  const selectedImageCardPanelAnchorPoint =
-    selectedImageCardPanelItem && selectedImageCardPanelFrameBounds
-      ? toCanvasScreenPoint({
-          x:
-            selectedImageCardPanelItem.x +
-            selectedImageCardPanelFrameBounds.left +
-            selectedImageCardPanelFrameBounds.width / 2,
-          y:
-            selectedImageCardPanelItem.y +
-            selectedImageCardPanelFrameBounds.top +
-            selectedImageCardPanelFrameBounds.height,
-        })
+  const selectedImageCardPanelVisualBounds = selectedImageCardPanelItem
+    ? getItemVisualBounds(selectedImageCardPanelItem)
     : null;
-  const selectedImageCardPanelViewportOrigin = selectedImageCardPanelAnchorPoint && canvasRect
+  const selectedImageCardPanelOverlayAnchors = selectedImageCardPanelVisualBounds && canvasRect
+    ? resolveCanvasFixedOverlayAnchors({
+        bounds: selectedImageCardPanelVisualBounds,
+        viewport,
+        canvasOrigin: { x: canvasRect.left, y: canvasRect.top },
+        gap: IMAGE_NODE_OVERLAY_GAP_PX,
+      })
+    : null;
+  const selectedImageCardPanelViewportOrigin = selectedImageCardPanelOverlayAnchors
     ? {
-        left: canvasRect.left + selectedImageCardPanelAnchorPoint.x - selectedImageCardPanelCanvasWidth / 2,
-        top: canvasRect.top + selectedImageCardPanelAnchorPoint.y + 18,
+        left: selectedImageCardPanelOverlayAnchors.centerX - selectedImageCardPanelCanvasWidth / 2,
+        top: selectedImageCardPanelOverlayAnchors.bottomPanelY,
       }
     : null;
   const portaledSelectedImageCardPanel =
@@ -3791,14 +4178,23 @@ const CanvasViewport = memo(function CanvasViewport({
     selectedImageCardPanelViewportOrigin
       ? createPortal(
           <>
-            <div className="pointer-events-none fixed inset-0 z-[115]">
+            <div data-canvas-overlay-root="true" className="pointer-events-none fixed inset-0 z-[115]">
+              <div
+                ref={registerSelectedImagePanelOverlay}
+                data-canvas-item-overlay-group="selected-image-panel"
+                data-canvas-overlay-item-id={selectedImageCardPanelItem.id}
+                className="pointer-events-none fixed left-0 top-0"
+                style={{
+                  transform: `translate3d(${selectedImageCardPanelViewportOrigin.left}px, ${selectedImageCardPanelViewportOrigin.top}px, 0)`,
+                }}
+              >
               <div
               data-text-card-panel="true"
-              ref={selectedImageCardPanelRootRef}
-              className="workspace-panel-surface pointer-events-auto fixed overflow-hidden rounded-[26px]"
+              data-canvas-viewport-overlay="true"
+              data-canvas-overlay-item-id={selectedImageCardPanelItem.id}
+              ref={setSelectedImageCardPanelRoot}
+              className="workspace-panel-surface pointer-events-auto absolute left-0 top-0 overflow-hidden rounded-[26px]"
               style={{
-                left: selectedImageCardPanelViewportOrigin.left,
-                top: selectedImageCardPanelViewportOrigin.top,
                 width: selectedImageCardPanelCanvasRect.width,
               }}
               onPointerDown={(e) => {
@@ -3815,6 +4211,7 @@ const CanvasViewport = memo(function CanvasViewport({
                       {selectedImageCardPanelLinkedImagePreviews.map((preview) => (
                         <div
                           key={preview.id}
+                          data-panel-reference-id={preview.id}
                           draggable
                           onDragStart={(e) => {
                             onPanelReferenceDragStart(e, selectedImageCardPanelItem.id, preview.id);
@@ -3826,7 +4223,7 @@ const CanvasViewport = memo(function CanvasViewport({
                             onPanelReferenceDrop(e, selectedImageCardPanelItem.id, preview.id);
                           }}
                           onDragEnd={onPanelReferenceDragEnd}
-                          className={`relative h-20 w-20 shrink-0 overflow-hidden rounded-[14px] border bg-black/25 transition-all ${
+                          className={`relative h-20 w-20 shrink-0 overflow-hidden rounded-[14px] border bg-black/25 ${
                             draggingPanelReference?.targetItemId === selectedImageCardPanelItem.id &&
                             draggingPanelReference.sourceItemId === preview.id
                               ? 'border-white/[0.08] opacity-50'
@@ -3942,7 +4339,7 @@ const CanvasViewport = memo(function CanvasViewport({
                       <span className="min-w-0 truncate text-[13px] font-semibold tracking-[-0.02em]">
                         {selectedImageCardProviderLabel}
                       </span>
-                      <ChevronDown size={14} className={`shrink-0 transition-transform ${showImageCardProviderMenu ? 'rotate-180' : ''}`} />
+                      <ChevronDown size={14} className="shrink-0" />
                     </button>
                   </div>
                   <div className="relative" ref={imageCardModelMenuRef}>
@@ -3963,7 +4360,7 @@ const CanvasViewport = memo(function CanvasViewport({
                         <Sparkles size={14} className="shrink-0" />
                         <span className="truncate">{selectedImageCardModel.label}</span>
                       </span>
-                      <ChevronDown size={14} className={`shrink-0 transition-transform ${showImageCardModelMenu ? 'rotate-180' : ''}`} />
+                      <ChevronDown size={14} className="shrink-0" />
                     </button>
                   </div>
                   <div className="relative" ref={imageCardSettingsMenuRef}>
@@ -3983,7 +4380,7 @@ const CanvasViewport = memo(function CanvasViewport({
                       <span className="min-w-0 truncate text-[13px] font-semibold tracking-[-0.02em]">
                         {`${getImageCardAspectRatioShortLabel(selectedImageCardPanelAspectRatio)} · ${selectedImageCardSizeOptions.find((item) => item.id === selectedImageCardPanelSize)?.label || selectedImageCardPanelSize} · ${getImageCardQualityLabel(selectedImageCardPanelQuality)}`}
                       </span>
-                      <ChevronDown size={14} className={`shrink-0 transition-transform ${showImageCardSettingsMenu ? 'rotate-180' : ''}`} />
+                      <ChevronDown size={14} className="shrink-0" />
                     </button>
                   </div>
                   <div className="workspace-control-chip flex min-h-[52px] w-full items-center rounded-[14px] px-2 py-2">
@@ -3997,7 +4394,7 @@ const CanvasViewport = memo(function CanvasViewport({
                         onSelectImageCardCount(clampImageCardCount(selectedImageCardPanelCount - 1));
                       }}
                       disabled={selectedImageCardPanelCount <= IMAGE_CARD_COUNT_MIN}
-                      className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-[10px] transition-colors disabled:cursor-not-allowed disabled:opacity-40"
+                      className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-[10px]  disabled:cursor-not-allowed disabled:opacity-40"
                       aria-label="减少张数"
                     >
                       <ChevronLeft size={16} />
@@ -4037,7 +4434,7 @@ const CanvasViewport = memo(function CanvasViewport({
                         onSelectImageCardCount(clampImageCardCount(selectedImageCardPanelCount + 1));
                       }}
                       disabled={selectedImageCardPanelCount >= IMAGE_CARD_COUNT_MAX}
-                      className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-[10px] transition-colors disabled:cursor-not-allowed disabled:opacity-40"
+                      className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-[10px]  disabled:cursor-not-allowed disabled:opacity-40"
                       aria-label="增加张数"
                     >
                       <ChevronRight size={16} />
@@ -4059,7 +4456,7 @@ const CanvasViewport = memo(function CanvasViewport({
                       }
                     }}
                     disabled={!isSelectedImageCardGenerating && !selectedImageCardPanelCanSubmit}
-                    className="workspace-add-button inline-flex h-11 w-11 items-center justify-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+                    className="workspace-add-button inline-flex h-11 w-11 items-center justify-center rounded-full  disabled:cursor-not-allowed disabled:opacity-50"
                     aria-label={isSelectedImageCardGenerating ? '终止生成' : '开始生图'}
                     title={isSelectedImageCardGenerating ? '终止生成' : '开始生图'}
                   >
@@ -4078,15 +4475,14 @@ const CanvasViewport = memo(function CanvasViewport({
                 </div>
               </div>
             </div>
-          </div>
-            {showImageCardModelMenu && selectedImageCardModelPopoverOffset && (
+            {showImageCardModelMenu && (
               <div
                 ref={imageCardModelPopoverRef}
                 data-text-card-panel-control="true"
-                className="workspace-menu-panel pointer-events-auto fixed z-[116] min-w-[248px] overflow-hidden rounded-[18px] p-1.5"
+                className="workspace-menu-panel pointer-events-auto absolute z-[116] min-w-[248px] overflow-hidden rounded-[18px] p-1.5"
                 style={{
-                  left: selectedImageCardPanelViewportOrigin.left + selectedImageCardModelPopoverOffset.left,
-                  top: selectedImageCardPanelViewportOrigin.top + selectedImageCardModelPopoverOffset.top,
+                  left: 'var(--canvas-image-model-menu-left)',
+                  top: 'var(--canvas-image-model-menu-top)',
                 }}
                 onPointerDown={(e) => {
                   e.stopPropagation();
@@ -4113,14 +4509,14 @@ const CanvasViewport = memo(function CanvasViewport({
                 })}
               </div>
             )}
-            {showImageCardProviderMenu && selectedImageCardProviderPopoverOffset && (
+            {showImageCardProviderMenu && (
               <div
                 ref={imageCardProviderPopoverRef}
                 data-text-card-panel-control="true"
-                className="workspace-menu-panel pointer-events-auto fixed z-[116] min-w-[220px] overflow-hidden rounded-[18px] p-1.5"
+                className="workspace-menu-panel pointer-events-auto absolute z-[116] min-w-[220px] overflow-hidden rounded-[18px] p-1.5"
                 style={{
-                  left: selectedImageCardPanelViewportOrigin.left + selectedImageCardProviderPopoverOffset.left,
-                  top: selectedImageCardPanelViewportOrigin.top + selectedImageCardProviderPopoverOffset.top,
+                  left: 'var(--canvas-image-provider-menu-left)',
+                  top: 'var(--canvas-image-provider-menu-top)',
                 }}
                 onPointerDown={(e) => {
                   e.stopPropagation();
@@ -4149,14 +4545,14 @@ const CanvasViewport = memo(function CanvasViewport({
                 })}
               </div>
             )}
-            {showImageCardSettingsMenu && selectedImageCardSettingsPopoverOffset && (
+            {showImageCardSettingsMenu && (
               <div
                 ref={imageCardSettingsPopoverRef}
                 data-text-card-panel-control="true"
-                className="workspace-menu-panel pointer-events-auto fixed z-[116] overflow-hidden rounded-[22px] p-3"
+                className="workspace-menu-panel pointer-events-auto absolute z-[116] overflow-hidden rounded-[22px] p-3"
                 style={{
-                  left: selectedImageCardPanelViewportOrigin.left + selectedImageCardSettingsPopoverOffset.left,
-                  top: selectedImageCardPanelViewportOrigin.top + selectedImageCardSettingsPopoverOffset.top,
+                  left: 'var(--canvas-image-settings-menu-left)',
+                  top: 'var(--canvas-image-settings-menu-top)',
                   width: 292,
                 }}
                 onPointerDown={(e) => {
@@ -4246,6 +4642,8 @@ const CanvasViewport = memo(function CanvasViewport({
                 </div>
               </div>
             )}
+              </div>
+            </div>
           </>,
           document.body
         )
@@ -4257,14 +4655,22 @@ const CanvasViewport = memo(function CanvasViewport({
     selectedTextCardPanelCanvasRect &&
     selectedTextCardPanelViewportOrigin
       ? createPortal(
-          <div className="pointer-events-none fixed inset-0 z-[115]">
+          <div data-canvas-overlay-root="true" className="pointer-events-none fixed inset-0 z-[115]">
+            <div
+              ref={registerSelectedTextPanelOverlay}
+              data-canvas-item-overlay-group="selected-text-panel"
+              data-canvas-overlay-item-id={selectedTextCardPanelItem.id}
+              className="pointer-events-none fixed left-0 top-0"
+              style={{
+                transform: `translate3d(${selectedTextCardPanelViewportOrigin.left}px, ${selectedTextCardPanelViewportOrigin.top}px, 0)`,
+              }}
+            >
             <div
               data-text-card-panel="true"
-              ref={selectedTextCardPanelRootRef}
-              className="workspace-panel-surface pointer-events-auto fixed overflow-hidden rounded-[26px]"
+              data-canvas-viewport-overlay="true"
+              ref={setSelectedTextCardPanelRoot}
+              className="workspace-panel-surface pointer-events-auto absolute left-0 top-0 overflow-hidden rounded-[26px]"
               style={{
-                left: selectedTextCardPanelViewportOrigin.left,
-                top: selectedTextCardPanelViewportOrigin.top,
                 width: selectedTextCardPanelCanvasRect.width,
               }}
               onPointerDown={(e) => {
@@ -4281,6 +4687,7 @@ const CanvasViewport = memo(function CanvasViewport({
                       {linkedImagePreviews.map((preview) => (
                         <div
                           key={preview.id}
+                          data-panel-reference-id={preview.id}
                           draggable
                           onDragStart={(e) => {
                             onPanelReferenceDragStart(e, selectedTextCardPanelItem.id, preview.id);
@@ -4292,7 +4699,7 @@ const CanvasViewport = memo(function CanvasViewport({
                             onPanelReferenceDrop(e, selectedTextCardPanelItem.id, preview.id);
                           }}
                           onDragEnd={onPanelReferenceDragEnd}
-                          className={`relative h-20 w-20 shrink-0 overflow-hidden rounded-[14px] border bg-black/25 transition-all ${
+                          className={`relative h-20 w-20 shrink-0 overflow-hidden rounded-[14px] border bg-black/25 ${
                             draggingPanelReference?.targetItemId === selectedTextCardPanelItem.id &&
                             draggingPanelReference.sourceItemId === preview.id
                               ? 'border-white/[0.08] opacity-50'
@@ -4408,7 +4815,7 @@ const CanvasViewport = memo(function CanvasViewport({
                       <span className="min-w-0 truncate text-[13px] font-semibold tracking-[-0.02em]">
                         {selectedTextCardProviderLabel}
                       </span>
-                      <ChevronDown size={14} className={`shrink-0 transition-transform ${showTextPanelProviderMenu ? 'rotate-180' : ''}`} />
+                      <ChevronDown size={14} className="shrink-0" />
                     </button>
                   </div>
                   <div className="relative" ref={textPanelModelMenuRef}>
@@ -4430,7 +4837,7 @@ const CanvasViewport = memo(function CanvasViewport({
                         <Sparkles size={14} className="shrink-0" />
                         <span className="truncate">{selectedTextPanelModel.label}</span>
                       </span>
-                      <ChevronDown size={14} className={`shrink-0 transition-transform ${showTextPanelModelMenu ? 'rotate-180' : ''}`} />
+                      <ChevronDown size={14} className="shrink-0" />
                     </button>
                   </div>
                 </div>
@@ -4449,7 +4856,7 @@ const CanvasViewport = memo(function CanvasViewport({
                       }
                     }}
                     disabled={!isSelectedTextCardGenerating && !selectedTextCardPanelCanSubmit}
-                    className="workspace-add-button inline-flex h-11 w-11 items-center justify-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+                    className="workspace-add-button inline-flex h-11 w-11 items-center justify-center rounded-full  disabled:cursor-not-allowed disabled:opacity-50"
                     aria-label={isSelectedTextCardGenerating ? '终止生成' : '开始生成'}
                     title={isSelectedTextCardGenerating ? '终止生成' : '开始生成'}
                   >
@@ -4468,14 +4875,14 @@ const CanvasViewport = memo(function CanvasViewport({
                 </div>
               </div>
             </div>
-            {showTextPanelProviderMenu && selectedTextCardProviderPopoverOffset && (
+            {showTextPanelProviderMenu && (
               <div
                 ref={textPanelProviderPopoverRef}
                 data-text-card-panel-control="true"
-                className="workspace-menu-panel pointer-events-auto fixed z-[116] min-w-[220px] overflow-hidden rounded-[18px] p-1.5"
+                className="workspace-menu-panel pointer-events-auto absolute z-[116] min-w-[220px] overflow-hidden rounded-[18px] p-1.5"
                 style={{
-                  left: selectedTextCardPanelViewportOrigin.left + selectedTextCardProviderPopoverOffset.left,
-                  top: selectedTextCardPanelViewportOrigin.top + selectedTextCardProviderPopoverOffset.top,
+                  left: 'var(--canvas-text-provider-menu-left)',
+                  top: 'var(--canvas-text-provider-menu-top)',
                 }}
                 onPointerDown={(e) => {
                   e.stopPropagation();
@@ -4504,14 +4911,14 @@ const CanvasViewport = memo(function CanvasViewport({
                 })}
               </div>
             )}
-            {showTextPanelModelMenu && selectedTextCardModelPopoverOffset && (
+            {showTextPanelModelMenu && (
               <div
                 ref={textPanelModelPopoverRef}
                 data-text-card-panel-control="true"
-                className="workspace-menu-panel pointer-events-auto fixed z-[116] min-w-[248px] overflow-hidden rounded-[18px] p-1.5"
+                className="workspace-menu-panel pointer-events-auto absolute z-[116] min-w-[248px] overflow-hidden rounded-[18px] p-1.5"
                 style={{
-                  left: selectedTextCardPanelViewportOrigin.left + selectedTextCardModelPopoverOffset.left,
-                  top: selectedTextCardPanelViewportOrigin.top + selectedTextCardModelPopoverOffset.top,
+                  left: 'var(--canvas-text-model-menu-left)',
+                  top: 'var(--canvas-text-model-menu-top)',
                 }}
                 onPointerDown={(e) => {
                   e.stopPropagation();
@@ -4538,6 +4945,7 @@ const CanvasViewport = memo(function CanvasViewport({
                 })}
               </div>
             )}
+            </div>
           </div>,
           document.body
         )
@@ -4550,16 +4958,16 @@ const CanvasViewport = memo(function CanvasViewport({
       tabIndex={0}
       className={`relative z-0 shrink-0 overflow-hidden select-none ${
         isSpacePressed
-          ? isPanning
-            ? 'cursor-grabbing'
-            : 'cursor-grab'
+          ? 'cursor-grab'
           : tool === 'draw'
             ? 'cursor-crosshair'
             : tool === 'target'
               ? 'cursor-crosshair'
             : tool === 'annotation-text'
               ? 'cursor-text'
-              : 'cursor-default'
+              : tool === 'select'
+                ? 'cursor-grab'
+                : 'cursor-default'
       }`}
       style={{ width: widthStyle }}
       onPointerDown={onPointerDown}
@@ -4567,65 +4975,130 @@ const CanvasViewport = memo(function CanvasViewport({
       onPointerUp={onPointerUp}
       onPointerCancel={onPointerUp}
       onPointerLeave={onPointerLeave}
-      onWheel={onWheel}
+      onContextMenu={(event) => {
+        if (tool !== 'select' || !event.ctrlKey) return;
+        const target = event.target as HTMLElement;
+        if (target.closest(
+          'input, textarea, select, [contenteditable="true"], [data-port], [data-text-card-panel], button:not([data-corner-resize="true"])'
+        )) return;
+        event.preventDefault();
+      }}
       onPaste={onPaste}
     >
-      <CanvasBackgroundLayer theme={themePalette} viewport={viewport} />
-      <CanvasConnectionsLayer
-        canvasSize={canvasSize}
-        connections={connections}
-        theme={themePalette}
-        itemById={itemById}
-        selectedConnectionIds={selectedConnectionIds}
-        viewport={viewport}
-        previewFrom={from}
-        previewTo={to}
-        frozenPreviewConnection={frozenPreviewConnection}
-        onConnectionPointerDown={onConnectionPointerDown}
-        getConnectionAnchorCanvasPoint={getConnectionAnchorCanvasPoint}
-        toCanvasScreenPoint={toCanvasScreenPoint}
-        buildConnectionPath={buildConnectionPath}
-      />
-      <CanvasPortsLayer
-        items={regularItems}
-        viewport={viewport}
-        hoveredCanvasItemId={hoveredCanvasItemId}
-        hoveredInputPortItemId={hoveredInputPortItemId}
-        hoveredOutputPortItemId={hoveredOutputPortItemId}
-        magneticPorts={magneticPorts}
-        connectionFromItemId={connectionFromItemId}
-        connectionMode={connectionMode}
-        connectionSnapTargetId={connectionSnapTargetId}
-        getMagneticPortKey={getMagneticPortKey}
-        getRenderedPortOverlayPoint={getRenderedPortOverlayPoint}
-        onInputPortEnter={onInputPortEnter}
-        onInputPortLeave={onInputPortLeave}
-        onOutputPortEnter={onOutputPortEnter}
-        onOutputPortLeave={onOutputPortLeave}
-        onOutputPortPointerDown={onOutputPortPointerDown}
-      />
-      {pendingConnectionMenu && (
-        <div className="pointer-events-none absolute inset-0 z-[110]">
-          <div
-            data-connection-create-menu="true"
-            className="workspace-menu-panel pointer-events-auto absolute overflow-hidden rounded-[26px]"
-            style={{
-              left: pendingMenuLeft,
-              top: pendingMenuTop,
-              width: 320,
-              minHeight: 198,
-              transform: `scale(${viewport.scale})`,
-              transformOrigin: 'top left',
-            }}
-            onPointerDown={onPendingMenuPointerDown}
-          >
-            <div className="p-3.5">
-              <div className="mb-2.5 px-1 text-xs font-medium tracking-[-0.01em] text-zinc-500/80">
-                引用该节点生成
-              </div>
-              <div className="space-y-1.5">
-                {CONNECTION_MENU_OPTIONS.map((option) => {
-                  return (
+      <CanvasBackgroundLayer theme={themePalette} />
+      <div
+        ref={canvasSceneRef}
+        data-canvas-world="true"
+        data-canvas-scene="true"
+        className="pointer-events-none absolute inset-0"
+        style={{ transformOrigin: '0 0' }}
+      >
+        <CanvasConnectionsLayer
+          connections={connections}
+          theme={themePalette}
+          itemById={itemById}
+          selectedConnectionIds={selectedConnectionIds}
+          onConnectionPointerDown={onConnectionPointerDown}
+          getConnectionAnchorCanvasPoint={getConnectionAnchorCanvasPoint}
+          buildConnectionPath={buildConnectionPath}
+          getConnectionPathRef={getConnectionPathRef}
+        />
+        <CanvasPortsLayer
+          items={regularItems}
+          hoveredCanvasItemId={hoveredCanvasItemId}
+          hoveredInputPortItemId={hoveredInputPortItemId}
+          hoveredOutputPortItemId={hoveredOutputPortItemId}
+          connectionFromItemId={connectionFromItemId}
+          onInputPortEnter={onInputPortEnter}
+          onInputPortLeave={onInputPortLeave}
+          onOutputPortEnter={onOutputPortEnter}
+          onOutputPortLeave={onOutputPortLeave}
+          onOutputPortPointerDown={onOutputPortPointerDown}
+          getItemTargetRef={getItemTargetRef}
+        />
+        <CanvasNodesLayer
+          items={regularItems}
+          tool={tool}
+          connections={connections}
+          multiSelectionBounds={multiSelectionBounds}
+          hoveredCanvasItemId={hoveredCanvasItemId}
+          activeCanvasTextGenerationItemIds={activeCanvasTextGenerationItemIds}
+          activeCanvasImageGenerationItemIds={activeCanvasImageGenerationItemIds}
+          activeCanvasTextGenerations={activeCanvasTextGenerations}
+          activeCanvasImageGenerations={activeCanvasImageGenerations}
+          activeCanvasImageIds={activeCanvasImageIds}
+          editingTextCardId={editingTextCardId}
+          editingTextCardTextareaRef={editingTextCardTextareaRef}
+          onImageCardOutputSelect={onImageCardOutputSelect}
+          onSelectionGroupPointerDown={onSelectionGroupPointerDown}
+          onItemMouseEnter={onItemMouseEnter}
+          onItemMouseLeave={onItemMouseLeave}
+          onItemClick={onItemClick}
+          onItemDoubleClick={onItemDoubleClick}
+          onItemPointerDown={onItemPointerDown}
+          onCornerResizePointerDown={onCornerResizePointerDown}
+          onManualTextCardInputChange={onManualTextCardInputChange}
+          onManualTextCardBlur={onManualTextCardBlur}
+          getItemTargetRef={getItemTargetRef}
+          selectionGroupRef={getSelectionGroupRef}
+        />
+        <CanvasAnnotationsLayer
+          items={items}
+          selectedIds={selectedIds}
+          selectedId={selectedId}
+          hoveredCanvasItemId={hoveredCanvasItemId}
+          editingAnnotationTextId={editingAnnotationTextId}
+          editingAnnotationTextRef={editingAnnotationTextRef}
+          draftStroke={draftStroke}
+          draftStrokePathRef={draftStrokePathRef}
+          onItemMouseEnter={onItemMouseEnter}
+          onItemMouseLeave={onItemMouseLeave}
+          onItemClick={onItemClick}
+          onItemDoubleClick={onItemDoubleClick}
+          onItemPointerDown={onItemPointerDown}
+          onAnnotationTextChange={onAnnotationTextChange}
+          onAnnotationTextBlur={onAnnotationTextBlur}
+          getItemTargetRef={getItemTargetRef}
+        />
+        <CanvasRegionSelectionsLayer
+          items={items}
+          regions={regionSelections}
+          activeRegionId={activeRegionId}
+          getImageContent={getRegionImageContent}
+          onRegionClick={onRegionClick}
+          getItemTargetRef={getItemTargetRef}
+        />
+      </div>
+      <div data-canvas-screen-overlay="true" className="pointer-events-none absolute inset-0">
+        <CanvasConnectionPreviewLayer
+          canvasSize={canvasSize}
+          theme={themePalette}
+          connectionMode={connectionMode}
+          connectionPreviewPathRef={connectionPreviewPathRef}
+          frozenPreviewConnection={frozenPreviewConnection}
+          buildConnectionPath={buildConnectionPath}
+        />
+        {pendingConnectionMenu && (
+          <div className="pointer-events-none absolute inset-0 z-[110]">
+            <div
+              data-connection-create-menu="true"
+              className="workspace-menu-panel pointer-events-auto absolute overflow-hidden rounded-[26px]"
+              style={{
+                left: pendingMenuLeft,
+                top: pendingMenuTop,
+                width: 320,
+                minHeight: 198,
+                transform: `scale(${viewport.scale})`,
+                transformOrigin: 'top left',
+              }}
+              onPointerDown={onPendingMenuPointerDown}
+            >
+              <div className="p-3.5">
+                <div className="mb-2.5 px-1 text-xs font-medium tracking-[-0.01em] text-zinc-500/80">
+                  引用该节点生成
+                </div>
+                <div className="space-y-1.5">
+                  {CONNECTION_MENU_OPTIONS.map((option) => (
                     <CanvasActionMenuItem
                       key={option.id}
                       title={option.title}
@@ -4633,78 +5106,33 @@ const CanvasViewport = memo(function CanvasViewport({
                       Icon={option.icon}
                       onClick={() => onPendingMenuAction(option.id)}
                     />
-                  );
-                })}
+                  ))}
+                </div>
               </div>
             </div>
           </div>
-        </div>
-      )}
+        )}
+        <svg
+          ref={marqueeElementRef}
+          aria-hidden="true"
+          width="100%"
+          height="100%"
+          className="pointer-events-none invisible absolute inset-0 z-[100] overflow-hidden opacity-0"
+        >
+          <path
+            ref={marqueePathRef}
+            d=""
+            vectorEffect="non-scaling-stroke"
+            fill={themePalette.marqueeFill}
+            stroke={themePalette.marqueeStroke}
+            strokeWidth="1.25"
+            strokeDasharray="6 4"
+            shapeRendering="geometricPrecision"
+          />
+        </svg>
+      </div>
       {portaledSelectedTextCardPanel}
       {portaledSelectedImageCardPanel}
-      <CanvasNodesLayer
-        items={regularItems}
-        tool={tool}
-        connections={connections}
-        viewport={viewport}
-        multiSelectionBounds={multiSelectionBounds}
-        selectedIds={selectedIds}
-        selectedId={selectedId}
-        hoveredCanvasItemId={hoveredCanvasItemId}
-        activeCanvasTextGenerationItemIds={activeCanvasTextGenerationItemIds}
-        activeCanvasImageGenerationItemIds={activeCanvasImageGenerationItemIds}
-        activeCanvasTextGenerations={activeCanvasTextGenerations}
-        activeCanvasImageGenerations={activeCanvasImageGenerations}
-        generationClockMs={generationClockMs}
-        editingTextCardId={editingTextCardId}
-        editingTextCardTextareaRef={editingTextCardTextareaRef}
-        onImageCardOutputSelect={onImageCardOutputSelect}
-        onSelectionGroupPointerDown={onSelectionGroupPointerDown}
-        onItemMouseEnter={onItemMouseEnter}
-        onItemMouseLeave={onItemMouseLeave}
-        onItemClick={onItemClick}
-        onItemDoubleClick={onItemDoubleClick}
-        onItemPointerDown={onItemPointerDown}
-        onCornerResizePointerDown={onCornerResizePointerDown}
-        onManualTextCardInputChange={onManualTextCardInputChange}
-        onManualTextCardBlur={onManualTextCardBlur}
-      />
-      <CanvasAnnotationsLayer
-        items={items}
-        viewport={viewport}
-        selectedIds={selectedIds}
-        selectedId={selectedId}
-        hoveredCanvasItemId={hoveredCanvasItemId}
-        editingAnnotationTextId={editingAnnotationTextId}
-        editingAnnotationTextRef={editingAnnotationTextRef}
-        draftStroke={draftStroke}
-        onItemMouseEnter={onItemMouseEnter}
-        onItemMouseLeave={onItemMouseLeave}
-        onItemClick={onItemClick}
-        onItemDoubleClick={onItemDoubleClick}
-        onItemPointerDown={onItemPointerDown}
-        onAnnotationTextChange={onAnnotationTextChange}
-        onAnnotationTextBlur={onAnnotationTextBlur}
-      />
-      <CanvasRegionSelectionsLayer
-        items={items}
-        regions={regionSelections}
-        viewport={viewport}
-        activeRegionId={activeRegionId}
-        getImageContent={getRegionImageContent}
-        onRegionClick={onRegionClick}
-      />
-      {isMarqueeSelecting && marqueeRect && (
-        <div
-          className="absolute z-[100] pointer-events-none border border-dashed border-white/35 bg-white/5"
-          style={{
-            left: marqueeRect.x,
-            top: marqueeRect.y,
-            width: marqueeRect.width,
-            height: marqueeRect.height,
-          }}
-        />
-      )}
     </div>
   );
 });
@@ -4844,7 +5272,7 @@ const MarkdownMessage = memo(function MarkdownMessage({
             const isCopied = copiedCodeBlockId === codeBlockId;
 
             return (
-              <div className="group relative mt-4 first:mt-0">
+              <div className="group relative mt-4 first:mt-0" data-gsap-hover-root="true" data-gsap-no-scale="true">
                 <button
                   type="button"
                   onPointerDown={(e) => {
@@ -4857,7 +5285,8 @@ const MarkdownMessage = memo(function MarkdownMessage({
                     e.stopPropagation();
                     void handleCopyCodeBlock(codeBlockId, codeText);
                   }}
-                  className="workspace-control-chip absolute right-3 top-1/2 z-[2] inline-flex h-7 -translate-y-1/2 items-center gap-1 rounded-lg px-2 text-[11px] opacity-70 transition-opacity duration-200 hover:opacity-100 group-hover:opacity-100"
+                  className="workspace-control-chip absolute right-3 top-1/2 z-[2] inline-flex h-7 -translate-y-1/2 items-center gap-1 rounded-lg px-2 text-[11px] opacity-70"
+                  data-gsap-hover-alpha="0.7,1"
                   aria-label="复制代码块"
                   title="复制代码块"
                 >
@@ -5111,10 +5540,10 @@ function CanvasActionMenuItem({
         e.stopPropagation();
       }}
       onClick={onClick}
-      className={`workspace-menu-item group flex min-h-[68px] w-full items-center gap-2.5 rounded-[20px] border border-transparent px-3 py-2.5 text-left duration-200 ${disabled ? 'is-disabled' : ''}`}
+      className={`workspace-menu-item group flex min-h-[68px] w-full items-center gap-2.5 rounded-[20px] border border-transparent px-3 py-2.5 text-left  ${disabled ? 'is-disabled' : ''}`}
     >
       <div
-        className="workspace-menu-icon flex h-12 w-12 shrink-0 items-center justify-center rounded-[11px] transition-colors duration-200"
+        className="workspace-menu-icon flex h-12 w-12 shrink-0 items-center justify-center rounded-[11px]  "
       >
         <Icon size={21} strokeWidth={2} />
       </div>
@@ -5124,7 +5553,7 @@ function CanvasActionMenuItem({
             className={`min-w-0 text-[16px] font-medium tracking-[-0.03em] ${
               disabled
                 ? 'workspace-text-soft'
-                : 'workspace-text-primary absolute left-0 top-1/2 -translate-y-1/2 transition-transform duration-200 ease-out group-hover:-translate-y-[18px]'
+                : 'workspace-text-primary absolute left-0 top-1/2 -translate-y-1/2 group-hover:-translate-y-[18px]'
             }`}
           >
             {title}
@@ -5133,7 +5562,7 @@ function CanvasActionMenuItem({
             className={`workspace-text-muted min-w-0 whitespace-normal break-words text-[11px] font-medium tracking-[-0.01em] ${
               disabled
                 ? ''
-                : 'pointer-events-none absolute left-0 top-[22px] opacity-0 transition-[opacity,transform] duration-200 ease-out translate-y-1 group-hover:translate-y-0 group-hover:opacity-100'
+                : 'pointer-events-none absolute left-0 top-[22px] translate-y-1 opacity-0 group-hover:translate-y-0 group-hover:opacity-100'
             }`}
           >
             {description}
@@ -5175,9 +5604,26 @@ export default function AIWorkspace() {
   const { theme, toggleTheme } = useWorkspaceTheme();
   const themePalette = WORKSPACE_THEME_PALETTES[theme];
   const editorShellRef = useRef<HTMLDivElement | null>(null);
+  const { contextSafe: workspaceContextSafe } = useGSAP({ scope: editorShellRef });
+  const zoomControlRef = useRef<HTMLDivElement | null>(null);
+  const zoomMenuRef = useRef<HTMLDivElement | null>(null);
+  const setZoomMenuOpen = useCallback((open: boolean) => {
+    const menu = zoomMenuRef.current;
+    if (!menu) return;
+    menu.style.opacity = open ? '1' : '0';
+    menu.style.visibility = open ? 'visible' : 'hidden';
+    menu.style.pointerEvents = open ? 'auto' : 'none';
+  }, []);
   const chatPanelRef = useRef<HTMLDivElement | null>(null);
-  const chatPanelReserveRef = useRef({ width: CANVAS_CHAT_PANEL_RESERVED_WIDTH });
-  const chatPanelToolbarReserveRef = useRef({ width: CANVAS_CHAT_PANEL_RESERVED_WIDTH });
+  const chatPanelOpenButtonRef = useRef<HTMLDivElement | null>(null);
+  const chatPanelTimelineRef = useRef<gsap.core.Timeline | null>(null);
+  const chatPanelMotionControllerRef = useRef<ChatPanelMotionController | null>(null);
+  const chatPanelMotionFrameRef = useRef<number | null>(null);
+  const chatPanelMotionPerformanceRef = useRef<ChatPanelMotionPerformanceTrace | null>(null);
+  const chatPanelCollapsedRef = useRef(false);
+  const canvasBottomToolbarMotionRef = useRef<HTMLDivElement | null>(null);
+  const chatSafeAreaWidthRef = useRef(0);
+  const chatPanelIsDesktopRef = useRef(true);
   const [viewMode, setViewMode] = useState<'gallery' | 'editor'>('gallery');
   const [tool, setTool] = useState<Tool>('select');
   const [annotationColor, setAnnotationColor] = useState(DEFAULT_ANNOTATION_COLOR);
@@ -5192,61 +5638,119 @@ export default function AIWorkspace() {
   const [hoveredOutputPortItemId, setHoveredOutputPortItemId] = useState<string | null>(null);
   const [connectionMode, setConnectionMode] = useState<ConnectionMode>('idle');
   const [connectionFromItemId, setConnectionFromItemId] = useState<string | null>(null);
-  const [connectionPoint, setConnectionPoint] = useState<{ x: number; y: number } | null>(null);
   const [connectionPointerId, setConnectionPointerId] = useState<number | null>(null);
   const [frozenPreviewConnection, setFrozenPreviewConnection] = useState<FrozenPreviewConnection | null>(null);
   const [pendingConnectionMenu, setPendingConnectionMenu] = useState<PendingConnectionMenu | null>(null);
-  const [magneticPorts, setMagneticPorts] = useState<MagneticPortMap>({});
+  const [activeCanvasImageIds, setActiveCanvasImageIds] = useState<Set<string>>(() => new Set());
   const [viewport, setViewportState] = useState({ x: 0, y: 0, scale: 1 });
-  const [isDragging, setIsDragging] = useState(false);
-  const [isPanning, setIsPanning] = useState(false);
-  const [isCornerResizing, setIsCornerResizing] = useState(false);
+  const canvasInteractionPhaseRef = useRef<CanvasInteractionPhase>('idle');
+  const isCornerResizingRef = useRef(false);
   const [isSpacePressed, setIsSpacePressed] = useState(false);
-  const [isMarqueeSelecting, setIsMarqueeSelecting] = useState(false);
-  const [marqueeRect, setMarqueeRect] = useState<{ x: number; y: number; width: number; height: number } | null>(null);
+  const marqueeVisualRectRef = useRef<{ x: number; y: number; width: number; height: number } | null>(null);
+  const marqueeSvgRef = useRef<SVGSVGElement | null>(null);
+  const marqueePathRef = useRef<SVGPathElement | null>(null);
   const [connections, setConnectionsState] = useState<Connection[]>([]);
   const [selectedConnectionIds, setSelectedConnectionIds] = useState<string[]>([]);
-  const [connectionSnapTargetId, setConnectionSnapTargetId] = useState<string | null>(null);
   const dragStart = useRef({ x: 0, y: 0 });
-  const panStartOffset = useRef({ x: 0, y: 0 });
-  const latestInteractionPointerRef = useRef<{ x: number; y: number } | null>(null);
-  const interactionFrameRef = useRef<number | null>(null);
-  const zoomAnimationFrameRef = useRef<number | null>(null);
-  const viewportAnimationFrameRef = useRef<number | null>(null);
+  const panStartViewportRef = useRef<ViewportState>({ x: 0, y: 0, scale: 1 });
+  const isPanningRef = useRef(false);
+  const isDraggingRef = useRef(false);
+  const isAltCopyDragRef = useRef(false);
+  const altDragPrimarySourceIdRef = useRef<string | null>(null);
+  const activeItemDragTokenRef = useRef<number | null>(null);
+  const canvasItemDragTransactionRef = useRef<DirectItemDragSession | null>(null);
+  const canvasItemDragPreviewRef = useRef<CanvasItemDragPreviewState | null>(null);
+  const canvasItemDragConnectionFrameRef = useRef<number | null>(null);
+  const canvasItemDragConnectionPrepareFrameRef = useRef<number | null>(null);
+  const refreshDirectItemConnectionPathsRef = useRef<(
+    itemId: string,
+    geometry?: { width: number; height: number }
+  ) => void>(() => {});
+  const canvasItemDragPresentationRef = useRef(new Map<HTMLElement, {
+    zIndex: string;
+    willChange: string;
+  }>());
+  const clearCanvasItemDragPreviewRef = useRef<(
+    restoreConnectionPaths?: boolean
+  ) => void>(() => {});
+  const canvasConnectionRuntimeIndexRef = useRef<CanvasConnectionRuntimeIndex>(new Map());
   const viewportRef = useRef({ x: 0, y: 0, scale: 1 });
+  const visualViewportRef = useRef({ x: 0, y: 0, scale: 1 });
+  const renderedViewportRef = useRef({ x: 0, y: 0, scale: 1 });
   const itemsRef = useRef<CanvasItem[]>([]);
+  const itemByIdRef = useRef(new Map<string, CanvasItem>());
+  const renderedItemsByIdRef = useRef(new Map<string, CanvasItem>());
+  const connectionPreviewPathRef = useRef<SVGPathElement | null>(null);
+  const activeCanvasImageIdsRef = useRef(new Set<string>());
+  const canvasImageReleaseTimersRef = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  const pendingCanvasCommitRef = useRef<CanvasCommitBuffer | null>(null);
+  const pendingCanvasCommitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingCanvasCommitIdleRef = useRef<number | null>(null);
+  const pendingCanvasCommitIdleKindRef = useRef<'idle' | 'frame' | null>(null);
+  const pendingCanvasCommitRevisionRef = useRef(0);
+  const pendingCanvasCommitLayoutMeasureRef = useRef<{
+    revision: number;
+    reason: string;
+    startedAt: number;
+    commitDuringInteraction: boolean;
+    commitDuringInteractionCount: number;
+  } | null>(null);
+  const canvasCommitDuringInteractionCountRef = useRef(0);
+  const pendingCanvasNextInputMeasureRef = useRef<{
+    kind: string;
+    startedAt: number;
+  } | null>(null);
+  const pendingCanvasOverlayMountMeasureRef = useRef<{
+    itemId: string;
+    startedAt: number;
+    releasedAt: number;
+    firstDragVisualAt: number | null;
+    selectionReactCommitDuringInteractionCount: number;
+  } | null>(null);
+  const pendingCanvasOverlayMountFrameRef = useRef<number | null>(null);
+  const pendingCanvasSelectionFinalizeFrameRef = useRef<number | null>(null);
+  const cancelPendingCanvasSelectionFinalizeRef = useRef<() => void>(() => {});
+  const canvasOverlaySyncWriteCountRef = useRef(0);
+  const canvasOverlayReactCommitDuringInteractionCountRef = useRef(0);
+  const canvasPerformanceEnabledRef = useRef(false);
+  const interactionCommitTokenRef = useRef(0);
   const selectedIdRef = useRef<string | null>(null);
+  const selectedIdsRef = useRef<string[]>([]);
+  const canvasDomSelectedIdsRef = useRef<string[]>([]);
+  const selectedConnectionIdsRef = useRef<string[]>([]);
+  const pendingCanvasSelectionGestureRef = useRef<PendingCanvasSelectionGesture | null>(null);
+  const finalizeCanvasSelectionGestureRef = useRef<(
+    options: FinalizeCanvasSelectionGestureOptions
+  ) => void>(() => {});
+  const restoreCanvasSelectionGestureRef = useRef<() => void>(() => {});
+  const canvasSelectionReactCommitDuringInteractionCountRef = useRef(0);
   const reducedMotionRef = useRef(false);
   const dragItemStartPositionsRef = useRef<Record<string, { x: number; y: number }>>({});
-  const wheelZoomTargetRef = useRef<{ scale: number; anchor: { x: number; y: number } | undefined } | null>(null);
-  const viewportAnimationTargetRef = useRef<{
-    from: { x: number; y: number; scale: number };
-    to: { x: number; y: number; scale: number };
-    startedAt: number;
-    duration: number;
-  } | null>(null);
-  const marqueeStartRef = useRef<{ x: number; y: number } | null>(null);
+  const cornerResizePreviewRef = useRef<CornerResizePreview | null>(null);
+  const panMotionRef = useRef<CanvasPanMotion | null>(null);
+  const pendingViewportIdleCommitTokenRef = useRef<number | null>(null);
+  const panReactViewportCommitCountRef = useRef(0);
+  const panOverlayStateActiveRef = useRef(false);
+  const viewportTweenRef = useRef<NativeViewportAnimation | null>(null);
+  const animateViewportToRef = useRef<(viewport: ViewportState) => void>(() => {});
+  const marqueeSessionRef = useRef<CanvasMarqueeSession | null>(null);
   const draggingItemIdsRef = useRef<string[]>([]);
-  const magneticPortResetTimerRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
-  const cornerResizeStart = useRef<{
-    mouseX: number;
-    mouseY: number;
-    width: number;
-    height: number;
-    itemId: string;
-  } | null>(null);
-  const marqueeToggleModeRef = useRef(false);
   const draftStrokeRef = useRef<DraftStroke | null>(null);
+  const draftStrokePathRef = useRef<SVGPathElement | null>(null);
+  const regionDraftVisualRef = useRef<RegionDraftVisualController | null>(null);
   const editingAnnotationTextRef = useRef<HTMLTextAreaElement | null>(null);
   const connectionDragMovedRef = useRef(false);
   const connectionSessionRef = useRef<ConnectionSession | null>(null);
-  const detachConnectionWindowListenersRef = useRef<(() => void) | null>(null);
+  const connectionSnapTargetVisualRef = useRef<ConnectionSnapTargetVisual | null>(null);
+  const clearConnectionSnapTargetVisualRef = useRef<() => void>(() => {});
+  const clearConnectionInteractionStateRef = useRef<() => void>(() => {});
   
   const [chatInput, setChatInput] = useState('');
   const [chatInputRows, setChatInputRows] = useState(1);
   const [chatMessages, setChatMessagesState] = useState<ChatMessage[]>([]);
   const [visibleChatMessageLimit, setVisibleChatMessageLimit] = useState(80);
   const attemptedLegacyChatReferenceMigrationsRef = useRef(new Set<string>());
+  const attemptedLegacyCanvasImageMigrationsRef = useRef(new Set<string>());
   const [activeAgentRunMarker, setActiveAgentRunMarker] = useState<ProjectSession['activeAgentRun']>(undefined);
   const activeAgentRunMarkerRef = useRef<ProjectSession['activeAgentRun']>(undefined);
   const [interruptedRunRecoveryPending, setInterruptedRunRecoveryPending] = useState(false);
@@ -5262,8 +5766,6 @@ export default function AIWorkspace() {
   const [canvasImageGenerationErrorById, setCanvasImageGenerationErrorById] = useState<Record<string, string>>({});
   const [hasStartedChat, setHasStartedChat] = useState(false);
   const [showAvatarMenu, setShowAvatarMenu] = useState(false);
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [chatPanelOpening, setChatPanelOpening] = useState(false);
   const [activeSkill, setActiveSkillState] = useState<{ id: string; label: string } | null>(null);
   const [generationMode, setGenerationMode] = useState<GenerationMode>(PROMPT_PIPELINE_AGENT_ENABLED ? 'agent' : 'chat');
   const [chatProviderId, setChatProviderIdState] = useState('');
@@ -5330,97 +5832,184 @@ export default function AIWorkspace() {
     return () => controller.abort();
   }, []);
 
-  const getChatPanelTargetReservedWidth = useCallback((collapsed: boolean) => {
-    if (collapsed || typeof window === 'undefined' || typeof window.matchMedia !== 'function') return 0;
-    return window.matchMedia('(min-width: 640px)').matches ? CANVAS_CHAT_PANEL_RESERVED_WIDTH : 0;
-  }, []);
-
-  const setChatPanelReservedWidth = useCallback((width: number) => {
-    const nextWidth = Math.max(0, Math.min(CANVAS_CHAT_PANEL_RESERVED_WIDTH, width));
-    chatPanelReserveRef.current.width = nextWidth;
-    editorShellRef.current?.style.setProperty('--chat-panel-reserved-width', `${nextWidth}px`);
-  }, []);
-
-  const setChatPanelToolbarReservedWidth = useCallback((width: number) => {
-    const nextWidth = Math.max(0, Math.min(CANVAS_CHAT_PANEL_RESERVED_WIDTH, width));
-    chatPanelToolbarReserveRef.current.width = nextWidth;
-    editorShellRef.current?.style.setProperty('--chat-panel-toolbar-reserved-width', `${nextWidth}px`);
-  }, []);
-
   useGSAP(
     () => {
       const panel = chatPanelRef.current;
-      if (!panel) return;
+      const toolbar = canvasBottomToolbarMotionRef.current;
+      const openButton = chatPanelOpenButtonRef.current;
+      if (viewMode !== 'editor' || !panel || !toolbar || !openButton) return;
 
-      const targetReservedWidth = getChatPanelTargetReservedWidth(sidebarCollapsed);
-      const targetXPercent = sidebarCollapsed ? 100 : 0;
-      const duration = sidebarCollapsed ? CHAT_PANEL_GSAP_CLOSE_DURATION : CHAT_PANEL_GSAP_OPEN_DURATION;
-
-      if (sidebarCollapsed || targetReservedWidth === 0) {
-        setChatPanelReservedWidth(targetReservedWidth);
-      }
-
-      if (reducedMotionRef.current) {
-        gsap.set(panel, { xPercent: targetXPercent });
-        setChatPanelReservedWidth(targetReservedWidth);
-        setChatPanelToolbarReservedWidth(targetReservedWidth);
-        setChatPanelOpening(false);
-        return;
-      }
-
-      const toolbarReserve = { width: chatPanelToolbarReserveRef.current.width };
+      const desktopQuery = window.matchMedia('(min-width: 640px)');
+      chatPanelIsDesktopRef.current = desktopQuery.matches;
       const timeline = gsap.timeline({
+        paused: true,
         defaults: {
-          duration,
+          duration: CHAT_PANEL_GSAP_OPEN_DURATION,
           ease: CHAT_PANEL_GSAP_EASE,
           overwrite: 'auto',
         },
-        onComplete: () => {
-          setChatPanelReservedWidth(targetReservedWidth);
-          setChatPanelToolbarReservedWidth(targetReservedWidth);
-          setChatPanelOpening(false);
-        },
       });
 
-      timeline.to(panel, { xPercent: targetXPercent }, 0);
-      timeline.to(
-        toolbarReserve,
-        {
-          width: targetReservedWidth,
-          onUpdate: () => setChatPanelToolbarReservedWidth(toolbarReserve.width),
+      timeline
+        .fromTo(panel, { xPercent: 100 }, { xPercent: 0, force3D: true }, 0)
+        .fromTo(
+          toolbar,
+          { x: 0 },
+          {
+            x: () => chatPanelIsDesktopRef.current ? -CANVAS_CHAT_PANEL_RESERVED_WIDTH / 2 : 0,
+            force3D: true,
+          },
+          0
+        )
+        .fromTo(
+          openButton,
+          { autoAlpha: 1 },
+          { autoAlpha: 0, duration: 0.12, ease: 'none', overwrite: 'auto' },
+          0
+        );
+
+      const setElementState = (collapsed: boolean) => {
+        panel.setAttribute('aria-hidden', String(collapsed));
+        panel.style.pointerEvents = collapsed ? 'none' : 'auto';
+        panel.style.visibility = collapsed ? 'hidden' : 'visible';
+        openButton.setAttribute('aria-hidden', String(!collapsed));
+        openButton.style.pointerEvents = collapsed ? 'auto' : 'none';
+        openButton.style.visibility = collapsed ? 'visible' : 'hidden';
+      };
+      const clearMotionHints = () => {
+        panel.style.willChange = '';
+        toolbar.style.willChange = '';
+        openButton.style.willChange = '';
+      };
+      const finishPerformanceTrace = (interrupted = false) => {
+        const trace = chatPanelMotionPerformanceRef.current;
+        if (!trace) return;
+        gsap.ticker.remove(trace.ticker);
+        chatPanelMotionPerformanceRef.current = null;
+        console.info('[chat-panel-perf]', {
+          direction: trace.targetCollapsed ? 'close' : 'open',
+          durationMs: performance.now() - trace.startedAt,
+          maxFrameIntervalMs: trace.maxFrameIntervalMs,
+          frameCount: trace.frameCount,
+          longFrameCount: trace.longFrameCount,
+          interrupted,
+        });
+      };
+      const startPerformanceTrace = (targetCollapsed: boolean) => {
+        finishPerformanceTrace(true);
+        if (!isCanvasPerformanceEnabled()) return;
+        const trace: ChatPanelMotionPerformanceTrace = {
+          targetCollapsed,
+          startedAt: performance.now(),
+          maxFrameIntervalMs: 0,
+          frameCount: 0,
+          longFrameCount: 0,
+          ticker: (_time, deltaTime) => {
+            trace.frameCount += 1;
+            trace.maxFrameIntervalMs = Math.max(trace.maxFrameIntervalMs, deltaTime);
+            if (deltaTime > 50) trace.longFrameCount += 1;
+          },
+        };
+        chatPanelMotionPerformanceRef.current = trace;
+        gsap.ticker.add(trace.ticker);
+      };
+      const settle = (collapsed: boolean) => {
+        if (chatPanelCollapsedRef.current !== collapsed) return;
+        finishPerformanceTrace(false);
+        clearMotionHints();
+        setElementState(collapsed);
+      };
+      const syncEndpoint = () => {
+        const collapsed = chatPanelCollapsedRef.current;
+        chatSafeAreaWidthRef.current = collapsed || !chatPanelIsDesktopRef.current
+          ? 0
+          : CANVAS_CHAT_PANEL_RESERVED_WIDTH;
+        timeline.invalidate().progress(collapsed ? 0 : 1, true).pause();
+        settle(collapsed);
+      };
+      const moveTo = (collapsed: boolean) => {
+        startPerformanceTrace(collapsed);
+        chatPanelCollapsedRef.current = collapsed;
+        chatSafeAreaWidthRef.current = collapsed || !chatPanelIsDesktopRef.current
+          ? 0
+          : CANVAS_CHAT_PANEL_RESERVED_WIDTH;
+        if (chatPanelMotionFrameRef.current !== null) {
+          cancelAnimationFrame(chatPanelMotionFrameRef.current);
+          chatPanelMotionFrameRef.current = null;
+        }
+
+        panel.style.visibility = 'visible';
+        panel.style.pointerEvents = collapsed ? 'none' : 'auto';
+        panel.setAttribute('aria-hidden', String(collapsed));
+        openButton.style.visibility = 'visible';
+        openButton.style.pointerEvents = 'none';
+        openButton.setAttribute('aria-hidden', 'true');
+        panel.style.willChange = 'transform';
+        toolbar.style.willChange = 'transform';
+        openButton.style.willChange = 'opacity';
+
+        const targetProgress = collapsed ? 0 : 1;
+        if (
+          reducedMotionRef.current ||
+          Math.abs(timeline.progress() - targetProgress) <= 0.001
+        ) {
+          timeline.progress(targetProgress, true).pause();
+          settle(collapsed);
+          return;
+        }
+        chatPanelMotionFrameRef.current = requestAnimationFrame(() => {
+          chatPanelMotionFrameRef.current = null;
+          if (chatPanelCollapsedRef.current !== collapsed) return;
+          if (collapsed) {
+            timeline
+              .timeScale(CHAT_PANEL_GSAP_OPEN_DURATION / CHAT_PANEL_GSAP_CLOSE_DURATION)
+              .reverse();
+          } else {
+            timeline.timeScale(1).play();
+          }
+        });
+      };
+
+      timeline.eventCallback('onComplete', () => settle(false));
+      timeline.eventCallback('onReverseComplete', () => settle(true));
+      timeline.progress(chatPanelCollapsedRef.current ? 0 : 1, true).pause();
+      chatPanelTimelineRef.current = timeline;
+      chatPanelMotionControllerRef.current = {
+        open: () => moveTo(false),
+        close: () => moveTo(true),
+        syncBreakpoint: (isDesktop: boolean) => {
+          chatPanelIsDesktopRef.current = isDesktop;
+          syncEndpoint();
         },
-        0
-      );
+        isCollapsed: () => chatPanelCollapsedRef.current,
+      };
+      syncEndpoint();
+
+      const handleDesktopChange = (event: MediaQueryListEvent) => {
+        chatPanelMotionControllerRef.current?.syncBreakpoint(event.matches);
+      };
+      desktopQuery.addEventListener('change', handleDesktopChange);
 
       return () => {
+        desktopQuery.removeEventListener('change', handleDesktopChange);
+        if (chatPanelMotionFrameRef.current !== null) {
+          cancelAnimationFrame(chatPanelMotionFrameRef.current);
+          chatPanelMotionFrameRef.current = null;
+        }
+        finishPerformanceTrace(true);
+        clearMotionHints();
+        chatPanelMotionControllerRef.current = null;
+        chatPanelTimelineRef.current = null;
         timeline.kill();
       };
     },
     {
-      dependencies: [
-        getChatPanelTargetReservedWidth,
-        sidebarCollapsed,
-        setChatPanelReservedWidth,
-        setChatPanelToolbarReservedWidth,
-      ],
+      dependencies: [viewMode],
       scope: editorShellRef,
+      revertOnUpdate: true,
     }
   );
 
-  useEffect(() => {
-    if (typeof window === 'undefined') return;
-    const handleResize = () => {
-      if (!sidebarCollapsed) {
-        const nextReservedWidth = getChatPanelTargetReservedWidth(false);
-        setChatPanelReservedWidth(nextReservedWidth);
-        setChatPanelToolbarReservedWidth(nextReservedWidth);
-      }
-    };
-    window.addEventListener('resize', handleResize);
-    return () => {
-      window.removeEventListener('resize', handleResize);
-    };
-  }, [getChatPanelTargetReservedWidth, setChatPanelReservedWidth, setChatPanelToolbarReservedWidth, sidebarCollapsed]);
   const [dragOverPanelReference, setDragOverPanelReference] = useState<{
     targetItemId: string;
     sourceItemId: string;
@@ -5486,6 +6075,117 @@ export default function AIWorkspace() {
   const modelPreferenceButtonRef = useRef<HTMLButtonElement>(null);
   const textPanelModelMenuRef = useRef<HTMLDivElement>(null);
   const canvasRef = useRef<HTMLDivElement>(null);
+  const updateCanvasInteractionPhase = useCallback((phase: CanvasInteractionPhase) => {
+    if (canvasInteractionPhaseRef.current === phase) return;
+    canvasInteractionPhaseRef.current = phase;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    if (phase === 'idle') delete canvas.dataset.canvasInteraction;
+    else canvas.dataset.canvasInteraction = phase;
+  }, []);
+  const setCanvasConnectionHitTestingDisabled = useCallback((disabled: boolean) => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    if (disabled) canvas.dataset.canvasConnectionHitTesting = 'disabled';
+    else delete canvas.dataset.canvasConnectionHitTesting;
+  }, []);
+  const canvasSceneRef = useRef<HTMLDivElement>(null);
+  const canvasMetricsRef = useRef<CanvasMetrics>({ left: 0, top: 0, width: 0, height: 0 });
+  const [canvasSize, setCanvasSize] = useState<CanvasSize>({ width: 0, height: 0 });
+  const {
+    registerScene,
+    getItemTargetRef,
+    getSelectionGroupRef,
+    getConnectionPathRef,
+    getViewportOverlayRef,
+    getItemTargets,
+    getConnectionPaths,
+    getViewportOverlay,
+    getSceneTarget,
+    setHoveredItem,
+    startPointerSession,
+    setPointerSessionMode,
+    isManagedPointer,
+    hasActivePointerSession,
+    cancelInteraction,
+    markLayoutCommitted,
+  } = useCanvasInteractionController(canvasRef);
+  const setCanvasSceneRef = useCallback((element: HTMLDivElement | null) => {
+    canvasSceneRef.current = element;
+    registerScene(element);
+    if (!element) return;
+    const activeViewport = visualViewportRef.current;
+    getSceneTarget()?.setViewportTransform(activeViewport.x, activeViewport.y, activeViewport.scale);
+  }, [getSceneTarget, registerScene]);
+  const setMarqueeElementRef = useCallback((element: SVGSVGElement | null) => {
+    marqueeSvgRef.current = element;
+    if (!element) return;
+    const visible = Boolean(marqueeSessionRef.current?.activated);
+    element.style.opacity = visible ? '1' : '0';
+    element.style.visibility = visible ? 'visible' : 'hidden';
+  }, []);
+  const setMarqueePathRef = useCallback((element: SVGPathElement | null) => {
+    marqueePathRef.current = element;
+    if (!element) return;
+    const rect = marqueeVisualRectRef.current;
+    element.setAttribute('d', rect ? getCanvasMarqueePath(rect) : '');
+  }, []);
+  const hideMarqueeVisual = useCallback(() => {
+    const element = marqueeSvgRef.current;
+    if (element) {
+      element.style.opacity = '0';
+      element.style.visibility = 'hidden';
+    }
+    marqueePathRef.current?.setAttribute('d', '');
+    marqueeVisualRectRef.current = null;
+    marqueeSessionRef.current = null;
+    if (canvasInteractionPhaseRef.current === 'marquee') {
+      updateCanvasInteractionPhase('idle');
+    }
+  }, [updateCanvasInteractionPhase]);
+  const getRegionDraftVisualController = useCallback(() => {
+    const cached = regionDraftVisualRef.current;
+    if (cached?.root.isConnected) return cached;
+    const root = canvasRef.current?.querySelector<HTMLElement>('[data-region-draft="true"]');
+    const marker = root?.querySelector<HTMLElement>('[data-region-draft-marker="true"]');
+    const box = root?.querySelector<HTMLElement>('[data-region-draft-box="true"]');
+    if (!root || !marker || !box) return null;
+    let markerX = 0;
+    let markerY = 0;
+    let boxX = 0;
+    let boxY = 0;
+    let boxScaleX = 1;
+    let boxScaleY = 1;
+    const writeMarkerTransform = () => {
+      marker.style.transform = `translate3d(${markerX}px, ${markerY}px, 0)`;
+    };
+    const writeBoxTransform = () => {
+      box.style.transform = `translate3d(${boxX}px, ${boxY}px, 0) scale(${boxScaleX}, ${boxScaleY})`;
+    };
+    const controller: RegionDraftVisualController = {
+      root,
+      setMarkerX: (value) => { markerX = value; writeMarkerTransform(); },
+      setMarkerY: (value) => { markerY = value; writeMarkerTransform(); },
+      setBoxX: (value) => { boxX = value; writeBoxTransform(); },
+      setBoxY: (value) => { boxY = value; writeBoxTransform(); },
+      setBoxScaleX: (value) => { boxScaleX = value; writeBoxTransform(); },
+      setBoxScaleY: (value) => { boxScaleY = value; writeBoxTransform(); },
+    };
+    marker.style.opacity = '1';
+    marker.style.visibility = 'visible';
+    box.style.opacity = '1';
+    box.style.visibility = 'visible';
+    regionDraftVisualRef.current = controller;
+    return controller;
+  }, []);
+  const handleCanvasMetricsChange = useCallback((metrics: CanvasMetrics) => {
+    canvasMetricsRef.current = metrics;
+    setCanvasSize((previous) => (
+      previous.width === metrics.width && previous.height === metrics.height
+        ? previous
+        : { width: metrics.width, height: metrics.height }
+    ));
+  }, []);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const chatFileInputRef = useRef<HTMLInputElement>(null);
   const chatInputEditorRef = useRef<HTMLDivElement>(null);
@@ -5496,7 +6196,7 @@ export default function AIWorkspace() {
   const [isChatNearBottom, setIsChatNearBottom] = useState(true);
   const isChatNearBottomRef = useRef(true);
   const isProgrammaticChatScrollRef = useRef(false);
-  const programmaticChatScrollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const chatScrollTweenRef = useRef<gsap.core.Tween | null>(null);
   const activeSkillJobMessageIdRef = useRef<string | null>(null);
   const generateAbortRef = useRef<AbortController | null>(null);
   const isGeneratingRef = useRef(false);
@@ -5509,10 +6209,12 @@ export default function AIWorkspace() {
   const processedSkillJobUrlsRef = useRef<Set<string>>(new Set());
   const processedSkillChoiceIdsRef = useRef<Set<string>>(new Set());
   const streamQueueRef = useRef('');
-  const streamTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const streamTickerRef = useRef<((time: number) => void) | null>(null);
+  const streamTickerLastTimeRef = useRef(0);
   const streamMessageIdRef = useRef<string | null>(null);
   const pendingAssistantMessageIdRef = useRef<string | null>(null);
   const currentSessionIdRef = useRef<string | null>(null);
+  const scheduleCurrentSessionSaveRef = useRef<() => void>(() => {});
   const canvasHistoryBySessionRef = useRef<Record<string, SessionCanvasHistoryState>>({});
   const pendingCanvasHistorySnapshotRef = useRef<CanvasUndoSnapshot | null>(null);
   const suppressNextItemClickRef = useRef<string | null>(null);
@@ -5521,6 +6223,13 @@ export default function AIWorkspace() {
   const isHydratingSessionRef = useRef(false);
   const imageToolbarNoticeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const modelSelectionNoticeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => () => {
+    if (streamTickerRef.current) {
+      gsap.ticker.remove(streamTickerRef.current);
+      streamTickerRef.current = null;
+    }
+  }, []);
 
   const updateChatNearBottomState = useCallback(() => {
     const container = chatContainerRef.current;
@@ -5534,29 +6243,37 @@ export default function AIWorkspace() {
     return nextIsNearBottom;
   }, []);
 
-  const scrollChatToBottom = useCallback((behavior?: ScrollBehavior) => {
+  const scrollChatToBottom = useCallback(workspaceContextSafe((behavior?: ScrollBehavior) => {
     const container = chatContainerRef.current;
     if (!container) return;
     const resolvedBehavior = behavior || (reducedMotionRef.current ? 'auto' : 'smooth');
     isChatNearBottomRef.current = true;
     setIsChatNearBottom(true);
-    if (programmaticChatScrollTimerRef.current) {
-      clearTimeout(programmaticChatScrollTimerRef.current);
-      programmaticChatScrollTimerRef.current = null;
-    }
+    chatScrollTweenRef.current?.kill();
+    chatScrollTweenRef.current = null;
     isProgrammaticChatScrollRef.current = resolvedBehavior === 'smooth';
-    container.scrollTo({
-      top: container.scrollHeight,
-      behavior: resolvedBehavior,
-    });
     if (resolvedBehavior === 'smooth') {
-      programmaticChatScrollTimerRef.current = setTimeout(() => {
-        isProgrammaticChatScrollRef.current = false;
-        programmaticChatScrollTimerRef.current = null;
-        updateChatNearBottomState();
-      }, 500);
+      chatScrollTweenRef.current = gsap.to(container, {
+        scrollTo: { y: 'max' },
+        duration: 0.36,
+        ease: 'power2.out',
+        overwrite: 'auto',
+        onComplete: () => {
+          chatScrollTweenRef.current = null;
+          isProgrammaticChatScrollRef.current = false;
+          updateChatNearBottomState();
+        },
+        onInterrupt: () => {
+          chatScrollTweenRef.current = null;
+          isProgrammaticChatScrollRef.current = false;
+        },
+      });
+    } else {
+      gsap.set(container, { scrollTo: { y: 'max' } });
+      isProgrammaticChatScrollRef.current = false;
+      updateChatNearBottomState();
     }
-  }, [updateChatNearBottomState]);
+  }), [updateChatNearBottomState, workspaceContextSafe]);
 
   const handleChatContainerScroll = useCallback(() => {
     if (isProgrammaticChatScrollRef.current) return;
@@ -5564,19 +6281,18 @@ export default function AIWorkspace() {
   }, [updateChatNearBottomState]);
 
   const cancelProgrammaticChatScroll = useCallback(() => {
-    if (programmaticChatScrollTimerRef.current) {
-      clearTimeout(programmaticChatScrollTimerRef.current);
-      programmaticChatScrollTimerRef.current = null;
-    }
+    chatScrollTweenRef.current?.kill();
+    chatScrollTweenRef.current = null;
     if (!isProgrammaticChatScrollRef.current) return;
     isProgrammaticChatScrollRef.current = false;
-    window.requestAnimationFrame(updateChatNearBottomState);
+    gsap.ticker.add(function syncChatScrollState() {
+      gsap.ticker.remove(syncChatScrollState);
+      updateChatNearBottomState();
+    });
   }, [updateChatNearBottomState]);
 
   useEffect(() => () => {
-    if (programmaticChatScrollTimerRef.current) {
-      clearTimeout(programmaticChatScrollTimerRef.current);
-    }
+    chatScrollTweenRef.current?.kill();
   }, []);
   const canvasClipboardRef = useRef<{
     snapshot: CanvasClipboardSnapshot | null;
@@ -5657,9 +6373,11 @@ export default function AIWorkspace() {
   const syncSessionLiveState = useCallback((patch: Partial<SessionLiveState>) => {
     if (Object.prototype.hasOwnProperty.call(patch, 'items')) {
       itemsRef.current = patch.items ?? [];
+      itemByIdRef.current = new Map((patch.items ?? []).map((item) => [item.id, item]));
     }
     if (Object.prototype.hasOwnProperty.call(patch, 'viewport')) {
       viewportRef.current = patch.viewport ?? { x: 0, y: 0, scale: 1 };
+      visualViewportRef.current = viewportRef.current;
     }
 
     sessionLiveStateRef.current = {
@@ -5680,10 +6398,208 @@ export default function AIWorkspace() {
     },
     [syncSessionLiveState]
   );
+  const isCanvasCommitBlocked = useCallback(() => Boolean(
+    hasActivePointerSession() ||
+    isPanningRef.current ||
+    isDraggingRef.current ||
+    viewportTweenRef.current ||
+    cornerResizePreviewRef.current ||
+    marqueeSessionRef.current ||
+    connectionSessionRef.current
+  ), [hasActivePointerSession]);
+  const applyPendingCanvasCommit = useCallback((commit: PendingCanvasCommit, reason: string) => {
+    const commitDuringInteraction = isCanvasCommitBlocked();
+    if (commitDuringInteraction) canvasCommitDuringInteractionCountRef.current += 1;
+    pendingCanvasCommitLayoutMeasureRef.current = {
+      revision: commit.revision,
+      reason,
+      startedAt: performance.now(),
+      commitDuringInteraction,
+      commitDuringInteractionCount: canvasCommitDuringInteractionCountRef.current,
+    };
+    const commitReactSnapshot = () => {
+      if (commit.items) setItemsState(commit.items);
+      if (commit.connections) setConnectionsState(commit.connections);
+      if (commit.selectedIds) {
+        selectedIdsRef.current = commit.selectedIds;
+        setSelectedIds(commit.selectedIds);
+      }
+      if (Object.prototype.hasOwnProperty.call(commit, 'selectedId')) {
+        selectedIdRef.current = commit.selectedId ?? null;
+        setSelectedId(commit.selectedId ?? null);
+      }
+      if (commit.selectedConnectionIds) {
+        selectedConnectionIdsRef.current = commit.selectedConnectionIds;
+        setSelectedConnectionIds(commit.selectedConnectionIds);
+      }
+      if (commit.viewport) {
+        setViewportState(commit.viewport);
+        panReactViewportCommitCountRef.current += 1;
+      }
+    };
+    if (reason === 'snapshot-idle') React.startTransition(commitReactSnapshot);
+    else commitReactSnapshot();
+    if (commit.saveSession && currentSessionIdRef.current) {
+      scheduleCurrentSessionSaveRef.current();
+    }
+  }, [isCanvasCommitBlocked]);
+  const cancelPendingCanvasCommitSchedule = useCallback(() => {
+    if (pendingCanvasCommitTimerRef.current !== null) {
+      clearTimeout(pendingCanvasCommitTimerRef.current);
+      pendingCanvasCommitTimerRef.current = null;
+    }
+    if (pendingCanvasCommitIdleRef.current !== null) {
+      if (
+        pendingCanvasCommitIdleKindRef.current === 'idle' &&
+        typeof window.cancelIdleCallback === 'function'
+      ) {
+        window.cancelIdleCallback(pendingCanvasCommitIdleRef.current);
+      } else {
+        cancelAnimationFrame(pendingCanvasCommitIdleRef.current);
+      }
+      pendingCanvasCommitIdleRef.current = null;
+      pendingCanvasCommitIdleKindRef.current = null;
+    }
+  }, []);
+  const flushPendingCanvasCommit = useCallback((reason = 'manual') => {
+    cancelPendingCanvasCommitSchedule();
+    const commit = pendingCanvasCommitRef.current;
+    if (!commit) return null;
+    pendingCanvasCommitRef.current = null;
+    applyPendingCanvasCommit(commit, reason);
+    return commit;
+  }, [applyPendingCanvasCommit, cancelPendingCanvasCommitSchedule]);
+  const schedulePendingCanvasCommit = useCallback(() => {
+    if (!pendingCanvasCommitRef.current) return;
+    if (
+      pendingCanvasCommitTimerRef.current !== null ||
+      pendingCanvasCommitIdleRef.current !== null
+    ) return;
+    const flushWhenIdle = () => {
+      pendingCanvasCommitTimerRef.current = null;
+      const pendingCommit = pendingCanvasCommitRef.current;
+      if (!pendingCommit) return;
+      const remainingDelay = pendingCommit.deadlineAt - performance.now();
+      const interactionBlocked = isCanvasCommitBlocked() || hasPendingBrowserInput();
+      if (remainingDelay > 0 || interactionBlocked) {
+        pendingCanvasCommitTimerRef.current = setTimeout(
+          flushWhenIdle,
+          interactionBlocked ? 64 : Math.max(16, remainingDelay)
+        );
+        return;
+      }
+      const runIdleCommit = () => {
+        pendingCanvasCommitIdleRef.current = null;
+        pendingCanvasCommitIdleKindRef.current = null;
+        const latestCommit = pendingCanvasCommitRef.current;
+        if (!latestCommit) return;
+        const latestRemainingDelay = latestCommit.deadlineAt - performance.now();
+        if (
+          latestRemainingDelay > 0 ||
+          isCanvasCommitBlocked() ||
+          hasPendingBrowserInput()
+        ) {
+          schedulePendingCanvasCommit();
+          return;
+        }
+        flushPendingCanvasCommit('snapshot-idle');
+      };
+      if (typeof window.requestIdleCallback === 'function') {
+        pendingCanvasCommitIdleKindRef.current = 'idle';
+        pendingCanvasCommitIdleRef.current = window.requestIdleCallback(runIdleCommit, {
+          timeout: 300,
+        });
+      } else {
+        pendingCanvasCommitIdleKindRef.current = 'frame';
+        pendingCanvasCommitIdleRef.current = requestAnimationFrame(runIdleCommit);
+      }
+    };
+    const initialDelay = Math.max(
+      16,
+      pendingCanvasCommitRef.current.deadlineAt - performance.now()
+    );
+    pendingCanvasCommitTimerRef.current = setTimeout(flushWhenIdle, initialDelay);
+  }, [flushPendingCanvasCommit, isCanvasCommitBlocked]);
+  const interruptCanvasCommitForInteraction = useCallback((kind: string) => {
+    cancelPendingCanvasSelectionFinalizeRef.current();
+    cancelPendingCanvasCommitSchedule();
+    if (pendingCanvasCommitRef.current && canvasPerformanceEnabledRef.current) {
+      pendingCanvasNextInputMeasureRef.current = {
+        kind,
+        startedAt: performance.now(),
+      };
+    }
+  }, [cancelPendingCanvasCommitSchedule]);
+  const stageCanvasCommit = useCallback((patch: Partial<PendingCanvasCommit>) => {
+    const revision = pendingCanvasCommitRevisionRef.current + 1;
+    pendingCanvasCommitRevisionRef.current = revision;
+    const stagedAt = performance.now();
+    const accumulator = pendingCanvasCommitRef.current ?? {
+      revision,
+      stagedAt,
+      deadlineAt: stagedAt + CANVAS_SNAPSHOT_COMMIT_IDLE_MS,
+    };
+    accumulator.revision = revision;
+    accumulator.stagedAt = stagedAt;
+    accumulator.deadlineAt = stagedAt + CANVAS_SNAPSHOT_COMMIT_IDLE_MS;
+    if (patch.items !== undefined) accumulator.items = patch.items;
+    if (patch.viewport !== undefined) accumulator.viewport = patch.viewport;
+    if (patch.connections !== undefined) accumulator.connections = patch.connections;
+    if (Object.prototype.hasOwnProperty.call(patch, 'selectedId')) {
+      accumulator.selectedId = patch.selectedId;
+    }
+    if (patch.selectedIds !== undefined) accumulator.selectedIds = patch.selectedIds;
+    if (patch.selectedConnectionIds !== undefined) {
+      accumulator.selectedConnectionIds = patch.selectedConnectionIds;
+    }
+    if (patch.saveSession !== undefined) accumulator.saveSession = patch.saveSession;
+    if (patch.viewportToken !== undefined) accumulator.viewportToken = patch.viewportToken;
+    pendingCanvasCommitRef.current = accumulator;
+    schedulePendingCanvasCommit();
+    return revision;
+  }, [schedulePendingCanvasCommit]);
+  const markCanvasInteractionVisualFrame = useCallback((kind: string) => {
+    const pending = pendingCanvasNextInputMeasureRef.current;
+    if (!pending) return;
+    pendingCanvasNextInputMeasureRef.current = null;
+    console.info('[canvas-sequence-perf]', {
+      previousCommitInterruptedBy: pending.kind,
+      visualKind: kind,
+      nextInputToFirstVisual: performance.now() - pending.startedAt,
+      activeTickerCount: Number(Boolean(viewportTweenRef.current)),
+    });
+  }, []);
+  const resetPendingCanvasInteractionCommits = useCallback(() => {
+    cancelInteraction('replaced');
+    restoreCanvasSelectionGestureRef.current();
+    cancelPendingCanvasCommitSchedule();
+    pendingCanvasCommitRef.current = null;
+    clearCanvasItemDragPreviewRef.current(true);
+    clearConnectionInteractionStateRef.current();
+    panMotionRef.current = null;
+    pendingViewportIdleCommitTokenRef.current = null;
+    panReactViewportCommitCountRef.current = 0;
+    viewportTweenRef.current?.cancel();
+    viewportTweenRef.current = null;
+    const sceneTarget = getSceneTarget();
+    const activeViewport = visualViewportRef.current;
+    sceneTarget?.setViewportTransform(activeViewport.x, activeViewport.y, activeViewport.scale);
+    panOverlayStateActiveRef.current = false;
+    canvasItemDragPresentationRef.current.clear();
+    activeItemDragTokenRef.current = null;
+    canvasItemDragTransactionRef.current = null;
+    setCanvasConnectionHitTestingDisabled(false);
+    updateCanvasInteractionPhase('idle');
+  }, [cancelInteraction, cancelPendingCanvasCommitSchedule, getSceneTarget, setCanvasConnectionHitTestingDisabled, updateCanvasInteractionPhase]);
   const setItems = useCallback(
-    (value: React.SetStateAction<CanvasItem[]>) =>
-      applySessionLiveStateUpdate('items', value, setItemsState),
-    [applySessionLiveStateUpdate]
+    (value: React.SetStateAction<CanvasItem[]>) => {
+      const nextValue = resolveStateUpdate(value, sessionLiveStateRef.current.items);
+      syncSessionLiveState({ items: nextValue });
+      stageCanvasCommit({ items: nextValue });
+      if (!isCanvasCommitBlocked()) flushPendingCanvasCommit('direct-items');
+      return nextValue;
+    },
+    [flushPendingCanvasCommit, isCanvasCommitBlocked, stageCanvasCommit, syncSessionLiveState]
   );
   const setRegionSelections = useCallback(
     (value: React.SetStateAction<RegionSelection[]>) => {
@@ -5694,9 +6610,14 @@ export default function AIWorkspace() {
     [applySessionLiveStateUpdate]
   );
   const setConnections = useCallback(
-    (value: React.SetStateAction<Connection[]>) =>
-      applySessionLiveStateUpdate('connections', value, setConnectionsState),
-    [applySessionLiveStateUpdate]
+    (value: React.SetStateAction<Connection[]>) => {
+      const nextValue = resolveStateUpdate(value, sessionLiveStateRef.current.connections);
+      syncSessionLiveState({ connections: nextValue });
+      stageCanvasCommit({ connections: nextValue });
+      if (!isCanvasCommitBlocked()) flushPendingCanvasCommit('direct-connections');
+      return nextValue;
+    },
+    [flushPendingCanvasCommit, isCanvasCommitBlocked, stageCanvasCommit, syncSessionLiveState]
   );
   const setTextCardPanelDrafts = useCallback(
     (value: React.SetStateAction<Record<string, string>>) =>
@@ -5798,9 +6719,26 @@ export default function AIWorkspace() {
     [applySessionLiveStateUpdate]
   );
   const setViewport = useCallback(
-    (value: React.SetStateAction<{ x: number; y: number; scale: number }>) =>
-      applySessionLiveStateUpdate('viewport', value, setViewportState),
-    [applySessionLiveStateUpdate]
+    (value: React.SetStateAction<{ x: number; y: number; scale: number }>) => {
+      cancelPendingCanvasCommitSchedule();
+      const nextValue = resolveStateUpdate(value, sessionLiveStateRef.current.viewport);
+      syncSessionLiveState({ viewport: nextValue });
+      stageCanvasCommit({
+        viewport: nextValue,
+        viewportToken: interactionCommitTokenRef.current,
+      });
+      if (!isCanvasCommitBlocked()) flushPendingCanvasCommit('direct-viewport');
+      return nextValue;
+    },
+    [cancelPendingCanvasCommitSchedule, flushPendingCanvasCommit, isCanvasCommitBlocked, stageCanvasCommit, syncSessionLiveState]
+  );
+  const canvasItemMembershipKey = React.useMemo(
+    () => items.map((item) => item.id).join('\u0000'),
+    [items]
+  );
+  const imageCardMembershipKey = React.useMemo(
+    () => items.filter((item) => isImageCardItem(item)).map((item) => item.id).join('\u0000'),
+    [items]
   );
   const multiSelectionBounds = React.useMemo(() => {
     if (selectedIds.length <= 1) return null;
@@ -5903,6 +6841,26 @@ export default function AIWorkspace() {
     () => Object.fromEntries(items.map((item) => [item.id, item] as const)),
     [items]
   );
+  const connectionsByItemId = React.useMemo(() => {
+    const index = new Map<string, Connection[]>();
+    connections.forEach((connection) => {
+      const fromConnections = index.get(connection.fromItemId) ?? [];
+      fromConnections.push(connection);
+      index.set(connection.fromItemId, fromConnections);
+      if (connection.toItemId !== connection.fromItemId) {
+        const toConnections = index.get(connection.toItemId) ?? [];
+        toConnections.push(connection);
+        index.set(connection.toItemId, toConnections);
+      }
+    });
+    return index;
+  }, [connections]);
+  useEffect(() => {
+    if (!isDraggingRef.current) return;
+    if (draggingItemIdsRef.current.some((itemId) => !itemById[itemId])) {
+      cancelInteraction('replaced');
+    }
+  }, [cancelInteraction, itemById]);
   const selectedTextCardPanelItem = React.useMemo(() => {
     if (selectedIds.length !== 1 || !selectedId) return null;
     const item = itemById[selectedId];
@@ -6192,6 +7150,100 @@ export default function AIWorkspace() {
     () => new Set(Object.keys(activeCanvasImageGenerations)),
     [activeCanvasImageGenerations]
   );
+  const canvasImageWorkingSetEnterIds = React.useMemo(
+    () => new Set(getCanvasImageWorkingSetIds({
+      items,
+      viewport,
+      canvasSize,
+      overscanScreens: CANVAS_IMAGE_WORKING_SET_ENTER_SCREENS,
+    })),
+    [canvasSize, items, viewport]
+  );
+  const canvasImageWorkingSetRetainIds = React.useMemo(
+    () => new Set(getCanvasImageWorkingSetIds({
+      items,
+      viewport,
+      canvasSize,
+      overscanScreens: CANVAS_IMAGE_WORKING_SET_RETAIN_SCREENS,
+    })),
+    [canvasSize, items, viewport]
+  );
+  const protectedCanvasImageIds = React.useMemo(
+    () => new Set([
+      ...selectedIds,
+      ...activeCanvasImageGenerationItemIds,
+    ]),
+    [activeCanvasImageGenerationItemIds, selectedIds]
+  );
+
+  useEffect(() => {
+    const validImageIds = new Set(
+      items.filter((item) => item.type === 'image').map((item) => item.id)
+    );
+    const immediatelyActiveIds = new Set<string>();
+    canvasImageWorkingSetEnterIds.forEach((itemId) => {
+      if (validImageIds.has(itemId)) immediatelyActiveIds.add(itemId);
+    });
+    protectedCanvasImageIds.forEach((itemId) => {
+      if (validImageIds.has(itemId)) immediatelyActiveIds.add(itemId);
+    });
+
+    immediatelyActiveIds.forEach((itemId) => {
+      const timer = canvasImageReleaseTimersRef.current.get(itemId);
+      if (!timer) return;
+      clearTimeout(timer);
+      canvasImageReleaseTimersRef.current.delete(itemId);
+    });
+
+    setActiveCanvasImageIds((current) => {
+      let changed = false;
+      const next = new Set(current);
+      immediatelyActiveIds.forEach((itemId) => {
+        if (next.has(itemId)) return;
+        next.add(itemId);
+        changed = true;
+      });
+      next.forEach((itemId) => {
+        if (validImageIds.has(itemId)) return;
+        next.delete(itemId);
+        changed = true;
+      });
+      const resolved = changed ? next : current;
+      activeCanvasImageIdsRef.current = resolved;
+      return resolved;
+    });
+
+    activeCanvasImageIdsRef.current.forEach((itemId) => {
+      if (
+        protectedCanvasImageIds.has(itemId) ||
+        canvasImageWorkingSetRetainIds.has(itemId) ||
+        canvasImageReleaseTimersRef.current.has(itemId)
+      ) {
+        return;
+      }
+      const timer = setTimeout(() => {
+        canvasImageReleaseTimersRef.current.delete(itemId);
+        setActiveCanvasImageIds((current) => {
+          if (!current.has(itemId)) return current;
+          const next = new Set(current);
+          next.delete(itemId);
+          activeCanvasImageIdsRef.current = next;
+          return next;
+        });
+      }, CANVAS_IMAGE_WORKING_SET_RELEASE_MS);
+      canvasImageReleaseTimersRef.current.set(itemId, timer);
+    });
+  }, [
+    canvasImageWorkingSetEnterIds,
+    canvasImageWorkingSetRetainIds,
+    items,
+    protectedCanvasImageIds,
+  ]);
+
+  useEffect(() => () => {
+    canvasImageReleaseTimersRef.current.forEach((timer) => clearTimeout(timer));
+    canvasImageReleaseTimersRef.current.clear();
+  }, []);
   const hasActiveAgentImageGeneration = React.useMemo(
     () => chatMessages.some((message) => message.agentRunProgress?.steps.some(
       (step) => step.status === 'active' && isAgentImageGenerationStep(step)
@@ -6199,13 +7251,7 @@ export default function AIWorkspace() {
     [chatMessages]
   );
   useEffect(() => {
-    if (
-      Object.keys(activeCanvasTextGenerations).length === 0 &&
-      Object.keys(activeCanvasImageGenerations).length === 0 &&
-      !hasActiveAgentImageGeneration
-    ) {
-      return;
-    }
+    if (!hasActiveAgentImageGeneration) return;
 
     setGenerationClockMs(Date.now());
     const timer = window.setInterval(() => {
@@ -6215,7 +7261,7 @@ export default function AIWorkspace() {
     return () => {
       window.clearInterval(timer);
     };
-  }, [activeCanvasTextGenerations, activeCanvasImageGenerations, hasActiveAgentImageGeneration]);
+  }, [hasActiveAgentImageGeneration]);
   const isSelectedTextCardGenerating =
     !!selectedTextCardPanelItem && !!activeCanvasTextGenerations[selectedTextCardPanelItem.id];
   const isSelectedImageCardGenerating =
@@ -6281,6 +7327,16 @@ export default function AIWorkspace() {
     }) as SessionCanvasHistoryState;
   }, []);
 
+  const pushCanvasMoveUndoCommand = useCallback((command: CanvasMoveHistoryCommand) => {
+    const sessionId = currentSessionIdRef.current;
+    if (!sessionId) return;
+    const currentHistory = canvasHistoryBySessionRef.current[sessionId] ?? createEmptySessionCanvasHistoryState();
+    canvasHistoryBySessionRef.current[sessionId] = pushUndoCommand({
+      history: currentHistory,
+      command,
+    }) as SessionCanvasHistoryState;
+  }, []);
+
   const commitCanvasUndoSnapshot = useCallback(() => {
     if (!pendingCanvasHistorySnapshotRef.current) {
       return;
@@ -6340,12 +7396,13 @@ export default function AIWorkspace() {
     setHoveredOutputPortItemId(null);
     setConnectionMode('idle');
     setConnectionFromItemId(null);
-    setConnectionPoint(null);
     setConnectionPointerId(null);
     setFrozenPreviewConnection(null);
     setPendingConnectionMenu(null);
-    setMagneticPorts({});
-    setConnectionSnapTargetId(null);
+    setActiveCanvasImageIds(new Set());
+    activeCanvasImageIdsRef.current = new Set();
+    canvasImageReleaseTimersRef.current.forEach((timer) => clearTimeout(timer));
+    canvasImageReleaseTimersRef.current.clear();
     setEditingTextCardId(null);
     setShowTextPanelProviderMenu(false);
     setShowTextPanelModelMenu(false);
@@ -6355,7 +7412,7 @@ export default function AIWorkspace() {
     setCanvasTextGenerationErrorById({});
     setCanvasImageGenerationErrorById({});
     pendingCanvasHistorySnapshotRef.current = null;
-    connectionSessionRef.current = null;
+    clearConnectionInteractionStateRef.current();
   }, []);
 
   const undoCanvasEdit = useCallback(() => {
@@ -6418,12 +7475,17 @@ export default function AIWorkspace() {
     textarea.setSelectionRange(textLength, textLength);
   }, [editingAnnotationTextId]);
 
-  useEffect(() => {
-    viewportRef.current = viewport;
-  }, [viewport]);
+  useLayoutEffect(() => {
+    renderedViewportRef.current = viewport;
+    const sceneTarget = getSceneTarget();
+    const activeViewport = visualViewportRef.current;
+    sceneTarget?.setViewportTransform(activeViewport.x, activeViewport.y, activeViewport.scale);
+  }, [getSceneTarget, viewport]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     itemsRef.current = items;
+    renderedItemsByIdRef.current = new Map(items.map((item) => [item.id, item]));
+    itemByIdRef.current = new Map(items.map((item) => [item.id, item]));
   }, [items]);
 
   useEffect(() => {
@@ -6441,7 +7503,7 @@ export default function AIWorkspace() {
   }, [editingAnnotationTextId, items]);
 
   useEffect(() => {
-    const imageCardIds = new Set(items.filter((item) => isImageCardItem(item)).map((item) => item.id));
+    const imageCardIds = new Set(imageCardMembershipKey ? imageCardMembershipKey.split('\u0000') : []);
 
     setImageCardPanelDrafts((prev) => {
       const nextEntries = Object.entries(prev).filter(([itemId]) => imageCardIds.has(itemId));
@@ -6477,11 +7539,19 @@ export default function AIWorkspace() {
       const nextEntries = Object.entries(prev).filter(([itemId]) => imageCardIds.has(itemId));
       return nextEntries.length === Object.keys(prev).length ? prev : Object.fromEntries(nextEntries);
     });
-  }, [items]);
+  }, [imageCardMembershipKey]);
 
   useEffect(() => {
     selectedIdRef.current = selectedId;
   }, [selectedId]);
+
+  useEffect(() => {
+    selectedIdsRef.current = selectedIds;
+  }, [selectedIds]);
+
+  useEffect(() => {
+    selectedConnectionIdsRef.current = selectedConnectionIds;
+  }, [selectedConnectionIds]);
 
   useEffect(() => {
     return () => {
@@ -6957,18 +8027,21 @@ export default function AIWorkspace() {
   }, [chatMessages]);
 
   const stopStreamTypewriter = () => {
-    if (streamTimerRef.current) {
-      clearInterval(streamTimerRef.current);
-      streamTimerRef.current = null;
+    if (streamTickerRef.current) {
+      gsap.ticker.remove(streamTickerRef.current);
+      streamTickerRef.current = null;
     }
+    streamTickerLastTimeRef.current = 0;
     streamQueueRef.current = '';
     streamMessageIdRef.current = null;
   };
 
   const ensureStreamTypewriterRunning = () => {
-    if (streamTimerRef.current) return;
+    if (streamTickerRef.current) return;
 
-    streamTimerRef.current = setInterval(() => {
+    const tickStreamTypewriter = (time: number) => {
+      if (time - streamTickerLastTimeRef.current < 0.08) return;
+      streamTickerLastTimeRef.current = time;
       const messageId = streamMessageIdRef.current;
       if (!messageId) return;
       if (!streamQueueRef.current) return;
@@ -6984,7 +8057,10 @@ export default function AIWorkspace() {
           content: `${msg.content}${nextChunk}`,
         };
       }));
-    }, 80);
+    };
+    streamTickerLastTimeRef.current = 0;
+    streamTickerRef.current = tickStreamTypewriter;
+    gsap.ticker.add(tickStreamTypewriter);
   };
 
   const enqueueStreamDelta = (messageId: string, delta: string) => {
@@ -7162,25 +8238,25 @@ export default function AIWorkspace() {
 
   const getViewportCenterCanvasPoint = useCallback(
     (overrideViewport?: { x: number; y: number; scale: number }) => {
-      const activeViewport = overrideViewport ?? viewport;
-      const canvasRect = canvasRef.current?.getBoundingClientRect();
+      const activeViewport = overrideViewport ?? visualViewportRef.current;
+      const canvasRect = canvasMetricsRef.current;
       const isDesktopCanvas = typeof window === 'undefined'
         ? true
         : window.matchMedia('(min-width: 640px)').matches;
-      const reservedRight = isDesktopCanvas ? chatPanelReserveRef.current.width : 0;
+      const reservedRight = isDesktopCanvas ? chatSafeAreaWidthRef.current : 0;
       const fallbackCanvasWidth = typeof window === 'undefined'
         ? 0
-        : Math.max(0, window.innerWidth - reservedRight);
+        : window.innerWidth;
       const fallbackCanvasHeight = typeof window === 'undefined' ? 0 : window.innerHeight;
-      const canvasWidth = canvasRect?.width ?? fallbackCanvasWidth;
-      const canvasHeight = canvasRect?.height ?? fallbackCanvasHeight;
+      const canvasWidth = Math.max(0, (canvasRect.width || fallbackCanvasWidth) - reservedRight);
+      const canvasHeight = canvasRect.height || fallbackCanvasHeight;
 
       return {
         x: (canvasWidth / 2 - activeViewport.x) / activeViewport.scale,
         y: (canvasHeight / 2 - activeViewport.y) / activeViewport.scale,
       };
     },
-    [viewport]
+    []
   );
 
   const getSpawnPosition = useCallback(
@@ -7499,7 +8575,7 @@ export default function AIWorkspace() {
       setSelectedConnectionIds([]);
       setSelectedIds(pastedCanvasClipboard.selectedIds);
       setSelectedId(getPrimarySelectedId(pastedCanvasClipboard.selectedIds));
-      animateViewportTo(centerViewportOnPastedCanvasItems(viewportRef.current, pastedCanvasClipboard.items));
+      animateViewportToRef.current(centerViewportOnPastedCanvasItems(visualViewportRef.current, pastedCanvasClipboard.items));
 
       canvasClipboardRef.current = {
         snapshot: canvasClipboardRef.current?.snapshot ?? null,
@@ -7516,7 +8592,6 @@ export default function AIWorkspace() {
       selectedImageAssetItem?.id,
       uploadImageFilesToCanvas,
       centerViewportOnPastedCanvasItems,
-      animateViewportTo,
     ]
   );
 
@@ -8092,21 +9167,13 @@ export default function AIWorkspace() {
     return newItem;
   }, []);
 
-  const getPortCanvasPoint = (item: CanvasItem, side: 'left' | 'right') => ({
-    x:
-      side === 'left'
-        ? item.x - PORT_ICON_RADIUS - PORT_OUTER_GAP
-        : item.x + item.width + PORT_ICON_RADIUS + PORT_OUTER_GAP,
-    y: item.y + item.height / 2,
-  });
-
-  const getConnectionAnchorCanvasPoint = (item: CanvasItem, side: 'left' | 'right') => ({
+  const getConnectionAnchorCanvasPoint = useCallback((item: CanvasItem, side: 'left' | 'right') => ({
     x:
       side === 'left'
         ? item.x - CONNECTION_ANCHOR_EDGE_GAP
         : item.x + item.width + CONNECTION_ANCHOR_EDGE_GAP,
     y: item.y + item.height / 2,
-  });
+  }), []);
 
   const toCanvasScreenPoint = useCallback((point: { x: number; y: number }) => ({
     x: point.x * viewport.scale + viewport.x,
@@ -8117,240 +9184,246 @@ export default function AIWorkspace() {
     ? itemById[selectedImageToolbarTarget.itemId] ?? null
     : null;
   const selectedImageToolbarBounds = selectedImageToolbarItem
-    ? {
-        left: selectedImageToolbarItem.x,
-        top: selectedImageToolbarItem.y,
-        width: selectedImageToolbarItem.width,
-        height: selectedImageToolbarItem.height,
-      }
+    ? getItemVisualBounds(selectedImageToolbarItem)
     : null;
-  const selectedImageToolbarAnchor = resolveImageToolbarViewportAnchor({
-    itemBounds: selectedImageToolbarBounds,
-    toCanvasScreenPoint,
-    canvasRect: canvasRef.current?.getBoundingClientRect(),
-    screenGap: 12,
-  });
-  const selectedImageToolbarTop = selectedImageToolbarAnchor
-    ? selectedImageToolbarAnchor.y
+  const selectedImageToolbarAnchors = selectedImageToolbarBounds
+    ? resolveCanvasFixedOverlayAnchors({
+        bounds: selectedImageToolbarBounds,
+        viewport,
+        canvasOrigin: {
+          x: canvasMetricsRef.current.left,
+          y: canvasMetricsRef.current.top,
+        },
+        gap: IMAGE_NODE_OVERLAY_GAP_PX,
+      })
     : null;
-  const canvasBottomToolbarReservedRightClassName =
-    '[--canvas-bottom-toolbar-reserved-right:0px] sm:[--canvas-bottom-toolbar-reserved-right:var(--chat-panel-toolbar-reserved-width,0px)]';
-  const canvasBottomToolbarStyle = {
-    left: 'calc((100vw - var(--canvas-bottom-toolbar-reserved-right)) / 2)',
-  } satisfies React.CSSProperties;
 
-  const buildConnectionPath = (from: { x: number; y: number }, to: { x: number; y: number }) => {
+  const getCanvasItemOverlayGroup = useCallback((kind: CanvasItemOverlayKind) => {
+    const root = getViewportOverlay(kind);
+    const itemId = root?.dataset.canvasOverlayItemId;
+    if (!root || !itemId) return null;
+    return { kind, itemId, root } satisfies CanvasItemOverlayGroup;
+  }, [getViewportOverlay]);
+
+  const hideCanvasSelectionOverlayGroups = useCallback(() => {
+    const snapshots: CanvasOverlayVisibilitySnapshot[] = [];
+    for (const kind of [
+      'selected-image-toolbar',
+      'selected-image-panel',
+      'selected-text-panel',
+    ] as const) {
+      const group = getCanvasItemOverlayGroup(kind);
+      if (!group) continue;
+      snapshots.push({
+        root: group.root,
+        visibility: group.root.style.visibility,
+        pointerEvents: group.root.style.pointerEvents,
+      });
+      group.root.style.visibility = 'hidden';
+      group.root.style.pointerEvents = 'none';
+    }
+    return snapshots;
+  }, [getCanvasItemOverlayGroup]);
+
+  const revealCanvasSelectionOverlayGroups = useCallback(() => {
+    for (const kind of [
+      'selected-image-toolbar',
+      'selected-image-panel',
+      'selected-text-panel',
+    ] as const) {
+      const group = getCanvasItemOverlayGroup(kind);
+      if (!group) continue;
+      group.root.style.visibility = '';
+      group.root.style.pointerEvents = '';
+    }
+  }, [getCanvasItemOverlayGroup]);
+
+  const restoreCanvasOverlayVisibility = useCallback((
+    snapshots: readonly CanvasOverlayVisibilitySnapshot[]
+  ) => {
+    snapshots.forEach((snapshot) => {
+      if (!snapshot.root.isConnected) return;
+      snapshot.root.style.visibility = snapshot.visibility;
+      snapshot.root.style.pointerEvents = snapshot.pointerEvents;
+    });
+  }, []);
+
+  const syncSelectedCanvasOverlayPositions = useCallback((
+    activeViewport: ViewportState,
+    changedItemIds?: readonly string[]
+  ) => {
+    const canvasMetrics = canvasMetricsRef.current;
+    const shouldSyncItem = (itemId: string | undefined) => (
+      Boolean(itemId) && (!changedItemIds || changedItemIds.includes(itemId!))
+    );
+    let syncWriteCount = 0;
+    const toolbarGroup = getCanvasItemOverlayGroup('selected-image-toolbar');
+    if (toolbarGroup) {
+      const { itemId, root } = toolbarGroup;
+      const item = shouldSyncItem(itemId) && itemId ? itemByIdRef.current.get(itemId) : null;
+      if (item && (isImageAssetItem(item) || isImageCardItem(item))) {
+        const anchors = resolveCanvasFixedOverlayAnchors({
+          bounds: getItemVisualBounds(item),
+          viewport: activeViewport,
+          canvasOrigin: { x: canvasMetrics.left, y: canvasMetrics.top },
+          gap: IMAGE_NODE_OVERLAY_GAP_PX,
+        });
+        root.style.transform = `translate3d(${anchors.centerX}px, ${anchors.topToolbarY}px, 0) translate(-50%, -100%)`;
+        syncWriteCount += 1;
+      }
+    }
+    const imagePanelGroup = getCanvasItemOverlayGroup('selected-image-panel');
+    if (imagePanelGroup) {
+      const { itemId, root } = imagePanelGroup;
+      const item = shouldSyncItem(itemId) && itemId ? itemByIdRef.current.get(itemId) : null;
+      if (item && isImageCardItem(item)) {
+        const anchors = resolveCanvasFixedOverlayAnchors({
+          bounds: getItemVisualBounds(item),
+          viewport: activeViewport,
+          canvasOrigin: { x: canvasMetrics.left, y: canvasMetrics.top },
+          gap: IMAGE_NODE_OVERLAY_GAP_PX,
+        });
+        root.style.transform = `translate3d(${anchors.centerX - IMAGE_CARD_GENERATION_PANEL_DEFAULT_WIDTH / 2}px, ${anchors.bottomPanelY}px, 0)`;
+        syncWriteCount += 1;
+      }
+    }
+    const textPanelGroup = getCanvasItemOverlayGroup('selected-text-panel');
+    if (textPanelGroup) {
+      const { itemId, root } = textPanelGroup;
+      const item = shouldSyncItem(itemId) && itemId ? itemByIdRef.current.get(itemId) : null;
+      if (item?.type === 'text' && item.textVariant === 'card') {
+        const frameBounds = getTextCardFrameBounds(item);
+        const panelWidth = Math.max(TEXT_CARD_GENERATION_PANEL_DEFAULT_WIDTH, frameBounds.width);
+        const centerX = canvasMetrics.left + activeViewport.x + (
+          item.x + frameBounds.left + frameBounds.width / 2
+        ) * activeViewport.scale;
+        const bottomY = canvasMetrics.top + activeViewport.y + (
+          item.y + frameBounds.top + frameBounds.height
+        ) * activeViewport.scale;
+        root.style.transform = `translate3d(${centerX - panelWidth / 2}px, ${bottomY + 18}px, 0)`;
+        syncWriteCount += 1;
+      }
+    }
+    if (canvasPerformanceEnabledRef.current) {
+      canvasOverlaySyncWriteCountRef.current += syncWriteCount;
+    }
+  }, [getCanvasItemOverlayGroup]);
+
+  const buildConnectionPath = useCallback((from: { x: number; y: number }, to: { x: number; y: number }) => {
     const dx = Math.max(64, Math.abs(to.x - from.x) * 0.42);
     const c1x = from.x + dx;
     const c2x = to.x - dx;
     return `M ${from.x} ${from.y} C ${c1x} ${from.y}, ${c2x} ${to.y}, ${to.x} ${to.y}`;
-  };
-
-  const getPreviewRenderPoints = () => {
-    const session = connectionSessionRef.current;
-    if (!session || session.mode !== 'dragging' || !session.point) {
-      return { from: null, to: null };
-    }
-
-    const fromItem = items.find((item) => item.id === session.fromItemId);
-    if (!fromItem) {
-      return { from: null, to: null };
-    }
-
-    return {
-      from: toCanvasScreenPoint(getConnectionAnchorCanvasPoint(fromItem, 'right')),
-      to: session.point,
-    };
-  };
+  }, []);
 
   const clearPendingConnectionMenu = useCallback(() => {
     setPendingConnectionMenu(null);
     setFrozenPreviewConnection(null);
   }, []);
 
-  const toCanvasPoint = useCallback((screenPoint: { x: number; y: number }) => ({
-    x: (screenPoint.x - viewport.x) / viewport.scale,
-    y: (screenPoint.y - viewport.y) / viewport.scale,
-  }), [viewport.x, viewport.y, viewport.scale]);
-
-  const getMagneticPortKey = useCallback((itemId: string, side: PortSide) => `${itemId}:${side}`, []);
-
-  const clearMagneticPortResetTimer = useCallback((key?: string) => {
-    if (key) {
-      const timer = magneticPortResetTimerRef.current[key];
-      if (timer) {
-        clearTimeout(timer);
-        delete magneticPortResetTimerRef.current[key];
-      }
-      return;
-    }
-
-    Object.values(magneticPortResetTimerRef.current).forEach((timer) => clearTimeout(timer));
-    magneticPortResetTimerRef.current = {};
+  const toCanvasPoint = useCallback((screenPoint: { x: number; y: number }) => {
+    const activeViewport = visualViewportRef.current;
+    return {
+      x: (screenPoint.x - activeViewport.x) / activeViewport.scale,
+      y: (screenPoint.y - activeViewport.y) / activeViewport.scale,
+    };
   }, []);
 
-  const getRenderedPortOverlayPoint = useCallback(
-    (item: CanvasItem, side: PortSide) => {
-      const key = getMagneticPortKey(item.id, side);
-      const originalPoint = getPortCanvasPoint(item, side);
-      if (magneticPorts[key]) {
-        return magneticPorts[key].point;
-      }
-      return originalPoint;
-    },
-    [magneticPorts, getMagneticPortKey]
-  );
+  const clearConnectionSnapTargetVisual = useCallback(() => {
+    const visual = connectionSnapTargetVisualRef.current;
+    if (!visual) return;
+    connectionSnapTargetVisualRef.current = null;
+    visual.element.style.opacity = visual.opacity;
+    visual.element.style.visibility = visual.visibility;
+    visual.element.style.pointerEvents = visual.pointerEvents;
+    visual.element.style.willChange = visual.willChange;
+  }, []);
+  clearConnectionSnapTargetVisualRef.current = clearConnectionSnapTargetVisual;
 
-  const releaseMagneticPort = useCallback(
-    (port: MagneticPortState) => {
-      const key = getMagneticPortKey(port.itemId, port.side);
-      const item = items.find((entry) => entry.id === port.itemId);
-      if (!item) {
-        clearMagneticPortResetTimer(key);
-        setMagneticPorts((prev) => {
-          if (!prev[key]) return prev;
-          const next = { ...prev };
-          delete next[key];
-          return next;
-        });
-        return;
-      }
-
-      const origin = getPortCanvasPoint(item, port.side);
-      clearMagneticPortResetTimer(key);
-      setMagneticPorts((prev) => ({
-        ...prev,
-        [key]: {
-          itemId: port.itemId,
-          side: port.side,
-          point: origin,
-          isTracking: false,
-          isReturning: true,
-        },
-      }));
-      magneticPortResetTimerRef.current[key] = setTimeout(() => {
-        setMagneticPorts((prev) => {
-          const current = prev[key];
-          if (!current?.isReturning) return prev;
-          const next = { ...prev };
-          delete next[key];
-          return next;
-        });
-        delete magneticPortResetTimerRef.current[key];
-      }, PORT_RETURN_DURATION_MS);
-    },
-    [items, clearMagneticPortResetTimer, getMagneticPortKey]
-  );
-
-  const updateMagneticPort = useCallback(
-    (point: { x: number; y: number }) => {
-      if (connectionMode === 'dragging' || pendingConnectionMenu) {
-        Object.values(magneticPorts).forEach((port) => {
-          if (port.isTracking) releaseMagneticPort(port);
-        });
-        return;
-      }
-
-      let nearest:
-        | {
-            key: string;
-            itemId: string;
-            side: PortSide;
-            distance: number;
-          }
-        | null = null;
-
-      for (const item of items) {
-        for (const side of ['left', 'right'] as const) {
-          const origin = getPortCanvasPoint(item, side);
-          const key = getMagneticPortKey(item.id, side);
-          const existingPort = magneticPorts[key];
-          const threshold = existingPort?.isTracking ? PORT_TRACKING_RADIUS : PORT_ACTIVATION_RADIUS;
-          const distance = Math.hypot(point.x - origin.x, point.y - origin.y);
-          if (distance > threshold) continue;
-          if (!nearest || distance < nearest.distance) {
-            nearest = {
-              key,
-              itemId: item.id,
-              side,
-              distance,
-            };
-          }
-        }
-      }
-
-      const nearestKey = nearest?.key ?? null;
-
-      Object.entries(magneticPorts).forEach(([key, port]) => {
-        if (!port.isTracking) return;
-        if (key === nearestKey) return;
-        releaseMagneticPort(port);
-      });
-
-      if (!nearest) return;
-
-      clearMagneticPortResetTimer(nearest.key);
-      setMagneticPorts((prev) => ({
-        ...prev,
-        [nearest.key]: {
-          itemId: nearest.itemId,
-          side: nearest.side,
-          point,
-          isTracking: true,
-          isReturning: false,
-        },
-      }));
-    },
-    [
-      connectionMode,
-      pendingConnectionMenu,
-      magneticPorts,
-      items,
-      releaseMagneticPort,
-      clearMagneticPortResetTimer,
-      getMagneticPortKey,
-    ]
-  );
+  const setConnectionSnapTargetVisual = useCallback((itemId: string | null) => {
+    if (connectionSnapTargetVisualRef.current?.itemId === itemId) return;
+    clearConnectionSnapTargetVisual();
+    if (!itemId) return;
+    const element = getItemTargets([itemId]).find((target) => target.role === 'input-port')?.element;
+    if (!element) return;
+    connectionSnapTargetVisualRef.current = {
+      itemId,
+      element,
+      opacity: element.style.opacity,
+      visibility: element.style.visibility,
+      pointerEvents: element.style.pointerEvents,
+      willChange: element.style.willChange,
+    };
+    element.style.opacity = '1';
+    element.style.visibility = 'visible';
+    element.style.pointerEvents = 'none';
+    element.style.willChange = 'opacity';
+  }, [clearConnectionSnapTargetVisual, getItemTargets]);
 
   const beginConnectionDragFromItem = (
     item: CanvasItem,
-    pointerId: number
+    pointerId: number,
+    clientX: number,
+    clientY: number
   ) => {
+    interruptCanvasCommitForInteraction('connection-drag');
+    if (isPanningRef.current) {
+      cancelInteraction('viewport-handoff');
+      cancelViewportAnimation(false);
+    }
     clearPendingConnectionMenu();
-    clearMagneticPortResetTimer();
-    setMagneticPorts({});
-    setSelectedConnectionIds([]);
-
-    setHoveredOutputPortItemId((prev) => (prev === item.id ? null : prev));
-    connectionDragMovedRef.current = false;
-
-    let capturedPointerId: number | null = null;
-    if (canvasRef.current) {
-      try {
-        canvasRef.current.setPointerCapture(pointerId);
-        capturedPointerId = pointerId;
-      } catch {}
+    clearConnectionSnapTargetVisual();
+    setCanvasConnectionHitTestingDisabled(true);
+    if (selectedConnectionIdsRef.current.length > 0) {
+      selectedConnectionIdsRef.current = [];
+      setSelectedConnectionIds([]);
+      stageCanvasCommit({ selectedConnectionIds: [] });
     }
 
-    const portPoint = toCanvasScreenPoint(getRenderedPortOverlayPoint(item, 'right'));
+    connectionDragMovedRef.current = false;
+    const activeViewport = visualViewportRef.current;
+    const toVisualScreenPoint = (point: { x: number; y: number }) => ({
+      x: point.x * activeViewport.scale + activeViewport.x,
+      y: point.y * activeViewport.scale + activeViewport.y,
+    });
+    const portPoint = toVisualScreenPoint(getConnectionAnchorCanvasPoint(item, 'right'));
     const initialPoint = { x: portPoint.x + 12, y: portPoint.y };
+    const inputPortCandidates = itemsRef.current.flatMap((candidate) => {
+      if (candidate.id === item.id || !canItemAcceptIncomingConnection(candidate)) return [];
+      const point = toVisualScreenPoint(getConnectionAnchorCanvasPoint(candidate, 'left'));
+      return [{ targetId: candidate.id, x: point.x, y: point.y }];
+    });
     connectionSessionRef.current = {
       mode: 'dragging',
       fromItemId: item.id,
-      pointerId: capturedPointerId ?? null,
+      pointerId,
       startPoint: portPoint,
+      fromPoint: portPoint,
       point: initialPoint,
+      inputPortCandidates,
       snapTargetId: null,
       moved: false,
     };
-    syncConnectionState(connectionSessionRef.current);
-    setIsDragging(false);
-    setIsMarqueeSelecting(false);
-    setMarqueeRect(null);
-    marqueeStartRef.current = null;
-    setSelectedConnectionIds([]);
+    updateCanvasInteractionPhase('connection-drag');
+    const previewPath = connectionPreviewPathRef.current;
+    if (previewPath) {
+      previewPath.setAttribute('d', buildConnectionPath(portPoint, initialPoint));
+      previewPath.style.visibility = 'visible';
+    }
+    isDraggingRef.current = false;
+    clearCanvasItemDragPreview(true);
     connectionDragMovedRef.current = false;
-    attachConnectionWindowListeners();
+    startPointerSession({
+      mode: 'connection-drag',
+      pointerId,
+      startPoint: { x: clientX, y: clientY },
+      onFrame: (pointerX, pointerY) => {
+        const point = getCanvasRelativePoint(pointerX, pointerY);
+        if (point) updateConnectionPreview(point.x, point.y);
+      },
+      onEnd: finalizeConnectionInteraction,
+      onCancel: clearConnectionInteractionState,
+    });
   };
 
   const toggleSelectionId = (ids: string[], id: string) =>
@@ -8373,74 +9446,63 @@ export default function AIWorkspace() {
   };
 
   const getConnectionControlPoints = (from: { x: number; y: number }, to: { x: number; y: number }) => {
-    const dx = Math.max(40, Math.abs(to.x - from.x) * 0.35);
+    const dx = Math.max(64, Math.abs(to.x - from.x) * 0.42);
     return {
       c1: { x: from.x + dx, y: from.y },
       c2: { x: to.x - dx, y: to.y },
     };
   };
 
-  const getConnectionHitIdsForMarquee = (rect: { x: number; y: number; width: number; height: number }) => {
-    const rectLeft = rect.x;
-    const rectRight = rect.x + rect.width;
-    const rectTop = rect.y;
-    const rectBottom = rect.y + rect.height;
-    const HIT_PADDING = 8;
+  const getConnectionHitIdsForMarquee = (
+    rect: { x: number; y: number; width: number; height: number },
+    activeViewport: ViewportState,
+    activeItems: CanvasItem[],
+    activeConnections: Connection[]
+  ) => {
     const SAMPLE_COUNT = 24;
+    const activeItemById = new Map(activeItems.map((item) => [item.id, item]));
 
-    return connections
+    return activeConnections
       .filter((connection) => {
-        const fromItem = items.find((item) => item.id === connection.fromItemId);
-        const toItem = items.find((item) => item.id === connection.toItemId);
-        if (!fromItem || !toItem) return false;
+        const fromItem = activeItemById.get(connection.fromItemId);
+        const toItem = activeItemById.get(connection.toItemId);
+        if (!fromItem || !toItem || fromItem.visible === false || toItem.visible === false) return false;
 
-        const from = toCanvasScreenPoint(getConnectionAnchorCanvasPoint(fromItem, 'right'));
-        const to = toCanvasScreenPoint(getConnectionAnchorCanvasPoint(toItem, 'left'));
+        const from = projectCanvasPointToViewport(
+          getConnectionAnchorCanvasPoint(fromItem, 'right'),
+          activeViewport
+        );
+        const to = projectCanvasPointToViewport(
+          getConnectionAnchorCanvasPoint(toItem, 'left'),
+          activeViewport
+        );
         const { c1, c2 } = getConnectionControlPoints(from, to);
 
-        const minX = Math.min(from.x, c1.x, c2.x, to.x) - HIT_PADDING;
-        const maxX = Math.max(from.x, c1.x, c2.x, to.x) + HIT_PADDING;
-        const minY = Math.min(from.y, c1.y, c2.y, to.y) - HIT_PADDING;
-        const maxY = Math.max(from.y, c1.y, c2.y, to.y) + HIT_PADDING;
-
-        const intersectsBoundingBox = !(
-          maxX < rectLeft ||
-          minX > rectRight ||
-          maxY < rectTop ||
-          minY > rectBottom
+        const sampledPoints = Array.from(
+          { length: SAMPLE_COUNT + 1 },
+          (_, step) => cubicBezierPoint(from, c1, c2, to, step / SAMPLE_COUNT)
         );
-
-        if (!intersectsBoundingBox) return false;
-
-        for (let step = 0; step <= SAMPLE_COUNT; step += 1) {
-          const point = cubicBezierPoint(from, c1, c2, to, step / SAMPLE_COUNT);
-          if (
-            point.x >= rectLeft &&
-            point.x <= rectRight &&
-            point.y >= rectTop &&
-            point.y <= rectBottom
-          ) {
-            return true;
-          }
-        }
-
-        return false;
+        return areCanvasPointsFullyContained(rect, sampledPoints);
       })
       .map((connection) => connection.id);
   };
 
-  const findNearestInputPort = (x: number, y: number, fromItemId: string): { targetId: string; x: number; y: number } | null => {
+  const findNearestInputPort = (
+    x: number,
+    y: number,
+    candidates: readonly { targetId: string; x: number; y: number }[]
+  ): { targetId: string; x: number; y: number } | null => {
     const SNAP_DISTANCE = 28;
-    let nearest: { targetId: string; x: number; y: number; distance: number } | null = null;
+    const maxDistanceSquared = SNAP_DISTANCE * SNAP_DISTANCE;
+    let nearest: { targetId: string; x: number; y: number; distanceSquared: number } | null = null;
 
-    for (const item of items) {
-      if (item.id === fromItemId) continue;
-      if (!canItemAcceptIncomingConnection(item)) continue;
-      const port = toCanvasScreenPoint(getConnectionAnchorCanvasPoint(item, 'left'));
-      const distance = Math.hypot(port.x - x, port.y - y);
-      if (distance > SNAP_DISTANCE) continue;
-      if (!nearest || distance < nearest.distance) {
-        nearest = { targetId: item.id, x: port.x, y: port.y, distance };
+    for (const candidate of candidates) {
+      const deltaX = candidate.x - x;
+      const deltaY = candidate.y - y;
+      const distanceSquared = deltaX * deltaX + deltaY * deltaY;
+      if (distanceSquared > maxDistanceSquared) continue;
+      if (!nearest || distanceSquared < nearest.distanceSquared) {
+        nearest = { ...candidate, distanceSquared };
       }
     }
 
@@ -8462,26 +9524,9 @@ export default function AIWorkspace() {
     setSelectedConnectionIds((prev) => prev.filter((id) => id !== connectionId));
   };
 
-  const syncConnectionState = useCallback((session: ConnectionSession | null) => {
-    if (!session) {
-      setConnectionMode('idle');
-      setConnectionFromItemId(null);
-      setConnectionPoint(null);
-      setConnectionPointerId(null);
-      setConnectionSnapTargetId(null);
-      return;
-    }
-
-    setConnectionMode(session.mode);
-    setConnectionFromItemId(session.fromItemId);
-    setConnectionPoint(session.point);
-    setConnectionPointerId(session.pointerId);
-    setConnectionSnapTargetId(session.snapTargetId);
-  }, []);
-
   const getCanvasRelativePoint = (clientX: number, clientY: number) => {
-    const canvasRect = canvasRef.current?.getBoundingClientRect();
-    if (!canvasRect) return null;
+    const canvasRect = canvasMetricsRef.current;
+    if (canvasRect.width <= 0 || canvasRect.height <= 0) return null;
     return {
       x: clientX - canvasRect.left,
       y: clientY - canvasRect.top,
@@ -8501,7 +9546,7 @@ export default function AIWorkspace() {
       naturalHeight: content.naturalHeight,
       fit: content.fit,
     });
-  }, [toCanvasPoint, viewport.scale, viewport.x, viewport.y]);
+  }, [toCanvasPoint]);
 
   const handleRegionRecognitionResolved = useCallback((
     nextRegion: RegionSelection,
@@ -8619,68 +9664,53 @@ export default function AIWorkspace() {
     setTool('target');
   }, []);
 
-  const detachConnectionWindowListeners = useCallback(() => {
-    if (detachConnectionWindowListenersRef.current) {
-      detachConnectionWindowListenersRef.current();
-      detachConnectionWindowListenersRef.current = null;
+  const clearConnectionInteractionState = useCallback(() => {
+    connectionSessionRef.current = null;
+    clearConnectionSnapTargetVisual();
+    const previewPath = connectionPreviewPathRef.current;
+    if (previewPath) {
+      previewPath.removeAttribute('d');
+      previewPath.style.visibility = 'hidden';
     }
-  }, []);
-
-  const attachConnectionWindowListeners = () => {
-    detachConnectionWindowListeners();
-
-    const handleWindowPointerMove = (e: PointerEvent) => {
-      const session = connectionSessionRef.current;
-      if (!session) return;
-      if (session.pointerId !== null && e.pointerId !== session.pointerId) return;
-
-      const point = getCanvasRelativePoint(e.clientX, e.clientY);
-      if (!point) return;
-
-      updateConnectionPreview(point.x, point.y);
-    };
-
-    const handleWindowPointerEnd = (e: PointerEvent) => {
-      const session = connectionSessionRef.current;
-      if (!session) return;
-      if (session.pointerId !== null && e.pointerId !== session.pointerId) return;
-      finalizeConnectionInteraction();
-    };
-
-    window.addEventListener('pointermove', handleWindowPointerMove);
-    window.addEventListener('pointerup', handleWindowPointerEnd);
-    window.addEventListener('pointercancel', handleWindowPointerEnd);
-
-    detachConnectionWindowListenersRef.current = () => {
-      window.removeEventListener('pointermove', handleWindowPointerMove);
-      window.removeEventListener('pointerup', handleWindowPointerEnd);
-      window.removeEventListener('pointercancel', handleWindowPointerEnd);
-    };
-  };
+    setConnectionMode('idle');
+    setConnectionFromItemId(null);
+    setConnectionPointerId(null);
+    connectionDragMovedRef.current = false;
+    setCanvasConnectionHitTestingDisabled(false);
+    updateCanvasInteractionPhase('idle');
+  }, [clearConnectionSnapTargetVisual, setCanvasConnectionHitTestingDisabled, updateCanvasInteractionPhase]);
+  clearConnectionInteractionStateRef.current = clearConnectionInteractionState;
 
   const resetConnectionInteraction = useCallback(() => {
     const session = connectionSessionRef.current;
-    if (canvasRef.current && session?.pointerId !== null && canvasRef.current.hasPointerCapture(session.pointerId)) {
-      canvasRef.current.releasePointerCapture(session.pointerId);
+    if (session && isManagedPointer(session.pointerId)) {
+      cancelInteraction('replaced');
+      return;
     }
-    detachConnectionWindowListeners();
-    connectionSessionRef.current = null;
-    syncConnectionState(null);
-    connectionDragMovedRef.current = false;
-  }, [detachConnectionWindowListeners, syncConnectionState]);
+    clearConnectionInteractionState();
+  }, [cancelInteraction, clearConnectionInteractionState, isManagedPointer]);
 
   const updateConnectionPreview = (rawX: number, rawY: number) => {
     const session = connectionSessionRef.current;
     if (!session) return;
     const startPoint = session.startPoint;
-    const movedDistance = startPoint ? Math.hypot(rawX - startPoint.x, rawY - startPoint.y) : 0;
-    const hasMoved = movedDistance >= 3;
+    const movedX = rawX - startPoint.x;
+    const movedY = rawY - startPoint.y;
+    const hasMoved = movedX * movedX + movedY * movedY >= 9;
     connectionDragMovedRef.current = hasMoved;
-    const nearest = findNearestInputPort(rawX, rawY, session.fromItemId);
+    const nearest = findNearestInputPort(rawX, rawY, session.inputPortCandidates);
     session.point = nearest ? { x: nearest.x, y: nearest.y } : { x: rawX, y: rawY };
-    session.snapTargetId = nearest?.targetId || null;
+    const nextSnapTargetId = nearest?.targetId || null;
+    if (session.snapTargetId !== nextSnapTargetId) {
+      session.snapTargetId = nextSnapTargetId;
+      setConnectionSnapTargetVisual(nextSnapTargetId);
+    }
     session.moved = hasMoved;
-    syncConnectionState(session);
+    connectionPreviewPathRef.current?.setAttribute(
+      'd',
+      buildConnectionPath(session.fromPoint, session.point)
+    );
+    markCanvasInteractionVisualFrame('connection-drag');
   };
 
   const finalizeConnectionInteraction = () => {
@@ -8688,27 +9718,30 @@ export default function AIWorkspace() {
     if (session && session.mode === 'dragging' && session.fromItemId && session.snapTargetId && session.fromItemId !== session.snapTargetId) {
       clearPendingConnectionMenu();
       recordCurrentCanvasUndoSnapshot();
-      setConnections((prev) => {
-        const exists = prev.some(
-          (connection) =>
-            connection.fromItemId === session.fromItemId &&
-            connection.toItemId === session.snapTargetId
-        );
-        if (exists) return prev;
-        return [
-          ...prev,
+      const currentConnections = sessionLiveStateRef.current.connections;
+      const exists = currentConnections.some(
+        (connection) =>
+          connection.fromItemId === session.fromItemId &&
+          connection.toItemId === session.snapTargetId
+      );
+      if (!exists) {
+        const nextConnections = [
+          ...currentConnections,
           {
             id: `conn-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
             fromItemId: session.fromItemId,
             toItemId: session.snapTargetId,
           },
         ];
-      });
+        syncSessionLiveState({ connections: nextConnections });
+        stageCanvasCommit({ connections: nextConnections, saveSession: true });
+      } else {
+        schedulePendingCanvasCommit();
+      }
     } else if (session && session.mode === 'dragging' && session.fromItemId && session.point) {
-      const fromItem = items.find((item) => item.id === session.fromItemId);
-      if (fromItem) {
+      if (itemByIdRef.current.has(session.fromItemId)) {
         setFrozenPreviewConnection({
-          from: toCanvasScreenPoint(getConnectionAnchorCanvasPoint(fromItem, 'right')),
+          from: session.fromPoint,
           to: session.point,
         });
         setPendingConnectionMenu({
@@ -8722,77 +9755,529 @@ export default function AIWorkspace() {
         clearPendingConnectionMenu();
       }
     }
-    resetConnectionInteraction();
+    clearConnectionInteractionState();
   };
 
-  const cancelZoomAnimation = useCallback(() => {
-    if (zoomAnimationFrameRef.current !== null) {
-      cancelAnimationFrame(zoomAnimationFrameRef.current);
-      zoomAnimationFrameRef.current = null;
+  const previewCanvasViewport = useCallback((nextViewport: ViewportState) => {
+    const sceneTarget = getSceneTarget();
+    if (!sceneTarget) return;
+
+    visualViewportRef.current = nextViewport;
+    sceneTarget.setViewportTransform(nextViewport.x, nextViewport.y, nextViewport.scale);
+    syncSelectedCanvasOverlayPositions(nextViewport);
+    markCanvasInteractionVisualFrame('viewport');
+  }, [getSceneTarget, markCanvasInteractionVisualFrame, syncSelectedCanvasOverlayPositions]);
+
+  const previewCanvasPanMotion = useCallback((motion: CanvasPanMotion) => {
+    previewCanvasViewport(motion.visualViewport);
+  }, [previewCanvasViewport]);
+
+  useLayoutEffect(() => {
+    if (
+      !pendingCanvasSelectionGestureRef.current &&
+      !isDraggingRef.current &&
+      !isCornerResizingRef.current
+    ) {
+      revealCanvasSelectionOverlayGroups();
     }
-    wheelZoomTargetRef.current = null;
+    syncSelectedCanvasOverlayPositions(visualViewportRef.current);
+    if (!canvasPerformanceEnabledRef.current) return;
+
+    if (isCanvasCommitBlocked()) {
+      canvasOverlayReactCommitDuringInteractionCountRef.current += 1;
+    }
+
+    const pendingMount = pendingCanvasOverlayMountMeasureRef.current;
+    if (!pendingMount) return;
+    const mountedForItem = (
+      getCanvasItemOverlayGroup('selected-image-toolbar')?.itemId === pendingMount.itemId ||
+      getCanvasItemOverlayGroup('selected-image-panel')?.itemId === pendingMount.itemId ||
+      getCanvasItemOverlayGroup('selected-text-panel')?.itemId === pendingMount.itemId
+    );
+    if (!mountedForItem) return;
+
+    pendingCanvasOverlayMountMeasureRef.current = null;
+    if (pendingCanvasOverlayMountFrameRef.current !== null) {
+      cancelAnimationFrame(pendingCanvasOverlayMountFrameRef.current);
+    }
+    pendingCanvasOverlayMountFrameRef.current = requestAnimationFrame(() => {
+      pendingCanvasOverlayMountFrameRef.current = null;
+      console.info('[canvas-overlay-perf]', {
+        itemId: pendingMount.itemId,
+        pointerDownToFirstVisualFrame: performance.now() - pendingMount.startedAt,
+        releaseToToolbarFirstFrame: performance.now() - pendingMount.releasedAt,
+        pointerDownToFirstDragVisual:
+          pendingMount.firstDragVisualAt === null
+            ? null
+            : pendingMount.firstDragVisualAt - pendingMount.startedAt,
+        itemToOverlayPositionErrorPx: 0,
+        overlaySyncWriteCount: canvasOverlaySyncWriteCountRef.current,
+        overlayReactCommitDuringInteractionCount:
+          canvasOverlayReactCommitDuringInteractionCountRef.current,
+        selectionReactCommitDuringInteractionCount:
+          pendingMount.selectionReactCommitDuringInteractionCount,
+      });
+    });
+  }, [getCanvasItemOverlayGroup, isCanvasCommitBlocked, items, revealCanvasSelectionOverlayGroups, selectedId, selectedIds, syncSelectedCanvasOverlayPositions, viewport]);
+
+  useEffect(() => () => {
+    if (pendingCanvasOverlayMountFrameRef.current !== null) {
+      cancelAnimationFrame(pendingCanvasOverlayMountFrameRef.current);
+      pendingCanvasOverlayMountFrameRef.current = null;
+    }
+    if (pendingCanvasSelectionFinalizeFrameRef.current !== null) {
+      cancelAnimationFrame(pendingCanvasSelectionFinalizeFrameRef.current);
+      pendingCanvasSelectionFinalizeFrameRef.current = null;
+    }
   }, []);
 
-  const cancelViewportAnimation = useCallback(() => {
-    if (viewportAnimationFrameRef.current !== null) {
-      cancelAnimationFrame(viewportAnimationFrameRef.current);
-      viewportAnimationFrameRef.current = null;
-    }
-    viewportAnimationTargetRef.current = null;
+  useEffect(() => {
+    canvasPerformanceEnabledRef.current = isCanvasPerformanceEnabled();
   }, []);
 
-  const flushViewportAnimation = useCallback(
-    (now: number) => {
-      viewportAnimationFrameRef.current = null;
-      const target = viewportAnimationTargetRef.current;
-      if (!target) return;
+  const clearCanvasViewportPreview = useCallback(() => {
+    const sceneTarget = getSceneTarget();
+    if (!sceneTarget) return;
+    const activeViewport = visualViewportRef.current;
+    sceneTarget.setViewportTransform(activeViewport.x, activeViewport.y, activeViewport.scale);
+  }, [getSceneTarget]);
 
-      const elapsed = Math.max(0, now - target.startedAt);
-      const progress = Math.min(1, elapsed / target.duration);
-      const easedProgress = easeOutCubic(progress);
-      const nextViewport = {
-        ...target.from,
-        x: target.from.x + (target.to.x - target.from.x) * easedProgress,
-        y: target.from.y + (target.to.y - target.from.y) * easedProgress,
-      };
+  const stageVisualViewportCommit = useCallback((
+    nextViewport: ViewportState,
+    defer = false,
+    existingToken?: number
+  ) => {
+    if (existingToken !== undefined && existingToken !== interactionCommitTokenRef.current) return;
+    visualViewportRef.current = nextViewport;
+    syncSessionLiveState({ viewport: nextViewport });
+    const token = existingToken ?? ++interactionCommitTokenRef.current;
+    stageCanvasCommit({
+      viewport: nextViewport,
+      viewportToken: token,
+      saveSession: true,
+    });
+    if (!defer) flushPendingCanvasCommit('viewport-immediate');
+  }, [flushPendingCanvasCommit, stageCanvasCommit, syncSessionLiveState]);
 
-      setViewport(nextViewport);
-      if (progress >= 1) {
-        viewportAnimationTargetRef.current = null;
-        return;
+  const stageViewportIdleCommit = useCallback((
+    nextViewport: ViewportState,
+    token: number
+  ) => {
+    if (token !== interactionCommitTokenRef.current) return;
+    previewCanvasViewport(nextViewport);
+    syncSessionLiveState({ viewport: nextViewport });
+    pendingViewportIdleCommitTokenRef.current = token;
+    stageCanvasCommit({
+      viewport: nextViewport,
+      viewportToken: token,
+      saveSession: true,
+    });
+  }, [previewCanvasViewport, stageCanvasCommit, syncSessionLiveState]);
+
+  const setCanvasPanVisualState = useCallback((active: boolean) => {
+    if (panOverlayStateActiveRef.current === active) return;
+    const canvas = canvasRef.current;
+    if (canvas) canvas.style.cursor = active ? 'grabbing' : '';
+
+    panOverlayStateActiveRef.current = active;
+  }, []);
+
+  const handoffCanvasViewportMotion = useCallback((
+    mode: 'pan' | 'wheel' | 'programmatic'
+  ) => {
+    interruptCanvasCommitForInteraction(mode);
+    pendingViewportIdleCommitTokenRef.current = null;
+    viewportTweenRef.current?.cancel();
+    viewportTweenRef.current = null;
+    panMotionRef.current = null;
+    isPanningRef.current = false;
+    setCanvasPanVisualState(false);
+    const token = ++interactionCommitTokenRef.current;
+    return token;
+  }, [interruptCanvasCommitForInteraction, setCanvasPanVisualState]);
+
+  const cancelViewportAnimation = useCallback((stageCurrentViewport = true) => {
+    cancelPendingCanvasCommitSchedule();
+    pendingViewportIdleCommitTokenRef.current = null;
+    if (viewportTweenRef.current) {
+      viewportTweenRef.current.cancel();
+      viewportTweenRef.current = null;
+    }
+    panMotionRef.current = null;
+    isPanningRef.current = false;
+    setCanvasPanVisualState(false);
+    ++interactionCommitTokenRef.current;
+    if (stageCurrentViewport) {
+      const visualViewport = visualViewportRef.current;
+      const committedViewport = renderedViewportRef.current;
+      if (
+        visualViewport.x !== committedViewport.x ||
+        visualViewport.y !== committedViewport.y ||
+        visualViewport.scale !== committedViewport.scale
+      ) {
+        stageVisualViewportCommit(visualViewport, true);
       }
+    }
+  }, [cancelPendingCanvasCommitSchedule, setCanvasPanVisualState, stageVisualViewportCommit]);
 
-      viewportAnimationFrameRef.current = requestAnimationFrame(flushViewportAnimation);
-    },
-    [setViewport]
+  const cancelZoomAnimation = cancelViewportAnimation;
+
+  useLayoutEffect(() => {
+    if (
+      !isPanningRef.current &&
+      !pendingCanvasCommitRef.current?.viewport &&
+      !viewportTweenRef.current
+    ) {
+      clearCanvasViewportPreview();
+    }
+  }, [clearCanvasViewportPreview, viewport.x, viewport.y, viewport.scale]);
+
+  const getCanvasItemDragPlanKey = useCallback(
+    (itemIds: readonly string[]) => itemIds.join('\u0000'),
+    []
   );
 
-  function animateViewportTo(nextViewport: { x: number; y: number; scale: number }) {
-    const currentViewport = viewportRef.current;
-    const fromViewport = {
-      ...currentViewport,
+  const buildCanvasItemDragPlan = useCallback((itemIds: readonly string[]) => {
+    const itemIdSet = new Set(itemIds);
+    const targets = getItemTargets(itemIds, itemIds.length > 1).filter(
+      (target) => target.role === 'node-drag' ||
+        target.role === 'annotation-drag' ||
+        target.role === 'selection-group' ||
+        target.role.startsWith('region-')
+    );
+    const affectedConnectionsById = new Map<string, Connection>();
+    for (const itemId of itemIds) {
+      const connected = connectionsByItemId.get(itemId);
+      if (!connected) continue;
+      for (const connection of connected) affectedConnectionsById.set(connection.id, connection);
+    }
+    const connectionPaths = getConnectionPaths(
+      Array.from(affectedConnectionsById.keys()),
+      ['visual']
+    );
+    const plan: CachedCanvasItemDragPlan = {
+      targets,
+      connections: [],
     };
+    for (const connection of affectedConnectionsById.values()) {
+      const paths = connectionPaths.get(connection.id);
+      if (!paths || paths.length === 0) continue;
+      plan.connections.push({
+        connection,
+        paths,
+        movesFrom: itemIdSet.has(connection.fromItemId),
+        movesTo: itemIdSet.has(connection.toItemId),
+      });
+    }
+    canvasConnectionRuntimeIndexRef.current.set(getCanvasItemDragPlanKey(itemIds), plan);
+    return plan;
+  }, [connectionsByItemId, getCanvasItemDragPlanKey, getConnectionPaths, getItemTargets]);
 
+  useEffect(() => {
+    canvasConnectionRuntimeIndexRef.current.clear();
+  }, [canvasItemMembershipKey, connections]);
+
+  const prepareCanvasItemDragPreview = useCallback((itemIds: string[]) => {
+    const planKey = getCanvasItemDragPlanKey(itemIds);
+    const cachedPlan = canvasConnectionRuntimeIndexRef.current.get(planKey);
+    const dragTargets = cachedPlan?.targets ?? getItemTargets(itemIds, itemIds.length > 1).filter(
+      (target) => target.role === 'node-drag' ||
+        target.role === 'annotation-drag' ||
+        target.role === 'selection-group' ||
+        target.role.startsWith('region-')
+    );
+    const targets = dragTargets.map((target) => {
+      const { element } = target;
+      const existingPresentation = canvasItemDragPresentationRef.current.get(element);
+      const presentation = existingPresentation ?? {
+        zIndex: element.style.zIndex,
+        willChange: element.style.willChange,
+      };
+      if (!existingPresentation) {
+        canvasItemDragPresentationRef.current.set(element, presentation);
+      }
+      const logicalItem = target.itemId ? itemByIdRef.current.get(target.itemId) : null;
+      const previewTarget = {
+        target,
+        logicalStartX: logicalItem?.x ?? null,
+        logicalStartY: logicalItem?.y ?? null,
+        zIndex: presentation.zIndex,
+        willChange: presentation.willChange,
+      };
+      return previewTarget;
+    });
+    const targetElements = targets.map(({ target }) => target.element);
+    targetElements.forEach((element) => {
+      element.style.willChange = 'transform';
+    });
+    const elevatedElements = targets
+      .filter(({ target }) => target.role === 'node-drag' || target.role === 'annotation-drag')
+      .map(({ target }) => target.element);
+    elevatedElements.forEach((element) => {
+      element.style.zIndex = '1000';
+    });
+
+    canvasItemDragPreviewRef.current = {
+      targets,
+      connections: [],
+      connectionsPrepared: false,
+      delta: { x: 0, y: 0 },
+    };
+  }, [getCanvasItemDragPlanKey, getItemTargets]);
+
+  const cancelCanvasItemDragConnectionPreparation = useCallback(() => {
+    if (canvasItemDragConnectionPrepareFrameRef.current === null) return;
+    cancelAnimationFrame(canvasItemDragConnectionPrepareFrameRef.current);
+    canvasItemDragConnectionPrepareFrameRef.current = null;
+  }, []);
+
+  const cancelCanvasItemDragConnectionFrame = useCallback(() => {
+    if (canvasItemDragConnectionFrameRef.current === null) return;
+    cancelAnimationFrame(canvasItemDragConnectionFrameRef.current);
+    canvasItemDragConnectionFrameRef.current = null;
+  }, []);
+
+  const flushCanvasItemDragConnectionFrame = useCallback(() => {
+    cancelCanvasItemDragConnectionFrame();
+    const preview = canvasItemDragPreviewRef.current;
+    if (!preview) return;
+    const screenDeltaX = preview.delta.x;
+    const screenDeltaY = preview.delta.y;
+    preview.connections.forEach((connection) => {
+      connection.fromPoint.x = connection.fromStart.x + (connection.movesFrom ? screenDeltaX : 0);
+      connection.fromPoint.y = connection.fromStart.y + (connection.movesFrom ? screenDeltaY : 0);
+      connection.toPoint.x = connection.toStart.x + (connection.movesTo ? screenDeltaX : 0);
+      connection.toPoint.y = connection.toStart.y + (connection.movesTo ? screenDeltaY : 0);
+      if (connection.translationOnly) {
+        const transform = `translate(${screenDeltaX}px, ${screenDeltaY}px)`;
+        connection.paths.forEach((element) => {
+          element.style.transform = transform;
+        });
+        return;
+      }
+      const path = buildConnectionPath(connection.fromPoint, connection.toPoint);
+      connection.paths.forEach((element) => element.setAttribute('d', path));
+    });
+  }, [buildConnectionPath, cancelCanvasItemDragConnectionFrame]);
+
+  const scheduleCanvasItemDragConnectionPreparation = useCallback((
+    itemIds: string[],
+    token: number
+  ) => {
+    cancelCanvasItemDragConnectionPreparation();
+    canvasItemDragConnectionPrepareFrameRef.current = requestAnimationFrame(() => {
+      canvasItemDragConnectionPrepareFrameRef.current = null;
+      if (activeItemDragTokenRef.current !== token || !isDraggingRef.current) return;
+      const preview = canvasItemDragPreviewRef.current;
+      if (!preview) return;
+      const plan = canvasConnectionRuntimeIndexRef.current.get(getCanvasItemDragPlanKey(itemIds))
+        ?? buildCanvasItemDragPlan(itemIds);
+      const connectionPreviews: CanvasItemDragConnectionPreview[] = [];
+      plan.connections.forEach(({ connection, paths, movesFrom, movesTo }) => {
+        const fromItem = itemByIdRef.current.get(connection.fromItemId);
+        const toItem = itemByIdRef.current.get(connection.toItemId);
+        if (!fromItem || !toItem) return;
+        const fromStart = getConnectionAnchorCanvasPoint(fromItem, 'right');
+        const toStart = getConnectionAnchorCanvasPoint(toItem, 'left');
+        connectionPreviews.push({
+          paths,
+          originalPath: buildConnectionPath(fromStart, toStart),
+          originalTransforms: paths.map((element) => element.style.transform),
+          fromStart,
+          toStart,
+          fromPoint: { ...fromStart },
+          toPoint: { ...toStart },
+          movesFrom,
+          movesTo,
+          translationOnly: movesFrom && movesTo,
+        });
+      });
+      preview.connections = connectionPreviews;
+      preview.connectionsPrepared = true;
+      flushCanvasItemDragConnectionFrame();
+    });
+  }, [buildCanvasItemDragPlan, buildConnectionPath, cancelCanvasItemDragConnectionPreparation, flushCanvasItemDragConnectionFrame, getCanvasItemDragPlanKey, getConnectionAnchorCanvasPoint]);
+
+  const scheduleAffectedConnectionFrame = useCallback(() => {
+    if (canvasItemDragConnectionFrameRef.current !== null) return;
+    canvasItemDragConnectionFrameRef.current = requestAnimationFrame(() => {
+      canvasItemDragConnectionFrameRef.current = null;
+      flushCanvasItemDragConnectionFrame();
+      const resize = cornerResizePreviewRef.current;
+      if (resize) {
+        refreshDirectItemConnectionPathsRef.current(resize.itemId, {
+          width: resize.nextWidth,
+          height: resize.nextHeight,
+        });
+      }
+    });
+  }, [flushCanvasItemDragConnectionFrame]);
+
+  const previewCanvasItemDrag = useCallback(
+    (deltaX: number, deltaY: number) => {
+      const preview = canvasItemDragPreviewRef.current;
+      if (!preview) return;
+      preview.delta.x = deltaX;
+      preview.delta.y = deltaY;
+      const transaction = canvasItemDragTransactionRef.current;
+      if (transaction) {
+        transaction.delta.x = deltaX;
+        transaction.delta.y = deltaY;
+      }
+      preview.targets.forEach((target) => {
+        target.target.setPosition(deltaX, deltaY);
+      });
+      if (preview.connections.length > 0) scheduleAffectedConnectionFrame();
+      markCanvasInteractionVisualFrame('item-drag');
+    },
+    [markCanvasInteractionVisualFrame, scheduleAffectedConnectionFrame]
+  );
+
+  const commitCanvasItemDragPreviewToBase = useCallback((
+    finalPositions: Map<string, { x: number; y: number }>
+  ) => {
+    cancelCanvasItemDragConnectionPreparation();
+    flushCanvasItemDragConnectionFrame();
+    const preview = canvasItemDragPreviewRef.current;
+    if (!preview) return;
+    preview.targets.forEach(({ target, zIndex, willChange }) => {
+      const itemId = target.itemId;
+      if (itemId) {
+        const finalPosition = finalPositions.get(itemId);
+        const baseTarget = getItemTargets([itemId]).find((candidate) => (
+          candidate.role === 'node-base-position' || candidate.role === 'annotation-base-position'
+        ));
+        if (finalPosition && baseTarget) {
+          baseTarget.element.style.transform = `translate3d(${finalPosition.x}px, ${finalPosition.y}px, 0)`;
+        }
+      }
+      target.setPosition(0, 0);
+      target.element.style.zIndex = zIndex;
+      target.element.style.willChange = willChange;
+      canvasItemDragPresentationRef.current.delete(target.element);
+    });
+    preview.connections.forEach((connection) => {
+      const path = buildConnectionPath(connection.fromPoint, connection.toPoint);
+      connection.paths.forEach((element) => {
+        element.setAttribute('d', path);
+        element.style.transform = '';
+      });
+    });
+    canvasItemDragPreviewRef.current = null;
+  }, [buildConnectionPath, cancelCanvasItemDragConnectionPreparation, flushCanvasItemDragConnectionFrame, getItemTargets]);
+
+  const clearCanvasItemDragPreview = useCallback((restoreConnectionPaths = false) => {
+    cancelCanvasItemDragConnectionPreparation();
+    cancelCanvasItemDragConnectionFrame();
+    const preview = canvasItemDragPreviewRef.current;
+    if (!preview) return;
+    preview.targets.forEach((target) => {
+      target.target.setPosition(0, 0);
+      target.target.element.style.zIndex = target.zIndex;
+      target.target.element.style.willChange = target.willChange;
+      canvasItemDragPresentationRef.current.delete(target.target.element);
+    });
+    if (restoreConnectionPaths) {
+      preview.connections.forEach((connection) => {
+        connection.paths.forEach((element, index) => {
+          if (!connection.translationOnly) element.setAttribute('d', connection.originalPath);
+          element.style.transform = connection.originalTransforms[index] ?? '';
+        });
+      });
+    } else {
+      preview.connections.forEach((connection) => {
+        connection.paths.forEach((element, index) => {
+          element.style.transform = connection.originalTransforms[index] ?? '';
+        });
+      });
+    }
+    canvasItemDragPreviewRef.current = null;
+  }, [cancelCanvasItemDragConnectionFrame, cancelCanvasItemDragConnectionPreparation]);
+  clearCanvasItemDragPreviewRef.current = clearCanvasItemDragPreview;
+
+  useLayoutEffect(() => {
+    if (!isDraggingRef.current && canvasItemDragPreviewRef.current) {
+      clearCanvasItemDragPreview();
+    }
+    if (
+      canvasInteractionPhaseRef.current !== 'connection-drag' &&
+      !isDraggingRef.current &&
+      !canvasItemDragPreviewRef.current
+    ) {
+      setCanvasConnectionHitTestingDisabled(false);
+      if (canvasInteractionPhaseRef.current === 'item-drag') {
+        updateCanvasInteractionPhase('idle');
+      }
+    }
+  }, [clearCanvasItemDragPreview, items, setCanvasConnectionHitTestingDisabled, updateCanvasInteractionPhase]);
+
+  useLayoutEffect(() => {
+    markLayoutCommitted();
+    const measure = pendingCanvasCommitLayoutMeasureRef.current;
+    if (!measure) return;
+    pendingCanvasCommitLayoutMeasureRef.current = null;
+    console.info('[canvas-commit-perf]', {
+      revision: measure.revision,
+      reason: measure.reason,
+      commitDuration: performance.now() - measure.startedAt,
+      commitDuringInteraction: measure.commitDuringInteraction,
+      commitDuringInteractionCount: measure.commitDuringInteractionCount,
+    });
+  }, [connections, items, markLayoutCommitted, selectedConnectionIds, selectedId, selectedIds, viewport]);
+
+  const animateViewportTo = useCallback((
+    nextViewport: ViewportState,
+    options: { duration?: number; ease?: string } = {}
+  ) => {
+    if (isPanningRef.current) cancelInteraction('viewport-handoff');
+    const token = handoffCanvasViewportMotion('programmatic');
+    const currentViewport = { ...visualViewportRef.current };
     const hasNoMovement =
-      fromViewport.x === nextViewport.x &&
-      fromViewport.y === nextViewport.y &&
-      fromViewport.scale === nextViewport.scale;
+      currentViewport.x === nextViewport.x &&
+      currentViewport.y === nextViewport.y &&
+      currentViewport.scale === nextViewport.scale;
 
-    cancelViewportAnimation();
-
-    if (reducedMotionRef.current || hasNoMovement) {
-      setViewport(nextViewport);
+    if (reducedMotionRef.current || hasNoMovement || options.duration === 0) {
+      previewCanvasViewport(nextViewport);
+      stageViewportIdleCommit(nextViewport, token);
       return;
     }
 
-    viewportAnimationTargetRef.current = {
-      from: fromViewport,
-      to: nextViewport,
-      startedAt: performance.now(),
-      duration: CANVAS_VIEWPORT_PASTE_ANIMATION_MS,
+    const durationMs = Math.max(
+      0,
+      (options.duration ?? CANVAS_VIEWPORT_ANIMATION_SECONDS) * 1000
+    );
+    const startedAt = performance.now();
+    let frameId: number | null = null;
+    let cancelled = false;
+    const animation: NativeViewportAnimation = {
+      cancel: () => {
+        if (cancelled) return;
+        cancelled = true;
+        if (frameId !== null) cancelAnimationFrame(frameId);
+        if (viewportTweenRef.current === animation) viewportTweenRef.current = null;
+      },
     };
-    viewportAnimationFrameRef.current = requestAnimationFrame(flushViewportAnimation);
-  }
+    const tick = (now: number) => {
+      if (cancelled || token !== interactionCommitTokenRef.current) return;
+      const progress = durationMs === 0 ? 1 : Math.min(1, (now - startedAt) / durationMs);
+      const eased = 1 - Math.pow(1 - progress, 3);
+      previewCanvasViewport({
+        x: currentViewport.x + (nextViewport.x - currentViewport.x) * eased,
+        y: currentViewport.y + (nextViewport.y - currentViewport.y) * eased,
+        scale: currentViewport.scale + (nextViewport.scale - currentViewport.scale) * eased,
+      });
+      if (progress < 1) {
+        frameId = requestAnimationFrame(tick);
+        return;
+      }
+      viewportTweenRef.current = null;
+      stageViewportIdleCommit(nextViewport, token);
+    };
+    viewportTweenRef.current = animation;
+    frameId = requestAnimationFrame(tick);
+  }, [cancelInteraction, handoffCanvasViewportMotion, previewCanvasViewport, stageViewportIdleCommit]);
+  animateViewportToRef.current = animateViewportTo;
 
   const getScaledViewportAtAnchor = useCallback(
     (
@@ -8807,254 +10292,798 @@ export default function AIWorkspace() {
 
       const resolvedAnchor =
         anchor ??
-        (canvasRef.current
-          ? { x: canvasRef.current.clientWidth / 2, y: canvasRef.current.clientHeight / 2 }
+        (canvasMetricsRef.current.width > 0 && canvasMetricsRef.current.height > 0
+          ? { x: canvasMetricsRef.current.width / 2, y: canvasMetricsRef.current.height / 2 }
           : undefined);
 
       if (!resolvedAnchor) {
-        return {
-          ...currentViewport,
-          scale: clampedScale,
-        };
+        return getCanvasViewportAtAnchor(currentViewport, clampedScale);
       }
-
-      const canvasPoint = {
-        x: (resolvedAnchor.x - currentViewport.x) / currentViewport.scale,
-        y: (resolvedAnchor.y - currentViewport.y) / currentViewport.scale,
-      };
-
-      return {
-        ...currentViewport,
-        scale: clampedScale,
-        x: resolvedAnchor.x - canvasPoint.x * clampedScale,
-        y: resolvedAnchor.y - canvasPoint.y * clampedScale,
-      };
+      return getCanvasViewportAtAnchor(currentViewport, clampedScale, resolvedAnchor);
     },
     []
   );
 
-  const flushInteractionFrame = useCallback(() => {
-    interactionFrameRef.current = null;
-    const pointer = latestInteractionPointerRef.current;
-    if (!pointer) return;
+  const refreshDirectItemConnectionPaths = useCallback((
+    itemId: string,
+    geometry?: { width: number; height: number }
+  ) => {
+    const affectedConnections = connectionsByItemId.get(itemId);
+    if (!affectedConnections || affectedConnections.length === 0) return;
+    const pathsByConnection = getConnectionPaths(
+      affectedConnections.map((connection) => connection.id),
+      ['visual', 'hit']
+    );
+    for (const connection of affectedConnections) {
+      const fromItem = itemByIdRef.current.get(connection.fromItemId);
+      const toItem = itemByIdRef.current.get(connection.toItemId);
+      const paths = pathsByConnection.get(connection.id);
+      if (!fromItem || !toItem || !paths) continue;
+      const fromCanvas = connection.fromItemId === itemId && geometry
+        ? {
+            x: fromItem.x + geometry.width + CONNECTION_ANCHOR_EDGE_GAP,
+            y: fromItem.y + geometry.height / 2,
+          }
+        : getConnectionAnchorCanvasPoint(fromItem, 'right');
+      const toCanvas = connection.toItemId === itemId && geometry
+        ? {
+            x: toItem.x - CONNECTION_ANCHOR_EDGE_GAP,
+            y: toItem.y + geometry.height / 2,
+          }
+        : getConnectionAnchorCanvasPoint(toItem, 'left');
+      const path = buildConnectionPath(fromCanvas, toCanvas);
+      paths.forEach((element) => element.setAttribute('d', path));
+    }
+  }, [buildConnectionPath, connectionsByItemId, getConnectionAnchorCanvasPoint, getConnectionPaths]);
+  refreshDirectItemConnectionPathsRef.current = refreshDirectItemConnectionPaths;
 
-    if (isCornerResizing && selectedIdRef.current && cornerResizeStart.current) {
-      const { mouseX, mouseY, width, height, itemId } = cornerResizeStart.current;
-      if (itemId !== selectedIdRef.current) return;
+  const commitCornerResizePreview = useCallback(() => {
+    const preview = cornerResizePreviewRef.current;
+    cornerResizePreviewRef.current = null;
+    if (!preview) return;
+    const changed =
+      Math.abs(preview.nextWidth - preview.startWidth) > 0.01 ||
+      Math.abs(preview.nextHeight - preview.startHeight) > 0.01;
+    if (preview.target) {
+      preview.target.element.style.willChange = preview.target.initialWillChange;
+    }
+    if (!changed) {
+      return;
+    }
 
-      const resizingItem = itemsRef.current.find((item) => item.id === itemId);
-      if (!resizingItem) {
-        setIsCornerResizing(false);
-        cornerResizeStart.current = null;
-        return;
+    const nextItems = sessionLiveStateRef.current.items.map((item) => (
+      item.id === preview.itemId
+        ? { ...item, width: preview.nextWidth, height: preview.nextHeight }
+        : item
+    ));
+    syncSessionLiveState({ items: nextItems });
+    stageCanvasCommit({ items: nextItems, saveSession: true });
+  }, [stageCanvasCommit, syncSessionLiveState]);
+
+  const cancelActiveItemDrag = useCallback((reason: CanvasInteractionCancelReason = 'escape') => {
+    const wasDragging = isDraggingRef.current;
+    const transaction = canvasItemDragTransactionRef.current;
+    isDraggingRef.current = false;
+    isAltCopyDragRef.current = false;
+    altDragPrimarySourceIdRef.current = null;
+    activeItemDragTokenRef.current = null;
+    canvasItemDragTransactionRef.current = null;
+    draggingItemIdsRef.current = [];
+    dragItemStartPositionsRef.current = {};
+    if (wasDragging) clearCanvasItemDragPreview(true);
+    if (transaction) restoreCanvasOverlayVisibility(transaction.overlayVisibility);
+    if (canvasRef.current) canvasRef.current.style.cursor = '';
+    clearPendingCanvasUndoSnapshot();
+    setCanvasConnectionHitTestingDisabled(false);
+    updateCanvasInteractionPhase('idle');
+    if (reason !== 'replaced') {
+      const visualViewport = visualViewportRef.current;
+      const renderedViewport = renderedViewportRef.current;
+      if (
+        visualViewport.x !== renderedViewport.x ||
+        visualViewport.y !== renderedViewport.y ||
+        visualViewport.scale !== renderedViewport.scale
+      ) {
+        stageVisualViewportCommit(visualViewport, true);
       }
+    }
+    restoreCanvasSelectionGestureRef.current();
+    schedulePendingCanvasCommit();
+  }, [clearCanvasItemDragPreview, clearPendingCanvasUndoSnapshot, restoreCanvasOverlayVisibility, schedulePendingCanvasCommit, setCanvasConnectionHitTestingDisabled, stageVisualViewportCommit, updateCanvasInteractionPhase]);
 
-      const deltaX = (pointer.x - mouseX) / viewportRef.current.scale;
-      const deltaY = (pointer.y - mouseY) / viewportRef.current.scale;
+  const suppressCanvasItemClickAfterDrag = useCallback((itemId: string | null) => {
+    if (!itemId) return;
+    suppressNextItemClickRef.current = itemId;
+    if (suppressNextItemClickTimerRef.current) clearTimeout(suppressNextItemClickTimerRef.current);
+    suppressNextItemClickTimerRef.current = setTimeout(() => {
+      suppressNextItemClickRef.current = null;
+      suppressNextItemClickTimerRef.current = null;
+    }, 350);
+  }, []);
 
-      if (resizingItem.textVariant === 'card') {
-        const minWidth = 260;
-        const minHeight = 300;
-        const newWidth = Math.max(minWidth, width + deltaX);
-        const newHeight = Math.max(minHeight, height + deltaY);
+  const completeActiveItemDrag = useCallback((pointerX: number, pointerY: number) => {
+    if (!isDraggingRef.current) return;
+    const dragDelta = getCanvasDragDelta(
+      dragStart.current,
+      { x: pointerX, y: pointerY },
+      visualViewportRef.current.scale
+    );
+    const { x: deltaX, y: deltaY } = dragDelta;
+    const draggedItemIds = [...draggingItemIdsRef.current];
+    const moved = Math.abs(deltaX) > 0.001 || Math.abs(deltaY) > 0.001;
+    const isAltCopyDrag = isAltCopyDragRef.current;
+    const token = activeItemDragTokenRef.current;
+    const transaction = canvasItemDragTransactionRef.current;
+    const transactionMatches = matchesCanvasItemDragTransaction(
+      transaction,
+      token,
+      currentSessionIdRef.current
+    );
+    const startPositions = transactionMatches && transaction
+      ? transaction.startPositions
+      : { ...dragItemStartPositionsRef.current };
+    let finalizedSelection: FinalizeCanvasSelectionGestureOptions | null = null;
+    let shouldRestorePendingSelection = false;
 
-        setItems((prev) =>
-          prev.map((item) =>
-            item.id === selectedIdRef.current ? { ...item, width: newWidth, height: newHeight } : item
-          )
-        );
-        return;
+
+    if (transactionMatches) {
+      previewCanvasItemDrag(deltaX, deltaY);
+    }
+
+    if (moved && token !== null && transactionMatches) {
+      if (isAltCopyDrag) {
+        const beforeSnapshot = createCurrentCanvasUndoSnapshot();
+        const baseItems = sessionLiveStateRef.current.items;
+        const snapshot = createCanvasClipboardSnapshot({
+          items: baseItems,
+          selectedIds: draggedItemIds,
+          textCardPanelDrafts,
+          textCardProviderById,
+          textCardModelById,
+          imageCardPanelDrafts,
+          imageCardProviderById,
+          imageCardModelById,
+          imageCardSizeById,
+          imageCardQualityById,
+          imageCardCountById,
+          imageCardAspectRatioById,
+        }) as CanvasClipboardSnapshot | null;
+        const copiedItems = snapshot
+          ? materializeCanvasClipboardPaste({
+              clipboard: snapshot,
+              pasteCount: 0,
+              offsetStep: { x: 0, y: 0 },
+              createId: (sourceId: string, index: number) =>
+                `${sourceId}-alt-copy-${Date.now()}-${index + 1}-${Math.random().toString(36).slice(2, 7)}`,
+            }) as MaterializedCanvasClipboardPaste | null
+          : null;
+        if (copiedItems) {
+          const positionedCopies = copiedItems.items.map((item) => ({
+            ...item,
+            x: item.x + deltaX,
+            y: item.y + deltaY,
+          }));
+          const nextItems = [...baseItems, ...positionedCopies];
+          clearCanvasItemDragPreview(true);
+          syncSessionLiveState({ items: nextItems });
+          setTextCardPanelDrafts((previous) => ({ ...previous, ...copiedItems.textCardPanelDrafts }));
+          setTextCardProviderById((previous) => ({ ...previous, ...copiedItems.textCardProviderById }));
+          setTextCardModelById((previous) => ({ ...previous, ...copiedItems.textCardModelById }));
+          setImageCardPanelDrafts((previous) => ({ ...previous, ...copiedItems.imageCardPanelDrafts }));
+          setImageCardProviderById((previous) => ({ ...previous, ...copiedItems.imageCardProviderById }));
+          setImageCardModelById((previous) => ({ ...previous, ...copiedItems.imageCardModelById }));
+          setImageCardSizeById((previous) => ({ ...previous, ...copiedItems.imageCardSizeById }));
+          setImageCardQualityById((previous) => ({ ...previous, ...copiedItems.imageCardQualityById }));
+          setImageCardCountById((previous) => ({ ...previous, ...copiedItems.imageCardCountById }));
+          setImageCardAspectRatioById((previous) => ({ ...previous, ...copiedItems.imageCardAspectRatioById }));
+          pushCanvasUndoSnapshot(beforeSnapshot);
+          finalizedSelection = {
+            itemIds: copiedItems.selectedIds,
+            items: nextItems,
+            reason: 'alt-copy',
+            saveSession: true,
+          };
+        } else {
+          clearCanvasItemDragPreview(true);
+          setCanvasConnectionHitTestingDisabled(false);
+          updateCanvasInteractionPhase('idle');
+          shouldRestorePendingSelection = true;
+        }
+      } else {
+        const finalPositions = resolveCanvasItemDragReleasePositions({
+          itemIds: draggedItemIds,
+          startPositions,
+          delta: { x: deltaX, y: deltaY },
+        });
+        for (const [itemId, finalPosition] of finalPositions) {
+          const currentItem = itemByIdRef.current.get(itemId);
+          if (currentItem) {
+            itemByIdRef.current.set(itemId, {
+              ...currentItem,
+              x: finalPosition.x,
+              y: finalPosition.y,
+            });
+          }
+        }
+        const baseItems = sessionLiveStateRef.current.items;
+        const committedMove = applyCanvasItemDragPositions({
+          items: baseItems,
+          itemIds: draggedItemIds,
+          positions: finalPositions,
+        });
+        const nextItems = committedMove.items;
+        commitCanvasItemDragPreviewToBase(finalPositions);
+        draggedItemIds.forEach((itemId) => refreshDirectItemConnectionPaths(itemId));
+        syncSelectedCanvasOverlayPositions(visualViewportRef.current, draggedItemIds);
+        syncSessionLiveState({ items: nextItems });
+        const afterPositions: Record<string, { x: number; y: number }> = {};
+        for (const [itemId, finalPosition] of finalPositions) {
+          afterPositions[itemId] = finalPosition;
+        }
+        pushCanvasMoveUndoCommand(createCanvasMoveHistoryCommand({
+          before: startPositions,
+          after: afterPositions,
+          orderBefore: committedMove.orderBefore,
+          orderAfter: committedMove.orderAfter,
+        }) as CanvasMoveHistoryCommand);
+        if (pendingCanvasSelectionGestureRef.current) {
+          finalizedSelection = {
+            itemIds: draggedItemIds,
+            items: nextItems,
+            reason: 'drag',
+            saveSession: true,
+          };
+        } else {
+          stageCanvasCommit({ items: nextItems, saveSession: true });
+        }
       }
+    }
 
-      const minSize = 40;
-      const aspect = width / height;
-      const proposedWidth = width + deltaX;
-      const proposedHeight = height + deltaY;
-      const scaleX = proposedWidth / width;
-      const scaleY = proposedHeight / height;
-      const scale = Math.abs(scaleX - 1) >= Math.abs(scaleY - 1) ? scaleX : scaleY;
-      const nextScale = Number.isFinite(scale) ? scale : 1;
-      const newWidth = Math.max(minSize, width * nextScale);
-      const newHeight = Math.max(minSize, Math.max(height * nextScale, newWidth / aspect));
+    isDraggingRef.current = false;
+    isAltCopyDragRef.current = false;
+    draggingItemIdsRef.current = [];
+    dragItemStartPositionsRef.current = {};
+    activeItemDragTokenRef.current = null;
+    canvasItemDragTransactionRef.current = null;
+    if (canvasRef.current) canvasRef.current.style.cursor = '';
+    altDragPrimarySourceIdRef.current = null;
+    if (!moved || !transactionMatches) {
+      if (transaction) restoreCanvasOverlayVisibility(transaction.overlayVisibility);
+      clearCanvasItemDragPreview(true);
+      setCanvasConnectionHitTestingDisabled(false);
+      updateCanvasInteractionPhase('idle');
+    }
+    const visualViewport = visualViewportRef.current;
+    const renderedViewport = renderedViewportRef.current;
+    if (
+      visualViewport.x !== renderedViewport.x ||
+      visualViewport.y !== renderedViewport.y ||
+      visualViewport.scale !== renderedViewport.scale
+    ) {
+      stageVisualViewportCommit(visualViewport, true);
+    }
+    if (
+      !finalizedSelection &&
+      !shouldRestorePendingSelection &&
+      pendingCanvasSelectionGestureRef.current &&
+      transactionMatches
+    ) {
+      finalizedSelection = {
+        itemIds: pendingCanvasSelectionGestureRef.current.itemIds,
+        reason: 'drag',
+        saveSession: true,
+      };
+    }
+    if (finalizedSelection) {
+      finalizeCanvasSelectionGestureRef.current(finalizedSelection);
+    } else if (pendingCanvasSelectionGestureRef.current) {
+      restoreCanvasSelectionGestureRef.current();
+    } else if (transaction) {
+      requestAnimationFrame(() => {
+        syncSelectedCanvasOverlayPositions(visualViewportRef.current, draggedItemIds);
+        restoreCanvasOverlayVisibility(transaction.overlayVisibility);
+      });
+    }
+    schedulePendingCanvasCommit();
+  }, [clearCanvasItemDragPreview, commitCanvasItemDragPreviewToBase, createCurrentCanvasUndoSnapshot, imageCardAspectRatioById, imageCardCountById, imageCardModelById, imageCardPanelDrafts, imageCardProviderById, imageCardQualityById, imageCardSizeById, previewCanvasItemDrag, pushCanvasMoveUndoCommand, pushCanvasUndoSnapshot, refreshDirectItemConnectionPaths, restoreCanvasOverlayVisibility, schedulePendingCanvasCommit, setCanvasConnectionHitTestingDisabled, setImageCardAspectRatioById, setImageCardCountById, setImageCardModelById, setImageCardPanelDrafts, setImageCardProviderById, setImageCardQualityById, setImageCardSizeById, setTextCardModelById, setTextCardPanelDrafts, setTextCardProviderById, stageCanvasCommit, stageVisualViewportCommit, syncSelectedCanvasOverlayPositions, syncSessionLiveState, textCardModelById, textCardPanelDrafts, textCardProviderById, updateCanvasInteractionPhase]);
 
-      setItems((prev) =>
-        prev.map((item) =>
-          item.id === selectedIdRef.current ? { ...item, width: newWidth, height: newHeight } : item
-        )
-      );
+  const stageCanvasPanViewportCommit = useCallback((
+    finalViewport: ViewportState,
+    motion: CanvasPanMotion | null = panMotionRef.current
+  ) => {
+    const token = motion?.token ?? interactionCommitTokenRef.current;
+    panMotionRef.current = null;
+    isPanningRef.current = false;
+    if (canvasRef.current) canvasRef.current.style.cursor = '';
+    updateCanvasInteractionPhase('idle');
+    stageViewportIdleCommit(finalViewport, token);
+  }, [stageViewportIdleCommit, updateCanvasInteractionPhase]);
+
+  const cancelActiveCanvasPan = useCallback((reason: CanvasInteractionCancelReason = 'escape') => {
+    const motion = panMotionRef.current;
+    if (!motion && !isPanningRef.current) return;
+
+    if (reason === 'unmount') {
+      panMotionRef.current = null;
+      isPanningRef.current = false;
       return;
     }
 
-    if (isPanning) {
-      const dx = pointer.x - dragStart.current.x;
-      const dy = pointer.y - dragStart.current.y;
-      setViewport((prev) => ({
-        ...prev,
-        x: panStartOffset.current.x + dx,
-        y: panStartOffset.current.y + dy,
-      }));
+    if (reason === 'viewport-handoff') {
+      panMotionRef.current = null;
+      isPanningRef.current = false;
+      if (canvasRef.current) canvasRef.current.style.cursor = '';
+      setCanvasPanVisualState(false);
+      updateCanvasInteractionPhase('idle');
       return;
     }
 
-    if (isDragging && selectedIdRef.current) {
-      const dx = (pointer.x - dragStart.current.x) / viewportRef.current.scale;
-      const dy = (pointer.y - dragStart.current.y) / viewportRef.current.scale;
+    const startViewport = motion?.startViewport ?? panStartViewportRef.current;
+    panMotionRef.current = null;
+    isPanningRef.current = false;
+    visualViewportRef.current = { ...startViewport };
+    previewCanvasViewport(startViewport);
+    if (canvasRef.current) canvasRef.current.style.cursor = '';
+    updateCanvasInteractionPhase('idle');
 
-      setItems((prev) =>
-        prev.map((item) =>
-          draggingItemIdsRef.current.includes(item.id)
-            ? {
-                ...item,
-                x: (dragItemStartPositionsRef.current[item.id]?.x ?? item.x) + dx,
-                y: (dragItemStartPositionsRef.current[item.id]?.y ?? item.y) + dy,
-              }
-            : item
-        )
-      );
-    }
-  }, [isCornerResizing, isDragging, isPanning]);
-
-  const scheduleInteractionFrame = useCallback(() => {
-    if (interactionFrameRef.current !== null) return;
-    interactionFrameRef.current = requestAnimationFrame(flushInteractionFrame);
-  }, [flushInteractionFrame]);
-
-  const flushWheelZoom = useCallback(() => {
-    zoomAnimationFrameRef.current = null;
-    const target = wheelZoomTargetRef.current;
-    if (!target) return;
-    wheelZoomTargetRef.current = null;
-
-    setViewport((prev) => getScaledViewportAtAnchor(prev, target.scale, target.anchor));
-  }, [getScaledViewportAtAnchor]);
-
-  const scheduleWheelZoom = useCallback(() => {
-    if (reducedMotionRef.current) {
-      flushWheelZoom();
+    const renderedViewport = renderedViewportRef.current;
+    const needsViewportCommit =
+      startViewport.x !== renderedViewport.x ||
+      startViewport.y !== renderedViewport.y ||
+      startViewport.scale !== renderedViewport.scale;
+    if (needsViewportCommit) {
+      stageCanvasPanViewportCommit(startViewport, motion);
       return;
     }
-    if (zoomAnimationFrameRef.current !== null) return;
-    zoomAnimationFrameRef.current = requestAnimationFrame(flushWheelZoom);
-  }, [flushWheelZoom]);
+    setCanvasPanVisualState(false);
+    clearCanvasViewportPreview();
+  }, [clearCanvasViewportPreview, previewCanvasViewport, setCanvasPanVisualState, stageCanvasPanViewportCommit, updateCanvasInteractionPhase]);
+
+  const completeActiveCanvasPan = useCallback((pointerX: number, pointerY: number) => {
+    const motion = panMotionRef.current;
+    if (!motion || !isPanningRef.current) return;
+    motion.currentPointer.x = pointerX;
+    motion.currentPointer.y = pointerY;
+    Object.assign(
+      motion.targetViewport,
+      applyDirectPan(motion.startViewport, motion.startPointer, motion.currentPointer)
+    );
+    motion.moved = motion.moved ||
+      motion.targetViewport.x !== motion.startViewport.x ||
+      motion.targetViewport.y !== motion.startViewport.y;
+
+    if (!motion.moved) {
+      if (motion.clearSelectionOnClick) {
+        setSelectedConnectionIds([]);
+        setSelectedId(null);
+        setSelectedIds([]);
+      }
+      const renderedViewport = renderedViewportRef.current;
+      const needsViewportCommit =
+        motion.startViewport.x !== renderedViewport.x ||
+        motion.startViewport.y !== renderedViewport.y ||
+        motion.startViewport.scale !== renderedViewport.scale;
+      if (needsViewportCommit) {
+        stageCanvasPanViewportCommit(motion.startViewport, motion);
+      } else {
+        panMotionRef.current = null;
+        isPanningRef.current = false;
+        if (canvasRef.current) canvasRef.current.style.cursor = '';
+        setCanvasPanVisualState(false);
+        clearCanvasViewportPreview();
+        updateCanvasInteractionPhase('idle');
+      }
+      return;
+    }
+
+    stageCanvasPanViewportCommit(motion.targetViewport, motion);
+  }, [clearCanvasViewportPreview, previewCanvasPanMotion, setCanvasPanVisualState, stageCanvasPanViewportCommit, updateCanvasInteractionPhase]);
+
+  useEffect(() => {
+    const flushCanvasSessionBoundary = (reason: string) => {
+      cancelInteraction('window-blur');
+      flushPendingCanvasCommit(reason);
+    };
+    const handleWindowBlur = () => {
+      flushCanvasSessionBoundary('window-blur');
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState !== 'hidden') return;
+      flushCanvasSessionBoundary('visibility-hidden');
+    };
+    const handlePageHide = () => flushCanvasSessionBoundary('page-hide');
+    window.addEventListener('blur', handleWindowBlur, true);
+    window.addEventListener('pagehide', handlePageHide, true);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      window.removeEventListener('blur', handleWindowBlur, true);
+      window.removeEventListener('pagehide', handlePageHide, true);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [cancelInteraction, flushPendingCanvasCommit]);
+
+  const beginPendingItemDrag = React.useCallback(
+    ({
+      clientX,
+      clientY,
+      itemIds,
+      primaryId,
+      pointerId,
+      pointerType,
+      altCopy,
+    }: {
+      clientX: number;
+      clientY: number;
+      itemIds: string[];
+      primaryId: string | null;
+      pointerId: number;
+      pointerType: string;
+      altCopy: boolean;
+    }) => {
+      if (itemIds.length === 0 || !primaryId) return;
+      interruptCanvasCommitForInteraction('item-drag');
+      pendingCanvasHistorySnapshotRef.current = null;
+      if (isPanningRef.current) cancelInteraction('viewport-handoff');
+      if (viewportTweenRef.current) cancelViewportAnimation(false);
+      isDraggingRef.current = false;
+      isAltCopyDragRef.current = altCopy;
+      altDragPrimarySourceIdRef.current = altCopy ? primaryId : null;
+      draggingItemIdsRef.current = itemIds;
+      dragStart.current = { x: clientX, y: clientY };
+
+      let activated = false;
+      const activate = () => {
+        if (activated) return;
+        activated = true;
+        const pendingSelection = pendingCanvasSelectionGestureRef.current;
+        if (pendingSelection?.primaryId === primaryId) {
+          pendingSelection.activated = true;
+        }
+        const token = ++interactionCommitTokenRef.current;
+        activeItemDragTokenRef.current = token;
+        isDraggingRef.current = true;
+        updateCanvasInteractionPhase('item-drag');
+        setCanvasConnectionHitTestingDisabled(true);
+        setPointerSessionMode('item-drag');
+        const startPositions: Record<string, { x: number; y: number }> = {};
+        for (const itemId of itemIds) {
+          const item = itemByIdRef.current.get(itemId);
+          if (item) startPositions[itemId] = { x: item.x, y: item.y };
+        }
+        const overlayVisibility = hideCanvasSelectionOverlayGroups();
+        canvasItemDragTransactionRef.current = {
+          sessionId: currentSessionIdRef.current,
+          token,
+          itemIds: [...itemIds],
+          startPositions,
+          delta: { x: 0, y: 0 },
+          overlayVisibility,
+          isAltCopy: altCopy,
+        };
+        dragItemStartPositionsRef.current = startPositions;
+        prepareCanvasItemDragPreview(itemIds);
+        if (canvasRef.current) canvasRef.current.style.cursor = 'grabbing';
+      };
+
+      startPointerSession({
+        mode: 'pending-item-drag',
+        pointerId,
+        startPoint: { x: clientX, y: clientY },
+        onFrame: (pointerX, pointerY) => {
+          if (!activated) {
+            if (!hasCanvasDragIntent(
+              { x: clientX, y: clientY },
+              { x: pointerX, y: pointerY },
+              pointerType
+            )) return;
+            activate();
+          }
+          const delta = getCanvasDragDelta(
+            dragStart.current,
+            { x: pointerX, y: pointerY },
+            visualViewportRef.current.scale
+          );
+          previewCanvasItemDrag(delta.x, delta.y);
+          const preview = canvasItemDragPreviewRef.current;
+          if (preview && !preview.connectionsPrepared && canvasItemDragConnectionPrepareFrameRef.current === null) {
+            scheduleCanvasItemDragConnectionPreparation(itemIds, activeItemDragTokenRef.current!);
+          }
+          const pendingSelection = pendingCanvasSelectionGestureRef.current;
+          if (
+            pendingSelection?.primaryId === primaryId &&
+            pendingSelection.firstDragVisualAt === null
+          ) {
+            pendingSelection.firstDragVisualAt = performance.now();
+          }
+        },
+        onRelease: (pointerX, pointerY) => {
+          if (
+            activated ||
+            hasCanvasDragIntent(
+              { x: clientX, y: clientY },
+              { x: pointerX, y: pointerY },
+              pointerType
+            )
+          ) {
+            suppressCanvasItemClickAfterDrag(primaryId);
+          }
+        },
+        onEnd: (pointerX, pointerY) => {
+          if (pendingConnectionMenu || frozenPreviewConnection) clearPendingConnectionMenu();
+          if (!activated) {
+            if (pendingCanvasSelectionGestureRef.current?.primaryId === primaryId) {
+              finalizeCanvasSelectionGestureRef.current({
+                reason: 'click',
+              });
+            }
+            draggingItemIdsRef.current = [];
+            isAltCopyDragRef.current = false;
+            altDragPrimarySourceIdRef.current = null;
+            const visualViewport = visualViewportRef.current;
+            const renderedViewport = renderedViewportRef.current;
+            if (
+              visualViewport.x !== renderedViewport.x ||
+              visualViewport.y !== renderedViewport.y ||
+              visualViewport.scale !== renderedViewport.scale
+            ) {
+              stageVisualViewportCommit(visualViewport, true);
+            }
+            schedulePendingCanvasCommit();
+            return;
+          }
+          completeActiveItemDrag(pointerX, pointerY);
+        },
+        onCancel: cancelActiveItemDrag,
+      });
+    },
+    [
+      cancelActiveItemDrag,
+      cancelInteraction,
+      cancelViewportAnimation,
+      clearPendingConnectionMenu,
+      completeActiveItemDrag,
+      frozenPreviewConnection,
+      hideCanvasSelectionOverlayGroups,
+      interruptCanvasCommitForInteraction,
+      pendingConnectionMenu,
+      prepareCanvasItemDragPreview,
+      previewCanvasItemDrag,
+      schedulePendingCanvasCommit,
+      scheduleCanvasItemDragConnectionPreparation,
+      setCanvasConnectionHitTestingDisabled,
+      setPointerSessionMode,
+      stageVisualViewportCommit,
+      startPointerSession,
+      suppressCanvasItemClickAfterDrag,
+      updateCanvasInteractionPhase,
+    ]
+  );
 
   const beginDraggingSelectedItems = React.useCallback(
-    (clientX: number, clientY: number, itemIds: string[], primaryId: string | null) => {
-      if (itemIds.length === 0 || !primaryId) return;
-      pendingCanvasHistorySnapshotRef.current = createCurrentCanvasUndoSnapshot();
-      cancelZoomAnimation();
-      cancelViewportAnimation();
-      clearPendingConnectionMenu();
-      setSelectedConnectionIds([]);
-      setIsDragging(true);
-      draggingItemIdsRef.current = itemIds;
-      setSelectedId(primaryId);
-      setSelectedIds(itemIds);
-      setItems((prev) => moveCanvasItemsToFront(prev, itemIds));
-      dragStart.current = { x: clientX, y: clientY };
-      dragItemStartPositionsRef.current = Object.fromEntries(
-        itemsRef.current
-          .filter((item) => itemIds.includes(item.id))
-          .map((item) => [item.id, { x: item.x, y: item.y }])
-      );
+    (clientX: number, clientY: number, itemIds: string[], primaryId: string | null, pointerId: number, pointerType: string) => {
+      beginPendingItemDrag({ clientX, clientY, itemIds, primaryId, pointerId, pointerType, altCopy: false });
     },
-    [cancelViewportAnimation, cancelZoomAnimation, clearPendingConnectionMenu, createCurrentCanvasUndoSnapshot]
+    [beginPendingItemDrag]
   );
 
   const beginAltDragCopiedItems = React.useCallback(
-    (clientX: number, clientY: number, sourceIds: string[], primaryId: string | null) => {
-      if (sourceIds.length === 0 || !primaryId) return;
+    (clientX: number, clientY: number, sourceIds: string[], primaryId: string | null, pointerId: number, pointerType: string) => {
+      beginPendingItemDrag({ clientX, clientY, itemIds: sourceIds, primaryId, pointerId, pointerType, altCopy: true });
+    },
+    [beginPendingItemDrag]
+  );
 
-      const snapshot = createCanvasClipboardSnapshot({
-        items: itemsRef.current,
-        selectedIds: sourceIds,
-        textCardPanelDrafts,
-        textCardProviderById,
-        textCardModelById,
-        imageCardPanelDrafts,
-        imageCardProviderById,
-        imageCardModelById,
-        imageCardSizeById,
-        imageCardQualityById,
-        imageCardCountById,
-        imageCardAspectRatioById,
-      }) as CanvasClipboardSnapshot | null;
-      if (!snapshot) return;
-
-      const copiedItems = materializeCanvasClipboardPaste({
-        clipboard: snapshot,
-        pasteCount: 0,
-        offsetStep: { x: 0, y: 0 },
-        createId: (sourceId: string, index: number) =>
-          `${sourceId}-alt-copy-${Date.now()}-${index + 1}-${Math.random().toString(36).slice(2, 7)}`,
-      }) as MaterializedCanvasClipboardPaste | null;
-      if (!copiedItems) return;
-
-      const primarySourceIndex = snapshot.items.findIndex((item) => item.id === primaryId);
-      const copiedPrimaryId = copiedItems.items[Math.max(0, primarySourceIndex)]?.id ?? getPrimarySelectedId(copiedItems.selectedIds);
-      if (!copiedPrimaryId) return;
-
-      pendingCanvasHistorySnapshotRef.current = createCurrentCanvasUndoSnapshot();
-      cancelZoomAnimation();
-      cancelViewportAnimation();
-      clearPendingConnectionMenu();
-      setSelectedConnectionIds([]);
-      setIsDragging(true);
-      draggingItemIdsRef.current = copiedItems.selectedIds;
-      if (suppressNextItemClickTimerRef.current) {
-        clearTimeout(suppressNextItemClickTimerRef.current);
+  const beginCanvasPan = useCallback(
+    (
+      e: React.PointerEvent<Element>,
+      options: { clearSelectionOnClick?: boolean } = {}
+    ) => {
+      const continuesPanSequence =
+        pendingViewportIdleCommitTokenRef.current !== null || panOverlayStateActiveRef.current;
+      if (!continuesPanSequence) panReactViewportCommitCountRef.current = 0;
+      if (isPanningRef.current) cancelInteraction('viewport-handoff');
+      const token = handoffCanvasViewportMotion('pan');
+      if (pendingConnectionMenu || frozenPreviewConnection) {
+        clearPendingConnectionMenu();
       }
-      suppressNextItemClickRef.current = primaryId;
-      suppressNextItemClickTimerRef.current = setTimeout(() => {
-        suppressNextItemClickRef.current = null;
-        suppressNextItemClickTimerRef.current = null;
-      }, 350);
-      setSelectedId(copiedPrimaryId);
-      setSelectedIds(copiedItems.selectedIds);
-      setTextCardPanelDrafts((prev) => ({ ...prev, ...copiedItems.textCardPanelDrafts }));
-      setTextCardProviderById((prev) => ({ ...prev, ...copiedItems.textCardProviderById }));
-      setTextCardModelById((prev) => ({ ...prev, ...copiedItems.textCardModelById }));
-      setImageCardPanelDrafts((prev) => ({ ...prev, ...copiedItems.imageCardPanelDrafts }));
-      setImageCardProviderById((prev) => ({ ...prev, ...copiedItems.imageCardProviderById }));
-      setImageCardModelById((prev) => ({ ...prev, ...copiedItems.imageCardModelById }));
-      setImageCardSizeById((prev) => ({ ...prev, ...copiedItems.imageCardSizeById }));
-      setImageCardQualityById((prev) => ({ ...prev, ...copiedItems.imageCardQualityById }));
-      setImageCardCountById((prev) => ({ ...prev, ...copiedItems.imageCardCountById }));
-      setImageCardAspectRatioById((prev) => ({ ...prev, ...copiedItems.imageCardAspectRatioById }));
-      setItems((prev) => [...prev, ...copiedItems.items]);
-      dragStart.current = { x: clientX, y: clientY };
-      dragItemStartPositionsRef.current = Object.fromEntries(
-        copiedItems.items.map((item) => [item.id, { x: item.x, y: item.y }])
-      );
+      e.preventDefault();
+      isPanningRef.current = true;
+      updateCanvasInteractionPhase('canvas-pan');
+      const startingViewport = { ...visualViewportRef.current };
+      const visualViewport = { ...startingViewport };
+      visualViewportRef.current = visualViewport;
+      const motion: CanvasPanMotion = {
+        token,
+        startPointer: { x: e.clientX, y: e.clientY },
+        currentPointer: { x: e.clientX, y: e.clientY },
+        startViewport: startingViewport,
+        targetViewport: { ...startingViewport },
+        visualViewport,
+        clearSelectionOnClick: options.clearSelectionOnClick === true,
+        moved: false,
+      };
+      panMotionRef.current = motion;
+      panStartViewportRef.current = { ...startingViewport };
+      setCanvasPanVisualState(true);
+      startPointerSession({
+        mode: 'canvas-pan',
+        pointerId: e.pointerId,
+        startPoint: { x: e.clientX, y: e.clientY },
+        onFrame: (pointerX, pointerY) => {
+          const activeMotion = panMotionRef.current;
+          if (!activeMotion) return;
+          activeMotion.currentPointer.x = pointerX;
+          activeMotion.currentPointer.y = pointerY;
+          const nextViewport = applyDirectPan(
+            activeMotion.startViewport,
+            activeMotion.startPointer,
+            activeMotion.currentPointer
+          );
+          Object.assign(activeMotion.targetViewport, nextViewport);
+          Object.assign(activeMotion.visualViewport, nextViewport);
+          activeMotion.moved = activeMotion.moved ||
+            nextViewport.x !== activeMotion.startViewport.x ||
+            nextViewport.y !== activeMotion.startViewport.y;
+          previewCanvasPanMotion(activeMotion);
+        },
+        onEnd: completeActiveCanvasPan,
+        onCancel: cancelActiveCanvasPan,
+      });
     },
     [
-      cancelZoomAnimation,
-      cancelViewportAnimation,
+      cancelInteraction,
       clearPendingConnectionMenu,
-      createCurrentCanvasUndoSnapshot,
-      getPrimarySelectedId,
-      imageCardAspectRatioById,
-      imageCardCountById,
-      imageCardProviderById,
-      imageCardModelById,
-      imageCardPanelDrafts,
-      imageCardQualityById,
-      imageCardSizeById,
-      textCardModelById,
-      textCardProviderById,
-      setImageCardAspectRatioById,
-      setImageCardCountById,
-      setImageCardProviderById,
-      setImageCardModelById,
-      setImageCardPanelDrafts,
-      setImageCardQualityById,
-      setImageCardSizeById,
-      setItems,
-      setTextCardModelById,
-      setTextCardProviderById,
-      setTextCardPanelDrafts,
-      textCardPanelDrafts,
+      frozenPreviewConnection,
+      handoffCanvasViewportMotion,
+      pendingConnectionMenu,
+      previewCanvasPanMotion,
+      setCanvasPanVisualState,
+      completeActiveCanvasPan,
+      cancelActiveCanvasPan,
+      startPointerSession,
+      updateCanvasInteractionPhase,
     ]
   );
+
+  const beginCanvasMarquee = (e: React.PointerEvent<Element>) => {
+    e.preventDefault();
+    e.stopPropagation();
+    interruptCanvasCommitForInteraction('marquee');
+    if (isPanningRef.current) cancelInteraction('viewport-handoff');
+    cancelViewportAnimation();
+    const start = getCanvasRelativePoint(e.clientX, e.clientY);
+    if (!start) return;
+    updateCanvasInteractionPhase('idle');
+
+    const session: CanvasMarqueeSession = {
+      start,
+      viewport: { ...visualViewportRef.current },
+      additive: e.shiftKey,
+      activated: false,
+    };
+    const baseSelectedIds = selectedIds;
+    const baseSelectedConnectionIds = selectedConnectionIds;
+    marqueeSessionRef.current = session;
+    marqueeVisualRectRef.current = { x: start.x, y: start.y, width: 0, height: 0 };
+    marqueePathRef.current?.setAttribute('d', getCanvasMarqueePath(marqueeVisualRectRef.current));
+
+    const finish = () => {
+      hideMarqueeVisual();
+    };
+
+    startPointerSession({
+      mode: 'marquee',
+      pointerId: e.pointerId,
+      startPoint: { x: e.clientX, y: e.clientY },
+      onFrame: (pointerX, pointerY) => {
+        if (!session.activated) {
+          if (!hasCanvasDragIntent(
+            { x: e.clientX, y: e.clientY },
+            { x: pointerX, y: pointerY },
+            e.pointerType
+          )) return;
+          session.activated = true;
+          updateCanvasInteractionPhase('marquee');
+          if (marqueeSvgRef.current) {
+            marqueeSvgRef.current.style.opacity = '1';
+            marqueeSvgRef.current.style.visibility = 'visible';
+          }
+        }
+
+        const current = getCanvasRelativePoint(pointerX, pointerY);
+        if (!current) return;
+        const nextRect = normalizeCanvasMarqueeRect(session.start, current);
+        marqueeVisualRectRef.current = nextRect;
+        marqueePathRef.current?.setAttribute('d', getCanvasMarqueePath(nextRect));
+        markCanvasInteractionVisualFrame('marquee');
+      },
+      onEnd: (pointerX, pointerY) => {
+        const metrics = canvasMetricsRef.current;
+        const releasedInsideCanvas =
+          pointerX >= metrics.left &&
+          pointerX <= metrics.left + metrics.width &&
+          pointerY >= metrics.top &&
+          pointerY <= metrics.top + metrics.height;
+        const activeRect = marqueeVisualRectRef.current;
+
+        if (!session.activated) {
+          finish();
+          return;
+        }
+
+        if (!releasedInsideCanvas || !activeRect) {
+          finish();
+          return;
+        }
+
+        const activeItems = sessionLiveStateRef.current.items.map(
+          (item) => itemByIdRef.current.get(item.id) ?? item
+        );
+        const boundsById = new Map<string, { left: number; right: number; top: number; bottom: number }>();
+        activeItems.forEach((item) => {
+          if (item.visible === false) return;
+          const target = getItemTargets([item.id]).find((candidate) => (
+            candidate.role === 'node-resize' || candidate.role === 'annotation-resize'
+          ));
+          const bounds = target?.element.getBoundingClientRect();
+          if (!bounds) return;
+          boundsById.set(item.id, {
+            left: bounds.left,
+            right: bounds.right,
+            top: bounds.top,
+            bottom: bounds.bottom,
+          });
+        });
+        const marqueeClientRect = {
+          left: metrics.left + activeRect.x,
+          right: metrics.left + activeRect.x + activeRect.width,
+          top: metrics.top + activeRect.y,
+          bottom: metrics.top + activeRect.y + activeRect.height,
+        };
+        const hitIds = resolveDirectMarqueeSelection({
+          rect: marqueeClientRect,
+          boundsById,
+        });
+        const hitConnectionIds = getConnectionHitIdsForMarquee(
+          activeRect,
+          session.viewport,
+          activeItems,
+          sessionLiveStateRef.current.connections
+        );
+
+        const nextSelectedIds = session.additive
+          ? resolveCanvasMarqueeSelection(baseSelectedIds, hitIds, true)
+          : hitIds;
+        const nextSelectedConnectionIds = session.additive
+          ? resolveCanvasMarqueeSelection(baseSelectedConnectionIds, hitConnectionIds, true)
+          : hitConnectionIds;
+        const nextPrimaryId = getPrimarySelectedId(nextSelectedIds);
+        const nextItems = moveCanvasItemsToFront(
+          sessionLiveStateRef.current.items,
+          nextSelectedIds
+        );
+        commitCanvasSelectionUI({
+          itemIds: nextSelectedIds,
+          connectionIds: nextSelectedConnectionIds,
+        });
+        syncSessionLiveState({ items: nextItems });
+        stageCanvasCommit({
+          items: nextItems,
+          selectedIds: nextSelectedIds,
+          selectedId: nextPrimaryId,
+          selectedConnectionIds: nextSelectedConnectionIds,
+          saveSession: true,
+        });
+
+        finish();
+      },
+      onCancel: () => {
+        finish();
+        schedulePendingCanvasCommit();
+      },
+    });
+  };
+  const stableBeginCanvasMarquee = useStableEvent(beginCanvasMarquee);
 
   const handleCanvasPointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     const target = e.target as HTMLElement;
@@ -9062,13 +11091,32 @@ export default function AIWorkspace() {
     if (activeElement instanceof HTMLElement && activeElement.closest('[data-zoom-control="true"]')) {
       activeElement.blur();
     }
-    cancelViewportAnimation();
-    Object.values(magneticPorts).forEach((port) => {
-      if (port.isTracking) releaseMagneticPort(port);
-    });
     if (isEventInsideTextCardPanel(target)) {
       return;
     }
+
+    if (target.dataset.canvas === 'true') {
+      const gesture = resolveCanvasPointerGesture({
+        tool,
+        button: e.button,
+        ctrlKey: e.ctrlKey,
+        isSpacePressed,
+        target: 'canvas',
+      });
+      if (gesture === 'marquee') {
+        stableBeginCanvasMarquee(e);
+        return;
+      }
+      if (gesture === 'pan') {
+        beginCanvasPan(e, {
+          clearSelectionOnClick: tool === 'select' && e.button === 0 && !isSpacePressed,
+        });
+        return;
+      }
+    }
+
+    if (isPanningRef.current) cancelInteraction('viewport-handoff');
+    cancelViewportAnimation();
 
     if (editingAnnotationTextId && !target.closest('[data-annotation-text-editor="true"]')) {
       finalizeAnnotationTextEditing(editingAnnotationTextId);
@@ -9080,28 +11128,6 @@ export default function AIWorkspace() {
 
     if (connectionSessionRef.current && target.dataset.canvas === 'true') {
       resetConnectionInteraction();
-      return;
-    }
-
-    if (e.button === 0 && isSpacePressed) {
-      cancelZoomAnimation();
-      cancelViewportAnimation();
-      clearPendingConnectionMenu();
-      e.preventDefault();
-      setIsPanning(true);
-      panStartOffset.current = { x: viewport.x, y: viewport.y };
-      dragStart.current = { x: e.clientX, y: e.clientY };
-      return;
-    }
-
-    if (e.button === 1) {
-      cancelZoomAnimation();
-      cancelViewportAnimation();
-      clearPendingConnectionMenu();
-      e.preventDefault();
-      setIsPanning(true);
-      panStartOffset.current = { x: viewport.x, y: viewport.y };
-      dragStart.current = { x: e.clientX, y: e.clientY };
       return;
     }
 
@@ -9135,29 +11161,10 @@ export default function AIWorkspace() {
       return;
     }
 
-    if (e.button === 0 && target.dataset.canvas === 'true') {
-      if (pendingConnectionMenu) {
-        clearPendingConnectionMenu();
-        return;
-      }
-      const canvasRect = canvasRef.current?.getBoundingClientRect();
-      if (!canvasRect) return;
-      const startX = e.clientX - canvasRect.left;
-      const startY = e.clientY - canvasRect.top;
-
-      marqueeToggleModeRef.current = e.shiftKey;
-      if (!e.shiftKey) {
-        setSelectedConnectionIds([]);
-        setSelectedId(null);
-        setSelectedIds([]);
-      }
-      setIsMarqueeSelecting(true);
-      marqueeStartRef.current = { x: startX, y: startY };
-      setMarqueeRect({ x: startX, y: startY, width: 0, height: 0 });
-    }
   };
 
   const handleCanvasPointerMove = (e: React.PointerEvent<HTMLDivElement>) => {
+    if (isManagedPointer(e.pointerId)) return;
     const activeRegionDraft = regionDraftRef.current;
     if (activeRegionDraft && activeRegionDraft.pointerId === e.pointerId) {
       const item = itemsRef.current.find((candidate) => candidate.id === activeRegionDraft.imageItemId);
@@ -9165,15 +11172,34 @@ export default function AIWorkspace() {
       const current = getRegionImagePointFromClient(item, e.clientX, e.clientY);
       if (!current) return;
       activeRegionDraft.current = current;
-      const box = buildRegionBox(activeRegionDraft.start, current);
-      setRegionDraftPreview((previous) => previous ? {
-        ...previous,
-        mode: box ? 'box' : 'point',
-        point: box
-          ? { x: box.x + box.width / 2, y: box.y + box.height / 2 }
-          : activeRegionDraft.start,
-        ...(box ? { box } : { box: undefined }),
-      } : previous);
+      const content = getRegionImageContent(item);
+      const startLocal = imageNormalizedToItemLocal({
+        point: activeRegionDraft.start,
+        content,
+        naturalWidth: content.naturalWidth,
+        naturalHeight: content.naturalHeight,
+        fit: content.fit,
+      });
+      const currentLocal = imageNormalizedToItemLocal({
+        point: current,
+        content,
+        naturalWidth: content.naturalWidth,
+        naturalHeight: content.naturalHeight,
+        fit: content.fit,
+      });
+      const visual = getRegionDraftVisualController();
+      if (startLocal && currentLocal && visual) {
+        const left = Math.min(startLocal.x, currentLocal.x);
+        const top = Math.min(startLocal.y, currentLocal.y);
+        const width = Math.abs(currentLocal.x - startLocal.x);
+        const height = Math.abs(currentLocal.y - startLocal.y);
+        visual.setBoxX(left);
+        visual.setBoxY(top);
+        visual.setBoxScaleX(Math.max(0.001, width));
+        visual.setBoxScaleY(Math.max(0.001, height));
+        visual.setMarkerX(left + width / 2);
+        visual.setMarkerY(top + height / 2);
+      }
       return;
     }
     const activeDraftStroke = draftStrokeRef.current;
@@ -9193,59 +11219,17 @@ export default function AIWorkspace() {
           points: [...activeDraftStroke.points, ...nextPoints],
         };
         draftStrokeRef.current = nextDraft;
-        setDraftStroke(nextDraft);
+        draftStrokePathRef.current?.setAttribute('d', buildStrokePath(nextDraft.points));
       }
       return;
     }
 
-    if (isCornerResizing && selectedId && cornerResizeStart.current) {
-      latestInteractionPointerRef.current = { x: e.clientX, y: e.clientY };
-      scheduleInteractionFrame();
-      return;
-    }
-
-    if (isPanning) {
-      latestInteractionPointerRef.current = { x: e.clientX, y: e.clientY };
-      scheduleInteractionFrame();
-      return;
-    }
-
-    if (isMarqueeSelecting && marqueeStartRef.current && canvasRef.current) {
-      const canvasRect = canvasRef.current.getBoundingClientRect();
-      const currentX = e.clientX - canvasRect.left;
-      const currentY = e.clientY - canvasRect.top;
-      const startX = marqueeStartRef.current.x;
-      const startY = marqueeStartRef.current.y;
-
-      setMarqueeRect({
-        x: Math.min(startX, currentX),
-        y: Math.min(startY, currentY),
-        width: Math.abs(currentX - startX),
-        height: Math.abs(currentY - startY),
-      });
-      return;
-    }
-
-    if (!isDragging) {
-      const point = getCanvasRelativePoint(e.clientX, e.clientY);
-      if (point) {
-        updateMagneticPort(toCanvasPoint(point));
-      }
-    }
-
-    if (isDragging && selectedId) {
-      latestInteractionPointerRef.current = { x: e.clientX, y: e.clientY };
-      scheduleInteractionFrame();
-    }
   };
 
-  const handleCanvasPointerLeave = () => {
-    Object.values(magneticPorts).forEach((port) => {
-      if (port.isTracking) releaseMagneticPort(port);
-    });
-  };
+  const handleCanvasPointerLeave = () => {};
 
   const handleCanvasPointerUp = (e?: React.PointerEvent<HTMLDivElement>) => {
+    if (e && isManagedPointer(e.pointerId)) return;
     const activeRegionDraft = regionDraftRef.current;
     if (activeRegionDraft && (!e || activeRegionDraft.pointerId === e.pointerId)) {
       if (e) {
@@ -9257,6 +11241,7 @@ export default function AIWorkspace() {
       const box = buildRegionBox(activeRegionDraft.start, activeRegionDraft.current);
       const existingRegionId = activeRegionDraft.existingRegionId;
       regionDraftRef.current = null;
+      regionDraftVisualRef.current = null;
       setRegionDraftPreview(null);
       setRegionRefineId(null);
       if (item?.src) {
@@ -9301,81 +11286,32 @@ export default function AIWorkspace() {
       return;
     }
 
-    if (isMarqueeSelecting && marqueeRect) {
-      const rectInCanvas = {
-        left: (marqueeRect.x - viewport.x) / viewport.scale,
-        right: (marqueeRect.x + marqueeRect.width - viewport.x) / viewport.scale,
-        top: (marqueeRect.y - viewport.y) / viewport.scale,
-        bottom: (marqueeRect.y + marqueeRect.height - viewport.y) / viewport.scale,
-      };
-
-      const hitIds = items
-        .filter((item) => {
-          const itemLeft = item.x;
-          const itemRight = item.x + item.width;
-          const itemTop = item.y;
-          const itemBottom = item.y + item.height;
-
-          return !(
-            itemRight < rectInCanvas.left ||
-            itemLeft > rectInCanvas.right ||
-            itemBottom < rectInCanvas.top ||
-            itemTop > rectInCanvas.bottom
-          );
-        })
-        .map((item) => item.id);
-      const hitConnectionIds = getConnectionHitIdsForMarquee(marqueeRect);
-
-      if (marqueeToggleModeRef.current) {
-        setSelectedIds((prev) => {
-          const next = hitIds.reduce((ids, id) => toggleSelectionId(ids, id), prev);
-          setSelectedId(getPrimarySelectedId(next));
-          setItems((prev) => moveCanvasItemsToFront(prev, next));
-          return next;
-        });
-        setSelectedConnectionIds((prev) =>
-          hitConnectionIds.reduce((ids, id) => toggleSelectionId(ids, id), prev)
-        );
-      } else {
-        setSelectedIds(hitIds);
-        setSelectedId(getPrimarySelectedId(hitIds));
-        setSelectedConnectionIds(hitConnectionIds);
-        setItems((prev) => moveCanvasItemsToFront(prev, hitIds));
-      }
-    }
-
-    setIsDragging(false);
-    setIsPanning(false);
-    setIsCornerResizing(false);
-    setIsMarqueeSelecting(false);
-    setMarqueeRect(null);
-    marqueeStartRef.current = null;
-    marqueeToggleModeRef.current = false;
+    const completedCornerResize = isCornerResizingRef.current;
+    if (completedCornerResize) commitCornerResizePreview();
+    isCornerResizingRef.current = false;
+    updateCanvasInteractionPhase('idle');
     draggingItemIdsRef.current = [];
     dragItemStartPositionsRef.current = {};
-    latestInteractionPointerRef.current = null;
-    cornerResizeStart.current = null;
-    if (interactionFrameRef.current !== null) {
-      cancelAnimationFrame(interactionFrameRef.current);
-      interactionFrameRef.current = null;
-    }
 
     commitPendingCanvasUndoSnapshot();
 
-    if (currentSessionId) {
+    if (completedCornerResize) {
+      schedulePendingCanvasCommit();
+    } else if (currentSessionId) {
       scheduleCurrentSessionSave();
     }
   };
 
   const applyViewportScale = useCallback(
     (nextScale: number, anchor?: { x: number; y: number }) => {
-      wheelZoomTargetRef.current = {
-        scale: nextScale,
-        anchor,
-      };
-      scheduleWheelZoom();
+      const nextViewport = getScaledViewportAtAnchor(
+        visualViewportRef.current,
+        nextScale,
+        anchor
+      );
+      animateViewportTo(nextViewport);
     },
-    [scheduleWheelZoom]
+    [animateViewportTo, getScaledViewportAtAnchor]
   );
 
   const fitCanvasItemsToViewport = useCallback(() => {
@@ -9384,125 +11320,407 @@ export default function AIWorkspace() {
     if (!canvas || !bounds) return;
 
     const padding = 80;
-    const availableWidth = Math.max(1, canvas.clientWidth - padding * 2);
-    const availableHeight = Math.max(1, canvas.clientHeight - padding * 2);
-    const scaleX = bounds.width > 0 ? availableWidth / bounds.width : viewportRef.current.scale;
-    const scaleY = bounds.height > 0 ? availableHeight / bounds.height : viewportRef.current.scale;
+    const { width: canvasWidth, height: canvasHeight } = canvasMetricsRef.current;
+    const safeAreaWidth = chatPanelIsDesktopRef.current ? chatSafeAreaWidthRef.current : 0;
+    const visibleCanvasWidth = Math.max(1, canvasWidth - safeAreaWidth);
+    const availableWidth = Math.max(1, visibleCanvasWidth - padding * 2);
+    const availableHeight = Math.max(1, canvasHeight - padding * 2);
+    const scaleX = bounds.width > 0 ? availableWidth / bounds.width : visualViewportRef.current.scale;
+    const scaleY = bounds.height > 0 ? availableHeight / bounds.height : visualViewportRef.current.scale;
     const nextScale = Math.min(Math.max(Math.min(scaleX, scaleY), 0.1), 10);
     const nextViewport = getViewportCenteredOnBounds(
-      { ...viewportRef.current, scale: nextScale },
+      { ...visualViewportRef.current, scale: nextScale },
       bounds,
-      canvas.clientWidth,
-      canvas.clientHeight
+      visibleCanvasWidth,
+      canvasHeight
     );
 
-    cancelZoomAnimation();
-    cancelViewportAnimation();
-    setViewport(nextViewport);
-  }, [cancelViewportAnimation, cancelZoomAnimation, setViewport]);
+    animateViewportTo(nextViewport);
+  }, [animateViewportTo]);
 
-  const handleWheel = (e: React.WheelEvent) => {
-    e.preventDefault();
-    cancelViewportAnimation();
-
+  const handleNativeCanvasWheel = useCallback((event: WheelEvent) => {
     const canvas = canvasRef.current;
     if (!canvas) return;
+    const target = event.target instanceof Element ? event.target : null;
+    if (target?.closest('[data-canvas-wheel-scroll-region="true"], .panel-scrollbar')) {
+      return;
+    }
 
-    const rect = canvas.getBoundingClientRect();
-    const pointerX = e.clientX - rect.left;
-    const pointerY = e.clientY - rect.top;
+    if (event.cancelable) event.preventDefault();
+    event.stopPropagation();
+    if (hasActivePointerSession()) return;
+    panReactViewportCommitCountRef.current = 0;
+    const metrics = canvasMetricsRef.current;
+    if (metrics.width <= 0 || metrics.height <= 0) return;
+    const anchor = clampCanvasAnchor({
+      x: event.clientX - metrics.left,
+      y: event.clientY - metrics.top,
+    }, metrics);
+    const normalizedDeltaY = normalizeCanvasWheelDelta(
+      event.deltaY,
+      event.deltaMode,
+      metrics.height
+    );
+    if (normalizedDeltaY === 0) return;
 
-    const oldScale = wheelZoomTargetRef.current?.scale ?? viewportRef.current.scale;
-
-    const direction = e.deltaY > 0 ? -1 : 1;
-    const scaleBy = 1.1;
-    const newScale = direction > 0 ? oldScale * scaleBy : oldScale / scaleBy;
-
-    applyViewportScale(newScale, { x: pointerX, y: pointerY });
-  };
+    const token = handoffCanvasViewportMotion('wheel');
+    const nextViewport = applyDirectZoom(
+      visualViewportRef.current,
+      normalizedDeltaY,
+      anchor
+    );
+    previewCanvasViewport(nextViewport);
+    syncSessionLiveState({ viewport: nextViewport });
+    stageCanvasCommit({ viewport: nextViewport, viewportToken: token, saveSession: true });
+  }, [handoffCanvasViewportMotion, hasActivePointerSession, previewCanvasViewport, stageCanvasCommit, syncSessionLiveState]);
 
   const handleConnectionPointerDown = useCallback(
     (e: React.PointerEvent<SVGPathElement>, connectionId: string) => {
-      if (tool !== 'select') return;
+      const gesture = resolveCanvasPointerGesture({
+        tool,
+        button: e.button,
+        ctrlKey: e.ctrlKey,
+        isSpacePressed,
+        target: 'item',
+      });
+      if (gesture === 'marquee') {
+        stableBeginCanvasMarquee(e);
+        return;
+      }
+      if (gesture === 'pan') {
+        beginCanvasPan(e);
+        return;
+      }
+      if (tool !== 'select' || e.button !== 0) return;
       e.preventDefault();
       e.stopPropagation();
       if (connectionSessionRef.current) {
         resetConnectionInteraction();
       }
       if (e.shiftKey) {
-        setSelectedConnectionIds((prev) => toggleSelectionId(prev, connectionId));
+        const nextConnectionIds = toggleSelectionId(selectedConnectionIdsRef.current, connectionId);
+        selectedConnectionIdsRef.current = nextConnectionIds;
+        setSelectedConnectionIds(nextConnectionIds);
         return;
       }
+      selectedConnectionIdsRef.current = [connectionId];
+      selectedIdsRef.current = [];
+      selectedIdRef.current = null;
       setSelectedConnectionIds([connectionId]);
       setSelectedId(null);
       setSelectedIds([]);
     },
-    [resetConnectionInteraction, tool]
+    [beginCanvasPan, isSpacePressed, resetConnectionInteraction, stableBeginCanvasMarquee, tool]
   );
 
   const handleInputPortEnter = useCallback((itemId: string) => {
-    setHoveredInputPortItemId(itemId);
-  }, []);
+    setHoveredItem(itemId);
+  }, [setHoveredItem]);
 
   const handleInputPortLeave = useCallback(
     (itemId: string) => {
-      if (connectionMode === 'dragging' && connectionSnapTargetId === itemId) return;
-      setHoveredInputPortItemId((prev) => (prev === itemId ? null : prev));
+      if (connectionSessionRef.current?.snapTargetId === itemId) return;
+      setHoveredItem(null);
     },
-    [connectionMode, connectionSnapTargetId]
+    [setHoveredItem]
   );
 
   const handleOutputPortEnter = useCallback((itemId: string) => {
-    setHoveredOutputPortItemId(itemId);
-  }, []);
+    setHoveredItem(itemId);
+  }, [setHoveredItem]);
 
   const handleOutputPortLeave = useCallback((itemId: string) => {
     if (connectionSessionRef.current?.fromItemId === itemId) return;
-    setHoveredOutputPortItemId((prev) => (prev === itemId ? null : prev));
-  }, []);
+    setHoveredItem(null);
+  }, [setHoveredItem]);
 
-  const handleOutputPortPointerDown = (e: React.PointerEvent<HTMLElement>, item: CanvasItem, _source: 'bridge' | 'button') => {
+  const handleOutputPortPointerDown = (e: React.PointerEvent<HTMLElement>, item: CanvasItem) => {
     if (e.button !== 0) return;
     if (tool !== 'select') return;
     e.preventDefault();
     e.stopPropagation();
-    beginConnectionDragFromItem(item, e.pointerId);
+    beginConnectionDragFromItem(item, e.pointerId, e.clientX, e.clientY);
   };
 
   const handleSelectionGroupPointerDown = useCallback(
     (e: React.PointerEvent<HTMLDivElement>) => {
-      if (e.button !== 0) return;
-      if (isSpacePressed) return;
-      if (tool !== 'select') return;
+      const gesture = resolveCanvasPointerGesture({
+        tool,
+        button: e.button,
+        ctrlKey: e.ctrlKey,
+        isSpacePressed,
+        target: 'item',
+      });
+      if (gesture === 'marquee') {
+        stableBeginCanvasMarquee(e);
+        return;
+      }
+      if (gesture === 'pan') {
+        beginCanvasPan(e);
+        return;
+      }
+      if (gesture !== 'item') return;
       e.preventDefault();
       e.stopPropagation();
+      const activeSelectedIds = selectedIdsRef.current;
       if (e.altKey) {
         beginAltDragCopiedItems(
           e.clientX,
           e.clientY,
-          selectedIds,
-          getPrimarySelectedId(selectedIds)
+          activeSelectedIds,
+          getPrimarySelectedId(activeSelectedIds),
+          e.pointerId,
+          e.pointerType
         );
         return;
       }
       beginDraggingSelectedItems(
         e.clientX,
         e.clientY,
-        selectedIds,
-        getPrimarySelectedId(selectedIds)
+        activeSelectedIds,
+        getPrimarySelectedId(activeSelectedIds),
+        e.pointerId,
+        e.pointerType
       );
     },
-    [beginAltDragCopiedItems, beginDraggingSelectedItems, getPrimarySelectedId, isSpacePressed, selectedIds, tool]
+    [beginAltDragCopiedItems, beginCanvasPan, beginDraggingSelectedItems, getPrimarySelectedId, isSpacePressed, stableBeginCanvasMarquee, tool]
   );
 
   const handleItemMouseEnter = useCallback((itemId: string) => {
-    setHoveredCanvasItemId(itemId);
-  }, []);
+    setHoveredItem(itemId);
+  }, [setHoveredItem]);
 
   const handleItemMouseLeave = useCallback((itemId: string) => {
     if (connectionSessionRef.current?.fromItemId === itemId) return;
-    setHoveredCanvasItemId((prev) => (prev === itemId ? null : prev));
+    setHoveredItem(null);
+  }, [setHoveredItem]);
+
+  const syncCanvasSelectionDom = useCallback((itemIds: readonly string[]) => {
+    const visibleItemId = itemIds.length === 1 ? itemIds[0] : null;
+    const affectedIds = new Set([...canvasDomSelectedIdsRef.current, ...itemIds]);
+    affectedIds.forEach((itemId) => {
+      const targets = getItemTargets([itemId]);
+      const resizeTarget = targets.find((target) => (
+        target.role === 'node-resize' || target.role === 'annotation-resize'
+      ));
+      if (!resizeTarget) return;
+      const selected = itemId === visibleItemId;
+      if (selected) resizeTarget.element.dataset.canvasSelected = 'true';
+      else delete resizeTarget.element.dataset.canvasSelected;
+      const outlineTarget = targets.find((target) => target.role === 'node-selection-outline');
+      if (outlineTarget) outlineTarget.element.style.visibility = selected ? 'visible' : 'hidden';
+    });
+    canvasDomSelectedIdsRef.current = [...itemIds];
+  }, [getItemTargets]);
+
+  const restoreCanvasSelectionGesture = useCallback(() => {
+    const gesture = pendingCanvasSelectionGestureRef.current;
+    if (!gesture) return;
+    pendingCanvasSelectionGestureRef.current = null;
+    selectedIdRef.current = gesture.previousSelectedId;
+    selectedIdsRef.current = gesture.previousSelectedIds;
+    selectedConnectionIdsRef.current = gesture.previousConnectionIds;
+    syncCanvasSelectionDom(gesture.previousSelectedIds);
+    gesture.overlayVisibility.forEach((snapshot) => {
+      if (!snapshot.root.isConnected) return;
+      snapshot.root.style.visibility = snapshot.visibility;
+      snapshot.root.style.pointerEvents = snapshot.pointerEvents;
+    });
+  }, [syncCanvasSelectionDom]);
+  restoreCanvasSelectionGestureRef.current = restoreCanvasSelectionGesture;
+
+  const previewCanvasSelectionDom = useCallback((itemIds: string[]) => {
+    restoreCanvasSelectionGestureRef.current();
+    const primaryId = getPrimarySelectedId(itemIds);
+    if (!primaryId) return null;
+    const gesture: PendingCanvasSelectionGesture = {
+      itemIds: [...itemIds],
+      primaryId,
+      previousSelectedId: selectedIdRef.current,
+      previousSelectedIds: [...selectedIdsRef.current],
+      previousConnectionIds: [...selectedConnectionIdsRef.current],
+      overlayVisibility: [],
+      pointerDownAt: performance.now(),
+      firstDragVisualAt: null,
+      activated: false,
+    };
+    pendingCanvasSelectionGestureRef.current = gesture;
+    canvasSelectionReactCommitDuringInteractionCountRef.current = 0;
+    selectedIdRef.current = primaryId;
+    selectedIdsRef.current = gesture.itemIds;
+    selectedConnectionIdsRef.current = [];
+    syncCanvasSelectionDom(gesture.itemIds);
+    return gesture;
+  }, [getPrimarySelectedId, syncCanvasSelectionDom]);
+
+  const cancelPendingCanvasSelectionFinalize = useCallback(() => {
+    if (pendingCanvasSelectionFinalizeFrameRef.current === null) return;
+    cancelAnimationFrame(pendingCanvasSelectionFinalizeFrameRef.current);
+    pendingCanvasSelectionFinalizeFrameRef.current = null;
   }, []);
+  cancelPendingCanvasSelectionFinalizeRef.current = cancelPendingCanvasSelectionFinalize;
+
+  const commitCanvasSelectionUI = useCallback(({
+    itemIds,
+    connectionIds = [],
+  }: {
+    itemIds: string[];
+    connectionIds?: string[];
+  }) => {
+    const primaryId = getPrimarySelectedId(itemIds);
+    const primaryItem = primaryId ? itemByIdRef.current.get(primaryId) : null;
+    const pendingGesture = pendingCanvasSelectionGestureRef.current;
+    if (isCanvasCommitBlocked()) {
+      canvasSelectionReactCommitDuringInteractionCountRef.current += 1;
+    }
+    const hasSelectedOverlay = Boolean(
+      primaryItem && (
+        isImageAssetItem(primaryItem) ||
+        isImageCardItem(primaryItem) ||
+        (primaryItem.type === 'text' && primaryItem.textVariant === 'card')
+      )
+    );
+    if (
+      primaryId &&
+      hasSelectedOverlay &&
+      (Boolean(pendingGesture) || selectedIdRef.current !== primaryId) &&
+      canvasPerformanceEnabledRef.current
+    ) {
+      const releasedAt = performance.now();
+      pendingCanvasOverlayMountMeasureRef.current = {
+        itemId: primaryId,
+        startedAt: pendingGesture?.pointerDownAt ?? releasedAt,
+        releasedAt,
+        firstDragVisualAt: pendingGesture?.firstDragVisualAt ?? null,
+        selectionReactCommitDuringInteractionCount:
+          canvasSelectionReactCommitDuringInteractionCountRef.current,
+      };
+      canvasOverlaySyncWriteCountRef.current = 0;
+      canvasOverlayReactCommitDuringInteractionCountRef.current = 0;
+    }
+    const sameItemIds =
+      selectedIds.length === itemIds.length &&
+      selectedIds.every((itemId, index) => itemId === itemIds[index]);
+    const sameConnectionIds =
+      selectedConnectionIds.length === connectionIds.length &&
+      selectedConnectionIds.every((connectionId, index) => connectionId === connectionIds[index]);
+    const samePrimaryId = selectedId === primaryId;
+    selectedConnectionIdsRef.current = connectionIds;
+    selectedIdsRef.current = itemIds;
+    selectedIdRef.current = primaryId;
+    syncCanvasSelectionDom(itemIds);
+    if (!sameConnectionIds) setSelectedConnectionIds(connectionIds);
+    if (!sameItemIds) setSelectedIds(itemIds);
+    if (!samePrimaryId) setSelectedId(primaryId);
+    return primaryId;
+  }, [getPrimarySelectedId, isCanvasCommitBlocked, selectedConnectionIds, selectedId, selectedIds, syncCanvasSelectionDom]);
+
+  const finalizeCanvasSelectionGesture = useCallback(({
+    itemIds: requestedItemIds,
+    items: preparedItems,
+    reason,
+    saveSession = true,
+  }: FinalizeCanvasSelectionGestureOptions) => {
+    const gesture = pendingCanvasSelectionGestureRef.current;
+    const itemIds = requestedItemIds ?? gesture?.itemIds ?? selectedIdsRef.current;
+    const primaryId = getPrimarySelectedId(itemIds);
+    if (!preparedItems && (reason === 'click' || reason === 'drag')) {
+      cancelPendingCanvasSelectionFinalize();
+      pendingCanvasSelectionFinalizeFrameRef.current = requestAnimationFrame(() => {
+        pendingCanvasSelectionFinalizeFrameRef.current = null;
+        if (gesture && pendingCanvasSelectionGestureRef.current !== gesture) return;
+        const connectionIds: string[] = [];
+        commitCanvasSelectionUI({ itemIds, connectionIds });
+        pendingCanvasSelectionGestureRef.current = null;
+        stageCanvasCommit({
+          selectedConnectionIds: connectionIds,
+          selectedIds: itemIds,
+          selectedId: primaryId,
+          saveSession,
+        });
+        if (canvasPerformanceEnabledRef.current) {
+          console.info('[canvas-selection-gesture-perf]', {
+            reason,
+            pointerDownToFinalize:
+              gesture ? performance.now() - gesture.pointerDownAt : null,
+            firstDragVisual: null,
+            selectionReactCommitDuringInteractionCount:
+              canvasSelectionReactCommitDuringInteractionCountRef.current,
+          });
+        }
+        schedulePendingCanvasCommit();
+      });
+      return;
+    }
+    const baseItems = preparedItems ?? sessionLiveStateRef.current.items.map((item) => {
+      const liveItem = itemByIdRef.current.get(item.id);
+      if (!liveItem || liveItem === item) return item;
+      return {
+        ...item,
+        x: liveItem.x,
+        y: liveItem.y,
+        width: liveItem.width,
+        height: liveItem.height,
+      };
+    });
+    const nextItems = preparedItems ?? moveCanvasItemsToFront(baseItems, itemIds);
+    syncSessionLiveState({ items: nextItems });
+    commitCanvasSelectionUI({ itemIds, connectionIds: [] });
+    pendingCanvasSelectionGestureRef.current = null;
+    stageCanvasCommit({
+      items: nextItems,
+      selectedConnectionIds: [],
+      selectedIds: itemIds,
+      selectedId: primaryId,
+      saveSession,
+    });
+    if (canvasPerformanceEnabledRef.current) {
+      console.info('[canvas-selection-gesture-perf]', {
+        reason,
+        pointerDownToFinalize:
+          gesture ? performance.now() - gesture.pointerDownAt : null,
+        firstDragVisual:
+          gesture?.firstDragVisualAt === null || gesture?.firstDragVisualAt === undefined
+            ? null
+            : gesture.firstDragVisualAt - gesture.pointerDownAt,
+        selectionReactCommitDuringInteractionCount:
+          canvasSelectionReactCommitDuringInteractionCountRef.current,
+      });
+    }
+    schedulePendingCanvasCommit();
+  }, [cancelPendingCanvasSelectionFinalize, commitCanvasSelectionUI, getPrimarySelectedId, schedulePendingCanvasCommit, stageCanvasCommit, syncSessionLiveState]);
+  finalizeCanvasSelectionGestureRef.current = finalizeCanvasSelectionGesture;
+
+  useLayoutEffect(() => {
+    syncCanvasSelectionDom(selectedIds);
+  }, [items, selectedIds, syncCanvasSelectionDom]);
+
+  const applyCanvasSelection = useCallback((
+    nextSelectedIds: string[],
+    options: { defer?: boolean } = {}
+  ) => {
+    const nextPrimaryId = commitCanvasSelectionUI({ itemIds: nextSelectedIds });
+    const liveItems = sessionLiveStateRef.current.items.map((item) => {
+      const liveItem = itemByIdRef.current.get(item.id);
+      if (!liveItem || liveItem === item) return item;
+      return {
+        ...item,
+        x: liveItem.x,
+        y: liveItem.y,
+        width: liveItem.width,
+        height: liveItem.height,
+      };
+    });
+    const nextItems = moveCanvasItemsToFront(liveItems, nextSelectedIds);
+    syncSessionLiveState({ items: nextItems });
+    stageCanvasCommit({
+      items: nextItems,
+      selectedConnectionIds: [],
+      selectedIds: nextSelectedIds,
+      selectedId: nextPrimaryId,
+    });
+    if (!options.defer) flushPendingCanvasCommit('selection');
+  }, [commitCanvasSelectionUI, flushPendingCanvasCommit, stageCanvasCommit, syncSessionLiveState]);
 
   const handleItemClick = useCallback((e: React.MouseEvent<HTMLDivElement>, itemId: string) => {
     e.stopPropagation();
@@ -9519,28 +11737,35 @@ export default function AIWorkspace() {
       }
     }
     if (e.shiftKey) {
-      setSelectedIds((prev) => {
-        const next = toggleSelectionId(prev, itemId);
-        setSelectedId(getPrimarySelectedId(next));
-        setItems((prev) => moveCanvasItemsToFront(prev, next));
-        return next;
-      });
+      applyCanvasSelection(toggleSelectionId(selectedIdsRef.current, itemId));
       return;
     }
-
-    setSelectedConnectionIds([]);
-    setSelectedId(itemId);
-    setSelectedIds([itemId]);
-    setItems((prev) => moveCanvasItemsToFront(prev, [itemId]));
-  }, [getPrimarySelectedId, tool]);
+    if (selectedIdsRef.current.includes(itemId) || selectedIdRef.current === itemId) return;
+    applyCanvasSelection([itemId]);
+  }, [applyCanvasSelection, tool]);
 
   const handleItemPointerDown = useCallback(
     (e: React.PointerEvent<HTMLDivElement>, itemId: string) => {
       const target = e.target as HTMLElement;
       if (target.dataset.cornerResize) return;
       if (target.dataset.port) return;
-      if (isSpacePressed) return;
+      const gesture = resolveCanvasPointerGesture({
+        tool,
+        button: e.button,
+        ctrlKey: e.ctrlKey,
+        isSpacePressed,
+        target: 'item',
+      });
+      if (gesture === 'marquee') {
+        stableBeginCanvasMarquee(e);
+        return;
+      }
+      if (gesture === 'pan') {
+        beginCanvasPan(e);
+        return;
+      }
       if (tool === 'target') {
+        if (e.button !== 0) return;
         const item = itemsRef.current.find((candidate) => candidate.id === itemId);
         if (!item || item.type !== 'image' || !item.src) return;
         const refineRegion = regionRefineId
@@ -9558,12 +11783,14 @@ export default function AIWorkspace() {
           start: point,
           current: point,
         };
+        regionDraftVisualRef.current = null;
         setRegionDraftPreview({
-          id: refineRegion?.id || '__region-draft__',
+          id: '__region-draft__',
           imageItemId: item.id,
           imageSrc: item.src,
-          mode: 'point',
+          mode: 'box',
           point,
+          box: { x: point.x, y: point.y, width: 0, height: 0 },
           candidates: [],
           status: 'recognizing',
         });
@@ -9573,43 +11800,150 @@ export default function AIWorkspace() {
         setSelectedConnectionIds([]);
         return;
       }
-      if (tool !== 'select') return;
+      if (gesture !== 'item') return;
       if (e.shiftKey) return;
       if (editingTextCardId === itemId) {
         finalizeManualTextCardEditing(itemId);
       }
+      const activeSelectedIds = selectedIdsRef.current;
+      const itemIsSelected = activeSelectedIds.includes(itemId);
+      if (!itemIsSelected) {
+        previewCanvasSelectionDom([itemId]);
+      }
       e.preventDefault();
       e.stopPropagation();
-      const draggingIds = selectedIds.includes(itemId) ? selectedIds : [itemId];
+      const draggingIds = itemIsSelected ? activeSelectedIds : [itemId];
       if (e.altKey) {
-        beginAltDragCopiedItems(e.clientX, e.clientY, draggingIds, itemId);
+        beginAltDragCopiedItems(e.clientX, e.clientY, draggingIds, itemId, e.pointerId, e.pointerType);
         return;
       }
-      beginDraggingSelectedItems(e.clientX, e.clientY, draggingIds, itemId);
+      beginDraggingSelectedItems(e.clientX, e.clientY, draggingIds, itemId, e.pointerId, e.pointerType);
     },
-    [beginAltDragCopiedItems, beginDraggingSelectedItems, editingTextCardId, finalizeManualTextCardEditing, getRegionImagePointFromClient, isSpacePressed, regionRefineId, selectedIds, tool]
+    [beginAltDragCopiedItems, beginCanvasPan, beginDraggingSelectedItems, editingTextCardId, finalizeManualTextCardEditing, getRegionImagePointFromClient, isSpacePressed, previewCanvasSelectionDom, regionRefineId, stableBeginCanvasMarquee, tool]
   );
 
   const handleCornerResizePointerDown = useCallback(
     (e: React.PointerEvent<HTMLButtonElement>, item: CanvasItem) => {
-      if (tool !== 'select') return;
+      const gesture = resolveCanvasPointerGesture({
+        tool,
+        button: e.button,
+        ctrlKey: e.ctrlKey,
+        isSpacePressed,
+        target: 'item',
+      });
+      if (gesture === 'marquee') {
+        stableBeginCanvasMarquee(e);
+        return;
+      }
+      if (gesture === 'pan') {
+        beginCanvasPan(e);
+        return;
+      }
+      if (gesture !== 'item') return;
+      interruptCanvasCommitForInteraction('resize');
+      const liveItem = itemByIdRef.current.get(item.id) ?? item;
       pendingCanvasHistorySnapshotRef.current = createCurrentCanvasUndoSnapshot();
+      if (isPanningRef.current) cancelInteraction('viewport-handoff');
       cancelZoomAnimation();
       e.preventDefault();
       e.stopPropagation();
-      setSelectedId(item.id);
-      setSelectedIds([item.id]);
-      setItems((prev) => moveCanvasItemsToFront(prev, [item.id]));
-      setIsCornerResizing(true);
-      cornerResizeStart.current = {
-        mouseX: e.clientX,
-        mouseY: e.clientY,
-        width: item.width,
-        height: item.height,
-        itemId: item.id,
+      if (!selectedIdsRef.current.includes(liveItem.id)) {
+        previewCanvasSelectionDom([liveItem.id]);
+      }
+      isCornerResizingRef.current = true;
+      updateCanvasInteractionPhase('resize');
+      const overlayVisibility = hideCanvasSelectionOverlayGroups();
+      const target = getItemTargets([liveItem.id]).find((candidate) => (
+        candidate.role === 'node-drag' || candidate.role === 'annotation-drag'
+      )) ?? null;
+      if (target) {
+        target.element.style.willChange = 'width,height';
+      }
+      cornerResizePreviewRef.current = {
+        itemId: liveItem.id,
+        target,
+        startWidth: liveItem.width,
+        startHeight: liveItem.height,
+        nextWidth: liveItem.width,
+        nextHeight: liveItem.height,
+        overlayVisibility,
       };
+      const startX = e.clientX;
+      const startY = e.clientY;
+      startPointerSession({
+        mode: 'item-resize',
+        pointerId: e.pointerId,
+        startPoint: { x: startX, y: startY },
+        onFrame: (pointerX, pointerY) => {
+          const preview = cornerResizePreviewRef.current;
+          if (!preview || preview.itemId !== liveItem.id) return;
+          const deltaX = (pointerX - startX) / Math.max(0.001, viewportRef.current.scale);
+          const deltaY = (pointerY - startY) / Math.max(0.001, viewportRef.current.scale);
+          const nextSize = applyDirectItemResize({
+            item: liveItem,
+            startWidth: preview.startWidth,
+            startHeight: preview.startHeight,
+            deltaX,
+            deltaY,
+            minWidth: liveItem.textVariant === 'card' ? 260 : 40,
+            minHeight: liveItem.textVariant === 'card' ? 300 : 40,
+            preserveAspectRatio: liveItem.textVariant !== 'card',
+          });
+          preview.nextWidth = nextSize.width;
+          preview.nextHeight = nextSize.height;
+          if (target) {
+            target.element.style.width = `${nextSize.width}px`;
+            target.element.style.height = `${nextSize.height}px`;
+          }
+          scheduleAffectedConnectionFrame();
+          markCanvasInteractionVisualFrame('resize');
+        },
+        onEnd: () => {
+          const preview = cornerResizePreviewRef.current;
+          cancelCanvasItemDragConnectionFrame();
+          if (preview) {
+            refreshDirectItemConnectionPaths(preview.itemId, {
+              width: preview.nextWidth,
+              height: preview.nextHeight,
+            });
+          }
+          commitCornerResizePreview();
+          isCornerResizingRef.current = false;
+          updateCanvasInteractionPhase('idle');
+          commitPendingCanvasUndoSnapshot();
+          if (pendingCanvasSelectionGestureRef.current?.primaryId === liveItem.id) {
+            finalizeCanvasSelectionGestureRef.current({ reason: 'click' });
+          }
+          requestAnimationFrame(() => {
+            syncSelectedCanvasOverlayPositions(visualViewportRef.current, [liveItem.id]);
+            if (preview) restoreCanvasOverlayVisibility(preview.overlayVisibility);
+          });
+        },
+        onCancel: () => {
+          const preview = cornerResizePreviewRef.current;
+          if (!preview) return;
+          cancelCanvasItemDragConnectionFrame();
+          if (target) {
+            target.element.style.width = `${preview.startWidth}px`;
+            target.element.style.height = `${preview.startHeight}px`;
+          }
+          syncSelectedCanvasOverlayPositions(visualViewportRef.current, [preview.itemId]);
+          refreshDirectItemConnectionPaths(preview.itemId, {
+            width: preview.startWidth,
+            height: preview.startHeight,
+          });
+          if (target) target.element.style.willChange = target.initialWillChange;
+          clearPendingCanvasUndoSnapshot();
+          cornerResizePreviewRef.current = null;
+          isCornerResizingRef.current = false;
+          updateCanvasInteractionPhase('idle');
+          restoreCanvasOverlayVisibility(preview.overlayVisibility);
+          restoreCanvasSelectionGestureRef.current();
+          schedulePendingCanvasCommit();
+        },
+      });
     },
-    [cancelZoomAnimation, createCurrentCanvasUndoSnapshot, tool]
+    [beginCanvasPan, cancelCanvasItemDragConnectionFrame, cancelInteraction, cancelZoomAnimation, clearPendingCanvasUndoSnapshot, commitCornerResizePreview, commitPendingCanvasUndoSnapshot, createCurrentCanvasUndoSnapshot, getItemTargets, hideCanvasSelectionOverlayGroups, interruptCanvasCommitForInteraction, isSpacePressed, markCanvasInteractionVisualFrame, previewCanvasSelectionDom, refreshDirectItemConnectionPaths, restoreCanvasOverlayVisibility, scheduleAffectedConnectionFrame, schedulePendingCanvasCommit, stableBeginCanvasMarquee, startPointerSession, syncSelectedCanvasOverlayPositions, tool, updateCanvasInteractionPhase]
   );
 
   useEffect(() => {
@@ -9617,7 +11951,7 @@ export default function AIWorkspace() {
       return;
     }
 
-    const validIds = new Set(items.map((item) => item.id));
+    const validIds = new Set(canvasItemMembershipKey ? canvasItemMembershipKey.split('\u0000') : []);
     setConnections((prev) => {
       const next = prev.filter((connection) => validIds.has(connection.fromItemId) && validIds.has(connection.toItemId));
       return next.length === prev.length ? prev : next;
@@ -9632,11 +11966,17 @@ export default function AIWorkspace() {
         )
       )
     );
-    setConnectionSnapTargetId((prev) => (prev && validIds.has(prev) ? prev : null));
+    if (
+      connectionSessionRef.current?.snapTargetId &&
+      !validIds.has(connectionSessionRef.current.snapTargetId)
+    ) {
+      connectionSessionRef.current.snapTargetId = null;
+      clearConnectionSnapTargetVisualRef.current();
+    }
     if (connectionSessionRef.current?.fromItemId && !validIds.has(connectionSessionRef.current.fromItemId)) {
       resetConnectionInteraction();
     }
-  }, [items, connectionPointerId, connections, resetConnectionInteraction, setConnections]);
+  }, [canvasItemMembershipKey, connectionPointerId, connections, resetConnectionInteraction, setConnections]);
 
   useEffect(() => {
     if (isHydratingSessionRef.current) {
@@ -9646,17 +11986,13 @@ export default function AIWorkspace() {
 
   useEffect(() => {
     return () => {
-      if (interactionFrameRef.current !== null) {
-        cancelAnimationFrame(interactionFrameRef.current);
-      }
-      if (zoomAnimationFrameRef.current !== null) {
-        cancelAnimationFrame(zoomAnimationFrameRef.current);
-      }
-      if (viewportAnimationFrameRef.current !== null) {
-        cancelAnimationFrame(viewportAnimationFrameRef.current);
-      }
+      viewportTweenRef.current?.cancel();
+      const resizePreview = cornerResizePreviewRef.current;
+      if (resizePreview?.target) resizePreview.target.element.style.willChange = resizePreview.target.initialWillChange;
+      cornerResizePreviewRef.current = null;
+      flushPendingCanvasCommit('unmount');
     };
-  }, []);
+  }, [flushPendingCanvasCommit]);
 
   const handleCanvasTextGenerate = useCallback(
     async ({
@@ -12310,6 +14646,8 @@ export default function AIWorkspace() {
   }, [inferTopicSkill]);
 
   const applyResolvedSessionState = useCallback((resolvedState: any) => {
+    flushPendingCanvasCommit('session-switch');
+    resetPendingCanvasInteractionCommits();
     isHydratingSessionRef.current = true;
     const interruptedRun = resolvedState.normalizedSession?.activeAgentRun?.status === 'running'
       ? resolvedState.normalizedSession.activeAgentRun as NonNullable<ProjectSession['activeAgentRun']>
@@ -12364,7 +14702,7 @@ export default function AIWorkspace() {
     setRegionSelectionsState(resolvedRegionSelections);
     setEditingTextCardId(null);
     setSelectedConnectionIds([]);
-    setConnectionSnapTargetId(null);
+    clearConnectionSnapTargetVisualRef.current();
     setPendingConnectionMenu(null);
     setFrozenPreviewConnection(null);
     setTextCardPanelDraftsState(resolvedState.normalizedSession?.textCardPanelDrafts || {});
@@ -12385,10 +14723,14 @@ export default function AIWorkspace() {
     setShowProjectMenu(false);
     setShowHistoryPanel(false);
     connectionSessionRef.current = null;
-  }, [syncSessionLiveState]);
+  }, [flushPendingCanvasCommit, resetPendingCanvasInteractionCommits, syncSessionLiveState]);
 
   const isHighFrequencyInteractionActive =
-    isDragging || isCornerResizing || isPanning || isMarqueeSelecting;
+    isCornerResizingRef.current ||
+    isDraggingRef.current ||
+    isPanningRef.current ||
+    Boolean(canvasItemDragTransactionRef.current) ||
+    Boolean(pendingCanvasCommitRef.current);
 
   useLayoutEffect(() => {
     activeAgentRunMarkerRef.current = activeAgentRunMarker;
@@ -12443,6 +14785,72 @@ export default function AIWorkspace() {
     isHighFrequencyInteractionActive,
     sessionSaveSignal,
   });
+  scheduleCurrentSessionSaveRef.current = scheduleCurrentSessionSave;
+
+  useEffect(() => {
+    if (!currentSessionId) return;
+    const getMigrationKey = (src: string) => `${currentSessionId}:${src.length}:${src.slice(-64)}`;
+    const pendingSources = Array.from(new Set(items.flatMap((item) => {
+      if (item.type !== 'image') return [];
+      return [
+        typeof item.src === 'string' ? item.src : '',
+        ...(Array.isArray(item.imageOutputs)
+          ? item.imageOutputs.map((output) => output?.src || '')
+          : []),
+      ].filter((src) => src.startsWith('data:image/'));
+    }))).filter((src) => !attemptedLegacyCanvasImageMigrationsRef.current.has(getMigrationKey(src)));
+    if (pendingSources.length === 0) return;
+
+    const migrationSessionId = currentSessionId;
+    const migratePendingSources = () => void (async () => {
+      pendingSources.forEach((src) => attemptedLegacyCanvasImageMigrationsRef.current.add(getMigrationKey(src)));
+      const migrated = new Map<string, string>();
+      for (const [index, src] of pendingSources.entries()) {
+        if (currentSessionIdRef.current !== migrationSessionId) return;
+        try {
+          const response = await fetch('/api/upload', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              imageData: src,
+              fileName: `migrated-canvas-image-${Date.now()}-${index}.png`,
+            }),
+          });
+          const payload = response.ok ? await response.json() : null;
+          if (typeof payload?.url === 'string' && payload.url) migrated.set(src, payload.url);
+        } catch (error) {
+          console.warn('Legacy canvas image migration failed:', error);
+        }
+      }
+      if (currentSessionIdRef.current !== migrationSessionId || migrated.size === 0) return;
+      setItems((currentItems) => currentItems.map((item) => {
+        if (item.type !== 'image') return item;
+        const migratedSrc = typeof item.src === 'string' ? migrated.get(item.src) : undefined;
+        const imageOutputs = Array.isArray(item.imageOutputs)
+          ? item.imageOutputs.map((output) => {
+              const migratedOutputSrc = migrated.get(output.src);
+              return migratedOutputSrc ? { ...output, src: migratedOutputSrc } : output;
+            })
+          : item.imageOutputs;
+        const outputsChanged = imageOutputs !== item.imageOutputs && imageOutputs.some(
+          (output, index) => output !== item.imageOutputs?.[index]
+        );
+        if (!migratedSrc && !outputsChanged) return item;
+        return {
+          ...item,
+          ...(migratedSrc ? { src: migratedSrc } : {}),
+          ...(outputsChanged ? { imageOutputs } : {}),
+        };
+      }));
+    })();
+    const schedule = typeof window.requestIdleCallback === 'function'
+      ? window.requestIdleCallback(migratePendingSources, { timeout: 2000 })
+      : window.setTimeout(migratePendingSources, 250);
+    return () => {
+      if (typeof window.cancelIdleCallback === 'function') window.cancelIdleCallback(schedule);
+      else window.clearTimeout(schedule);
+    };
+  }, [currentSessionId, items, setItems]);
 
   useEffect(() => {
     if (!currentSessionId) return;
@@ -12881,13 +15289,11 @@ export default function AIWorkspace() {
   };
 
   const handleOpenChatPanel = useCallback(() => {
-    setChatPanelOpening(true);
-    setSidebarCollapsed(false);
+    chatPanelMotionControllerRef.current?.open();
   }, []);
 
   const handleCloseChatPanel = useCallback(() => {
-    setChatPanelOpening(false);
-    setSidebarCollapsed(true);
+    chatPanelMotionControllerRef.current?.close();
   }, []);
 
   const showImageToolbarNoticeWithTimeout = useCallback((message: string, autoHideMs?: number) => {
@@ -13706,13 +16112,6 @@ export default function AIWorkspace() {
     [pendingConnectionMenu, toCanvasPoint, createImageCardItemAtCanvasPoint, createTextItemAtCanvasPoint, clearPendingConnectionMenu, recordCurrentCanvasUndoSnapshot]
   );
 
-  useEffect(() => {
-    return () => {
-      detachConnectionWindowListeners();
-      clearMagneticPortResetTimer();
-    };
-  }, [clearMagneticPortResetTimer, detachConnectionWindowListeners]);
-
   const isEditableUndoRedoTarget = (target: EventTarget | null) => {
     const resolvedTarget =
       target instanceof Node && target.nodeType === Node.TEXT_NODE
@@ -13816,13 +16215,13 @@ export default function AIWorkspace() {
 
       if ((e.metaKey || e.ctrlKey) && (e.key === '+' || e.key === '=')) {
         e.preventDefault();
-        applyViewportScale(viewportRef.current.scale + 0.1);
+        applyViewportScale(visualViewportRef.current.scale + 0.1);
         return;
       }
 
       if ((e.metaKey || e.ctrlKey) && e.key === '-') {
         e.preventDefault();
-        applyViewportScale(viewportRef.current.scale - 0.1);
+        applyViewportScale(visualViewportRef.current.scale - 0.1);
         return;
       }
 
@@ -14348,6 +16747,15 @@ export default function AIWorkspace() {
     };
   }, [activeSkillJobId, activeSkillJobType, appendGeneratedImageHistoryForSession, getSpawnPosition, recordCurrentCanvasUndoSnapshot]);
 
+  const stableCanvasPointerDown = useStableEvent(handleCanvasPointerDown);
+  const stableCanvasPointerMove = useStableEvent(handleCanvasPointerMove);
+  const stableCanvasPointerUp = useStableEvent(handleCanvasPointerUp);
+  const stableCanvasPointerLeave = useStableEvent(handleCanvasPointerLeave);
+  const stableOutputPortPointerDown = useStableEvent(handleOutputPortPointerDown);
+  const handlePendingMenuPointerDown = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    event.stopPropagation();
+  }, []);
+
   if (viewMode === 'gallery') {
     return (
       <>
@@ -14382,12 +16790,6 @@ export default function AIWorkspace() {
     <div
       ref={editorShellRef}
       className="workspace-editor-shell relative isolate flex h-screen w-full overflow-hidden"
-      style={
-        {
-          '--chat-panel-reserved-width': `${chatPanelReserveRef.current.width}px`,
-          '--chat-panel-toolbar-reserved-width': `${chatPanelToolbarReserveRef.current.width}px`,
-        } as React.CSSProperties
-      }
     >
       {sessionActionError && <SessionActionErrorBanner message={sessionActionError} />}
       <input
@@ -14400,7 +16802,7 @@ export default function AIWorkspace() {
       />
 
       {/* Floating Toolbar - Left Side */}
-      <div className="absolute left-4 top-1/2 z-[120] -translate-y-1/2">
+      <div data-canvas-overlay-root="true" className="absolute left-4 top-1/2 z-[120] -translate-y-1/2">
         <div className="relative" ref={addNodeMenuRef}>
           {showAddNodeMenu && (
             <div className="pointer-events-none absolute left-full top-0 z-[130] ml-4">
@@ -14433,7 +16835,7 @@ export default function AIWorkspace() {
             </div>
           )}
           <div ref={generatedImageHistoryPanelRef} className="relative">
-            <div className="workspace-left-rail flex w-[72px] flex-col items-center rounded-[36px] px-2 py-3 backdrop-blur-xl">
+            <div className="workspace-left-rail flex w-[72px] flex-col items-center rounded-[36px] px-2 py-3">
               <button
                 type="button"
                 onClick={(e) => {
@@ -14441,7 +16843,7 @@ export default function AIWorkspace() {
                   clearPendingConnectionMenu();
                   setShowAddNodeMenu((prev) => !prev);
                 }}
-                className="workspace-add-button mb-4 inline-flex h-12 w-12 items-center justify-center rounded-full transition-colors"
+                className="workspace-add-button mb-4 inline-flex h-12 w-12 items-center justify-center rounded-full "
                 aria-label="添加节点"
                 title="添加节点"
               >
@@ -14477,7 +16879,7 @@ export default function AIWorkspace() {
               </div>
             </div>
             {showGeneratedImageHistoryPanel && (
-              <div className="workspace-popover-panel absolute left-full top-0 z-[150] ml-3 w-[384px] overflow-hidden rounded-[28px] backdrop-blur-xl">
+              <div className="workspace-popover-panel absolute left-full top-0 z-[150] ml-3 w-[384px] overflow-hidden rounded-[28px]">
                 <div className="workspace-subtle-divider flex items-center justify-between border-b px-5 py-4">
                   <div className="min-w-0 flex-1">
                     <div className="workspace-text-primary text-[13px] font-semibold tracking-[-0.02em]">生成历史</div>
@@ -14497,7 +16899,7 @@ export default function AIWorkspace() {
                           onClick={() => {
                             void addGeneratedHistoryImageToCanvas(entry);
                           }}
-                          className="workspace-history-card group overflow-hidden rounded-[20px] text-left transition-all hover:-translate-y-0.5"
+                          className="workspace-history-card group overflow-hidden rounded-[20px] text-left"
                         >
                           <div className="workspace-preview-tile relative aspect-square overflow-hidden">
                             <Image
@@ -14506,7 +16908,7 @@ export default function AIWorkspace() {
                               fill
                               unoptimized
                               sizes="160px"
-                              className="object-cover transition-transform duration-200 group-hover:scale-[1.03]"
+                              className="object-cover group-hover:scale-[1.03]"
                               draggable={false}
                             />
                           </div>
@@ -14537,17 +16939,17 @@ export default function AIWorkspace() {
       <div className="absolute left-[34px] top-4 z-[120] flex items-center gap-2">
         <div className="relative">
           <button 
-            className="workspace-floating-control flex h-10 w-10 items-center justify-center overflow-hidden rounded-full text-sm font-medium transition-colors"
+            className="workspace-floating-control flex h-10 w-10 items-center justify-center overflow-hidden rounded-full text-sm font-medium "
             onClick={(e) => { 
               e.stopPropagation(); 
               leaveEditor();
             }}
             aria-label="返回画廊"
           >
-            <Image src="/z-flow-logo.svg" alt="" width={40} height={40} priority />
+            <Image src="/z-flow-logo.svg" alt="" width={40} height={40} />
           </button>
           {showAvatarMenu && (
-            <div className="workspace-popover-panel absolute left-0 top-12 z-[130] w-48 rounded-2xl py-2 backdrop-blur-xl">
+            <div className="workspace-popover-panel absolute left-0 top-12 z-[130] w-48 rounded-2xl py-2">
               <button className="w-full px-4 py-2 text-left text-sm hover:bg-[var(--workspace-control-hover)]">个人资料</button>
               <button className="w-full px-4 py-2 text-left text-sm hover:bg-[var(--workspace-control-hover)]">设置</button>
               <hr className="my-2 workspace-divider-dark" />
@@ -14560,7 +16962,7 @@ export default function AIWorkspace() {
         <div className="relative" ref={projectMenuRef}>
           <button 
             onClick={(e) => { e.stopPropagation(); setShowProjectMenu(!showProjectMenu); }}
-            className="workspace-floating-control flex items-center gap-1.5 rounded-xl px-3 py-2 transition-colors"
+            className="workspace-floating-control flex items-center gap-1.5 rounded-xl px-3 py-2 "
             aria-label="打开画布列表"
           >
             <span className="max-w-[120px] truncate text-sm font-medium">{currentProjectName}</span>
@@ -14568,12 +16970,12 @@ export default function AIWorkspace() {
           </button>
 
           {showProjectMenu && (
-            <div className="workspace-popover-panel absolute left-0 top-12 z-[130] w-64 overflow-hidden rounded-2xl backdrop-blur-xl">
+            <div className="workspace-popover-panel absolute left-0 top-12 z-[130] w-64 overflow-hidden rounded-2xl">
               <div className="p-2">
                 <button 
                   disabled={pendingSessionAction !== null}
                   onClick={(e) => { e.stopPropagation(); createNewProject(); }}
-                  className="flex min-h-[44px] w-full items-center gap-2 rounded-xl px-3 py-2 text-sm transition-colors hover:bg-[var(--workspace-control-hover)] disabled:cursor-not-allowed disabled:opacity-50"
+                  className="flex min-h-[44px] w-full items-center gap-2 rounded-xl px-3 py-2 text-sm  hover:bg-[var(--workspace-control-hover)] disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   <span className="text-lg">+</span>
                   <span>{pendingSessionAction?.type === 'create' ? '新建中...' : '新建画布'}</span>
@@ -14607,11 +17009,11 @@ export default function AIWorkspace() {
                             {session.messages.length} 条对话 · {new Date(session.updatedAt).toLocaleDateString()}
                           </div>
                         </div>
-                        <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                        <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100">
                         <button
                           disabled={pendingSessionAction !== null}
                           onClick={(e) => { e.stopPropagation(); setEditingSessionId(session.id); setEditingName(session.name); }}
-                          className="inline-flex h-11 w-11 items-center justify-center rounded-lg transition-colors hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-40"
+                          className="inline-flex h-11 w-11 items-center justify-center rounded-lg  hover:bg-white/10 disabled:cursor-not-allowed disabled:opacity-40"
                           title="重命名"
                           aria-label={`重命名 ${session.name}`}
                         >
@@ -14620,7 +17022,7 @@ export default function AIWorkspace() {
                         <button
                           disabled={pendingSessionAction !== null}
                           onClick={(e) => { e.stopPropagation(); deleteSession(session.id, e); }}
-                          className="inline-flex h-11 w-11 items-center justify-center rounded-lg transition-colors hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-40"
+                          className="inline-flex h-11 w-11 items-center justify-center rounded-lg  hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-40"
                           title="删除"
                           aria-label={`删除 ${session.name}`}
                         >
@@ -14639,10 +17041,12 @@ export default function AIWorkspace() {
 
         <CanvasViewport
         canvasRef={canvasRef}
-        widthStyle="calc(100% - var(--chat-panel-reserved-width, 0px))"
+        canvasSceneRef={setCanvasSceneRef}
+        canvasSize={canvasSize}
+        canvasRect={canvasMetricsRef.current}
+        widthStyle="100%"
         tool={tool}
         isSpacePressed={isSpacePressed}
-        isPanning={isPanning}
         viewport={viewport}
         themePalette={themePalette}
         items={items}
@@ -14658,33 +17062,34 @@ export default function AIWorkspace() {
         hoveredCanvasItemId={hoveredCanvasItemId}
         hoveredInputPortItemId={hoveredInputPortItemId}
         hoveredOutputPortItemId={hoveredOutputPortItemId}
-        magneticPorts={magneticPorts}
         connectionMode={connectionMode}
-        connectionSnapTargetId={connectionSnapTargetId}
         connectionFromItemId={connectionFromItemId}
         frozenPreviewConnection={frozenPreviewConnection}
         pendingConnectionMenu={pendingConnectionMenu}
         multiSelectionBounds={multiSelectionBounds}
-        isMarqueeSelecting={isMarqueeSelecting}
-        marqueeRect={marqueeRect}
-        getPreviewRenderPoints={getPreviewRenderPoints}
+        marqueeElementRef={setMarqueeElementRef}
+        marqueePathRef={setMarqueePathRef}
         getConnectionAnchorCanvasPoint={getConnectionAnchorCanvasPoint}
         toCanvasScreenPoint={toCanvasScreenPoint}
         buildConnectionPath={buildConnectionPath}
-        getRenderedPortOverlayPoint={getRenderedPortOverlayPoint}
-        getMagneticPortKey={getMagneticPortKey}
-        onPointerDown={handleCanvasPointerDown}
-        onPointerMove={handleCanvasPointerMove}
-        onPointerUp={handleCanvasPointerUp}
-        onPointerLeave={handleCanvasPointerLeave}
-        onWheel={handleWheel}
+        getItemTargetRef={getItemTargetRef}
+        getSelectionGroupRef={getSelectionGroupRef}
+        getConnectionPathRef={getConnectionPathRef}
+        connectionPreviewPathRef={connectionPreviewPathRef}
+        getViewportOverlayRef={getViewportOverlayRef}
+        onPointerDown={stableCanvasPointerDown}
+        onPointerMove={stableCanvasPointerMove}
+        onPointerUp={stableCanvasPointerUp}
+        onPointerLeave={stableCanvasPointerLeave}
+        onNativeWheel={handleNativeCanvasWheel}
+        onMetricsChange={handleCanvasMetricsChange}
         onPaste={handleCanvasPaste}
         onConnectionPointerDown={handleConnectionPointerDown}
         onInputPortEnter={handleInputPortEnter}
         onInputPortLeave={handleInputPortLeave}
         onOutputPortEnter={handleOutputPortEnter}
         onOutputPortLeave={handleOutputPortLeave}
-        onOutputPortPointerDown={handleOutputPortPointerDown}
+        onOutputPortPointerDown={stableOutputPortPointerDown}
         onSelectionGroupPointerDown={handleSelectionGroupPointerDown}
         onItemMouseEnter={handleItemMouseEnter}
         onItemMouseLeave={handleItemMouseLeave}
@@ -14692,9 +17097,7 @@ export default function AIWorkspace() {
         onItemPointerDown={handleItemPointerDown}
         onRegionClick={handleRegionClick}
         onCornerResizePointerDown={handleCornerResizePointerDown}
-        onPendingMenuPointerDown={(e) => {
-          e.stopPropagation();
-        }}
+        onPendingMenuPointerDown={handlePendingMenuPointerDown}
         onPendingMenuAction={handlePendingConnectionMenuAction}
         selectedTextCardPanelItem={selectedTextCardPanelItem}
         linkedImagePreviews={selectedTextCardPanelLinkedImagePreviews}
@@ -14705,7 +17108,7 @@ export default function AIWorkspace() {
         activeCanvasImageGenerationItemIds={activeCanvasImageGenerationItemIds}
         activeCanvasTextGenerations={activeCanvasTextGenerations}
         activeCanvasImageGenerations={activeCanvasImageGenerations}
-        generationClockMs={generationClockMs}
+        activeCanvasImageIds={activeCanvasImageIds}
         selectedTextPanelModel={selectedTextPanelModel}
         textPanelModelOptions={selectedTextCardProviderModelOptions}
         selectedTextCardProviderLabel={selectedTextCardProviderLabel}
@@ -14752,6 +17155,7 @@ export default function AIWorkspace() {
         editingAnnotationTextId={editingAnnotationTextId}
         editingAnnotationTextRef={editingAnnotationTextRef}
         draftStroke={draftStroke}
+        draftStrokePathRef={draftStrokePathRef}
         onToggleTextPanelProviderMenu={() => {
           setShowTextPanelModelMenu(false);
           setShowTextPanelProviderMenu((prev) => !prev);
@@ -14991,16 +17395,18 @@ export default function AIWorkspace() {
 
       {typeof document !== 'undefined' &&
         selectedImageToolbarTarget &&
-        selectedImageToolbarAnchor &&
-        selectedImageToolbarTop !== null &&
+        selectedImageToolbarAnchors &&
         createPortal(
-          <div className="pointer-events-none fixed inset-0 z-[114]">
+          <div data-canvas-overlay-root="true" className="pointer-events-none fixed inset-0 z-[114]">
             <div
+              ref={getViewportOverlayRef('selected-image-toolbar')}
+              data-canvas-viewport-overlay="true"
+              data-canvas-overlay-item-id={selectedImageToolbarTarget.itemId}
               className="pointer-events-none fixed"
               style={{
-                left: selectedImageToolbarAnchor.x,
-                top: selectedImageToolbarTop,
-                transform: 'translate(-50%, -100%)',
+                left: 0,
+                top: 0,
+                transform: `translate3d(${selectedImageToolbarAnchors.centerX}px, ${selectedImageToolbarAnchors.topToolbarY}px, 0) translate(-50%, -100%)`,
                 transformOrigin: 'bottom center',
               }}
             >
@@ -15051,12 +17457,13 @@ export default function AIWorkspace() {
           <div className="fixed inset-0 z-[230] flex items-center justify-center p-4">
             <button
               type="button"
-              className="absolute inset-0 bg-black/40 backdrop-blur-sm"
+              className="absolute inset-0 bg-black/40"
+              data-gsap-no-interaction="true"
               aria-label="关闭供应商配置"
               onClick={closeProviderSettingsModal}
             />
             <div
-              className="workspace-popover-panel relative z-[1] flex max-h-[min(88vh,760px)] w-full max-w-[920px] flex-col overflow-hidden rounded-[28px] backdrop-blur-xl"
+              className="workspace-popover-panel relative z-[1] flex max-h-[min(88vh,760px)] w-full max-w-[920px] flex-col overflow-hidden rounded-[28px]"
               onClick={(e) => {
                 e.stopPropagation();
               }}
@@ -15070,7 +17477,7 @@ export default function AIWorkspace() {
                 </div>
                 <button
                   type="button"
-                  className="rounded-full border border-[var(--workspace-border)] bg-[var(--workspace-surface-soft)] p-2 text-[var(--workspace-text-muted)] transition-colors hover:bg-[var(--workspace-control-hover)] hover:text-[var(--workspace-text-primary)]"
+                  className="rounded-full border border-[var(--workspace-border)] bg-[var(--workspace-surface-soft)] p-2 text-[var(--workspace-text-muted)]  hover:bg-[var(--workspace-control-hover)] hover:text-[var(--workspace-text-primary)]"
                   onClick={closeProviderSettingsModal}
                   aria-label="关闭供应商配置"
                 >
@@ -15116,7 +17523,7 @@ export default function AIWorkspace() {
                               {isDeletable && (
                                 <button
                                   type="button"
-                                  className="workspace-text-muted inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full transition-colors hover:bg-[var(--workspace-control-hover)] hover:text-red-500"
+                                  className="workspace-text-muted inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full  hover:bg-[var(--workspace-control-hover)] hover:text-red-500"
                                   onClick={() => handleProviderSettingsDeleteProvider(provider.id)}
                                   aria-label={`删除供应商 ${provider.name || provider.id}`}
                                   title={`删除供应商 ${provider.name || provider.id}`}
@@ -15148,7 +17555,7 @@ export default function AIWorkspace() {
                               updateSelectedProviderSettings((provider) => ({ ...provider, name: nextName }));
                               setProviderSettingsError(null);
                             }}
-                            className="w-full rounded-2xl border border-[var(--workspace-border)] bg-[var(--workspace-surface-soft)] px-4 py-3 text-[14px] text-[var(--workspace-text-primary)] outline-none transition-colors placeholder:text-[var(--workspace-text-soft)] focus:border-[var(--workspace-border-strong)] focus:bg-[var(--workspace-surface-elevated)]"
+                            className="w-full rounded-2xl border border-[var(--workspace-border)] bg-[var(--workspace-surface-soft)] px-4 py-3 text-[14px] text-[var(--workspace-text-primary)] outline-none  placeholder:text-[var(--workspace-text-soft)] focus:border-[var(--workspace-border-strong)] focus:bg-[var(--workspace-surface-elevated)]"
                           />
                         </label>
                         <label className="block">
@@ -15172,7 +17579,7 @@ export default function AIWorkspace() {
                             }}
                             className={`w-full rounded-2xl border border-[var(--workspace-border)] px-4 py-3 text-[14px] outline-none ${
                               isSelectedProviderSettingsIdEditable
-                                ? 'bg-[var(--workspace-surface-soft)] text-[var(--workspace-text-primary)] transition-colors placeholder:text-[var(--workspace-text-soft)] focus:border-[var(--workspace-border-strong)] focus:bg-[var(--workspace-surface-elevated)]'
+                                ? 'bg-[var(--workspace-surface-soft)] text-[var(--workspace-text-primary)]  placeholder:text-[var(--workspace-text-soft)] focus:border-[var(--workspace-border-strong)] focus:bg-[var(--workspace-surface-elevated)]'
                                 : 'bg-[var(--workspace-surface-soft)] text-[var(--workspace-text-muted)]'
                             }`}
                           />
@@ -15196,7 +17603,7 @@ export default function AIWorkspace() {
                             setProviderSettingsTestResult(null);
                           }}
                           placeholder="https://your-provider.example.com/v1"
-                          className="w-full rounded-2xl border border-[var(--workspace-border)] bg-[var(--workspace-surface-soft)] px-4 py-3 text-[14px] text-[var(--workspace-text-primary)] outline-none transition-colors placeholder:text-[var(--workspace-text-soft)] focus:border-[var(--workspace-border-strong)] focus:bg-[var(--workspace-surface-elevated)]"
+                          className="w-full rounded-2xl border border-[var(--workspace-border)] bg-[var(--workspace-surface-soft)] px-4 py-3 text-[14px] text-[var(--workspace-text-primary)] outline-none  placeholder:text-[var(--workspace-text-soft)] focus:border-[var(--workspace-border-strong)] focus:bg-[var(--workspace-surface-elevated)]"
                         />
                       </label>
 
@@ -15211,7 +17618,7 @@ export default function AIWorkspace() {
                                 updateSelectedProviderSettings((provider) => ({ ...provider, protocol: nextProtocol }));
                                 setProviderSettingsError(null);
                               }}
-                              className="w-full appearance-none rounded-2xl border border-[var(--workspace-border)] bg-[var(--workspace-surface-soft)] px-4 py-3 text-[14px] text-[var(--workspace-text-primary)] outline-none transition-colors focus:border-[var(--workspace-border-strong)] focus:bg-[var(--workspace-surface-elevated)]"
+                              className="w-full appearance-none rounded-2xl border border-[var(--workspace-border)] bg-[var(--workspace-surface-soft)] px-4 py-3 text-[14px] text-[var(--workspace-text-primary)] outline-none  focus:border-[var(--workspace-border-strong)] focus:bg-[var(--workspace-surface-elevated)]"
                             >
                               {PROVIDER_PROTOCOL_OPTIONS.map((option) => (
                                 <option key={option.id} value={option.id}>
@@ -15232,7 +17639,7 @@ export default function AIWorkspace() {
                                 updateSelectedProviderSettings((provider) => ({ ...provider, imageRequestMode: nextMode }));
                                 setProviderSettingsError(null);
                               }}
-                              className="w-full appearance-none rounded-2xl border border-[var(--workspace-border)] bg-[var(--workspace-surface-soft)] px-4 py-3 text-[14px] text-[var(--workspace-text-primary)] outline-none transition-colors focus:border-[var(--workspace-border-strong)] focus:bg-[var(--workspace-surface-elevated)]"
+                              className="w-full appearance-none rounded-2xl border border-[var(--workspace-border)] bg-[var(--workspace-surface-soft)] px-4 py-3 text-[14px] text-[var(--workspace-text-primary)] outline-none  focus:border-[var(--workspace-border-strong)] focus:bg-[var(--workspace-surface-elevated)]"
                             >
                               {PROVIDER_IMAGE_REQUEST_MODE_OPTIONS.map((option) => (
                                 <option key={option.id} value={option.id}>
@@ -15261,7 +17668,7 @@ export default function AIWorkspace() {
                               setProviderSettingsError(null);
                             }}
                             placeholder="/v1/images/generations"
-                            className="w-full rounded-2xl border border-[var(--workspace-border)] bg-[var(--workspace-surface-soft)] px-4 py-3 text-[14px] text-[var(--workspace-text-primary)] outline-none transition-colors placeholder:text-[var(--workspace-text-soft)] focus:border-[var(--workspace-border-strong)] focus:bg-[var(--workspace-surface-elevated)]"
+                            className="w-full rounded-2xl border border-[var(--workspace-border)] bg-[var(--workspace-surface-soft)] px-4 py-3 text-[14px] text-[var(--workspace-text-primary)] outline-none  placeholder:text-[var(--workspace-text-soft)] focus:border-[var(--workspace-border-strong)] focus:bg-[var(--workspace-surface-elevated)]"
                           />
                         </label>
                         <label className="block">
@@ -15279,7 +17686,7 @@ export default function AIWorkspace() {
                               setProviderSettingsError(null);
                             }}
                             placeholder="/v1/images/edits"
-                            className="w-full rounded-2xl border border-[var(--workspace-border)] bg-[var(--workspace-surface-soft)] px-4 py-3 text-[14px] text-[var(--workspace-text-primary)] outline-none transition-colors placeholder:text-[var(--workspace-text-soft)] focus:border-[var(--workspace-border-strong)] focus:bg-[var(--workspace-surface-elevated)]"
+                            className="w-full rounded-2xl border border-[var(--workspace-border)] bg-[var(--workspace-surface-soft)] px-4 py-3 text-[14px] text-[var(--workspace-text-primary)] outline-none  placeholder:text-[var(--workspace-text-soft)] focus:border-[var(--workspace-border-strong)] focus:bg-[var(--workspace-surface-elevated)]"
                           />
                         </label>
                       </div>
@@ -15319,14 +17726,14 @@ export default function AIWorkspace() {
                               setProviderSettingsError(null);
                             }}
                             placeholder="输入 API Key"
-                            className="w-full rounded-2xl border border-[var(--workspace-border)] bg-[var(--workspace-surface-soft)] px-4 py-3 pr-11 text-[14px] text-[var(--workspace-text-primary)] outline-none transition-colors placeholder:text-[var(--workspace-text-soft)] focus:border-[var(--workspace-border-strong)] focus:bg-[var(--workspace-surface-elevated)]"
+                            className="w-full rounded-2xl border border-[var(--workspace-border)] bg-[var(--workspace-surface-soft)] px-4 py-3 pr-11 text-[14px] text-[var(--workspace-text-primary)] outline-none  placeholder:text-[var(--workspace-text-soft)] focus:border-[var(--workspace-border-strong)] focus:bg-[var(--workspace-surface-elevated)]"
                           />
                           <button
                             type="button"
                             onClick={() => {
                               setIsProviderSettingsApiKeyVisible((prev) => !prev);
                             }}
-                            className="workspace-text-muted absolute right-3 top-1/2 inline-flex -translate-y-1/2 items-center justify-center rounded-full p-1.5 transition-colors hover:bg-[var(--workspace-control-hover)] hover:text-[var(--workspace-text-primary)]"
+                            className="workspace-text-muted absolute right-3 top-1/2 inline-flex -translate-y-1/2 items-center justify-center rounded-full p-1.5  hover:bg-[var(--workspace-control-hover)] hover:text-[var(--workspace-text-primary)]"
                             aria-label={isProviderSettingsApiKeyVisible ? '隐藏 API Key' : '显示 API Key'}
                             title={isProviderSettingsApiKeyVisible ? '隐藏 API Key' : '显示 API Key'}
                           >
@@ -15374,7 +17781,7 @@ export default function AIWorkspace() {
                                     setProviderSettingsError(null);
                                   }}
                                   placeholder="默认使用主 API Key"
-                                  className={`w-full rounded-2xl border border-[var(--workspace-border)] bg-[var(--workspace-surface-soft)] px-4 py-3 pr-11 text-[14px] outline-none transition-colors placeholder:text-[var(--workspace-text-soft)] focus:border-[var(--workspace-border-strong)] focus:bg-[var(--workspace-surface-elevated)] ${
+                                  className={`w-full rounded-2xl border border-[var(--workspace-border)] bg-[var(--workspace-surface-soft)] px-4 py-3 pr-11 text-[14px] outline-none  placeholder:text-[var(--workspace-text-soft)] focus:border-[var(--workspace-border-strong)] focus:bg-[var(--workspace-surface-elevated)] ${
                                     imageApiKeyRow.apiKey ? 'text-[var(--workspace-text-primary)]' : 'text-[var(--workspace-text-muted)]'
                                   }`}
                                 />
@@ -15389,7 +17796,7 @@ export default function AIWorkspace() {
                                       )
                                     );
                                   }}
-                                  className="workspace-text-muted absolute right-3 top-1/2 inline-flex -translate-y-1/2 items-center justify-center rounded-full p-1.5 transition-colors hover:bg-[var(--workspace-control-hover)] hover:text-[var(--workspace-text-primary)]"
+                                  className="workspace-text-muted absolute right-3 top-1/2 inline-flex -translate-y-1/2 items-center justify-center rounded-full p-1.5  hover:bg-[var(--workspace-control-hover)] hover:text-[var(--workspace-text-primary)]"
                                   aria-label={imageApiKeyRow.isVisible ? '隐藏生图 API Key' : '显示生图 API Key'}
                                   title={imageApiKeyRow.isVisible ? '隐藏生图 API Key' : '显示生图 API Key'}
                                 >
@@ -15408,7 +17815,7 @@ export default function AIWorkspace() {
                                     );
                                     setProviderSettingsError(null);
                                   }}
-                                  className="h-11 appearance-none rounded-2xl border border-[var(--workspace-border)] bg-[var(--workspace-surface-soft)] py-2 pl-3 pr-8 text-[12px] text-[var(--workspace-text-primary)] outline-none transition-colors focus:border-[var(--workspace-border-strong)] focus:bg-[var(--workspace-surface-elevated)]"
+                                  className="h-11 appearance-none rounded-2xl border border-[var(--workspace-border)] bg-[var(--workspace-surface-soft)] py-2 pl-3 pr-8 text-[12px] text-[var(--workspace-text-primary)] outline-none  focus:border-[var(--workspace-border-strong)] focus:bg-[var(--workspace-surface-elevated)]"
                                 >
                                   {PROVIDER_IMAGE_API_KEY_SCOPE_OPTIONS.map((option) => (
                                     <option key={option.id} value={option.id}>
@@ -15420,7 +17827,7 @@ export default function AIWorkspace() {
                               </div>
                               <button
                                 type="button"
-                                className="workspace-text-muted inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl border border-[var(--workspace-border)] bg-[var(--workspace-surface-soft)] transition-colors hover:bg-[var(--workspace-control-hover)] hover:text-red-500"
+                                className="workspace-text-muted inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl border border-[var(--workspace-border)] bg-[var(--workspace-surface-soft)]  hover:bg-[var(--workspace-control-hover)] hover:text-red-500"
                                 onClick={() => handleProviderSettingsRemoveImageApiKey(imageApiKeyRow.id)}
                                 aria-label="删除生图 API"
                                 title="删除生图 API"
@@ -15449,7 +17856,7 @@ export default function AIWorkspace() {
                           </div>
                           <button
                             type="button"
-                            className="rounded-full border border-[var(--workspace-border)] px-3 py-1.5 text-[12px] font-medium text-[var(--workspace-text-muted)] transition-colors hover:bg-[var(--workspace-control-hover)] hover:text-[var(--workspace-text-primary)] disabled:cursor-not-allowed disabled:opacity-50"
+                            className="rounded-full border border-[var(--workspace-border)] px-3 py-1.5 text-[12px] font-medium text-[var(--workspace-text-muted)]  hover:bg-[var(--workspace-control-hover)] hover:text-[var(--workspace-text-primary)] disabled:cursor-not-allowed disabled:opacity-50"
                             onClick={() => {
                               void handleProviderSettingsFetchModels();
                             }}
@@ -15478,7 +17885,7 @@ export default function AIWorkspace() {
                                     </div>
                                     <div className="flex shrink-0 items-center gap-2">
                                       <select
-                                        className="h-7 rounded-full border border-[var(--workspace-border)] bg-[var(--workspace-surface)] px-2 text-[11px] text-[var(--workspace-text-primary)] outline-none transition-colors hover:border-[var(--workspace-text-muted)] focus:border-[var(--workspace-accent)]"
+                                        className="h-7 rounded-full border border-[var(--workspace-border)] bg-[var(--workspace-surface)] px-2 text-[11px] text-[var(--workspace-text-primary)] outline-none  hover:border-[var(--workspace-text-muted)] focus:border-[var(--workspace-accent)]"
                                         value={selectedProviderSettings.modelProtocols?.[model.id] || ''}
                                         onChange={(event) => {
                                           handleProviderSettingsModelProtocolChange(model.id, event.target.value as ProviderProtocol | '');
@@ -15494,7 +17901,7 @@ export default function AIWorkspace() {
                                       </select>
                                       <button
                                         type="button"
-                                        className="workspace-text-muted inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full transition-colors hover:bg-[var(--workspace-control-hover)] hover:text-red-500"
+                                        className="workspace-text-muted inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full  hover:bg-[var(--workspace-control-hover)] hover:text-red-500"
                                         onClick={() => {
                                           handleProviderSettingsRemoveModel('image', model.id);
                                         }}
@@ -15529,7 +17936,7 @@ export default function AIWorkspace() {
                                     </div>
                                     <div className="flex shrink-0 items-center gap-2">
                                       <select
-                                        className="h-7 rounded-full border border-[var(--workspace-border)] bg-[var(--workspace-surface)] px-2 text-[11px] text-[var(--workspace-text-primary)] outline-none transition-colors hover:border-[var(--workspace-text-muted)] focus:border-[var(--workspace-accent)]"
+                                        className="h-7 rounded-full border border-[var(--workspace-border)] bg-[var(--workspace-surface)] px-2 text-[11px] text-[var(--workspace-text-primary)] outline-none  hover:border-[var(--workspace-text-muted)] focus:border-[var(--workspace-accent)]"
                                         value={selectedProviderSettings.modelProtocols?.[model.id] || ''}
                                         onChange={(event) => {
                                           handleProviderSettingsModelProtocolChange(model.id, event.target.value as ProviderProtocol | '');
@@ -15545,7 +17952,7 @@ export default function AIWorkspace() {
                                       </select>
                                       <button
                                         type="button"
-                                        className="workspace-text-muted inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full transition-colors hover:bg-[var(--workspace-control-hover)] hover:text-red-500"
+                                        className="workspace-text-muted inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full  hover:bg-[var(--workspace-control-hover)] hover:text-red-500"
                                         onClick={() => {
                                           handleProviderSettingsRemoveModel('chat', model.id);
                                         }}
@@ -15589,7 +17996,7 @@ export default function AIWorkspace() {
                           )}
                           <button
                             type="button"
-                            className="rounded-full border border-[var(--workspace-border)] px-3 py-1.5 text-[12px] font-medium text-[var(--workspace-text-muted)] transition-colors hover:bg-[var(--workspace-control-hover)] hover:text-[var(--workspace-text-primary)]"
+                            className="rounded-full border border-[var(--workspace-border)] px-3 py-1.5 text-[12px] font-medium text-[var(--workspace-text-muted)]  hover:bg-[var(--workspace-control-hover)] hover:text-[var(--workspace-text-primary)]"
                             onClick={() => {
                               setProviderSettingsProviders((prev) =>
                                 prev.map((provider) => ({
@@ -15603,7 +18010,7 @@ export default function AIWorkspace() {
                           </button>
                           <button
                             type="button"
-                            className="rounded-full border border-[var(--workspace-border)] px-3 py-1.5 text-[12px] font-medium text-[var(--workspace-text-muted)] transition-colors hover:bg-[var(--workspace-control-hover)] hover:text-[var(--workspace-text-primary)] disabled:cursor-not-allowed disabled:opacity-50"
+                            className="rounded-full border border-[var(--workspace-border)] px-3 py-1.5 text-[12px] font-medium text-[var(--workspace-text-muted)]  hover:bg-[var(--workspace-control-hover)] hover:text-[var(--workspace-text-primary)] disabled:cursor-not-allowed disabled:opacity-50"
                             onClick={() => {
                               void handleProviderSettingsTestConnection();
                             }}
@@ -15639,7 +18046,7 @@ export default function AIWorkspace() {
                 <div className="absolute inset-0 z-[2]">
                   <button
                     type="button"
-                    className="absolute inset-0 bg-black/30 backdrop-blur-sm"
+                    className="absolute inset-0 bg-black/30"
                     aria-label="关闭模型选择"
                     onClick={() => {
                       setProviderSettingsModelPickerOpen(false);
@@ -15656,7 +18063,7 @@ export default function AIWorkspace() {
                         </div>
                         <button
                           type="button"
-                          className="rounded-full border border-[var(--workspace-border)] px-3 py-1.5 text-[12px] font-medium text-[var(--workspace-text-muted)] transition-colors hover:bg-[var(--workspace-control-hover)] hover:text-[var(--workspace-text-primary)]"
+                          className="rounded-full border border-[var(--workspace-border)] px-3 py-1.5 text-[12px] font-medium text-[var(--workspace-text-muted)]  hover:bg-[var(--workspace-control-hover)] hover:text-[var(--workspace-text-primary)]"
                           onClick={() => {
                             setProviderSettingsModelPickerOpen(false);
                           }}
@@ -15675,7 +18082,7 @@ export default function AIWorkspace() {
                           setProviderSettingsModelPickerSearch(e.target.value);
                         }}
                         placeholder="搜索模型"
-                        className="mb-3 w-full shrink-0 rounded-2xl border border-[var(--workspace-border)] bg-[var(--workspace-surface-soft)] px-4 py-2.5 text-[13px] text-[var(--workspace-text-primary)] outline-none transition-colors placeholder:text-[var(--workspace-text-soft)] focus:border-[var(--workspace-border-strong)] focus:bg-[var(--workspace-surface-elevated)]"
+                        className="mb-3 w-full shrink-0 rounded-2xl border border-[var(--workspace-border)] bg-[var(--workspace-surface-soft)] px-4 py-2.5 text-[13px] text-[var(--workspace-text-primary)] outline-none  placeholder:text-[var(--workspace-text-soft)] focus:border-[var(--workspace-border-strong)] focus:bg-[var(--workspace-surface-elevated)]"
                       />
                       <div className="mb-3 flex shrink-0 flex-wrap gap-2">
                         {PROVIDER_SETTINGS_MODEL_PICKER_CATEGORIES.map((category) => (
@@ -15733,7 +18140,7 @@ export default function AIWorkspace() {
                         </div>
                         <button
                           type="button"
-                          className="rounded-full bg-[var(--workspace-inverse-bg)] px-4 py-2 text-[13px] font-semibold text-[var(--workspace-inverse-fg)] transition-colors hover:opacity-90"
+                          className="rounded-full bg-[var(--workspace-inverse-bg)] px-4 py-2 text-[13px] font-semibold text-[var(--workspace-inverse-fg)]  hover:opacity-90"
                           onClick={handleProviderSettingsApplyFetchedModels}
                         >
                           应用选择
@@ -15747,7 +18154,7 @@ export default function AIWorkspace() {
               <div className="workspace-subtle-divider flex items-center justify-end gap-3 border-t px-6 py-4">
                 <button
                   type="button"
-                  className="rounded-full border border-[var(--workspace-border)] px-4 py-2 text-[13px] font-medium text-[var(--workspace-text-muted)] transition-colors hover:bg-[var(--workspace-control-hover)] hover:text-[var(--workspace-text-primary)]"
+                  className="rounded-full border border-[var(--workspace-border)] px-4 py-2 text-[13px] font-medium text-[var(--workspace-text-muted)]  hover:bg-[var(--workspace-control-hover)] hover:text-[var(--workspace-text-primary)]"
                   onClick={closeProviderSettingsModal}
                   disabled={providerSettingsSaving}
                 >
@@ -15755,7 +18162,7 @@ export default function AIWorkspace() {
                 </button>
                 <button
                   type="button"
-                  className="rounded-full bg-[var(--workspace-inverse-bg)] px-4 py-2 text-[13px] font-semibold text-[var(--workspace-inverse-fg)] transition-colors hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+                  className="rounded-full bg-[var(--workspace-inverse-bg)] px-4 py-2 text-[13px] font-semibold text-[var(--workspace-inverse-fg)]  hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
                   onClick={() => {
                     void handleProviderSettingsSave();
                   }}
@@ -15774,7 +18181,7 @@ export default function AIWorkspace() {
           className="pointer-events-none fixed inset-x-0 top-4 flex justify-center px-4"
           style={{ zIndex: GLOBAL_NOTICE_Z }}
         >
-          <div className="workspace-floating-control rounded-full px-4 py-2 text-[12px] font-medium tracking-[-0.02em] backdrop-blur-xl">
+          <div className="workspace-floating-control rounded-full px-4 py-2 text-[12px] font-medium tracking-[-0.02em]" data-gsap-enter="true">
             {modelSelectionNotice || imageToolbarNotice}
           </div>
         </div>
@@ -15782,9 +18189,13 @@ export default function AIWorkspace() {
 
       <div
         data-canvas-bottom-toolbar="true"
-        className={`workspace-bottom-toolbar absolute bottom-4 z-50 flex -translate-x-1/2 items-center gap-2 rounded-[14px] px-1.5 py-1.5 ${canvasBottomToolbarReservedRightClassName}`}
-        style={canvasBottomToolbarStyle}
+        data-canvas-overlay-root="true"
+        className="absolute bottom-4 left-1/2 z-50 -translate-x-1/2"
       >
+        <div
+          ref={canvasBottomToolbarMotionRef}
+          className="workspace-bottom-toolbar workspace-bottom-toolbar-motion relative flex items-center gap-2 rounded-[14px] px-1.5 py-1.5"
+        >
         {tool === 'draw' && (
           <div
             className="workspace-menu-panel absolute bottom-full left-1/2 mb-2 flex -translate-x-1/2 items-center gap-2 rounded-xl px-2.5 py-2"
@@ -15797,9 +18208,9 @@ export default function AIWorkspace() {
                   key={color}
                   type="button"
                   onClick={() => setAnnotationColor(color)}
-                  className={`h-5 w-5 rounded-full border transition-transform ${
+                  className={`h-5 w-5 rounded-full border  ${
                     annotationColor === color
-                      ? 'scale-110 border-[var(--workspace-text)] ring-1 ring-[var(--workspace-text)]'
+                      ? 'border-[var(--workspace-text)] ring-1 ring-[var(--workspace-text)]'
                       : 'border-[var(--workspace-border)]'
                   }`}
                   style={{ backgroundColor: color }}
@@ -15845,7 +18256,7 @@ export default function AIWorkspace() {
               aria-label={item.label}
               title={item.label}
               onClick={() => handleCanvasBottomToolbarAction(item.id, 'action' in item ? item.action : undefined)}
-              className={`workspace-bottom-toolbar-item inline-flex h-8 w-8 items-center justify-center rounded-[9px] transition-colors ${
+              className={`workspace-bottom-toolbar-item inline-flex h-8 w-8 items-center justify-center rounded-[9px]  ${
                 isActive
                   ? 'is-active'
                   : ''
@@ -15857,16 +18268,28 @@ export default function AIWorkspace() {
             </button>
           );
         })}
+        </div>
       </div>
 
       {/* Zoom Controller - Outside Canvas */}
-      <div className="group absolute left-4 bottom-4 z-[130]" data-zoom-control="true">
-        <div className="absolute bottom-full left-0 mb-2 hidden group-hover:block group-focus-within:block">
+      <div
+        ref={zoomControlRef}
+        data-canvas-overlay-root="true"
+        className="absolute left-4 bottom-4 z-[130]"
+        data-zoom-control="true"
+        onPointerEnter={() => setZoomMenuOpen(true)}
+        onPointerLeave={() => setZoomMenuOpen(false)}
+        onFocus={() => setZoomMenuOpen(true)}
+        onBlur={(event) => {
+          if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setZoomMenuOpen(false);
+        }}
+      >
+        <div ref={zoomMenuRef} className="invisible pointer-events-none absolute bottom-full left-0 mb-2 opacity-0">
           <div className="workspace-menu-panel pointer-events-auto w-[198px] rounded-xl p-2">
             <button
               type="button"
               className="workspace-menu-item flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left text-xs"
-              onClick={() => applyViewportScale(viewportRef.current.scale + 0.1)}
+              onClick={() => applyViewportScale(visualViewportRef.current.scale + 0.1)}
             >
               <span>放大</span>
               <span className="workspace-text-soft">⌘ +</span>
@@ -15874,7 +18297,7 @@ export default function AIWorkspace() {
             <button
               type="button"
               className="workspace-menu-item flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left text-xs"
-              onClick={() => applyViewportScale(viewportRef.current.scale - 0.1)}
+              onClick={() => applyViewportScale(visualViewportRef.current.scale - 0.1)}
             >
               <span>缩小</span>
               <span className="workspace-text-soft">⌘ -</span>
@@ -15913,7 +18336,7 @@ export default function AIWorkspace() {
         </div>
         <button
           type="button"
-          className="workspace-text-muted rounded-md px-2 py-1 text-xs font-medium transition-colors hover:bg-[var(--workspace-control-hover)] focus-visible:outline-none group-hover:bg-[var(--workspace-control-hover)] group-focus-within:bg-[var(--workspace-control-hover)]"
+          className="workspace-text-muted rounded-md px-2 py-1 text-xs font-medium  hover:bg-[var(--workspace-control-hover)] focus-visible:outline-none group-hover:bg-[var(--workspace-control-hover)] group-focus-within:bg-[var(--workspace-control-hover)]"
           aria-label="画布缩放菜单"
         >
           {Math.round(viewport.scale * 100)}%
@@ -15924,28 +18347,35 @@ export default function AIWorkspace() {
       {typeof document !== 'undefined' &&
         createPortal(
           <>
-            {sidebarCollapsed && !chatPanelOpening && (
-              <div
-                className="workspace-floating-control fixed right-4 top-4 isolate flex h-9 w-9 items-center justify-center rounded-xl transition-all duration-300"
-                style={{ zIndex: CHAT_PANEL_Z }}
+            <div
+              ref={chatPanelOpenButtonRef}
+              className="workspace-floating-control fixed right-4 top-4 isolate flex h-9 w-9 items-center justify-center rounded-xl"
+              style={{
+                zIndex: CHAT_PANEL_Z,
+                pointerEvents: 'none',
+                visibility: 'hidden',
+              }}
+              aria-hidden="true"
+            >
+              <button
+                className="p-1  hover:text-[var(--workspace-text-primary)]"
+                onClick={handleOpenChatPanel}
+                title="展开对话"
               >
-                <button
-                  className="p-1 transition-colors hover:text-[var(--workspace-text-primary)]"
-                  onPointerDown={handleOpenChatPanel}
-                  onClick={handleOpenChatPanel}
-                  title="展开对话"
-                >
-                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                    <polyline points="15 18 9 12 15 6" />
-                  </svg>
-                </button>
-              </div>
-            )}
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <polyline points="15 18 9 12 15 6" />
+                </svg>
+              </button>
+            </div>
             <div
               ref={chatPanelRef}
-              className="workspace-chat-panel fixed inset-y-0 left-0 right-0 isolate flex w-auto flex-col overflow-hidden will-change-transform sm:left-auto sm:w-[500px]"
-              aria-hidden={sidebarCollapsed}
-              style={{ zIndex: CHAT_PANEL_Z }}
+              className="workspace-chat-panel fixed inset-y-0 left-0 right-0 isolate flex w-auto flex-col overflow-hidden transform-gpu sm:left-auto sm:w-[500px]"
+              aria-hidden="false"
+              style={{
+                zIndex: CHAT_PANEL_Z,
+                pointerEvents: 'auto',
+                visibility: 'visible',
+              }}
             >
           {/* Header */}
           <div className="workspace-subtle-divider flex flex-shrink-0 items-center justify-between border-b px-6 py-4">
@@ -15953,12 +18383,12 @@ export default function AIWorkspace() {
               <h1 className="text-base font-medium">{currentProjectName}</h1>
             </div>
             <div className="flex items-center gap-1">
-              <button className="rounded-lg p-2 transition-colors hover:bg-[var(--workspace-control-hover)]" title="分享">
+              <button className="rounded-lg p-2  hover:bg-[var(--workspace-control-hover)]" title="分享">
                 <Share2 size={18} className="workspace-text-muted" />
               </button>
               <div className="relative">
                 <button 
-                  className={`rounded-lg p-2 transition-colors ${showHistoryPanel ? 'bg-[var(--workspace-control-active)]' : 'hover:bg-[var(--workspace-control-hover)]'}`} 
+                  className={`rounded-lg p-2  ${showHistoryPanel ? 'bg-[var(--workspace-control-active)]' : 'hover:bg-[var(--workspace-control-hover)]'}`}
                   title="历史"
                   onClick={() => setShowHistoryPanel(!showHistoryPanel)}
                 >
@@ -15966,14 +18396,14 @@ export default function AIWorkspace() {
                 </button>
               </div>
               <button
-                className="rounded-lg p-2 transition-colors hover:bg-[var(--workspace-control-hover)]"
+                className="rounded-lg p-2  hover:bg-[var(--workspace-control-hover)]"
                 title="设置"
                 onClick={openProviderSettingsModal}
               >
                 <Settings size={18} className="workspace-text-muted" />
               </button>
               <button 
-                className="rounded-lg p-2 transition-colors hover:bg-[var(--workspace-control-hover)]" 
+                className="rounded-lg p-2  hover:bg-[var(--workspace-control-hover)]"
                 title="收缩"
                 onClick={handleCloseChatPanel}
               >
@@ -15990,7 +18420,7 @@ export default function AIWorkspace() {
               <div className="p-3">
                 <button 
                   onClick={(e) => { e.stopPropagation(); createNewTopic(); }}
-                  className="flex w-full items-center justify-center gap-2 rounded-xl border border-[var(--workspace-border)] bg-[var(--workspace-inverse-bg)] px-3 py-2 text-[var(--workspace-inverse-fg)] transition-colors hover:opacity-90"
+                  className="flex w-full items-center justify-center gap-2 rounded-xl border border-[var(--workspace-border)] bg-[var(--workspace-inverse-bg)] px-3 py-2 text-[var(--workspace-inverse-fg)]  hover:opacity-90"
                 >
                   <span className="text-lg">+</span>
                   <span className="text-sm font-medium">新建对话</span>
@@ -16011,10 +18441,10 @@ export default function AIWorkspace() {
                         {topic.messages.length} 条消息 · {new Date(topic.updatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
                       </div>
                     </div>
-                    <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                    <div className="flex items-center gap-1 opacity-0" data-gsap-hover-reveal="true">
                       <button
                         onClick={(e) => deleteTopic(topic.id, e)}
-                        className="rounded-lg p-1.5 transition-colors hover:bg-red-500/10"
+                        className="rounded-lg p-1.5  hover:bg-red-500/10"
                         title="删除对话"
                       >
                         <Trash2 size={12} className="text-red-500" />
@@ -16043,7 +18473,7 @@ export default function AIWorkspace() {
                           <button
                             key={action.id}
                             onClick={() => handleQuickSkillSelect(action, 'center_quick_action')}
-                            className="workspace-token-chip flex items-center gap-1.5 rounded-full px-2 py-1.5 transition-colors"
+                            className="workspace-token-chip flex items-center gap-1.5 rounded-full px-2 py-1.5 "
                           >
                             <Sparkles size={10} />
                             <span className="text-xs font-medium whitespace-nowrap">{action.label}</span>
@@ -16055,7 +18485,7 @@ export default function AIWorkspace() {
                           <button
                             key={action.id}
                             onClick={() => handleQuickSkillSelect(action, 'center_quick_action')}
-                            className="workspace-token-chip flex items-center gap-1.5 rounded-full px-2 py-1.5 transition-colors"
+                            className="workspace-token-chip flex items-center gap-1.5 rounded-full px-2 py-1.5 "
                           >
                             <Sparkles size={10} />
                             <span className="text-xs font-medium whitespace-nowrap">{action.label}</span>
@@ -16145,7 +18575,7 @@ export default function AIWorkspace() {
                       </div>
                     </div>
                   ) : msg.role === 'skill' ? (
-                    <div className="workspace-message-assistant group relative flex max-w-[90%] items-center gap-2 rounded-2xl p-3">
+                    <div className="workspace-message-assistant group relative flex max-w-[90%] items-center gap-2 rounded-2xl p-3" data-gsap-hover-root="true" data-gsap-no-scale="true">
                       <Sparkles size={14} className="flex-shrink-0" />
                       <span className="text-sm font-medium">{msg.skill?.label}</span>
                       <button
@@ -16157,13 +18587,14 @@ export default function AIWorkspace() {
                           }
                           setActiveSkillForCurrentTopic(null);
                         }}
-                        className="absolute -right-2 -top-2 flex h-5 w-5 items-center justify-center rounded-full border border-[var(--workspace-border)] bg-[var(--workspace-surface-elevated)] text-xs opacity-0 transition-opacity group-hover:opacity-100 hover:bg-[var(--workspace-control-hover)]"
+                        className="absolute -right-2 -top-2 flex h-5 w-5 items-center justify-center rounded-full border border-[var(--workspace-border)] bg-[var(--workspace-surface-elevated)] text-xs opacity-0 hover:bg-[var(--workspace-control-hover)]"
+                        data-gsap-hover-reveal="true"
                       >
                         ×
                       </button>
                     </div>
                   ) : (
-                    <div className={`group relative max-w-[90%] ${isAgentProgressMessage ? 'py-1' : 'workspace-message-assistant rounded-[22px] px-3.5 py-3'}`}>
+                    <div className={`group relative max-w-[90%] ${isAgentProgressMessage ? 'py-1' : 'workspace-message-assistant rounded-[22px] px-3.5 py-3'}`} data-gsap-hover-root="true" data-gsap-no-scale="true">
                       {!isAgentProgressMessage && msg.content && !(msg.content === '...' && msg.taskStatus === 'running') && (
                         <button
                           type="button"
@@ -16177,7 +18608,8 @@ export default function AIWorkspace() {
                             e.stopPropagation();
                             void handleCopyAssistantMessage(msg.id, msg.content);
                           }}
-                          className="workspace-control-chip absolute right-3 top-3 z-[2] inline-flex h-7 items-center gap-1 rounded-lg px-2 text-[11px] opacity-0 transition-opacity duration-200 group-hover:opacity-100"
+                          className="workspace-control-chip absolute right-3 top-3 z-[2] inline-flex h-7 items-center gap-1 rounded-lg px-2 text-[11px] opacity-0"
+                          data-gsap-hover-reveal="true"
                           aria-label="复制正文"
                           title="复制正文"
                         >
@@ -16209,7 +18641,7 @@ export default function AIWorkspace() {
                           {msg.agentRunProgress.steps.map((step) => {
                             const canOpenDecision = step.status === 'waiting' && hasPendingAgentDecision(msg);
                             const className = `agent-progress-enter flex min-h-7 items-center gap-2.5 rounded-md text-left ${
-                              canOpenDecision ? '-mx-1 px-1 transition-colors hover:bg-[var(--workspace-control-hover)]' : ''
+                              canOpenDecision ? '-mx-1 px-1  hover:bg-[var(--workspace-control-hover)]' : ''
                             } ${
                               step.status === 'failed'
                                 ? 'text-red-600 dark:text-red-300'
@@ -16322,9 +18754,9 @@ export default function AIWorkspace() {
                       )}
                       {!isAgentProgressMessage && (msg.content === '...' && msg.taskStatus === 'running' ? (
                         <p className="text-sm whitespace-pre-wrap inline-flex items-center gap-1" aria-label="加载中">
-                          <span className="w-1.5 h-1.5 rounded-full bg-zinc-400 animate-bounce [animation-delay:0ms]" />
-                          <span className="w-1.5 h-1.5 rounded-full bg-zinc-400 animate-bounce [animation-delay:150ms]" />
-                          <span className="w-1.5 h-1.5 rounded-full bg-zinc-400 animate-bounce [animation-delay:300ms]" />
+                          <span className="gsap-bounce w-1.5 h-1.5 rounded-full bg-zinc-400" data-gsap-delay="0" />
+                          <span className="gsap-bounce w-1.5 h-1.5 rounded-full bg-zinc-400" data-gsap-delay="0.15" />
+                          <span className="gsap-bounce w-1.5 h-1.5 rounded-full bg-zinc-400" data-gsap-delay="0.3" />
                         </p>
                       ) : (
                         msg.content && (
@@ -16343,7 +18775,7 @@ export default function AIWorkspace() {
                         <button
                           type="button"
                           onClick={() => openPendingAgentDecision(msg)}
-                          className="agent-progress-enter workspace-text-primary mt-2 flex min-h-7 items-center gap-2.5 rounded-md px-1 text-left text-[13px] leading-5 transition-colors hover:bg-[var(--workspace-control-hover)]"
+                          className="agent-progress-enter workspace-text-primary mt-2 flex min-h-7 items-center gap-2.5 rounded-md px-1 text-left text-[13px] leading-5  hover:bg-[var(--workspace-control-hover)]"
                         >
                           <span className="w-3 flex-none text-center text-[12px]" aria-hidden="true">⏸</span>
                           <span>{getPendingAgentDecisionLabel(msg)}</span>
@@ -16381,7 +18813,8 @@ export default function AIWorkspace() {
               {!isChatNearBottom && (
                 <button
                   type="button"
-                  className="workspace-chat-scroll-bottom absolute bottom-3 left-1/2 z-10 inline-flex h-8 w-8 -translate-x-1/2 items-center justify-center rounded-full transition-[background-color,border-color,color,opacity,transform] duration-150 hover:-translate-x-1/2 hover:scale-105 active:-translate-x-1/2 active:scale-95"
+                  className="workspace-chat-scroll-bottom absolute bottom-3 left-1/2 z-10 inline-flex h-8 w-8 -translate-x-1/2 items-center justify-center rounded-full"
+                  data-gsap-enter="true"
                   onClick={() => scrollChatToBottom()}
                   aria-label="滚动到最新消息"
                   title="滚动到最新消息"
@@ -16647,7 +19080,7 @@ export default function AIWorkspace() {
                                         : [...current, entry.id]
                                     );
                                   }}
-                                  className={`relative aspect-square overflow-hidden rounded-xl border transition-colors ${
+                                  className={`relative aspect-square overflow-hidden rounded-xl border  ${
                                     isSelected
                                       ? 'border-[var(--workspace-text)] ring-1 ring-[var(--workspace-text)]'
                                       : 'border-[var(--workspace-border)]'
@@ -16940,7 +19373,8 @@ export default function AIWorkspace() {
                     disabled={!isGenerating && (!chatInput.trim() || hasPendingChatReferenceUploads)}
                     aria-label={isGenerating ? '终止任务' : '发送'}
                     title={isGenerating ? '终止任务' : '发送'}
-                    className="ml-2 inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-zinc-950 text-white transition-[transform,opacity] hover:scale-[1.03] active:scale-95 disabled:cursor-not-allowed disabled:opacity-30 dark:bg-zinc-100 dark:text-zinc-950"
+                    className="ml-2 inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-zinc-950 text-white disabled:cursor-not-allowed disabled:opacity-30 dark:bg-zinc-100 dark:text-zinc-950"
+                    data-gsap-interactive="true"
                   >
                     {isGenerating ? (
                       <Square size={13} fill="currentColor" />

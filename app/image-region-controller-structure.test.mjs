@@ -1,8 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
-const hookPath = '/Volumes/ZO/ZO.DESIGN/app/hooks/useImageRegionSelectionController.ts';
+const hookPath = fileURLToPath(new URL('./hooks/useImageRegionSelectionController.ts', import.meta.url));
 const source = fs.readFileSync(hookPath, 'utf8');
 
 test('region recognition controller cancels superseded requests and rejects stale revisions', () => {

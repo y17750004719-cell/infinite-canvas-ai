@@ -144,7 +144,7 @@ test('provider settings opens fetched model selection in a centered overlay inst
     true
   );
   assert.equal(
-    pageSource.includes('className="absolute inset-0 bg-black/30 backdrop-blur-sm"'),
+    pageSource.includes('className="absolute inset-0 bg-black/30"'),
     true
   );
   assert.equal(
@@ -157,7 +157,7 @@ test('provider settings opens fetched model selection in a centered overlay inst
 
 test('provider settings keeps the right detail column scrollable while footer actions stay fixed', () => {
   assert.equal(
-    pageSource.includes('className="workspace-popover-panel relative z-[1] flex max-h-[min(88vh,760px)] w-full max-w-[920px] flex-col overflow-hidden rounded-[28px] backdrop-blur-xl"'),
+    pageSource.includes('className="workspace-popover-panel relative z-[1] flex max-h-[min(88vh,760px)] w-full max-w-[920px] flex-col overflow-hidden rounded-[28px]"'),
     true
   );
   assert.equal(

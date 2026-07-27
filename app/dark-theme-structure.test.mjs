@@ -18,7 +18,8 @@ test('dark workspace uses 90% black as its deepest solid surface', () => {
 });
 
 test('dark-capable workspace controls do not hard-code white surfaces', () => {
-  assert.equal(pageSource.includes('data-canvas-bottom-toolbar="true"\n        className={`workspace-bottom-toolbar'), true);
+  assert.equal(pageSource.includes('data-canvas-bottom-toolbar="true"\n        data-canvas-overlay-root="true"\n        className="absolute bottom-4 left-1/2'), true);
+  assert.equal(pageSource.includes('className="workspace-bottom-toolbar workspace-bottom-toolbar-motion'), true);
   assert.equal(workspacesSource.includes('bg-white/90'), false);
   assert.equal(workspaceDetailSource.includes('bg-white/90'), false);
 });

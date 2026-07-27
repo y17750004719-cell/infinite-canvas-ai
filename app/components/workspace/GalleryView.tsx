@@ -95,7 +95,7 @@ export function GalleryView({
               onClick={onBack}
               aria-label="返回画廊"
             >
-              <Image src="/z-flow-logo.svg" alt="" width={40} height={40} priority />
+              <Image src="/z-flow-logo.svg" alt="" width={40} height={40} />
             </button>
           </div>
         </div>
@@ -130,12 +130,14 @@ export function GalleryView({
                       <Sparkles size={32} className="workspace-text-soft" />
                     </div>
                   )}
-                  <div className="absolute inset-0 bg-black/10 group-hover:bg-black/0 transition-colors" />
+                  <div className="absolute inset-0 bg-black/10" data-gsap-hover-reveal="true" data-gsap-invert-reveal="true" />
 
                   <button
                     onClick={(e) => onDeleteSession(session.id, e)}
                     disabled={isSessionMutationPending}
-                    className="workspace-dark-icon-button workspace-text-muted absolute right-2 top-2 z-20 h-11 w-11 rounded-full opacity-100 hover:text-red-400 sm:opacity-0 sm:group-hover:opacity-100"
+                    className="workspace-dark-icon-button workspace-text-muted absolute right-2 top-2 z-20 h-11 w-11 rounded-full opacity-100 hover:text-red-400 sm:opacity-0"
+                    data-gsap-hover-reveal="true"
+                    data-gsap-mobile-visible="true"
                     title="删除画布"
                     aria-label={`删除 ${session.name}`}
                   >
@@ -173,7 +175,9 @@ export function GalleryView({
                       <button
                         onClick={(e) => onStartEdit(session.id, session.name, e)}
                         disabled={isSessionMutationPending}
-                        className="inline-flex h-11 w-11 items-center justify-center rounded-lg opacity-100 transition-colors hover:bg-[var(--workspace-control-hover)] sm:opacity-0 sm:group-hover:opacity-100"
+                        className="inline-flex h-11 w-11 items-center justify-center rounded-lg opacity-100 hover:bg-[var(--workspace-control-hover)] sm:opacity-0"
+                        data-gsap-hover-reveal="true"
+                        data-gsap-mobile-visible="true"
                         title="重命名"
                         aria-label={`重命名 ${session.name}`}
                       >

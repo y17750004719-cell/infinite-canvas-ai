@@ -157,7 +157,7 @@ export default function WorkspacesPage() {
     return (
       <div className="workspace-page-shell min-h-screen flex items-center justify-center">
         <div className="flex items-center gap-2 text-gray-400">
-          <Sparkles className="w-5 h-5 animate-pulse" />
+          <Sparkles className="gsap-pulse w-5 h-5" />
           <span>加载中...</span>
         </div>
       </div>
@@ -230,7 +230,7 @@ export default function WorkspacesPage() {
                 <div
                   key={session.id}
                   onClick={() => handleOpen(session.id)}
-                  className="workspace-surface-card break-inside-avoid group cursor-pointer overflow-hidden rounded-2xl transition-all"
+                  className="workspace-surface-card break-inside-avoid group cursor-pointer overflow-hidden rounded-2xl "
                 >
                   {/* Preview Area */}
                   <div className="relative aspect-[4/3] bg-gray-100 overflow-hidden">
@@ -250,10 +250,10 @@ export default function WorkspacesPage() {
                     )}
                     
                     {/* Hover Overlay */}
-                    <div className="absolute inset-0 bg-black/0 group-hover:bg-black/10 transition-colors" />
+                    <div className="absolute inset-0 bg-black/10 opacity-0" data-gsap-hover-reveal="true" />
                     
                     {/* Action Buttons */}
-                    <div className="absolute top-2 right-2 flex gap-1 opacity-100 transition-opacity sm:opacity-0 sm:group-hover:opacity-100">
+                    <div className="absolute top-2 right-2 flex gap-1 opacity-100 sm:opacity-0" data-gsap-hover-reveal="true" data-gsap-mobile-visible="true">
                       <button
                         onClick={(e) => { e.stopPropagation(); router.push(`/workspaces/${session.id}`); }}
                         className="workspace-light-icon-button workspace-preview-action h-11 w-11"

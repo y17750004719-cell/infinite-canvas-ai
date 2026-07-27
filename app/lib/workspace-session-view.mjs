@@ -720,16 +720,24 @@ export function moveCanvasItemsToFront(items, selectedIds) {
   const selectedIdSet = new Set(normalizedSelectedIds);
   const remainingItems = [];
   const selectedItems = [];
+  let encounteredSelectedItem = false;
+  let alreadyAtFront = true;
 
   for (const item of items) {
     if (selectedIdSet.has(item?.id)) {
+      encounteredSelectedItem = true;
       selectedItems.push(item);
     } else {
+      if (encounteredSelectedItem) alreadyAtFront = false;
       remainingItems.push(item);
     }
   }
 
   if (selectedItems.length === 0) {
+    return items;
+  }
+
+  if (alreadyAtFront) {
     return items;
   }
 

@@ -117,7 +117,7 @@ export default function WorkspaceDetailPage() {
     return (
       <div className="workspace-page-shell min-h-screen flex items-center justify-center">
         <div className="flex items-center gap-2 text-gray-400">
-          <Sparkles className="w-5 h-5 animate-pulse" />
+          <Sparkles className="gsap-pulse w-5 h-5" />
           <span>加载中...</span>
         </div>
       </div>
@@ -223,7 +223,7 @@ export default function WorkspaceDetailPage() {
             {session.items.map(item => (
               <div
                 key={item.id}
-                className="workspace-surface-card break-inside-avoid group cursor-pointer overflow-hidden rounded-2xl transition-all"
+                className="workspace-surface-card break-inside-avoid group cursor-pointer overflow-hidden rounded-2xl "
                 onClick={handleEdit}
               >
                 {/* Preview */}
@@ -239,7 +239,7 @@ export default function WorkspaceDetailPage() {
                   </div>
                   
                   {/* Hover Overlay */}
-                  <div className="absolute inset-0 bg-black/0 group-hover:bg-black/5 transition-colors" />
+                  <div className="absolute inset-0 bg-black/0 group-hover:bg-black/5 " />
                 </div>
 
                 {/* Info */}

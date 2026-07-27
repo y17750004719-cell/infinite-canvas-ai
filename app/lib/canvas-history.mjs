@@ -11,6 +11,25 @@ const cloneValue = (value) => {
 const normalizeLimit = (limit) =>
   Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : DEFAULT_HISTORY_LIMIT;
 
+const isMoveItemsCommand = (entry) => entry?.kind === 'move-items';
+
+const normalizePositions = (positions) => Object.fromEntries(
+  Object.entries(positions && typeof positions === 'object' ? positions : {})
+    .flatMap(([id, position]) => (
+      Number.isFinite(position?.x) && Number.isFinite(position?.y)
+        ? [[id, { x: position.x, y: position.y }]]
+        : []
+    ))
+);
+
+const normalizeMoveItemsCommand = (command) => ({
+  kind: 'move-items',
+  before: normalizePositions(command?.before),
+  after: normalizePositions(command?.after),
+  orderBefore: Array.isArray(command?.orderBefore) ? [...command.orderBefore] : [],
+  orderAfter: Array.isArray(command?.orderAfter) ? [...command.orderAfter] : [],
+});
+
 const normalizeSnapshot = (snapshot) => ({
   items: Array.isArray(snapshot?.items) ? cloneValue(snapshot.items) : [],
   connections: Array.isArray(snapshot?.connections) ? cloneValue(snapshot.connections) : [],
@@ -73,23 +92,47 @@ export function createEmptySessionCanvasHistoryState() {
   };
 }
 
-function normalizeHistory(history) {
+function readHistory(history) {
   return {
-    past: Array.isArray(history?.past) ? history.past.map((snapshot) => createCanvasUndoSnapshot(snapshot)) : [],
-    future: Array.isArray(history?.future) ? history.future.map((snapshot) => createCanvasUndoSnapshot(snapshot)) : [],
+    past: Array.isArray(history?.past) ? history.past : [],
+    future: Array.isArray(history?.future) ? history.future : [],
   };
 }
+
+const applyMoveItemsCommand = (snapshot, command, direction) => {
+  const normalizedSnapshot = createCanvasUndoSnapshot(snapshot);
+  const normalizedCommand = normalizeMoveItemsCommand(command);
+  const positions = direction === 'backward' ? normalizedCommand.before : normalizedCommand.after;
+  const order = direction === 'backward' ? normalizedCommand.orderBefore : normalizedCommand.orderAfter;
+  const updatedItems = normalizedSnapshot.items.map((item) => {
+    const position = positions[item.id];
+    return position ? { ...item, x: position.x, y: position.y } : item;
+  });
+  if (order.length === 0) return { ...normalizedSnapshot, items: updatedItems };
+
+  const itemById = new Map(updatedItems.map((item) => [item.id, item]));
+  const orderedItems = order.flatMap((id) => {
+    const item = itemById.get(id);
+    if (!item) return [];
+    itemById.delete(id);
+    return [item];
+  });
+  return {
+    ...normalizedSnapshot,
+    items: [...orderedItems, ...itemById.values()],
+  };
+};
 
 export function pushUndoSnapshot({
   history,
   snapshot,
   limit = DEFAULT_HISTORY_LIMIT,
 }) {
-  const normalizedHistory = normalizeHistory(history);
+  const normalizedHistory = readHistory(history);
   const nextSnapshot = createCanvasUndoSnapshot(snapshot);
   const lastPastSnapshot = normalizedHistory.past.at(-1) ?? null;
 
-  if (lastPastSnapshot && areCanvasUndoSnapshotsEqual(lastPastSnapshot, nextSnapshot)) {
+  if (lastPastSnapshot && !isMoveItemsCommand(lastPastSnapshot) && areCanvasUndoSnapshotsEqual(lastPastSnapshot, nextSnapshot)) {
     if (normalizedHistory.future.length === 0) {
       return normalizedHistory;
     }
@@ -109,12 +152,30 @@ export function pushUndoSnapshot({
   };
 }
 
+export function createCanvasMoveHistoryCommand(command) {
+  return normalizeMoveItemsCommand(command);
+}
+
+export function pushUndoCommand({
+  history,
+  command,
+  limit = DEFAULT_HISTORY_LIMIT,
+}) {
+  const normalizedHistory = readHistory(history);
+  const nextCommand = normalizeMoveItemsCommand(command);
+  const maxEntries = normalizeLimit(limit);
+  return {
+    past: [...normalizedHistory.past, nextCommand].slice(-maxEntries),
+    future: [],
+  };
+}
+
 export function undoSnapshot({
   history,
   currentSnapshot,
   limit = DEFAULT_HISTORY_LIMIT,
 }) {
-  const normalizedHistory = normalizeHistory(history);
+  const normalizedHistory = readHistory(history);
   if (normalizedHistory.past.length === 0) {
     return {
       history: normalizedHistory,
@@ -122,11 +183,21 @@ export function undoSnapshot({
     };
   }
 
-  const snapshot = createCanvasUndoSnapshot(normalizedHistory.past.at(-1));
-  const nextFuture = [
-    createCanvasUndoSnapshot(currentSnapshot),
-    ...normalizedHistory.future,
-  ].slice(0, normalizeLimit(limit));
+  const previousEntry = normalizedHistory.past.at(-1);
+  if (isMoveItemsCommand(previousEntry)) {
+    return {
+      history: {
+        past: normalizedHistory.past.slice(0, -1),
+        future: [normalizeMoveItemsCommand(previousEntry), ...normalizedHistory.future]
+          .slice(0, normalizeLimit(limit)),
+      },
+      snapshot: applyMoveItemsCommand(currentSnapshot, previousEntry, 'backward'),
+    };
+  }
+
+  const snapshot = createCanvasUndoSnapshot(previousEntry);
+  const nextFuture = [createCanvasUndoSnapshot(currentSnapshot), ...normalizedHistory.future]
+    .slice(0, normalizeLimit(limit));
 
   return {
     history: {
@@ -142,7 +213,7 @@ export function redoSnapshot({
   currentSnapshot,
   limit = DEFAULT_HISTORY_LIMIT,
 }) {
-  const normalizedHistory = normalizeHistory(history);
+  const normalizedHistory = readHistory(history);
   if (normalizedHistory.future.length === 0) {
     return {
       history: normalizedHistory,
@@ -151,6 +222,16 @@ export function redoSnapshot({
   }
 
   const [nextSnapshot, ...remainingFuture] = normalizedHistory.future;
+  if (isMoveItemsCommand(nextSnapshot)) {
+    return {
+      history: {
+        past: [...normalizedHistory.past, normalizeMoveItemsCommand(nextSnapshot)]
+          .slice(-normalizeLimit(limit)),
+        future: remainingFuture,
+      },
+      snapshot: applyMoveItemsCommand(currentSnapshot, nextSnapshot, 'forward'),
+    };
+  }
   const nextPast = [
     ...normalizedHistory.past,
     createCanvasUndoSnapshot(currentSnapshot),

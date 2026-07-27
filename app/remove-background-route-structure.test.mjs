@@ -1,8 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
-const routePath = '/Volumes/ZO/ZO.DESIGN/app/api/image-tools/remove-background/route.ts';
+const routePath = fileURLToPath(new URL('./api/image-tools/remove-background/route.ts', import.meta.url));
 
 test('remove-background route exists again and guards invalid JSON bodies', () => {
   assert.equal(fs.existsSync(routePath), true);

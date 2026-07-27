@@ -14,6 +14,14 @@ const EXTENSION_TO_MIME_TYPE = new Map([
   ['.gif', 'image/gif'],
 ]);
 
+const DEFAULT_RUNTIME_DIR = path.join(process.cwd(), 'runtime');
+
+function hasUnsafePathSegment(segments) {
+  return segments.some(
+    (segment) => segment === '.' || segment === '..' || segment.includes('\\') || segment.includes('\0')
+  );
+}
+
 function normalizePathInput(inputPath) {
   if (typeof inputPath !== 'string' || !inputPath.startsWith('/')) {
     return null;
@@ -41,7 +49,7 @@ function normalizeRelativeRuntimePath(inputPath) {
 }
 
 export function getRuntimeDir({ runtimeDir } = {}) {
-  return runtimeDir || path.join(process.cwd(), 'runtime');
+  return runtimeDir || DEFAULT_RUNTIME_DIR;
 }
 
 export function buildRuntimeAssetUrl(relativePath) {
@@ -64,16 +72,16 @@ function resolveRuntimeAssetPath(relativePath, { runtimeDir, allowedExtensions }
   }
 
   const normalizedSegments = normalized.split('/').filter(Boolean);
-  if (normalizedSegments.length === 0 || normalizedSegments[0] !== 'uploads') {
+  if (
+    normalizedSegments.length === 0 ||
+    normalizedSegments[0] !== 'uploads' ||
+    hasUnsafePathSegment(normalizedSegments)
+  ) {
     return null;
   }
 
-  const root = path.resolve(getRuntimeDir({ runtimeDir }));
-  const resolvedPath = path.resolve(root, normalized);
-
-  if (resolvedPath !== root && !resolvedPath.startsWith(`${root}${path.sep}`)) {
-    return null;
-  }
+  const root = path.resolve(getRuntimeDir({ runtimeDir }), 'uploads');
+  const resolvedPath = path.join(root, ...normalizedSegments.slice(1));
 
   const extension = path.extname(resolvedPath).toLowerCase();
   if (Array.isArray(allowedExtensions) && allowedExtensions.length > 0 && !allowedExtensions.includes(extension)) {

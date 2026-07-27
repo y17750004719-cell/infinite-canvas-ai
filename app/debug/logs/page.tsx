@@ -27,7 +27,7 @@ function renderDetails(entry: LocalLogEntry): string {
 export default async function DebugLogsPage({
   searchParams,
 }: {
-  searchParams?: SearchParams;
+  searchParams?: Promise<SearchParams>;
 }) {
   if (!isLocalLogAccessAllowed()) {
     return (
@@ -41,9 +41,10 @@ export default async function DebugLogsPage({
   }
 
   const startupSession = getCurrentStartupSession();
-  const level = firstValue(searchParams?.level);
-  const source = firstValue(searchParams?.source);
-  const q = firstValue(searchParams?.q);
+  const resolvedSearchParams = await searchParams;
+  const level = firstValue(resolvedSearchParams?.level);
+  const source = firstValue(resolvedSearchParams?.source);
+  const q = firstValue(resolvedSearchParams?.q);
   const currentLogFile = `logs/${startupSession.date}/${startupSession.startupId}.app.log`;
 
   const entries = await readLogEntries({
@@ -85,7 +86,7 @@ export default async function DebugLogsPage({
             <select
               name="level"
               defaultValue={level}
-              className="rounded-2xl border border-neutral-800 bg-neutral-900/40 px-4 py-3 text-sm text-neutral-100 outline-none transition focus:border-neutral-500"
+              className="rounded-2xl border border-neutral-800 bg-neutral-900/40 px-4 py-3 text-sm text-neutral-100 outline-none focus:border-neutral-500"
             >
               <option value="">全部级别</option>
               <option value="info">info</option>
@@ -95,7 +96,7 @@ export default async function DebugLogsPage({
             <select
               name="source"
               defaultValue={source}
-              className="rounded-2xl border border-neutral-800 bg-neutral-900/40 px-4 py-3 text-sm text-neutral-100 outline-none transition focus:border-neutral-500"
+              className="rounded-2xl border border-neutral-800 bg-neutral-900/40 px-4 py-3 text-sm text-neutral-100 outline-none focus:border-neutral-500"
             >
               <option value="">全部来源</option>
               <option value="server">server</option>
@@ -106,11 +107,11 @@ export default async function DebugLogsPage({
               name="q"
               defaultValue={q}
               placeholder="搜索 message / scope / details"
-              className="rounded-2xl border border-neutral-800 bg-neutral-900/40 px-4 py-3 text-sm text-neutral-100 outline-none transition placeholder:text-neutral-500 focus:border-neutral-500"
+              className="rounded-2xl border border-neutral-800 bg-neutral-900/40 px-4 py-3 text-sm text-neutral-100 outline-none placeholder:text-neutral-500 focus:border-neutral-500"
             />
             <button
               type="submit"
-              className="rounded-2xl bg-neutral-100 px-5 py-3 text-sm font-medium text-neutral-950 transition hover:bg-neutral-200"
+              className="rounded-2xl bg-neutral-100 px-5 py-3 text-sm font-medium text-neutral-950 hover:bg-neutral-200"
             >
               筛选
             </button>

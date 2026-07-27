@@ -1,9 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
-const reportPath = '/Volumes/ZO/ZO.DESIGN/docs/remove-background/2026-04-02-comfly-root-cause.md';
-const smokePath = '/Volumes/ZO/ZO.DESIGN/docs/remove-background/2026-04-02-comfly-smoke-results.json';
+const reportPath = fileURLToPath(new URL('../docs/remove-background/2026-04-02-comfly-root-cause.md', import.meta.url));
+const smokePath = fileURLToPath(new URL('../docs/remove-background/2026-04-02-comfly-smoke-results.json', import.meta.url));
 
 test('remove-background investigation bundle includes a markdown report with the baseline COMFLY evidence', () => {
   assert.equal(fs.existsSync(reportPath), true);

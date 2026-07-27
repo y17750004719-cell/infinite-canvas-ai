@@ -35,7 +35,7 @@ if not defined NODE_EXE (
 
 if not defined NODE_EXE (
   echo [ERROR] node.exe not found.
-  echo Please install Node.js 18 or later, then reopen this window.
+  echo Please install Node.js 24 LTS, then reopen this window.
   pause
   exit /b 1
 )

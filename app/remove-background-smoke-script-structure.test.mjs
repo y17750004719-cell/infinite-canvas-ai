@@ -1,8 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
-const scriptPath = '/Volumes/ZO/ZO.DESIGN/scripts/smoke-remove-background.mjs';
+const scriptPath = fileURLToPath(new URL('../scripts/smoke-remove-background.mjs', import.meta.url));
 
 test('remove-background smoke script exists and prints endpoint diagnostics for both COMFLY candidates', () => {
   assert.equal(fs.existsSync(scriptPath), true);

@@ -1,8 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
-const routePath = '/Volumes/ZO/ZO.DESIGN/app/api/image-tools/locate/route.ts';
+const routePath = fileURLToPath(new URL('./api/image-tools/locate/route.ts', import.meta.url));
 const source = fs.readFileSync(routePath, 'utf8');
 
 test('locate route exposes a strict multimodal candidate contract', () => {

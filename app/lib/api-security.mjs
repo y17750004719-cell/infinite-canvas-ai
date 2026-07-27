@@ -15,6 +15,14 @@ const EXTENSION_TO_MIME_TYPE = new Map([
   ['.gif', 'image/gif'],
 ]);
 
+const DEFAULT_PUBLIC_DIR = path.join(process.cwd(), 'public');
+
+function hasUnsafePathSegment(segments) {
+  return segments.some(
+    (segment) => segment === '.' || segment === '..' || segment.includes('\\') || segment.includes('\0')
+  );
+}
+
 function isPng(buffer) {
   return (
     buffer.length >= 8 &&
@@ -146,13 +154,13 @@ export function resolvePublicAssetPath(inputPath, { publicDir, allowedExtensions
     return null;
   }
 
-  const root = path.resolve(publicDir || path.join(process.cwd(), 'public'));
   const relativePath = normalizedInput.replace(/^\/+/, '');
-  const resolvedPath = path.resolve(root, relativePath);
-
-  if (resolvedPath !== root && !resolvedPath.startsWith(`${root}${path.sep}`)) {
+  const pathSegments = relativePath.split('/').filter(Boolean);
+  if (pathSegments.length === 0 || hasUnsafePathSegment(pathSegments)) {
     return null;
   }
+  const root = path.resolve(publicDir || DEFAULT_PUBLIC_DIR);
+  const resolvedPath = path.join(root, ...pathSegments);
 
   const extension = path.extname(resolvedPath).toLowerCase();
   if (Array.isArray(allowedExtensions) && allowedExtensions.length > 0 && !allowedExtensions.includes(extension)) {

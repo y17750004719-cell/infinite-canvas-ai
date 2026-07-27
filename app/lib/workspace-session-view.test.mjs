@@ -1409,6 +1409,17 @@ test('moveCanvasItemsToFront moves multiple selected items together while preser
   );
 });
 
+test('moveCanvasItemsToFront preserves the array identity when selected items are already at the front', () => {
+  const items = [
+    { id: 'a', type: 'shape' },
+    { id: 'b', type: 'text', textVariant: 'card' },
+    { id: 'c', type: 'image', src: '/c.png' },
+  ];
+
+  assert.equal(moveCanvasItemsToFront(items, ['c']), items);
+  assert.equal(moveCanvasItemsToFront(items, ['b', 'c']), items);
+});
+
 test('moveCanvasItemsToFront ignores empty, duplicate, and invalid selected ids without disturbing other item order', () => {
   const items = [
     { id: 'a', type: 'shape' },

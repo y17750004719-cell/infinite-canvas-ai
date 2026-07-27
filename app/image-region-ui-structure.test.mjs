@@ -1,10 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
-const pageSource = fs.readFileSync('/Volumes/ZO/ZO.DESIGN/app/page.tsx', 'utf8');
+const pageSource = fs.readFileSync(fileURLToPath(new URL('./page.tsx', import.meta.url)), 'utf8');
 const uiSource = fs.readFileSync(
-  '/Volumes/ZO/ZO.DESIGN/app/components/workspace/ImageRegionSelectionUI.tsx',
+  fileURLToPath(new URL('./components/workspace/ImageRegionSelectionUI.tsx', import.meta.url)),
   'utf8'
 );
 

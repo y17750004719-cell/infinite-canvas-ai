@@ -4,6 +4,7 @@ import { NextResponse } from 'next/server';
 import { listGeneratedImageArchiveEntries } from '../../../lib/generated-image-history-archive.mjs';
 
 export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
 
 const NO_STORE_HEADERS = {
   'Cache-Control': 'no-store',

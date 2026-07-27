@@ -5,7 +5,9 @@ const canvasHistoryModule = await import('./canvas-history.mjs').catch(() => ({}
 
 const {
   createCanvasUndoSnapshot,
+  createCanvasMoveHistoryCommand,
   createEmptySessionCanvasHistoryState,
+  pushUndoCommand,
   pushUndoSnapshot,
   undoSnapshot,
   redoSnapshot,
@@ -205,6 +207,50 @@ test('redoSnapshot restores the next snapshot and pushes the current snapshot ba
   assert.equal(result.history.past.length, 1);
   assert.equal(result.history.future.length, 0);
   assert.deepEqual(result.history.past[0], currentSnapshot);
+});
+
+test('move commands undo and redo positions and item order without storing a full drag snapshot', () => {
+  assert.equal(typeof createCanvasMoveHistoryCommand, 'function');
+  assert.equal(typeof pushUndoCommand, 'function');
+  if (typeof createCanvasMoveHistoryCommand !== 'function' || typeof pushUndoCommand !== 'function') return;
+
+  const secondItem = {
+    ...buildCanvasState().items[0],
+    id: 'item-2',
+    x: 40,
+    y: 50,
+  };
+  const currentSnapshot = createCanvasUndoSnapshot(buildCanvasState({
+    items: [secondItem, { ...buildCanvasState().items[0], x: 110, y: 220 }],
+  }));
+  const command = createCanvasMoveHistoryCommand({
+    before: { 'item-1': { x: 10, y: 20 } },
+    after: { 'item-1': { x: 110, y: 220 } },
+    orderBefore: ['item-1', 'item-2'],
+    orderAfter: ['item-2', 'item-1'],
+  });
+  const history = pushUndoCommand({
+    history: createEmptySessionCanvasHistoryState(),
+    command,
+  });
+
+  assert.equal(history.past[0].kind, 'move-items');
+  assert.equal('items' in history.past[0], false);
+
+  const undoResult = undoSnapshot({ history, currentSnapshot });
+  assert.deepEqual(undoResult.snapshot.items.map((item) => item.id), ['item-1', 'item-2']);
+  assert.deepEqual(
+    undoResult.snapshot.items.find((item) => item.id === 'item-1'),
+    { ...buildCanvasState().items[0], x: 10, y: 20 }
+  );
+
+  const redoResult = redoSnapshot({
+    history: undoResult.history,
+    currentSnapshot: undoResult.snapshot,
+  });
+  assert.deepEqual(redoResult.snapshot.items.map((item) => item.id), ['item-2', 'item-1']);
+  assert.equal(redoResult.snapshot.items.find((item) => item.id === 'item-1').x, 110);
+  assert.equal(redoResult.snapshot.items.find((item) => item.id === 'item-1').y, 220);
 });
 
 test('separate session history states keep their undo stacks isolated', () => {

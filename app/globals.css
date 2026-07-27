@@ -132,7 +132,6 @@ body {
   align-items: center;
   justify-content: center;
   border-radius: 0.75rem;
-  transition: background-color 160ms ease, color 160ms ease, opacity 160ms ease;
 }
 
 .workspace-light-icon-button:hover {
@@ -154,7 +153,6 @@ body {
   background: var(--workspace-inverse-bg);
   padding: 0.5rem 1rem;
   color: var(--workspace-inverse-fg);
-  transition: background-color 160ms ease, opacity 160ms ease;
 }
 
 .workspace-black-button:hover {
@@ -191,7 +189,6 @@ body {
   border-radius: var(--workspace-radius-lg);
   border: 1px solid var(--workspace-border);
   background: var(--workspace-surface);
-  transition: border-color 160ms ease, background-color 160ms ease;
 }
 
 .workspace-gallery-card:hover {
@@ -210,7 +207,6 @@ body {
   background: var(--workspace-inverse-bg);
   padding: 0.5rem 1rem;
   color: var(--workspace-inverse-fg);
-  transition: background-color 160ms ease, opacity 160ms ease;
 }
 
 .workspace-primary-button:hover {
@@ -228,7 +224,6 @@ body {
   justify-content: center;
   border: 1px solid var(--workspace-border);
   background: var(--workspace-surface-elevated);
-  transition: background-color 160ms ease, opacity 160ms ease, color 160ms ease;
 }
 
 .workspace-dark-icon-button:hover {
@@ -265,14 +260,21 @@ body {
 .workspace-popover-panel,
 .workspace-floating-control {
   border: 1px solid var(--workspace-border);
-  background: var(--workspace-surface);
+  background: var(--workspace-surface-elevated);
   color: var(--workspace-text-primary);
+}
+
+.workspace-popover-panel,
+.workspace-floating-control {
+  backdrop-filter: none;
+  contain: layout style;
 }
 
 .agent-decision-popover {
   background: var(--workspace-surface-elevated);
   transform-origin: bottom center;
-  animation: agent-decision-enter 160ms cubic-bezier(0.22, 1, 0.36, 1) both;
+  will-change: transform, opacity;
+  backface-visibility: hidden;
 }
 
 .agent-decision-option:hover,
@@ -302,17 +304,6 @@ body {
   color: var(--workspace-inverse-fg);
 }
 
-@keyframes agent-decision-enter {
-  from {
-    opacity: 0;
-    transform: translateY(5px) scale(0.99);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0) scale(1);
-  }
-}
-
 .workspace-add-button {
   border: 1px solid var(--workspace-border);
   background: var(--workspace-inverse-bg);
@@ -332,7 +323,6 @@ body {
   border-radius: 18px;
   padding: 0.375rem 0.25rem;
   color: var(--workspace-text-soft);
-  transition: background-color 160ms ease, color 160ms ease;
 }
 
 .workspace-rail-item:hover,
@@ -364,12 +354,19 @@ body {
   border-left: 1px solid var(--workspace-border);
   background: var(--workspace-surface-elevated);
   color: var(--workspace-text-primary);
+  backface-visibility: hidden;
+  contain: layout style paint;
 }
 
 .workspace-bottom-toolbar {
   border: 1px solid var(--workspace-border);
   background: var(--workspace-surface-elevated);
   color: var(--workspace-text-muted);
+}
+
+.workspace-bottom-toolbar-motion {
+  backface-visibility: hidden;
+  contain: layout style paint;
 }
 
 .workspace-bottom-toolbar-item {
@@ -425,41 +422,20 @@ body {
   background: var(--workspace-surface-elevated);
 }
 
-@keyframes agent-progress-enter {
-  from {
-    opacity: 0;
-    transform: translateY(2px);
-  }
-  to {
-    opacity: 1;
-    transform: translateY(0);
-  }
-}
-
 .agent-progress-enter {
-  animation: agent-progress-enter 180ms ease-out both;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .agent-progress-enter {
-    animation: none;
-  }
-
-  .agent-decision-popover {
-    animation: none;
-  }
+  will-change: transform, opacity;
 }
 
 .workspace-menu-panel {
   border: 1px solid var(--workspace-border);
   background: var(--workspace-surface-elevated);
   color: var(--workspace-text-primary);
-  backdrop-filter: blur(24px);
+  backdrop-filter: none;
+  contain: layout style;
 }
 
 .workspace-menu-item {
   color: var(--workspace-text-primary);
-  transition: background-color 160ms ease, border-color 160ms ease, color 160ms ease, opacity 160ms ease;
 }
 
 .workspace-menu-item:hover {
@@ -489,7 +465,6 @@ body {
   border: 1px solid var(--workspace-border);
   background: var(--workspace-control-bg);
   color: var(--workspace-text-muted);
-  transition: background-color 160ms ease, border-color 160ms ease, color 160ms ease, opacity 160ms ease;
 }
 
 .workspace-control-chip:hover,
@@ -525,7 +500,6 @@ body {
   border: 1px solid var(--workspace-border);
   background: transparent;
   color: inherit;
-  transition: border-color 160ms ease, opacity 160ms ease;
 }
 
 .workspace-reference-token:hover {
@@ -536,7 +510,6 @@ body {
   border: 0;
   background: transparent;
   color: var(--workspace-text-muted);
-  transition: background-color 160ms ease, color 160ms ease, opacity 160ms ease;
 }
 
 .workspace-chat-icon-control:hover:not(:disabled),
@@ -556,13 +529,33 @@ body {
   border: 1px solid var(--workspace-border);
   background: var(--workspace-surface-elevated);
   color: var(--workspace-text-primary);
-  backdrop-filter: blur(24px);
+}
+
+[data-canvas-scene="true"] {
+  transform-origin: 0 0;
+  contain: layout style;
+  isolation: isolate;
+}
+
+[data-canvas-interaction="item-drag"] [data-canvas-ports-layer="true"] {
+  visibility: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
+
+[data-canvas-connection-hit-testing="disabled"] [data-canvas-connection-hit-layer="true"] {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+[data-canvas-image-shell="true"] {
+  content-visibility: auto;
+  contain: strict;
 }
 
 .workspace-panel-input {
   border: 1px solid var(--workspace-border);
   background: var(--workspace-surface-soft);
-  transition: background-color 160ms ease, border-color 160ms ease;
 }
 
 .workspace-panel-input:hover,
@@ -636,19 +629,4 @@ body {
   padding: 0.5rem 1rem;
   color: #fee2e2;
   backdrop-filter: blur(24px);
-}
-
-@keyframes workspace-text-card-breathe {
-  0%,
-  100% {
-    opacity: 0.42;
-  }
-
-  50% {
-    opacity: 0.88;
-  }
-}
-
-.workspace-text-card-waiting {
-  animation: workspace-text-card-breathe 1.9s ease-in-out infinite;
 }

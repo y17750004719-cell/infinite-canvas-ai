@@ -1,8 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import { fileURLToPath } from 'node:url';
 
-const routePath = '/Volumes/ZO/ZO.DESIGN/app/api/image-tools/export/route.ts';
+const routePath = fileURLToPath(new URL('./api/image-tools/export/route.ts', import.meta.url));
 
 test('image export route exists and validates the src query parameter', () => {
   assert.equal(fs.existsSync(routePath), true);

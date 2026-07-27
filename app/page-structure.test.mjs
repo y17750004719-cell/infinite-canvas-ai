@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const pageSource = fs.readFileSync(path.join(__dirname, 'page.tsx'), 'utf8');
 const globalsSource = fs.readFileSync(path.join(__dirname, 'globals.css'), 'utf8');
+const controllerSource = fs.readFileSync(path.join(__dirname, 'hooks/useCanvasInteractionController.ts'), 'utf8');
 const appSourceFilesWithoutShadows = [
   'globals.css',
   'page.tsx',
@@ -27,13 +28,13 @@ test('image card floating menus are not rendered inside the pending connection m
   const pendingMenuBlock = pageSource.slice(pendingMenuStart, pendingMenuEnd);
 
   assert.equal(
-    pendingMenuBlock.includes('{showImageCardSettingsMenu && selectedImageCardSettingsPopoverOffset && ('),
+    pendingMenuBlock.includes('{showImageCardSettingsMenu && ('),
     false
   );
   assert.equal(pendingMenuBlock.includes('{showImageCardCountMenu && selectedImageCardCountPopoverOffset && ('), false);
 });
 
-test('image card model menu uses a dedicated fixed popover that drops below the panel footer', () => {
+test('image card model menu stays group-relative so it follows the selected card', () => {
   const imagePanelStart = pageSource.indexOf('const portaledSelectedImageCardPanel =');
   const imagePanelEnd = pageSource.indexOf('const portaledSelectedTextCardPanel =', imagePanelStart);
 
@@ -43,11 +44,13 @@ test('image card model menu uses a dedicated fixed popover that drops below the 
 
   const imagePanelBlock = pageSource.slice(imagePanelStart, imagePanelEnd);
 
-  assert.equal(pageSource.includes('const [selectedImageCardModelPopoverOffset, setSelectedImageCardModelPopoverOffset] = useState<{ left: number; top: number } | null>(null);'), true);
+  assert.equal(pageSource.includes('const [selectedImageCardModelPopoverOffset, setSelectedImageCardModelPopoverOffset]'), false);
   assert.equal(pageSource.includes('imageCardModelPopoverRef: React.RefObject<HTMLDivElement | null>;'), true);
-  assert.equal(pageSource.includes('{showImageCardModelMenu && selectedImageCardModelPopoverOffset && ('), true);
+  assert.equal(pageSource.includes('{showImageCardModelMenu && ('), true);
   assert.equal(pageSource.includes('ref={imageCardModelPopoverRef}'), true);
-  assert.equal(pageSource.includes('className="workspace-menu-panel pointer-events-auto fixed z-[116] min-w-[248px] overflow-hidden rounded-[18px] p-1.5"'), true);
+  assert.equal(pageSource.includes('data-canvas-item-overlay-group="selected-image-panel"'), true);
+  assert.equal(pageSource.includes("left: 'var(--canvas-image-model-menu-left)'"), true);
+  assert.equal(pageSource.includes('className="workspace-menu-panel pointer-events-auto absolute z-[116] min-w-[248px] overflow-hidden rounded-[18px] p-1.5"'), true);
   assert.equal(pageSource.includes("transform: `translateY(-100%) scale(${viewport.scale})`"), false);
   assert.equal(imagePanelBlock.includes("transform: `scale(${viewport.scale})`"), false);
   assert.equal(pageSource.includes("placement: 'below-panel',"), true);
@@ -76,7 +79,7 @@ test('canvas image preview metadata retries local asset loading before falling b
 });
 
 test('image card content images fill the card content area with object-cover', () => {
-  const imageCardContentStart = pageSource.indexOf("{imageCardVisualState === 'content' && item.src && (");
+  const imageCardContentStart = pageSource.indexOf("{imageCardVisualState === 'content' && item.src && isImageActive && (");
   const imageCardContentEnd = pageSource.indexOf('{item.type === \'shape\' &&', imageCardContentStart);
 
   assert.notEqual(imageCardContentStart, -1);
@@ -90,15 +93,16 @@ test('image card content images fill the card content area with object-cover', (
 });
 
 test('canvas text and image cards render a compact generation duration badge in the title row', () => {
-  assert.equal(pageSource.includes('const cardGenerationDurationLabel = getGenerationDurationDisplay('), true);
-  assert.equal(pageSource.includes("{cardGenerationDurationLabel && ("), true);
+  assert.equal(pageSource.includes('const CanvasGenerationDurationBadge = memo'), true);
+  assert.equal(pageSource.includes('<CanvasGenerationDurationBadge'), true);
+  assert.equal(pageSource.includes('const timer = window.setInterval(() => setClockMs(Date.now()), 1000);'), true);
   assert.equal(pageSource.includes('<Clock3 size={12} strokeWidth={2} />'), true);
 });
 
 test('image card header renders image dimensions to the left of the generation duration chip', () => {
   const imageCardBlockStart = pageSource.indexOf('{isImageCard && (');
   const imageCardBlockEnd = pageSource.indexOf('{item.type === \'shape\' &&', imageCardBlockStart);
-  const imageCardContentStart = pageSource.indexOf("{imageCardVisualState === 'content' && item.src && (", imageCardBlockStart);
+  const imageCardContentStart = pageSource.indexOf("{imageCardVisualState === 'content' && item.src && isImageActive && (", imageCardBlockStart);
   const imageCardContentEnd = pageSource.indexOf('{item.type === \'shape\' &&', imageCardContentStart);
 
   assert.notEqual(imageCardBlockStart, -1);
@@ -112,10 +116,10 @@ test('image card header renders image dimensions to the left of the generation d
   const imageCardContentBlock = pageSource.slice(imageCardContentStart, imageCardContentEnd);
 
   assert.equal(pageSource.includes('const currentImageDimensionsLabel = isImageCard && currentImageOutput'), true);
-  assert.equal(imageCardBlock.includes('{(currentImageDimensionsLabel || cardGenerationDurationLabel) && ('), true);
+  assert.equal(imageCardBlock.includes('{(currentImageDimensionsLabel || hasGenerationDuration) && ('), true);
   assert.equal(imageCardBlock.includes('className="inline-flex items-center gap-2"'), true);
   assert.equal(imageCardBlock.includes('<span>{currentImageDimensionsLabel}</span>'), true);
-  assert.equal(imageCardBlock.includes('<Clock3 size={12} strokeWidth={2} />'), true);
+  assert.equal(imageCardBlock.includes('<CanvasGenerationDurationBadge'), true);
   assert.equal(imageCardBlock.includes('workspace-control-chip inline-flex h-6 items-center gap-1 rounded-lg px-2 text-[11px]'), true);
   assert.equal(imageCardContentBlock.includes('absolute right-3 top-3'), false);
   assert.equal(pageSource.includes('`${currentImageOutput.naturalWidth}×${currentImageOutput.naturalHeight}`'), true);
@@ -223,20 +227,18 @@ test('canvas bottom toolbar renders a screenshot-style icon-only dock', () => {
   assert.equal(pageSource.includes("setTool(toolId === 'text' ? 'annotation-text' : toolId)"), true);
   assert.equal(pageSource.includes("if (!action || action === 'video-placeholder') return;"), true);
   assert.equal(pageSource.includes("if (action === 'add-image-card')"), true);
-  assert.equal(pageSource.includes('const canvasBottomToolbarReservedRightClassName ='), true);
-  assert.equal(pageSource.includes("sm:[--canvas-bottom-toolbar-reserved-right:var(--chat-panel-toolbar-reserved-width,0px)]"), true);
-  assert.equal(pageSource.includes("sm:[--canvas-bottom-toolbar-reserved-right:var(--chat-panel-reserved-width,0px)]"), false);
+  assert.equal(pageSource.includes('const canvasBottomToolbarReservedRightClassName ='), false);
+  assert.equal(pageSource.includes('--canvas-bottom-toolbar-reserved-right'), false);
+  assert.equal(pageSource.includes('--chat-panel-toolbar-reserved-width'), false);
   assert.equal(pageSource.includes('const CANVAS_CHAT_PANEL_RESERVED_WIDTH = 500;'), true);
-  assert.equal(pageSource.includes('const reservedRight = isDesktopCanvas ? chatPanelReserveRef.current.width : 0;'), true);
-  assert.equal(pageSource.includes('Math.max(0, window.innerWidth - reservedRight)'), true);
+  assert.equal(pageSource.includes('const reservedRight = isDesktopCanvas ? chatSafeAreaWidthRef.current : 0;'), true);
+  assert.equal(pageSource.includes('Math.max(0, (canvasRect.width || fallbackCanvasWidth) - reservedRight)'), true);
   assert.equal(pageSource.includes('window.innerWidth / 2'), false);
-  assert.equal(
-    pageSource.includes("left: 'calc((100vw - var(--canvas-bottom-toolbar-reserved-right)) / 2)'"),
-    true
-  );
-  assert.equal(toolbarBlock.includes('absolute bottom-4 left-1/2'), false);
-  assert.equal(toolbarBlock.includes('absolute bottom-4 z-50 flex -translate-x-1/2'), true);
-  assert.equal(toolbarBlock.includes('style={canvasBottomToolbarStyle}'), true);
+  assert.equal(pageSource.includes("left: 'calc((100vw - var(--canvas-bottom-toolbar-reserved-right)) / 2)'"), false);
+  assert.equal(toolbarBlock.includes('className="absolute bottom-4 left-1/2 z-50 -translate-x-1/2"'), true);
+  assert.equal(toolbarBlock.includes('ref={canvasBottomToolbarMotionRef}'), true);
+  assert.equal(toolbarBlock.includes('workspace-bottom-toolbar-motion'), true);
+  assert.equal(toolbarBlock.includes('style={canvasBottomToolbarStyle}'), false);
   assert.equal(toolbarBlock.includes('workspace-bottom-toolbar'), true);
   assert.equal(toolbarBlock.includes('aria-label={item.label}'), true);
   assert.equal(toolbarBlock.includes('title={item.label}'), true);
@@ -250,13 +252,13 @@ test('canvas bottom toolbar renders a screenshot-style icon-only dock', () => {
 
 test('canvas annotations render above regular nodes and stay outside graph ports', () => {
   assert.equal(pageSource.includes('const CanvasAnnotationsLayer = memo'), true);
-  assert.equal(pageSource.includes('className="absolute z-[3]"'), true);
-  assert.equal(pageSource.includes('const regularItems = items.filter((item) => !isCanvasAnnotationItem(item));'), true);
-  assert.equal(pageSource.includes('<CanvasPortsLayer\n        items={regularItems}'), true);
-  assert.equal(pageSource.includes('<CanvasNodesLayer\n        items={regularItems}'), true);
+  assert.equal(pageSource.includes('className="pointer-events-none absolute z-[3]"'), true);
+  assert.equal(pageSource.includes('() => items.filter((item) => !isCanvasAnnotationItem(item))'), true);
+  assert.match(pageSource, /<CanvasPortsLayer\s+items=\{regularItems\}/);
+  assert.match(pageSource, /<CanvasNodesLayer\s+items=\{regularItems\}/);
 });
 
-test('canvas zoom display opens a hover menu with zoom actions', () => {
+test('canvas zoom display opens immediately without GSAP or a React visibility commit', () => {
   const zoomStart = pageSource.indexOf('{/* Zoom Controller - Outside Canvas */}');
   const zoomEnd = pageSource.indexOf('{/* Right Chat Panel */}', zoomStart);
 
@@ -266,9 +268,18 @@ test('canvas zoom display opens a hover menu with zoom actions', () => {
   const zoomBlock = pageSource.slice(zoomStart, zoomEnd);
 
   assert.equal(zoomBlock.includes('workspace-floating-control'), false);
-  assert.equal(zoomBlock.includes('group absolute left-4 bottom-4 z-[130]'), true);
+  assert.equal(zoomBlock.includes('ref={zoomControlRef}'), true);
+  assert.equal(zoomBlock.includes('className="absolute left-4 bottom-4 z-[130]"'), true);
   assert.equal(zoomBlock.includes('data-zoom-control="true"'), true);
-  assert.equal(zoomBlock.includes('group-hover:block group-focus-within:block'), true);
+  assert.equal(zoomBlock.includes('onPointerEnter={() => setZoomMenuOpen(true)}'), true);
+  assert.equal(zoomBlock.includes('onPointerLeave={() => setZoomMenuOpen(false)}'), true);
+  assert.equal(zoomBlock.includes('onFocus={() => setZoomMenuOpen(true)}'), true);
+  assert.equal(zoomBlock.includes('ref={zoomMenuRef}'), true);
+  assert.equal(zoomBlock.includes('invisible pointer-events-none absolute bottom-full left-0 mb-2 opacity-0'), true);
+  assert.equal(zoomBlock.includes('group-hover:block group-focus-within:block'), false);
+  assert.equal(pageSource.includes('const setZoomMenuOpen = useCallback((open: boolean) => {'), true);
+  assert.equal(pageSource.includes('const [isZoomMenuOpen, setIsZoomMenuOpen]'), false);
+  assert.equal(pageSource.includes('gsap.to(menu, {'), false);
   assert.equal(zoomBlock.includes('workspace-menu-panel pointer-events-auto w-[198px] rounded-xl p-2'), true);
   assert.equal(zoomBlock.includes('hover:bg-[var(--workspace-control-hover)]'), true);
   assert.equal(zoomBlock.includes('group-focus-within:bg-[var(--workspace-control-hover)]'), true);
@@ -282,8 +293,8 @@ test('canvas zoom display opens a hover menu with zoom actions', () => {
   assert.equal(zoomBlock.includes('⌘ +'), true);
   assert.equal(zoomBlock.includes('⌘ -'), true);
   assert.equal(zoomBlock.includes('⇧ 1'), true);
-  assert.equal(zoomBlock.includes('onClick={() => applyViewportScale(viewportRef.current.scale + 0.1)}'), true);
-  assert.equal(zoomBlock.includes('onClick={() => applyViewportScale(viewportRef.current.scale - 0.1)}'), true);
+  assert.equal(zoomBlock.includes('onClick={() => applyViewportScale(visualViewportRef.current.scale + 0.1)}'), true);
+  assert.equal(zoomBlock.includes('onClick={() => applyViewportScale(visualViewportRef.current.scale - 0.1)}'), true);
   assert.equal(zoomBlock.includes('onClick={fitCanvasItemsToViewport}'), true);
   assert.equal(zoomBlock.includes('onClick={() => applyViewportScale(0.5)}'), true);
   assert.equal(zoomBlock.includes('onClick={() => applyViewportScale(1)}'), true);
@@ -382,7 +393,7 @@ test('text card panel has provider picker and switches model to selected provide
   assert.equal(pageSource.includes('[selectedTextCardPanelItem.id]: nextModel?.id || defaultWorkspaceTextModelOption.id'), true);
 });
 
-test('text card panel uses bottom large provider and model controls with fixed popovers', () => {
+test('text card panel uses bottom controls with group-relative popovers', () => {
   const textPanelStart = pageSource.indexOf('const portaledSelectedTextCardPanel =');
   const textPanelEnd = pageSource.indexOf('\n  return (\n', textPanelStart);
 
@@ -397,14 +408,15 @@ test('text card panel uses bottom large provider and model controls with fixed p
   assert.equal(textPanelBlock.includes('workspace-control-chip flex min-h-[52px] w-full items-center justify-between gap-3 rounded-[14px] px-3 py-2 text-left'), true);
   assert.equal(textPanelBlock.includes('workspace-control-chip inline-flex items-center gap-2 rounded-full px-2.5 py-1.5 text-[13px] font-semibold tracking-[-0.02em]'), false);
   assert.equal(textPanelBlock.includes('className="workspace-menu-panel absolute bottom-full left-0 mb-2'), false);
-  assert.equal(pageSource.includes('const [selectedTextCardProviderPopoverOffset, setSelectedTextCardProviderPopoverOffset] = useState<{ left: number; top: number } | null>(null);'), true);
-  assert.equal(pageSource.includes('const [selectedTextCardModelPopoverOffset, setSelectedTextCardModelPopoverOffset] = useState<{ left: number; top: number } | null>(null);'), true);
+  assert.equal(pageSource.includes('const [selectedTextCardProviderPopoverOffset, setSelectedTextCardProviderPopoverOffset]'), false);
+  assert.equal(pageSource.includes('const [selectedTextCardModelPopoverOffset, setSelectedTextCardModelPopoverOffset]'), false);
   assert.equal(pageSource.includes('textPanelProviderPopoverRef = useRef<HTMLDivElement | null>(null);'), true);
   assert.equal(pageSource.includes('textPanelModelPopoverRef = useRef<HTMLDivElement | null>(null);'), true);
-  assert.equal(pageSource.includes('{showTextPanelProviderMenu && selectedTextCardProviderPopoverOffset && ('), true);
-  assert.equal(pageSource.includes('{showTextPanelModelMenu && selectedTextCardModelPopoverOffset && ('), true);
-  assert.equal(pageSource.includes('left: selectedTextCardPanelViewportOrigin.left + selectedTextCardProviderPopoverOffset.left,'), true);
-  assert.equal(pageSource.includes('left: selectedTextCardPanelViewportOrigin.left + selectedTextCardModelPopoverOffset.left,'), true);
+  assert.equal(pageSource.includes('{showTextPanelProviderMenu && ('), true);
+  assert.equal(pageSource.includes('{showTextPanelModelMenu && ('), true);
+  assert.equal(pageSource.includes('data-canvas-item-overlay-group="selected-text-panel"'), true);
+  assert.equal(pageSource.includes("left: 'var(--canvas-text-provider-menu-left)'"), true);
+  assert.equal(pageSource.includes("left: 'var(--canvas-text-model-menu-left)'"), true);
   assert.equal(pageSource.includes('left: selectedTextCardPanelViewportOrigin.left + selectedTextCardProviderPopoverOffset.left * viewport.scale,'), false);
   assert.equal(pageSource.includes('left: selectedTextCardPanelViewportOrigin.left + selectedTextCardModelPopoverOffset.left * viewport.scale,'), false);
 });
@@ -502,10 +514,10 @@ test('canvas clipboard wiring adds app-level copy helpers and keyboard shortcuts
   assert.equal(pageSource.includes("if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'v') {"), true);
 });
 
-test('alt-drag copy wiring materializes a temporary copy without mutating the regular clipboard ref', () => {
+test('alt-drag previews source targets and materializes the copy only on release', () => {
   const refStart = pageSource.indexOf('const suppressNextItemClickRef = useRef<string | null>(null);');
   const helperStart = pageSource.indexOf('const beginAltDragCopiedItems = React.useCallback(');
-  const helperEnd = pageSource.indexOf('  const handleCanvasPointerDown =', helperStart);
+  const helperEnd = pageSource.indexOf('  const beginCanvasPan =', helperStart);
   const selectionGroupStart = pageSource.indexOf('const handleSelectionGroupPointerDown = useCallback(');
   const selectionGroupEnd = pageSource.indexOf('  const handleItemMouseEnter = useCallback(', selectionGroupStart);
   const itemClickStart = pageSource.indexOf('const handleItemClick = useCallback(');
@@ -528,16 +540,28 @@ test('alt-drag copy wiring materializes a temporary copy without mutating the re
   assert.ok(itemPointerEnd > itemPointerStart);
 
   const helperBlock = pageSource.slice(helperStart, helperEnd);
+  const pendingHelperStart = pageSource.indexOf('const beginPendingItemDrag = React.useCallback(');
+  const pendingHelperEnd = pageSource.indexOf('  const beginDraggingSelectedItems = React.useCallback(', pendingHelperStart);
+  const pendingHelperBlock = pageSource.slice(pendingHelperStart, pendingHelperEnd);
+  const completeStart = pageSource.indexOf('const completeActiveItemDrag = useCallback(');
+  const completeEnd = pageSource.indexOf('  const cancelActiveCanvasPan = useCallback(', completeStart);
+  const completeBlock = pageSource.slice(completeStart, completeEnd);
   const selectionGroupBlock = pageSource.slice(selectionGroupStart, selectionGroupEnd);
   const itemClickBlock = pageSource.slice(itemClickStart, itemClickEnd);
   const itemPointerBlock = pageSource.slice(itemPointerStart, itemPointerEnd);
 
-  assert.equal(helperBlock.includes('createCanvasClipboardSnapshot({'), true);
-  assert.equal(helperBlock.includes('materializeCanvasClipboardPaste({'), true);
-  assert.equal(helperBlock.includes('offsetStep: { x: 0, y: 0 },'), true);
+  assert.equal(helperBlock.includes('createCanvasClipboardSnapshot({'), false);
+  assert.equal(helperBlock.includes('materializeCanvasClipboardPaste({'), false);
+  assert.equal(helperBlock.includes('setItems('), false);
   assert.equal(helperBlock.includes('canvasClipboardRef.current'), false);
-  assert.equal(helperBlock.includes('draggingItemIdsRef.current = copiedItems.selectedIds;'), true);
-  assert.equal(helperBlock.includes('suppressNextItemClickRef.current = primaryId;'), true);
+  assert.equal(helperBlock.includes('altCopy: true'), true);
+  assert.equal(pendingHelperBlock.includes('draggingItemIdsRef.current = itemIds;'), true);
+  assert.equal(pendingHelperBlock.includes('prepareCanvasItemDragPreview(itemIds);'), true);
+  assert.equal(pendingHelperBlock.includes("mode: 'pending-item-drag'"), true);
+  assert.equal(completeBlock.includes('createCanvasClipboardSnapshot({'), true);
+  assert.equal(completeBlock.includes('materializeCanvasClipboardPaste({'), true);
+  assert.equal(completeBlock.includes('offsetStep: { x: 0, y: 0 },'), true);
+  assert.equal(completeBlock.includes('pushCanvasUndoSnapshot(beforeSnapshot);'), true);
   assert.equal(itemClickBlock.includes('const suppressedItemClickId = suppressNextItemClickRef.current;'), true);
   assert.equal(itemClickBlock.includes('suppressNextItemClickRef.current = null;'), true);
   assert.equal(itemClickBlock.includes('if (suppressedItemClickId === itemId) {'), true);
@@ -545,6 +569,23 @@ test('alt-drag copy wiring materializes a temporary copy without mutating the re
   assert.equal(selectionGroupBlock.includes('beginAltDragCopiedItems('), true);
   assert.equal(itemPointerBlock.includes('if (e.altKey) {'), true);
   assert.equal(itemPointerBlock.includes('beginAltDragCopiedItems('), true);
+});
+
+test('canvas item pointerdown previews selection before entering the pending drag session', () => {
+  const itemClickStart = pageSource.indexOf('const handleItemClick = useCallback(');
+  const itemClickEnd = pageSource.indexOf('  const handleItemPointerDown = useCallback(', itemClickStart);
+  const itemPointerStart = pageSource.indexOf('const handleItemPointerDown = useCallback(');
+  const itemPointerEnd = pageSource.indexOf('  const handleCornerResizePointerDown = useCallback(', itemPointerStart);
+  const itemClickBlock = pageSource.slice(itemClickStart, itemClickEnd);
+  const itemPointerBlock = pageSource.slice(itemPointerStart, itemPointerEnd);
+
+  assert.equal(itemClickBlock.includes('if (selectedIdsRef.current.includes(itemId) || selectedIdRef.current === itemId) return;'), true);
+  assert.equal(itemPointerBlock.includes('const activeSelectedIds = selectedIdsRef.current;'), true);
+  assert.equal(itemPointerBlock.includes('const itemIsSelected = activeSelectedIds.includes(itemId);'), true);
+  assert.equal(itemPointerBlock.includes('if (!itemIsSelected) {\n        previewCanvasSelectionDom([itemId]);\n      }'), true);
+  assert.equal(itemPointerBlock.indexOf('previewCanvasSelectionDom([itemId]);') < itemPointerBlock.indexOf('beginDraggingSelectedItems('), true);
+  assert.equal(itemPointerBlock.includes('applyCanvasSelection([itemId], { defer: true });'), false);
+  assert.equal(itemPointerBlock.includes('const draggingIds = itemIsSelected ? activeSelectedIds : [itemId];'), true);
 });
 
 test('canvas copy shortcuts avoid hijacking text selection and paste falls back after image clipboard handling', () => {
@@ -573,17 +614,22 @@ test('canvas paste centers the pasted clipboard items and preserves paste accoun
   assert.equal(pasteBlock.includes('if (imageFiles.length > 0) {'), true);
   assert.equal(pasteBlock.includes('await uploadImageFilesToCanvas(imageFiles, \'pasted\');'), true);
   assert.equal(pasteBlock.includes('const pastedCanvasClipboard = materializeCanvasClipboardPaste({'), true);
-  assert.equal(pasteBlock.includes('animateViewportTo(centerViewportOnPastedCanvasItems(viewportRef.current, pastedCanvasClipboard.items));'), true);
+  assert.equal(pasteBlock.includes('animateViewportToRef.current(centerViewportOnPastedCanvasItems(visualViewportRef.current, pastedCanvasClipboard.items));'), true);
   assert.equal(pasteBlock.includes('canvasClipboardRef.current = {'), true);
   assert.equal(pasteBlock.includes('pasteCount: pastedCanvasClipboard.nextPasteCount,'), true);
 });
 
-test('canvas paste viewport centering uses requestAnimationFrame smoothing', () => {
-  assert.equal(pageSource.includes('const CANVAS_VIEWPORT_PASTE_ANIMATION_MS = 240;'), true);
-  assert.equal(pageSource.includes('const viewportAnimationFrameRef = useRef<number | null>(null);'), true);
-  assert.equal(pageSource.includes('function animateViewportTo(nextViewport: { x: number; y: number; scale: number }) {'), true);
-  assert.equal(pageSource.includes('viewportAnimationFrameRef.current = requestAnimationFrame(flushViewportAnimation);'), true);
-  assert.equal(pageSource.includes('if (reducedMotionRef.current || hasNoMovement) {'), true);
+test('canvas paste viewport centering uses one interruptible native world-transform animation', () => {
+  assert.equal(pageSource.includes('const CANVAS_VIEWPORT_ANIMATION_SECONDS = 0.12;'), true);
+  assert.equal(pageSource.includes('interface NativeViewportAnimation {'), true);
+  assert.equal(pageSource.includes('const viewportTweenRef = useRef<NativeViewportAnimation | null>(null);'), true);
+  assert.equal(pageSource.includes('const animateViewportTo = useCallback(('), true);
+  assert.equal(pageSource.includes("const token = handoffCanvasViewportMotion('programmatic');"), true);
+  assert.equal(pageSource.includes('stageViewportIdleCommit(nextViewport, token);'), true);
+  assert.equal(pageSource.includes('frameId = requestAnimationFrame(tick);'), true);
+  assert.equal(pageSource.includes('viewportTweenRef.current = gsap.to('), false);
+  assert.equal(pageSource.includes('const eased = 1 - Math.pow(1 - progress, 3);'), true);
+  assert.equal(pageSource.includes('if (reducedMotionRef.current || hasNoMovement || options.duration === 0) {'), true);
   assert.equal(pageSource.includes('const cancelViewportAnimation = useCallback('), true);
 });
 
@@ -609,12 +655,12 @@ test('image card generation controls render model parameter and count menus with
   assert.equal(pageSource.includes('<span className="workspace-text-muted text-[11px] font-medium">模型</span>'), false);
   assert.equal(pageSource.includes('<span className="workspace-text-muted text-[11px] font-medium">参数</span>'), false);
   assert.equal(pageSource.includes('<span className="workspace-text-muted text-[11px] font-medium">张数</span>'), false);
-  assert.equal(pageSource.includes('{showImageCardProviderMenu && selectedImageCardProviderPopoverOffset && ('), true);
+  assert.equal(pageSource.includes('{showImageCardProviderMenu && ('), true);
   assert.equal(pageSource.includes('ref={imageCardProviderMenuRef}'), true);
   assert.equal(pageSource.includes('ref={imageCardProviderPopoverRef}'), true);
   assert.equal(pageSource.includes('onToggleImageCardProviderMenu();'), true);
   assert.equal(pageSource.includes('{imageCardModelOptions.map((option) => {'), true);
-  assert.equal(pageSource.includes('{showImageCardSettingsMenu && selectedImageCardSettingsPopoverOffset && ('), true);
+  assert.equal(pageSource.includes('{showImageCardSettingsMenu && ('), true);
   assert.equal(pageSource.includes('{showImageCardCountMenu && selectedImageCardCountPopoverOffset && ('), false);
   assert.equal(pageSource.includes('ref={imageCardSettingsMenuRef}'), true);
   assert.equal(pageSource.includes('ref={imageCardSettingsPopoverRef}'), true);
@@ -674,13 +720,10 @@ test('image generation materializes the current image-card outputs into history 
 test('image nodes expose a shared toolbar target and render an above-node image toolbar overlay', () => {
   assert.equal(pageSource.includes('const selectedImageToolbarTarget = React.useMemo<'), true);
   assert.equal(pageSource.includes('getSelectedImageToolbarSource({'), true);
-  assert.equal(pageSource.includes('getItemVisualBounds(selectedImageToolbarItem)'), false);
-  assert.equal(pageSource.includes('left: selectedImageToolbarItem.x,'), true);
-  assert.equal(pageSource.includes('y: itemBounds.top,'), true);
-  assert.equal(pageSource.includes('y: itemBounds.top - canvasGap,'), false);
-  assert.equal(pageSource.includes('y: canvasRect.top + canvasScreenPoint.y - screenGap,'), true);
-  assert.equal(pageSource.includes('width: selectedImageToolbarItem.width,'), true);
-  assert.equal(pageSource.includes('height: selectedImageToolbarItem.height,'), true);
+  assert.equal(pageSource.includes('getItemVisualBounds(selectedImageToolbarItem)'), true);
+  assert.equal(pageSource.includes('resolveCanvasFixedOverlayAnchors({'), true);
+  assert.equal(pageSource.includes('const IMAGE_NODE_OVERLAY_GAP_PX = 10;'), true);
+  assert.equal(pageSource.includes('gap: IMAGE_NODE_OVERLAY_GAP_PX,'), true);
   assert.equal(pageSource.includes("typeof document !== 'undefined' &&"), true);
   assert.equal(pageSource.includes('data-image-node-toolbar="true"'), true);
   assert.equal(pageSource.includes('抠图'), true);
@@ -730,14 +773,20 @@ test('image toolbar keeps a fixed screen size while following the selected image
 
   const toolbarBlock = pageSource.slice(toolbarStart, toolbarEnd);
 
-  assert.equal(pageSource.includes('top: selectedImageToolbarTop,'), true);
-  assert.equal(pageSource.includes("transform: 'translate(-50%, -100%)'"), true);
+  assert.equal(pageSource.includes('top: 0,'), true);
+  assert.equal(pageSource.includes('translate3d(${selectedImageToolbarAnchors.centerX}px, ${selectedImageToolbarAnchors.topToolbarY}px, 0)'), true);
   assert.equal(toolbarBlock.includes('transform: `scale(${viewport.scale})`'), false);
   assert.equal(pageSource.includes("transformOrigin: 'bottom center'"), true);
   assert.equal(pageSource.includes('top: selectedImageToolbarTop - 12,'), false);
-  assert.equal(pageSource.includes('screenGap: 12,'), true);
+  assert.equal(pageSource.includes('screenGap: 12,'), false);
   assert.equal(pageSource.includes('canvasGap: 12,'), false);
   assert.equal(pageSource.includes('transform: `translate(-50%, -100%) scale(${viewport.scale})`'), false);
+  assert.equal(pageSource.includes('syncSelectedCanvasOverlayPositions(nextViewport);'), true);
+  assert.equal(pageSource.includes('previewCanvasViewport(motion.visualViewport);'), true);
+  assert.equal(controllerSource.includes('const getViewportOverlay = useCallback'), true);
+  assert.equal(pageSource.includes("getCanvasItemOverlayGroup('selected-image-toolbar')"), true);
+  assert.equal(pageSource.includes("getCanvasItemOverlayGroup('selected-image-panel')"), true);
+  assert.equal(pageSource.includes("getCanvasItemOverlayGroup('selected-text-panel')"), true);
 });
 
 test('image toolbar keeps its natural width and does not clamp back into the viewport shell', () => {
@@ -808,11 +857,12 @@ test('selected card panels keep 100 percent screen size while following card anc
   const textPanelBlock = pageSource.slice(textPanelStart, textPanelEnd);
 
   assert.equal(pageSource.includes('const selectedTextCardPanelAnchorPoint ='), true);
-  assert.equal(pageSource.includes('const selectedImageCardPanelAnchorPoint ='), true);
+  assert.equal(pageSource.includes('const selectedImageCardPanelOverlayAnchors ='), true);
   assert.equal(pageSource.includes('left: canvasRect.left + selectedTextCardPanelAnchorPoint.x - selectedTextCardPanelCanvasWidth / 2,'), true);
   assert.equal(pageSource.includes('top: canvasRect.top + selectedTextCardPanelAnchorPoint.y + 18,'), true);
-  assert.equal(pageSource.includes('left: canvasRect.left + selectedImageCardPanelAnchorPoint.x - selectedImageCardPanelCanvasWidth / 2,'), true);
-  assert.equal(pageSource.includes('top: canvasRect.top + selectedImageCardPanelAnchorPoint.y + 18,'), true);
+  assert.equal(pageSource.includes('left: selectedImageCardPanelOverlayAnchors.centerX - selectedImageCardPanelCanvasWidth / 2,'), true);
+  assert.equal(pageSource.includes('top: selectedImageCardPanelOverlayAnchors.bottomPanelY,'), true);
+  assert.equal(pageSource.includes('translate3d(${selectedImageCardPanelViewportOrigin.left}px, ${selectedImageCardPanelViewportOrigin.top}px, 0)'), true);
   assert.equal(imagePanelBlock.includes('transform: `scale(${viewport.scale})`'), false);
   assert.equal(textPanelBlock.includes('transform: `scale(${viewport.scale})`'), false);
   assert.equal(imagePanelBlock.includes('* viewport.scale'), false);
@@ -833,7 +883,7 @@ test('text card floating panel renders through a portal instead of the legacy in
 
 test('text card shell keeps padding inside idle and waiting states instead of the shared frame wrapper', () => {
   const textCardBranchStart = pageSource.indexOf("{item.type === 'text' && item.textVariant === 'card' && (");
-  const textCardBranchEnd = pageSource.indexOf('{isItemSelected &&', textCardBranchStart);
+  const textCardBranchEnd = pageSource.indexOf('data-canvas-selection-outline="true"', textCardBranchStart);
 
   assert.notEqual(textCardBranchStart, -1);
   assert.notEqual(textCardBranchEnd, -1);
@@ -848,7 +898,7 @@ test('text card shell keeps padding inside idle and waiting states instead of th
 
 test('text card content and manual states use edge-to-edge full-frame layouts without inner padding', () => {
   const textCardBranchStart = pageSource.indexOf("{item.type === 'text' && item.textVariant === 'card' && (");
-  const textCardBranchEnd = pageSource.indexOf('{isItemSelected &&', textCardBranchStart);
+  const textCardBranchEnd = pageSource.indexOf('data-canvas-selection-outline="true"', textCardBranchStart);
 
   assert.notEqual(textCardBranchStart, -1);
   assert.notEqual(textCardBranchEnd, -1);
@@ -877,7 +927,7 @@ test('text card content and manual states use edge-to-edge full-frame layouts wi
 
 test('text card generated and manual content bodies stay selectable without triggering drag or edit shortcuts', () => {
   const textCardBranchStart = pageSource.indexOf("{item.type === 'text' && item.textVariant === 'card' && (");
-  const textCardBranchEnd = pageSource.indexOf('{isItemSelected &&', textCardBranchStart);
+  const textCardBranchEnd = pageSource.indexOf('data-canvas-selection-outline="true"', textCardBranchStart);
 
   assert.notEqual(textCardBranchStart, -1);
   assert.notEqual(textCardBranchEnd, -1);
@@ -955,7 +1005,13 @@ test('image nodes are not excluded from corner-resize handles or resize interact
   assert.equal(pageSource.includes("const showCornerResizeHandle = isHoveredItem && item.type !== 'image';"), false);
   assert.equal(pageSource.includes("if (item.type === 'image') return;"), false);
   assert.equal(pageSource.includes("if (!resizingItem || resizingItem.type === 'image') {"), false);
-  assert.equal(pageSource.includes('const showCornerResizeHandle = isHoveredItem;'), true);
+  assert.equal(pageSource.includes('data-corner-resize="true"'), true);
+  assert.equal(pageSource.includes('data-gsap-hover-pointer="true"'), false);
+  assert.equal(pageSource.includes('group-hover:pointer-events-auto group-hover:opacity-100'), true);
+  assert.equal(pageSource.includes('cornerResizePreviewRef.current = {'), true);
+  assert.equal(pageSource.includes("target.element.style.width = `${nextSize.width}px`"), true);
+  assert.equal(pageSource.includes("target.element.style.height = `${nextSize.height}px`"), true);
+  assert.equal(pageSource.includes("mode: 'item-resize'"), true);
 });
 
 test('image card aspect ratio selection still routes through resizeImageCardItemToAspectRatio', () => {
@@ -1107,10 +1163,17 @@ test('image card panel shows a validation hint when references exist without any
 
 test('node selection flows move selected canvas items to the front of the persisted item order', () => {
   assert.equal(pageSource.includes('moveCanvasItemsToFront('), true);
-  assert.equal(pageSource.includes('setItems((prev) => moveCanvasItemsToFront(prev, itemIds));'), true);
-  assert.equal(pageSource.includes('setItems((prev) => moveCanvasItemsToFront(prev, [itemId]));'), true);
-  assert.equal(pageSource.includes('setItems((prev) => moveCanvasItemsToFront(prev, next));'), true);
-  assert.equal(pageSource.includes('setItems((prev) => moveCanvasItemsToFront(prev, hitIds));'), true);
+  assert.equal(pageSource.includes('const committedMove = applyCanvasItemDragPositions({'), true);
+  assert.equal(pageSource.includes('const applyCanvasSelection = useCallback'), true);
+  assert.equal(pageSource.includes('const liveItems = sessionLiveStateRef.current.items.map((item) => {'), true);
+  assert.equal(pageSource.includes('const nextItems = moveCanvasItemsToFront(liveItems, nextSelectedIds);'), true);
+  assert.equal(pageSource.includes('syncSessionLiveState({ items: nextItems });'), true);
+  assert.equal(pageSource.includes('stageCanvasCommit({\n      items: nextItems,'), true);
+  assert.equal(pageSource.includes('applyCanvasSelection(toggleSelectionId(selectedIdsRef.current, itemId));'), true);
+  assert.equal(pageSource.includes('applyCanvasSelection([itemId]);'), true);
+  assert.equal(pageSource.includes('const nextItems = moveCanvasItemsToFront(\n          sessionLiveStateRef.current.items,\n          nextSelectedIds\n        );'), true);
+  assert.equal(pageSource.includes('selectedIds: nextSelectedIds,'), true);
+  assert.equal(pageSource.includes('selectedConnectionIds: nextSelectedConnectionIds,'), true);
 });
 
 test('right chat panel renders through a page-level portal above canvas overlays', () => {
@@ -1118,36 +1181,42 @@ test('right chat panel renders through a page-level portal above canvas overlays
   assert.equal(pageSource.includes('const CHAT_PANEL_Z = '), true);
   assert.equal(pageSource.includes('createPortal('), true);
   assert.equal(pageSource.includes('document.body'), true);
-  assert.equal(pageSource.includes('style={{ zIndex: CHAT_PANEL_Z }}'), true);
+  assert.equal(pageSource.includes('zIndex: CHAT_PANEL_Z,'), true);
   assert.equal(pageSource.includes("className=\"workspace-floating-control fixed right-4 top-4 isolate"), true);
-  assert.equal(pageSource.includes('{sidebarCollapsed && !chatPanelOpening && ('), true);
+  assert.equal(pageSource.includes('{sidebarCollapsed && ('), false);
   assert.equal(pageSource.includes('chatPanelTransitioning'), false);
   assert.equal(pageSource.includes("import gsap from 'gsap';"), true);
   assert.equal(pageSource.includes("import { useGSAP } from '@gsap/react';"), true);
-  assert.equal(pageSource.includes('gsap.registerPlugin(useGSAP);'), true);
-  assert.equal(pageSource.includes('const [chatPanelOpening, setChatPanelOpening] = useState(false);'), true);
-  assert.equal(pageSource.includes('const chatPanelReserveRef = useRef({ width: CANVAS_CHAT_PANEL_RESERVED_WIDTH });'), true);
-  assert.equal(pageSource.includes('const chatPanelToolbarReserveRef = useRef({ width: CANVAS_CHAT_PANEL_RESERVED_WIDTH });'), true);
-  assert.equal(pageSource.includes('const setChatPanelReservedWidth = useCallback((width: number) => {'), true);
-  assert.equal(pageSource.includes('const setChatPanelToolbarReservedWidth = useCallback((width: number) => {'), true);
-  assert.equal(pageSource.includes("editorShellRef.current?.style.setProperty('--chat-panel-reserved-width', `${nextWidth}px`);"), true);
-  assert.equal(pageSource.includes("editorShellRef.current?.style.setProperty('--chat-panel-toolbar-reserved-width', `${nextWidth}px`);"), true);
-  assert.equal(pageSource.includes('const CHAT_PANEL_GSAP_OPEN_DURATION = 0.54;'), true);
-  assert.equal(pageSource.includes('const CHAT_PANEL_GSAP_CLOSE_DURATION = 0.46;'), true);
-  assert.equal(pageSource.includes("const CHAT_PANEL_GSAP_EASE = 'expo.out';"), true);
-  assert.equal(pageSource.includes('const duration = sidebarCollapsed ? CHAT_PANEL_GSAP_CLOSE_DURATION : CHAT_PANEL_GSAP_OPEN_DURATION;'), true);
-  assert.equal(pageSource.includes('const reserve = { width: chatPanelReserveRef.current.width };'), false);
-  assert.equal(pageSource.includes('const toolbarReserve = { width: chatPanelToolbarReserveRef.current.width };'), true);
-  assert.equal(pageSource.includes('onUpdate: () => {\n              setChatPanelReservedWidth(reserve.width);'), false);
-  assert.equal(pageSource.includes('onUpdate: () => setChatPanelToolbarReservedWidth(toolbarReserve.width),'), true);
+  assert.equal(pageSource.includes('gsap.registerPlugin(useGSAP, ScrollToPlugin);'), true);
+  assert.equal(pageSource.includes('const [chatPanelOpening, setChatPanelOpening] = useState(false);'), false);
+  assert.equal(pageSource.includes('onUpdate: () => setChatPanelToolbarReservedWidth'), false);
+  assert.equal(pageSource.includes('const chatSafeAreaWidthRef = useRef(0);'), true);
+  assert.equal(pageSource.includes('const chatPanelTimelineRef = useRef<gsap.core.Timeline | null>(null);'), true);
+  assert.equal(pageSource.includes('interface ChatPanelMotionController {'), true);
+  assert.equal(pageSource.includes('const chatPanelMotionControllerRef = useRef<ChatPanelMotionController | null>(null);'), true);
+  assert.equal(pageSource.includes('const [sidebarCollapsed,'), false);
+  assert.equal(pageSource.includes('const canvasBottomToolbarMotionRef = useRef<HTMLDivElement | null>(null);'), true);
+  assert.equal(pageSource.includes('--chat-panel-reserved-width'), false);
+  assert.equal(pageSource.includes('--chat-panel-toolbar-reserved-width'), false);
+  assert.equal(pageSource.includes('const CHAT_PANEL_GSAP_OPEN_DURATION = 0.28;'), true);
+  assert.equal(pageSource.includes('const CHAT_PANEL_GSAP_CLOSE_DURATION = 0.23;'), true);
+  assert.equal(pageSource.includes("const CHAT_PANEL_GSAP_EASE = 'power3.out';"), true);
   assert.equal(pageSource.includes('gsap.timeline({'), true);
-  assert.equal(pageSource.includes('.to(panel, { xPercent: targetXPercent }, 0)'), true);
-  assert.equal(pageSource.includes('timeline.to(\n        toolbarReserve,'), true);
+  assert.equal(pageSource.includes('.fromTo(panel, { xPercent: 100 }, { xPercent: 0, force3D: true }, 0)'), true);
+  assert.equal(pageSource.includes('chatPanelTimelineRef.current = timeline;'), true);
+  assert.equal(pageSource.includes('chatPanelMotionControllerRef.current = {'), true);
+  assert.equal(pageSource.includes('.timeScale(CHAT_PANEL_GSAP_OPEN_DURATION / CHAT_PANEL_GSAP_CLOSE_DURATION)'), true);
+  assert.equal(pageSource.includes('.reverse();'), true);
+  assert.equal(pageSource.includes('timeline.timeScale(1).play();'), true);
+  assert.equal(pageSource.includes('x: () => chatPanelIsDesktopRef.current ? -CANVAS_CHAT_PANEL_RESERVED_WIDTH / 2 : 0'), true);
   assert.equal(pageSource.includes('const handleOpenChatPanel = useCallback(() => {'), true);
   assert.equal(pageSource.includes('const handleCloseChatPanel = useCallback(() => {'), true);
-  assert.equal(pageSource.includes('setChatPanelOpening(true);\n    setSidebarCollapsed(false);'), true);
-  assert.equal(pageSource.includes('setChatPanelOpening(false);\n    setSidebarCollapsed(true);'), true);
-  assert.equal(pageSource.includes('onPointerDown={handleOpenChatPanel}'), true);
+  assert.equal(pageSource.includes('setChatPanelOpening(true);\n    setSidebarCollapsed(false);'), false);
+  assert.equal(pageSource.includes('setChatPanelOpening(false);\n    setSidebarCollapsed(true);'), false);
+  assert.equal(pageSource.includes('chatPanelMotionControllerRef.current?.open();'), true);
+  assert.equal(pageSource.includes('chatPanelMotionControllerRef.current?.close();'), true);
+  assert.equal(pageSource.includes('chatSafeAreaWidthRef.current = collapsed || !chatPanelIsDesktopRef.current'), true);
+  assert.equal(pageSource.includes('onPointerDown={handleOpenChatPanel}'), false);
   assert.equal(pageSource.includes('onClick={handleOpenChatPanel}'), true);
   assert.equal(pageSource.includes('onClick={handleCloseChatPanel}'), true);
   assert.equal(pageSource.includes('handleSetSidebarCollapsed'), false);
@@ -1158,19 +1227,25 @@ test('right chat panel renders through a page-level portal above canvas overlays
   assert.equal(pageSource.includes('className="pointer-events-none fixed inset-y-0 left-0 right-0 bg-[var(--workspace-page-bg)] sm:left-auto sm:w-[500px]"'), false);
   assert.equal(pageSource.includes('style={{ zIndex: CHAT_PANEL_Z - 1 }}'), false);
   assert.equal(pageSource.includes('const CANVAS_CHAT_PANEL_RESERVED_WIDTH = 500;'), true);
-  assert.equal(pageSource.includes('widthStyle="calc(100% - var(--chat-panel-reserved-width, 0px))"'), true);
-  assert.equal(pageSource.includes("--chat-panel-reserved-width': `${chatPanelReserveRef.current.width}px`"), true);
-  assert.equal(pageSource.includes("--chat-panel-toolbar-reserved-width': `${chatPanelToolbarReserveRef.current.width}px`"), true);
-  assert.equal(pageSource.includes("sm:[--canvas-bottom-toolbar-reserved-right:var(--chat-panel-toolbar-reserved-width,0px)]"), true);
-  assert.equal(pageSource.includes("sm:[--canvas-bottom-toolbar-reserved-right:var(--chat-panel-reserved-width,0px)]"), false);
+  assert.equal(pageSource.includes('widthStyle="100%"'), true);
+  assert.equal(pageSource.includes('widthStyle="calc(100% - var(--chat-panel-reserved-width, 0px))"'), false);
+  assert.equal(pageSource.includes('--chat-panel-reserved-width'), false);
+  assert.equal(pageSource.includes('--chat-panel-toolbar-reserved-width'), false);
   assert.equal(pageSource.includes("widthStyle={chatPanelReservesCanvas ? 'calc(100% - 500px)' : '100%'}"), false);
   assert.equal(pageSource.includes("widthStyle={sidebarCollapsed ? '100%' : 'calc(100% - 500px)'}"), false);
   assert.equal(pageSource.includes('workspace-chat-panel fixed inset-y-0 left-0 right-0 isolate flex w-auto flex-col overflow-hidden transition-transform duration-300 ease-out sm:left-auto sm:w-[500px]'), false);
-  assert.equal(pageSource.includes('workspace-chat-panel fixed inset-y-0 left-0 right-0 isolate flex w-auto flex-col overflow-hidden will-change-transform sm:left-auto sm:w-[500px]'), true);
+  assert.equal(pageSource.includes('workspace-chat-panel fixed inset-y-0 left-0 right-0 isolate flex w-auto flex-col overflow-hidden will-change-transform sm:left-auto sm:w-[500px]'), false);
+  assert.equal(pageSource.includes('workspace-chat-panel fixed inset-y-0 left-0 right-0 isolate flex w-auto flex-col overflow-hidden transform-gpu sm:left-auto sm:w-[500px]'), true);
   assert.equal((pageSource.match(/\$\{sidebarCollapsed \? 'translate-x-full' : 'translate-x-0'\}/g) || []).length, 0);
-  assert.equal(pageSource.includes('aria-hidden={sidebarCollapsed}'), true);
+  assert.equal(pageSource.includes("panel.setAttribute('aria-hidden', String(collapsed));"), true);
+  assert.equal(pageSource.includes("panel.style.visibility = collapsed ? 'hidden' : 'visible';"), true);
+  assert.equal(pageSource.includes("panel.style.pointerEvents = collapsed ? 'none' : 'auto';"), true);
+  assert.equal(pageSource.includes("toolbar.style.willChange = 'transform';"), true);
+  assert.equal(pageSource.includes('requestAnimationFrame(() => {'), true);
+  assert.equal(pageSource.includes("console.info('[chat-panel-perf]'"), true);
+  assert.equal(pageSource.includes('if (deltaTime > 50) trace.longFrameCount += 1;'), true);
   assert.equal(pageSource.includes("event.propertyName === 'transform'"), false);
-  assert.equal(pageSource.includes('setChatPanelOpening(false);'), true);
+  assert.equal(pageSource.includes('setChatPanelOpening(false);'), false);
   assert.equal(pageSource.includes('setChatPanelTransitioning(false);'), false);
   assert.equal(pageSource.includes('transition-all duration-300 sm:left-auto sm:w-[500px]'), false);
   assert.equal(pageSource.includes('sm:w-[480px]'), false);
@@ -1179,6 +1254,7 @@ test('right chat panel renders through a page-level portal above canvas overlays
   assert.equal(pageSource.includes('workspace-chat-panel fixed inset-y-0 left-0 right-0 isolate flex w-auto flex-col overflow-hidden backdrop-blur-xl'), false);
   assert.equal(globalsSource.includes('.workspace-chat-panel {\n  border-left: 1px solid var(--workspace-border);'), true);
   assert.equal(globalsSource.includes('.workspace-chat-panel {\n  border-left: 1px solid var(--workspace-border);\n  background: var(--workspace-surface-elevated);'), true);
+  assert.equal(globalsSource.includes('.workspace-chat-panel {\n  border-left: 1px solid var(--workspace-border);\n  background: var(--workspace-surface-elevated);\n  color: var(--workspace-text-primary);\n  will-change: transform;'), false);
   assert.equal(globalsSource.includes('.workspace-chat-panel {\n  border-left: 1px solid var(--workspace-border);\n  background: transparent;'), false);
   assert.equal(globalsSource.includes('background: color-mix(in srgb, var(--workspace-surface-elevated) 88%, transparent);'), false);
   assert.equal(globalsSource.includes('.workspace-chat-panel {\n  border: 1px solid var(--workspace-border);'), false);
@@ -1227,7 +1303,7 @@ test('page snapshots and transition persistence read from a live session state r
 
 test('page guards connection cleanup while a switched canvas session is hydrating', () => {
   const applyResolvedStateStart = pageSource.indexOf('const applyResolvedSessionState = useCallback((resolvedState: any) => {');
-  const applyResolvedStateEnd = pageSource.indexOf('  }, [syncSessionLiveState]);', applyResolvedStateStart);
+  const applyResolvedStateEnd = pageSource.indexOf('  }, [flushPendingCanvasCommit, resetPendingCanvasInteractionCommits, syncSessionLiveState]);', applyResolvedStateStart);
 
   assert.notEqual(applyResolvedStateStart, -1);
   assert.notEqual(applyResolvedStateEnd, -1);
@@ -1238,7 +1314,7 @@ test('page guards connection cleanup while a switched canvas session is hydratin
   assert.equal(pageSource.includes('const isHydratingSessionRef = useRef(false);'), true);
   assert.equal(applyResolvedStateBlock.includes('isHydratingSessionRef.current = true;'), true);
   assert.equal(applyResolvedStateBlock.includes('setSelectedConnectionIds([]);'), true);
-  assert.equal(applyResolvedStateBlock.includes('setConnectionSnapTargetId(null);'), true);
+  assert.equal(applyResolvedStateBlock.includes('clearConnectionSnapTargetVisualRef.current();'), true);
   assert.equal(applyResolvedStateBlock.includes('setPendingConnectionMenu(null);'), true);
   assert.equal(applyResolvedStateBlock.includes('setFrozenPreviewConnection(null);'), true);
   assert.equal(applyResolvedStateBlock.includes('connectionSessionRef.current = null;'), true);
