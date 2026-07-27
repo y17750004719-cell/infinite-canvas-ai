@@ -1,6 +1,6 @@
 ---
 name: skill
-description: Manage local skills - list, add, remove, search, edit, setup wizard
+description: "[OMX] Manage local skills - list, add, remove, search, edit, setup wizard"
 argument-hint: "<command> [args]"
 ---
 
@@ -313,7 +313,8 @@ Project-only skills (2):
   - backend-scaffold
 
 Common skills (3):
-  - frontend-ui-ux
+  - design
+  - frontend-ui-ux (deprecated; use design or visual-ralph)
   - git-master
   - planner
 
