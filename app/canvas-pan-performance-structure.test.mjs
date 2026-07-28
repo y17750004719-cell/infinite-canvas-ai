@@ -18,16 +18,30 @@ const sourceBetween = (source, start, end) => source.slice(
   source.indexOf(end, source.indexOf(start))
 );
 
-test('managed pointer input is delivered directly without a continuous ticker', () => {
+test('managed pointer input coalesces into one dirty animation frame without a continuous ticker', () => {
   const moveSource = sourceBetween(
     controllerSource,
     'function handleNativePointerMove',
     'function handleNativePointerUp'
   );
-  assert.equal(moveSource.includes('deliverPointerFrame(session);'), true);
+  const releaseSource = sourceBetween(
+    controllerSource,
+    'function handleNativePointerUp',
+    'function cancelPointerSession'
+  );
+  assert.equal(moveSource.includes('schedulePointerFrame(session);'), true);
+  assert.equal(moveSource.includes('deliverPointerFrame(session);'), false);
+  assert.equal(controllerSource.includes('session.frameBatcher = createLatestFrameBatcher({'), true);
+  assert.equal(controllerSource.includes('requestFrame: (callback) => requestAnimationFrame(callback)'), true);
+  assert.equal(releaseSource.includes('flushPointerFrame(session);'), true);
+  assert.ok(
+    releaseSource.indexOf('flushPointerFrame(session);') <
+      releaseSource.indexOf('session.onRelease?.(session.latestX, session.latestY);')
+  );
+  assert.equal(releaseSource.includes('session.inputEventCount += Math.max(1, coalescedEvents?.length ?? 0);'), true);
+  assert.equal(controllerSource.includes('cancelPointerFrame(session);'), true);
   assert.equal(controllerSource.includes('continuousFrame'), false);
   assert.equal(controllerSource.includes('gsap.ticker.add(flushPointerFrame)'), false);
-  assert.equal(controllerSource.includes('requestAnimationFrame(flushPointerFrame)'), false);
   assert.equal(controllerSource.includes('requestAnimationFrame(sample)'), false);
   assert.equal(controllerSource.includes("from 'gsap'"), false);
   assert.equal(controllerSource.includes("from '@gsap/react'"), false);
@@ -111,6 +125,34 @@ test('item dragging mutates registered DOM shells and only affected connection p
   assert.equal(pageSource.includes('restoreCanvasItemDragVisualOwnership'), false);
 });
 
+test('completed item drag cleans up synchronously before another drag can start', () => {
+  const completeSource = sourceBetween(
+    pageSource,
+    'const completeActiveItemDrag = useCallback',
+    'const stageCanvasPanViewportCommit = useCallback'
+  );
+  const commonCleanupSource = sourceBetween(
+    completeSource,
+    'altDragPrimarySourceIdRef.current = null;',
+    'if (!moved || !transactionMatches)'
+  );
+  const overlayRestoreSource = sourceBetween(
+    completeSource,
+    '} else if (transaction) {',
+    'schedulePendingCanvasCommit();'
+  );
+
+  assert.equal(commonCleanupSource.includes('setCanvasConnectionHitTestingDisabled(false);'), true);
+  assert.equal(commonCleanupSource.includes("updateCanvasInteractionPhase('idle');"), true);
+  assert.equal(completeSource.includes('requestAnimationFrame(() => {'), false);
+  assert.equal(overlayRestoreSource.includes('syncSelectedCanvasOverlayPositions(visualViewportRef.current, draggedItemIds);'), true);
+  assert.equal(overlayRestoreSource.includes('restoreCanvasOverlayVisibility(transaction.overlayVisibility);'), true);
+  assert.ok(
+    overlayRestoreSource.indexOf('syncSelectedCanvasOverlayPositions(') <
+      overlayRestoreSource.indexOf('restoreCanvasOverlayVisibility(')
+  );
+});
+
 test('item resize writes width and height directly with no resize ticker', () => {
   const resizeSource = sourceBetween(
     pageSource,
@@ -132,7 +174,8 @@ test('item resize writes width and height directly with no resize ticker', () =>
   assert.equal(resizeSource.includes('applyDirectItemResize({'), true);
   assert.equal(resizeMoveSource.includes("target.element.style.width = `${nextSize.width}px`"), true);
   assert.equal(resizeMoveSource.includes("target.element.style.height = `${nextSize.height}px`"), true);
-  assert.equal(resizeMoveSource.includes('scheduleAffectedConnectionFrame();'), true);
+  assert.equal(resizeMoveSource.includes('flushAffectedConnectionWork();'), true);
+  assert.equal(resizeMoveSource.includes('scheduleAffectedConnectionFrame();'), false);
   assert.equal(resizeMoveSource.includes('refreshDirectItemConnectionPaths('), false);
   assert.equal(resizeMoveSource.includes('syncSelectedCanvasOverlayPositions('), false);
   assert.equal(resizeMoveSource.includes('itemByIdRef.current.set('), false);
@@ -237,7 +280,7 @@ test('item pointerdown does not synchronously build drag or connection plans', (
   const connectionPreparationSource = sourceBetween(
     pageSource,
     'const scheduleCanvasItemDragConnectionPreparation = useCallback',
-    'const scheduleAffectedConnectionFrame = useCallback'
+    'const previewCanvasItemDrag = useCallback'
   );
 
   assert.equal(pendingDragSource.includes('prewarmCanvasItemDragPlan('), false);
@@ -281,24 +324,73 @@ test('selected overlay groups follow live geometry through transform-only writes
   assert.equal(overlaySource.includes('setItemsState('), false);
 });
 
+test('single selection reconciles every drag shell and clears stale compositor hints', () => {
+  const selectionSource = sourceBetween(
+    pageSource,
+    'const syncCanvasSelectionDom = useCallback',
+    'const restoreCanvasSelectionGesture = useCallback'
+  );
+  const restoreHintSource = sourceBetween(
+    pageSource,
+    'const restoreCanvasItemDragHint = useCallback',
+    'const commitCornerResizePreview = useCallback'
+  );
+
+  assert.equal(selectionSource.includes('sessionLiveStateRef.current.items'), true);
+  assert.equal(selectionSource.includes("target.role === 'node-drag' || target.role === 'annotation-drag'"), true);
+  assert.equal(selectionSource.includes("dragTarget.element.style.willChange = selected"), true);
+  assert.equal(selectionSource.includes("? 'transform'"), true);
+  assert.equal(selectionSource.includes(": '';"), true);
+  assert.equal(selectionSource.includes('dragTarget.initialWillChange'), false);
+  assert.equal(restoreHintSource.includes("? 'transform'"), true);
+  assert.equal(restoreHintSource.includes(": '';"), true);
+  assert.equal(restoreHintSource.includes('target.initialWillChange'), false);
+});
+
+test('selection changes keep the cached canvas-node click handler stable', () => {
+  assert.equal(pageSource.includes('const stableCanvasItemClick = useStableEvent(handleItemClick);'), true);
+  assert.equal(pageSource.includes('onItemClick={stableCanvasItemClick}'), true);
+  assert.equal(pageSource.includes('onItemClick={handleItemClick}'), false);
+});
+
+test('card panel layout effects ignore position-only item updates and batch geometry reads before writes', () => {
+  const panelLayoutSource = sourceBetween(
+    pageSource,
+    'useLayoutEffect(() => {\n    if (!selectedTextCardPanelItem?.id)',
+    'const selectedTextCardPanelPlaceholder ='
+  );
+
+  assert.equal(panelLayoutSource.includes('selectedTextCardPanelItem?.id'), true);
+  assert.equal(panelLayoutSource.includes('selectedImageCardPanelItem?.id'), true);
+  assert.equal(panelLayoutSource.includes('selectedTextCardPanelDisplayInput, selectedTextCardPanelItem]'), false);
+  assert.equal(panelLayoutSource.includes('selectedImageCardPanelDisplayInput, selectedImageCardPanelItem]'), false);
+  assert.equal(panelLayoutSource.includes('const measuredOffsets ='), true);
+  assert.equal(panelLayoutSource.includes('measuredOffsets.forEach'), true);
+});
+
 test('overlay performance metrics cover first visual frame, position error, and React commits', () => {
   assert.equal(pageSource.includes("console.info('[canvas-overlay-perf]'"), true);
   assert.equal(pageSource.includes('pointerDownToFirstVisualFrame:'), true);
   assert.equal(pageSource.includes('itemToOverlayPositionErrorPx: 0,'), true);
   assert.equal(pageSource.includes('overlaySyncWriteCount:'), true);
   assert.equal(pageSource.includes('overlayReactCommitDuringInteractionCount:'), true);
+  assert.equal(controllerSource.includes('inputEventCount: session.inputEventCount'), true);
+  assert.equal(controllerSource.includes('coalescedInputCount:'), true);
+  assert.equal(controllerSource.includes('const frameBudget = estimateFrameBudget(session.frameGaps);'), true);
 });
 
-test('canvas geometry snapshots use one 500ms debounce and preserve pending data across input', () => {
+test('canvas geometry snapshots wait for a quiet input window and preserve pending data across input', () => {
   const commitSource = sourceBetween(
     pageSource,
     'const isCanvasCommitBlocked = useCallback',
     'const markCanvasInteractionVisualFrame = useCallback'
   );
-  assert.equal(pageSource.includes('CANVAS_SNAPSHOT_COMMIT_IDLE_MS = 500'), true);
+  assert.equal(pageSource.includes('CANVAS_SNAPSHOT_COMMIT_IDLE_MS = 1200'), true);
   assert.equal(commitSource.includes('deadlineAt: stagedAt + CANVAS_SNAPSHOT_COMMIT_IDLE_MS'), true);
   assert.equal(commitSource.includes("window.requestIdleCallback(runIdleCommit, {"), true);
   assert.equal(commitSource.includes('timeout: 300,'), true);
+  assert.equal(commitSource.includes('const queueIdleCommitFrame = () => {'), true);
+  assert.equal(commitSource.includes('requestAnimationFrame(runIdleCommitFrame)'), true);
   assert.equal(commitSource.includes('React.startTransition(commitReactSnapshot)'), true);
   assert.equal(commitSource.includes('hasPendingBrowserInput()'), true);
   const interruptSource = sourceBetween(
@@ -313,15 +405,60 @@ test('canvas geometry snapshots use one 500ms debounce and preserve pending data
   assert.equal(pageSource.includes('createCanvasCommitCoordinator'), false);
 });
 
-test('affected connection updates are merged into one animation frame', () => {
+test('affected connection updates share the controller animation frame', () => {
   const connectionFrameSource = sourceBetween(
     pageSource,
-    'const cancelCanvasItemDragConnectionFrame = useCallback',
-    'const prepareCanvasItemDragPreview = useCallback'
+    'const flushCanvasItemDragConnectionFrame = useCallback',
+    'const scheduleCanvasItemDragConnectionPreparation = useCallback'
   );
-  assert.equal(connectionFrameSource.includes('const scheduleAffectedConnectionFrame = useCallback'), true);
-  assert.equal(connectionFrameSource.includes('requestAnimationFrame(() => {'), true);
-  assert.equal(connectionFrameSource.includes('flushCanvasItemDragConnectionFrame();'), true);
+  assert.equal(connectionFrameSource.includes('const flushAffectedConnectionWork = useCallback'), true);
+  assert.equal(connectionFrameSource.includes('requestAnimationFrame(() => {'), false);
+  assert.equal(connectionFrameSource.includes('scheduleAffectedConnectionFrame'), false);
+});
+
+test('item ports stay attached during imperative drag, resize, and immediate connection start', () => {
+  const dragTargetSource = sourceBetween(
+    pageSource,
+    'function isCanvasItemDragTarget',
+    'const getPortCanvasPoint ='
+  );
+  const dragPlanSource = sourceBetween(
+    pageSource,
+    'const buildCanvasItemDragPlan = useCallback',
+    'useEffect(() => {'
+  );
+  const dragPreviewSource = sourceBetween(
+    pageSource,
+    'const prepareCanvasItemDragPreview = useCallback',
+    'const cancelCanvasItemDragConnectionPreparation = useCallback'
+  );
+  const dragCommitSource = sourceBetween(
+    pageSource,
+    'const commitCanvasItemDragPreviewToBase = useCallback',
+    'const clearCanvasItemDragPreview = useCallback'
+  );
+  const resizeSource = sourceBetween(
+    pageSource,
+    'const handleCornerResizePointerDown = useCallback',
+    'useEffect(() => {'
+  );
+  const outputPortSource = sourceBetween(
+    pageSource,
+    'const handleOutputPortPointerDown =',
+    'const handleSelectionGroupPointerDown = useCallback'
+  );
+
+  assert.equal(dragTargetSource.includes("role === 'input-port'"), true);
+  assert.equal(dragTargetSource.includes("role === 'input-port-bridge'"), true);
+  assert.equal(dragTargetSource.includes("role === 'output-port'"), true);
+  assert.equal(dragTargetSource.includes("role === 'output-port-bridge'"), true);
+  assert.equal(dragPlanSource.includes('.filter(isCanvasItemDragTarget)'), true);
+  assert.equal(dragPreviewSource.includes('.filter(isCanvasItemDragTarget)'), true);
+  assert.equal(dragCommitSource.includes('syncCanvasItemPortPositions({ ...item, ...finalPosition });'), true);
+  assert.equal(resizeSource.includes('syncCanvasItemPortPositions({ ...liveItem, ...nextSize });'), true);
+  assert.equal(resizeSource.includes('syncCanvasItemPortPositions(liveItem);'), true);
+  assert.equal(outputPortSource.includes('const liveItem = itemByIdRef.current.get(item.id) ?? item;'), true);
+  assert.equal(outputPortSource.includes('beginConnectionDragFromItem(liveItem,'), true);
 });
 
 test('one canvas world owns viewport transforms and screen overlays stay outside it', () => {

@@ -757,10 +757,17 @@ test('image toolbar export downloads the current image source through the export
   assert.equal(pageSource.includes("link.download = fileName;"), true);
 });
 
-test('image toolbar positioning no longer clamps against canvas width and uses a fixed floating overlay', () => {
+test('image toolbar positioning avoids a full-viewport fixed compositor layer', () => {
+  const toolbarPortalStart = pageSource.indexOf('selectedImageToolbarTarget &&');
+  const toolbarPortalEnd = pageSource.indexOf('showProviderSettingsModal &&', toolbarPortalStart);
+  const toolbarPortalSource = pageSource.slice(toolbarPortalStart, toolbarPortalEnd);
+
+  assert.notEqual(toolbarPortalStart, -1);
+  assert.notEqual(toolbarPortalEnd, -1);
   assert.equal(pageSource.includes('imageToolbarApproxWidth'), false);
   assert.equal(pageSource.includes('canvasSize.width - imageToolbarSidePadding'), false);
-  assert.equal(pageSource.includes('className="pointer-events-none fixed inset-0 z-[114]"'), true);
+  assert.equal(toolbarPortalSource.includes('className="pointer-events-none fixed inset-0 z-[114]"'), false);
+  assert.equal(toolbarPortalSource.includes('className="pointer-events-none fixed left-0 top-0 z-[114]"'), true);
 });
 
 test('image toolbar keeps a fixed screen size while following the selected image', () => {
@@ -796,11 +803,33 @@ test('image toolbar keeps its natural width and does not clamp back into the vie
   assert.equal(pageSource.includes('<span className="whitespace-nowrap">{action.label}</span>'), true);
 });
 
-test('image toolbar and selected card panels render through a portal so they are not clipped by the canvas container', () => {
+test('selected card panel portals avoid full-viewport fixed compositor layers', () => {
+  const imagePanelStart = pageSource.indexOf('const portaledSelectedImageCardPanel =');
+  const imagePanelEnd = pageSource.indexOf('const portaledSelectedTextCardPanel =', imagePanelStart);
+  const textPanelStart = pageSource.indexOf('const portaledSelectedTextCardPanel =');
+  const textPanelEnd = pageSource.indexOf('\n  return (\n', textPanelStart);
+  const imagePanelBlock = pageSource.slice(imagePanelStart, imagePanelEnd);
+  const textPanelBlock = pageSource.slice(textPanelStart, textPanelEnd);
+
+  assert.notEqual(imagePanelStart, -1);
+  assert.notEqual(imagePanelEnd, -1);
+  assert.notEqual(textPanelStart, -1);
+  assert.notEqual(textPanelEnd, -1);
   assert.equal(pageSource.includes("import { createPortal } from 'react-dom';"), true);
-  assert.equal(pageSource.includes('createPortal('), true);
-  assert.equal(pageSource.includes('document.body'), true);
-  assert.equal(pageSource.includes('className="pointer-events-none fixed inset-0 z-[115]"'), true);
+  assert.equal(imagePanelBlock.includes('createPortal('), true);
+  assert.equal(textPanelBlock.includes('createPortal('), true);
+  assert.equal(imagePanelBlock.includes('className="pointer-events-none fixed inset-0 z-[115]"'), false);
+  assert.equal(textPanelBlock.includes('className="pointer-events-none fixed inset-0 z-[115]"'), false);
+  assert.equal(imagePanelBlock.includes('data-canvas-overlay-root="true"'), true);
+  assert.equal(textPanelBlock.includes('data-canvas-overlay-root="true"'), true);
+  assert.equal(imagePanelBlock.includes('data-canvas-item-overlay-group="selected-image-panel"'), true);
+  assert.equal(textPanelBlock.includes('data-canvas-item-overlay-group="selected-text-panel"'), true);
+  assert.equal(imagePanelBlock.includes('className="pointer-events-none fixed left-0 top-0 z-[115]"'), true);
+  assert.equal(textPanelBlock.includes('className="pointer-events-none fixed left-0 top-0 z-[115]"'), true);
+  assert.equal(imagePanelBlock.includes('width: selectedImageCardPanelCanvasRect.width,'), true);
+  assert.equal(imagePanelBlock.includes('height: selectedImageCardPanelCanvasRect.height,'), true);
+  assert.equal(textPanelBlock.includes('width: selectedTextCardPanelCanvasRect.width,'), true);
+  assert.equal(textPanelBlock.includes('height: selectedTextCardPanelCanvasRect.height,'), true);
 });
 
 test('image card floating panel positioning no longer clamps against canvasSize bounds', () => {

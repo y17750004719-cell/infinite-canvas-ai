@@ -4,6 +4,9 @@ import { useCallback, useEffect, useRef } from 'react';
 import type React from 'react';
 
 import { shouldCancelCanvasPointerSessionOnLostCapture } from '../lib/canvas-interaction.mjs';
+import { createLatestFrameBatcher } from '../lib/canvas-pointer-frame.mjs';
+
+type LatestFrameBatcher = ReturnType<typeof createLatestFrameBatcher>;
 
 export type CanvasInteractionMode = 'pending-item-drag' | 'canvas-pan' | 'item-drag' | 'item-resize' | 'connection-drag' | 'marquee';
 export type CanvasInteractionCancelReason =
@@ -40,6 +43,7 @@ interface PointerSession {
   latestX: number;
   latestY: number;
   dirty: boolean;
+  frameBatcher: LatestFrameBatcher | null;
   startedAt: number;
   firstFrameAt: number | null;
   firstInputAt: number | null;
@@ -47,16 +51,15 @@ interface PointerSession {
   firstFrameWork: number;
   lastFrameAt: number | null;
   frameCount: number;
-  slowFrameCount: number;
+  inputEventCount: number;
+  nativePointerMoveCount: number;
   longestFrame: number;
   longestWork: number;
   frameGaps: number[];
   frameWorks: number[];
   longTaskCount: number;
   longestLongTask: number;
-  frameBudget: number;
   performanceEnabled: boolean;
-  frameSampleCursor: number;
   onFrame: (x: number, y: number, deltaTime: number, hasInput: boolean) => void;
   onRelease?: (x: number, y: number) => void;
   onEnd: (x: number, y: number) => void;
@@ -76,6 +79,26 @@ interface StartPointerSessionOptions {
 const DEFAULT_FRAME_BUDGET_MS = 1000 / 60;
 const PERFORMANCE_SAMPLE_LIMIT = 240;
 const PERFORMANCE_STORAGE_KEY = 'zo:canvas-perf';
+
+const percentile = (values: readonly number[], ratio: number) => {
+  if (values.length === 0) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * ratio))];
+};
+
+const estimateFrameBudget = (frameGaps: readonly number[]) => {
+  const plausibleGaps = frameGaps.filter((gap) => gap >= 1000 / 240 && gap <= 40);
+  if (plausibleGaps.length === 0) return DEFAULT_FRAME_BUDGET_MS;
+  return Math.min(
+    DEFAULT_FRAME_BUDGET_MS,
+    Math.max(1000 / 240, percentile(plausibleGaps, 0.2))
+  );
+};
+
+const appendPerformanceSample = (samples: number[], value: number) => {
+  if (samples.length >= PERFORMANCE_SAMPLE_LIMIT) samples.shift();
+  samples.push(value);
+};
 
 export const isCanvasPerformanceEnabled = () => {
   if (process.env.NODE_ENV === 'production' || typeof window === 'undefined') return false;
@@ -322,6 +345,9 @@ export function useCanvasInteractionController(
 
   const reportPerformance = useCallback((session: PointerSession, endedAt: number) => {
     if (!session.performanceEnabled) return;
+    const frameBudget = estimateFrameBudget(session.frameGaps);
+    const slowFrameCount = session.frameGaps.filter((gap) => gap > frameBudget * 1.5).length;
+    const measuredFrameGapCount = session.frameGaps.length;
     const pressToFirstFrame = session.firstFrameAt === null
       ? null
       : session.firstFrameAt - session.startedAt;
@@ -339,20 +365,19 @@ export function useCanvasInteractionController(
           : session.firstFrameAt - session.firstFrameScheduledAt,
       firstFrameWork: session.firstFrameWork,
       frameCount: session.frameCount,
-      slowFrameCount: session.slowFrameCount,
-      droppedFrameRatio: session.frameCount > 0 ? session.slowFrameCount / session.frameCount : 0,
+      inputEventCount: session.inputEventCount,
+      nativePointerMoveCount: session.nativePointerMoveCount,
+      coalescedInputCount: Math.max(0, session.inputEventCount - session.frameCount),
+      slowFrameCount,
+      droppedFrameRatio: measuredFrameGapCount > 0 ? slowFrameCount / measuredFrameGapCount : 0,
       longestFrame: session.longestFrame,
       longestWork: session.longestWork,
-      frameGapP95: session.frameGaps.length > 0
-        ? [...session.frameGaps].sort((a, b) => a - b)[Math.floor(session.frameGaps.length * 0.95)]
-        : 0,
-      frameWorkP95: session.frameWorks.length > 0
-        ? [...session.frameWorks].sort((a, b) => a - b)[Math.floor(session.frameWorks.length * 0.95)]
-        : 0,
+      frameGapP95: percentile(session.frameGaps, 0.95),
+      frameWorkP95: percentile(session.frameWorks, 0.95),
       longTaskCount: session.longTaskCount,
       longestLongTask: session.longestLongTask,
-      displayRefreshRate: Math.round(1000 / session.frameBudget),
-      frameBudget: session.frameBudget,
+      displayRefreshRate: Math.round(1000 / frameBudget),
+      frameBudget,
       firstInputToVisualFrame:
         session.firstInputAt === null || session.firstFrameAt === null
           ? null
@@ -364,6 +389,7 @@ export function useCanvasInteractionController(
   const stopPointerSession = useCallback((releaseCapture = true) => {
     const session = pointerSessionRef.current;
     if (!session) return null;
+    cancelPointerFrame(session);
     pointerSessionRef.current = null;
     removeNativeListeners();
     performanceObserverRef.current?.disconnect();
@@ -389,9 +415,7 @@ export function useCanvasInteractionController(
   }, [canvasRef, removeNativeListeners, reportPerformance]);
 
   function deliverPointerFrame(session: PointerSession, hasInput = true) {
-    if (session.performanceEnabled && session.firstFrameScheduledAt === null) {
-      session.firstFrameScheduledAt = performance.now();
-    }
+    if (!session.dirty) return;
     session.dirty = false;
     if (!session.performanceEnabled) {
       session.onFrame(session.latestX, session.latestY, 0, hasInput);
@@ -402,17 +426,31 @@ export function useCanvasInteractionController(
     if (session.lastFrameAt !== null) {
       const frameGap = frameStartedAt - session.lastFrameAt;
       session.longestFrame = Math.max(session.longestFrame, frameGap);
-      if (frameGap > session.frameBudget * 1.5) session.slowFrameCount += 1;
-      session.frameGaps[session.frameSampleCursor % PERFORMANCE_SAMPLE_LIMIT] = frameGap;
+      appendPerformanceSample(session.frameGaps, frameGap);
     }
     session.lastFrameAt = frameStartedAt;
     session.frameCount += 1;
     session.onFrame(session.latestX, session.latestY, 0, hasInput);
     const frameWork = performance.now() - frameStartedAt;
-    session.frameWorks[session.frameSampleCursor % PERFORMANCE_SAMPLE_LIMIT] = frameWork;
-    session.frameSampleCursor += 1;
+    appendPerformanceSample(session.frameWorks, frameWork);
     if (session.frameCount === 1) session.firstFrameWork = frameWork;
     session.longestWork = Math.max(session.longestWork, frameWork);
+  }
+
+  function schedulePointerFrame(session: PointerSession) {
+    if (session.performanceEnabled && session.firstFrameScheduledAt === null) {
+      session.firstFrameScheduledAt = performance.now();
+    }
+    session.frameBatcher?.schedule();
+  }
+
+  function flushPointerFrame(session: PointerSession) {
+    if (!session.dirty) return;
+    session.frameBatcher?.flushNow();
+  }
+
+  function cancelPointerFrame(session: PointerSession) {
+    session.frameBatcher?.cancel();
   }
 
   function handleNativePointerMove(event: PointerEvent) {
@@ -424,10 +462,12 @@ export function useCanvasInteractionController(
     }
     const coalescedEvents = event.getCoalescedEvents?.();
     const latestEvent = coalescedEvents?.[coalescedEvents.length - 1] ?? event;
+    session.nativePointerMoveCount += 1;
+    session.inputEventCount += Math.max(1, coalescedEvents?.length ?? 0);
     session.latestX = latestEvent.clientX;
     session.latestY = latestEvent.clientY;
     session.dirty = true;
-    deliverPointerFrame(session);
+    schedulePointerFrame(session);
   }
 
   function handleNativePointerUp(event: PointerEvent) {
@@ -436,14 +476,25 @@ export function useCanvasInteractionController(
     event.stopPropagation();
     const coalescedEvents = event.getCoalescedEvents?.();
     const latestEvent = coalescedEvents?.[coalescedEvents.length - 1] ?? event;
-    const hasUnprocessedInput =
-      session.dirty ||
+    const hasNewReleaseCoordinates =
       latestEvent.clientX !== session.latestX ||
       latestEvent.clientY !== session.latestY;
+    const hasUnprocessedInput =
+      session.dirty ||
+      hasNewReleaseCoordinates;
     session.latestX = latestEvent.clientX;
     session.latestY = latestEvent.clientY;
+    if (hasUnprocessedInput) {
+      if (hasNewReleaseCoordinates) {
+        if (session.performanceEnabled && session.firstInputAt === null) {
+          session.firstInputAt = performance.now();
+        }
+        session.inputEventCount += Math.max(1, coalescedEvents?.length ?? 0);
+      }
+      session.dirty = true;
+      flushPointerFrame(session);
+    }
     session.onRelease?.(session.latestX, session.latestY);
-    if (hasUnprocessedInput) deliverPointerFrame(session);
     const stoppedSession = stopPointerSession();
     stoppedSession?.onEnd(stoppedSession.latestX, stoppedSession.latestY);
   }
@@ -486,11 +537,12 @@ export function useCanvasInteractionController(
     const performanceEnabled = isCanvasPerformanceEnabled();
     const startedAt = performanceEnabled ? performance.now() : 0;
     if (performanceEnabled) performance.mark(`canvas:${options.mode}:press:${Math.round(startedAt)}`);
-    pointerSessionRef.current = {
+    const session: PointerSession = {
       ...options,
       latestX: options.startPoint.x,
       latestY: options.startPoint.y,
       dirty: false,
+      frameBatcher: null,
       startedAt,
       firstFrameAt: null,
       firstInputAt: null,
@@ -498,17 +550,22 @@ export function useCanvasInteractionController(
       firstFrameWork: 0,
       lastFrameAt: null,
       frameCount: 0,
-      slowFrameCount: 0,
+      inputEventCount: 0,
+      nativePointerMoveCount: 0,
       longestFrame: 0,
       longestWork: 0,
       frameGaps: [],
       frameWorks: [],
       longTaskCount: 0,
       longestLongTask: 0,
-      frameBudget: DEFAULT_FRAME_BUDGET_MS,
       performanceEnabled,
-      frameSampleCursor: 0,
     };
+    session.frameBatcher = createLatestFrameBatcher({
+      requestFrame: (callback) => requestAnimationFrame(callback),
+      cancelFrame: (frameId) => cancelAnimationFrame(frameId),
+      flush: () => deliverPointerFrame(session),
+    });
+    pointerSessionRef.current = session;
     if (performanceEnabled && typeof PerformanceObserver !== 'undefined') {
       try {
         const observer = new PerformanceObserver((entries) => {

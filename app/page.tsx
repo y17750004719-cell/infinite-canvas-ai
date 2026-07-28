@@ -194,7 +194,7 @@ const CHAT_PANEL_Z = 180;
 const GLOBAL_NOTICE_Z = 220;
 const CANVAS_CLIPBOARD_PASTE_OFFSET = { x: 32, y: 32 };
 const CANVAS_VIEWPORT_ANIMATION_SECONDS = 0.12;
-const CANVAS_SNAPSHOT_COMMIT_IDLE_MS = 500;
+const CANVAS_SNAPSHOT_COMMIT_IDLE_MS = 1200;
 const CANVAS_IMAGE_WORKING_SET_ENTER_SCREENS = 1;
 const CANVAS_IMAGE_WORKING_SET_RETAIN_SCREENS = 1.5;
 const CANVAS_IMAGE_WORKING_SET_RELEASE_MS = 500;
@@ -1267,6 +1267,18 @@ const PORT_PROXIMITY_SIZE = 84;
 const CONNECTION_ANCHOR_EDGE_GAP = 8;
 const IMAGE_DISPLAY_MIN_SIDE = 512;
 const IMAGE_NODE_OVERLAY_GAP_PX = 10;
+
+function isCanvasItemDragTarget(target: CanvasRegisteredTarget): boolean {
+  const { role } = target;
+  return role === 'node-drag' ||
+    role === 'annotation-drag' ||
+    role === 'selection-group' ||
+    role === 'input-port' ||
+    role === 'input-port-bridge' ||
+    role === 'output-port' ||
+    role === 'output-port-bridge' ||
+    role.startsWith('region-');
+}
 
 const getPortCanvasPoint = (item: CanvasItem, side: PortSide) => ({
   x:
@@ -3979,7 +3991,7 @@ const CanvasViewport = memo(function CanvasViewport({
     textarea.focus();
   }, []);
   useLayoutEffect(() => {
-    if (!selectedTextCardPanelItem) {
+    if (!selectedTextCardPanelItem?.id) {
       setSelectedTextCardPanelInputMetrics((prev) =>
         prev.height === TEXT_CARD_PANEL_INPUT_MIN_HEIGHT && !prev.isOverflowing
           ? prev
@@ -3999,9 +4011,9 @@ const CanvasViewport = memo(function CanvasViewport({
     setSelectedTextCardPanelInputMetrics((prev) =>
       prev.height === nextMetrics.height && prev.isOverflowing === nextMetrics.isOverflowing ? prev : nextMetrics
     );
-  }, [selectedTextCardPanelCanvasWidth, selectedTextCardPanelDisplayInput, selectedTextCardPanelItem]);
+  }, [selectedTextCardPanelCanvasWidth, selectedTextCardPanelDisplayInput, selectedTextCardPanelItem?.id]);
   useLayoutEffect(() => {
-    if (!selectedImageCardPanelItem) {
+    if (!selectedImageCardPanelItem?.id) {
       setSelectedImageCardPanelInputMetrics((prev) =>
         prev.height === TEXT_CARD_PANEL_INPUT_MIN_HEIGHT && !prev.isOverflowing
           ? prev
@@ -4021,7 +4033,7 @@ const CanvasViewport = memo(function CanvasViewport({
     setSelectedImageCardPanelInputMetrics((prev) =>
       prev.height === nextMetrics.height && prev.isOverflowing === nextMetrics.isOverflowing ? prev : nextMetrics
     );
-  }, [selectedImageCardPanelCanvasWidth, selectedImageCardPanelDisplayInput, selectedImageCardPanelItem]);
+  }, [selectedImageCardPanelCanvasWidth, selectedImageCardPanelDisplayInput, selectedImageCardPanelItem?.id]);
   useEffect(() => {
     setSelectedImageCardCountInput(String(selectedImageCardPanelCount));
   }, [selectedImageCardPanelCount, selectedImageCardPanelItem?.id]);
@@ -4046,14 +4058,13 @@ const CanvasViewport = memo(function CanvasViewport({
   useLayoutEffect(() => {
     const panelElement = selectedTextCardPanelRootRef.current;
     const overlayGroup = panelElement?.parentElement;
-    if (!panelElement || !overlayGroup || !selectedTextCardPanelItem) return;
+    if (!panelElement || !overlayGroup || !selectedTextCardPanelItem?.id) return;
     const panelRect = panelElement.getBoundingClientRect();
-    const cacheOffset = (
-      anchorElement: HTMLElement | null,
-      leftProperty: string,
-      topProperty: string
-    ) => {
-      if (!anchorElement) return;
+    const measuredOffsets = ([
+      [textPanelProviderMenuRef.current, '--canvas-text-provider-menu-left', '--canvas-text-provider-menu-top'],
+      [textPanelModelMenuRef.current, '--canvas-text-model-menu-left', '--canvas-text-model-menu-top'],
+    ] as const).map(([anchorElement, leftProperty, topProperty]) => {
+      if (!(anchorElement instanceof HTMLElement)) return null;
       const offset = resolveFloatingPopoverOffset({
         panelRect,
         anchorRect: anchorElement.getBoundingClientRect(),
@@ -4061,30 +4072,31 @@ const CanvasViewport = memo(function CanvasViewport({
         placement: 'below-panel',
         gap: 12,
       });
-      if (!offset) return;
-      overlayGroup.style.setProperty(leftProperty, `${offset.left}px`);
-      overlayGroup.style.setProperty(topProperty, `${offset.top}px`);
-    };
-    cacheOffset(textPanelProviderMenuRef.current, '--canvas-text-provider-menu-left', '--canvas-text-provider-menu-top');
-    cacheOffset(textPanelModelMenuRef.current, '--canvas-text-model-menu-left', '--canvas-text-model-menu-top');
+      return offset ? { leftProperty, topProperty, offset } : null;
+    });
+    measuredOffsets.forEach((measurement) => {
+      if (!measurement) return;
+      overlayGroup.style.setProperty(measurement.leftProperty, `${measurement.offset.left}px`);
+      overlayGroup.style.setProperty(measurement.topProperty, `${measurement.offset.top}px`);
+    });
   }, [
     linkedImagePreviews.length,
     selectedTextCardPanelCanvasHeight,
-    selectedTextCardPanelItem,
+    selectedTextCardPanelItem?.id,
     textPanelModelMenuRef,
     textPanelProviderMenuRef,
   ]);
   useLayoutEffect(() => {
     const panelElement = selectedImageCardPanelRootRef.current;
     const overlayGroup = panelElement?.parentElement;
-    if (!panelElement || !overlayGroup || !selectedImageCardPanelItem) return;
+    if (!panelElement || !overlayGroup || !selectedImageCardPanelItem?.id) return;
     const panelRect = panelElement.getBoundingClientRect();
-    const cacheOffset = (
-      anchorElement: HTMLElement | null,
-      leftProperty: string,
-      topProperty: string
-    ) => {
-      if (!anchorElement) return;
+    const measuredOffsets = ([
+      [imageCardProviderMenuRef.current, '--canvas-image-provider-menu-left', '--canvas-image-provider-menu-top'],
+      [imageCardModelMenuRef.current, '--canvas-image-model-menu-left', '--canvas-image-model-menu-top'],
+      [imageCardSettingsMenuRef.current, '--canvas-image-settings-menu-left', '--canvas-image-settings-menu-top'],
+    ] as const).map(([anchorElement, leftProperty, topProperty]) => {
+      if (!(anchorElement instanceof HTMLElement)) return null;
       const offset = resolveFloatingPopoverOffset({
         panelRect,
         anchorRect: anchorElement.getBoundingClientRect(),
@@ -4092,19 +4104,19 @@ const CanvasViewport = memo(function CanvasViewport({
         placement: 'below-panel',
         gap: 12,
       });
-      if (!offset) return;
-      overlayGroup.style.setProperty(leftProperty, `${offset.left}px`);
-      overlayGroup.style.setProperty(topProperty, `${offset.top}px`);
-    };
-    cacheOffset(imageCardProviderMenuRef.current, '--canvas-image-provider-menu-left', '--canvas-image-provider-menu-top');
-    cacheOffset(imageCardModelMenuRef.current, '--canvas-image-model-menu-left', '--canvas-image-model-menu-top');
-    cacheOffset(imageCardSettingsMenuRef.current, '--canvas-image-settings-menu-left', '--canvas-image-settings-menu-top');
+      return offset ? { leftProperty, topProperty, offset } : null;
+    });
+    measuredOffsets.forEach((measurement) => {
+      if (!measurement) return;
+      overlayGroup.style.setProperty(measurement.leftProperty, `${measurement.offset.left}px`);
+      overlayGroup.style.setProperty(measurement.topProperty, `${measurement.offset.top}px`);
+    });
   }, [
     imageCardModelMenuRef,
     imageCardProviderMenuRef,
     imageCardSettingsMenuRef,
     selectedImageCardPanelCanvasHeight,
-    selectedImageCardPanelItem,
+    selectedImageCardPanelItem?.id,
     selectedImageCardPanelLinkedImagePreviews.length,
   ]);
   const selectedTextCardPanelPlaceholder = getTextCardPanelPlaceholder({
@@ -4177,17 +4189,18 @@ const CanvasViewport = memo(function CanvasViewport({
     selectedImageCardPanelCanvasRect &&
     selectedImageCardPanelViewportOrigin
       ? createPortal(
-          <>
-            <div data-canvas-overlay-root="true" className="pointer-events-none fixed inset-0 z-[115]">
-              <div
-                ref={registerSelectedImagePanelOverlay}
-                data-canvas-item-overlay-group="selected-image-panel"
-                data-canvas-overlay-item-id={selectedImageCardPanelItem.id}
-                className="pointer-events-none fixed left-0 top-0"
-                style={{
-                  transform: `translate3d(${selectedImageCardPanelViewportOrigin.left}px, ${selectedImageCardPanelViewportOrigin.top}px, 0)`,
-                }}
-              >
+          <div
+            ref={registerSelectedImagePanelOverlay}
+            data-canvas-overlay-root="true"
+            data-canvas-item-overlay-group="selected-image-panel"
+            data-canvas-overlay-item-id={selectedImageCardPanelItem.id}
+            className="pointer-events-none fixed left-0 top-0 z-[115]"
+            style={{
+              width: selectedImageCardPanelCanvasRect.width,
+              height: selectedImageCardPanelCanvasRect.height,
+              transform: `translate3d(${selectedImageCardPanelViewportOrigin.left}px, ${selectedImageCardPanelViewportOrigin.top}px, 0)`,
+            }}
+          >
               <div
               data-text-card-panel="true"
               data-canvas-viewport-overlay="true"
@@ -4642,9 +4655,7 @@ const CanvasViewport = memo(function CanvasViewport({
                 </div>
               </div>
             )}
-              </div>
-            </div>
-          </>,
+          </div>,
           document.body
         )
       : null;
@@ -4655,16 +4666,18 @@ const CanvasViewport = memo(function CanvasViewport({
     selectedTextCardPanelCanvasRect &&
     selectedTextCardPanelViewportOrigin
       ? createPortal(
-          <div data-canvas-overlay-root="true" className="pointer-events-none fixed inset-0 z-[115]">
-            <div
-              ref={registerSelectedTextPanelOverlay}
-              data-canvas-item-overlay-group="selected-text-panel"
-              data-canvas-overlay-item-id={selectedTextCardPanelItem.id}
-              className="pointer-events-none fixed left-0 top-0"
-              style={{
-                transform: `translate3d(${selectedTextCardPanelViewportOrigin.left}px, ${selectedTextCardPanelViewportOrigin.top}px, 0)`,
-              }}
-            >
+          <div
+            ref={registerSelectedTextPanelOverlay}
+            data-canvas-overlay-root="true"
+            data-canvas-item-overlay-group="selected-text-panel"
+            data-canvas-overlay-item-id={selectedTextCardPanelItem.id}
+            className="pointer-events-none fixed left-0 top-0 z-[115]"
+            style={{
+              width: selectedTextCardPanelCanvasRect.width,
+              height: selectedTextCardPanelCanvasRect.height,
+              transform: `translate3d(${selectedTextCardPanelViewportOrigin.left}px, ${selectedTextCardPanelViewportOrigin.top}px, 0)`,
+            }}
+          >
             <div
               data-text-card-panel="true"
               data-canvas-viewport-overlay="true"
@@ -4945,7 +4958,6 @@ const CanvasViewport = memo(function CanvasViewport({
                 })}
               </div>
             )}
-            </div>
           </div>,
           document.body
         )
@@ -5660,7 +5672,6 @@ export default function AIWorkspace() {
   const activeItemDragTokenRef = useRef<number | null>(null);
   const canvasItemDragTransactionRef = useRef<DirectItemDragSession | null>(null);
   const canvasItemDragPreviewRef = useRef<CanvasItemDragPreviewState | null>(null);
-  const canvasItemDragConnectionFrameRef = useRef<number | null>(null);
   const canvasItemDragConnectionPrepareFrameRef = useRef<number | null>(null);
   const refreshDirectItemConnectionPathsRef = useRef<(
     itemId: string,
@@ -6488,6 +6499,26 @@ export default function AIWorkspace() {
         );
         return;
       }
+      const queueIdleCommitFrame = () => {
+        const runIdleCommitFrame = () => {
+          pendingCanvasCommitIdleRef.current = null;
+          pendingCanvasCommitIdleKindRef.current = null;
+          const latestCommit = pendingCanvasCommitRef.current;
+          if (!latestCommit) return;
+          const latestRemainingDelay = latestCommit.deadlineAt - performance.now();
+          if (
+            latestRemainingDelay > 0 ||
+            isCanvasCommitBlocked() ||
+            hasPendingBrowserInput()
+          ) {
+            schedulePendingCanvasCommit();
+            return;
+          }
+          flushPendingCanvasCommit('snapshot-idle');
+        };
+        pendingCanvasCommitIdleKindRef.current = 'frame';
+        pendingCanvasCommitIdleRef.current = requestAnimationFrame(runIdleCommitFrame);
+      };
       const runIdleCommit = () => {
         pendingCanvasCommitIdleRef.current = null;
         pendingCanvasCommitIdleKindRef.current = null;
@@ -6502,7 +6533,7 @@ export default function AIWorkspace() {
           schedulePendingCanvasCommit();
           return;
         }
-        flushPendingCanvasCommit('snapshot-idle');
+        queueIdleCommitFrame();
       };
       if (typeof window.requestIdleCallback === 'function') {
         pendingCanvasCommitIdleKindRef.current = 'idle';
@@ -6510,8 +6541,7 @@ export default function AIWorkspace() {
           timeout: 300,
         });
       } else {
-        pendingCanvasCommitIdleKindRef.current = 'frame';
-        pendingCanvasCommitIdleRef.current = requestAnimationFrame(runIdleCommit);
+        queueIdleCommitFrame();
       }
     };
     const initialDelay = Math.max(
@@ -9937,14 +9967,22 @@ export default function AIWorkspace() {
     []
   );
 
+  const syncCanvasItemPortPositions = useCallback((item: CanvasItem) => {
+    const inputPoint = getPortCanvasPoint(item, 'left');
+    const outputPoint = getPortCanvasPoint(item, 'right');
+    getItemTargets([item.id]).forEach((target) => {
+      const isInputPort = target.role.startsWith('input-port');
+      const isOutputPort = target.role.startsWith('output-port');
+      if (!isInputPort && !isOutputPort) return;
+      const point = isInputPort ? inputPoint : outputPoint;
+      target.element.style.left = `${point.x}px`;
+      target.element.style.top = `${point.y}px`;
+    });
+  }, [getItemTargets]);
+
   const buildCanvasItemDragPlan = useCallback((itemIds: readonly string[]) => {
     const itemIdSet = new Set(itemIds);
-    const targets = getItemTargets(itemIds, itemIds.length > 1).filter(
-      (target) => target.role === 'node-drag' ||
-        target.role === 'annotation-drag' ||
-        target.role === 'selection-group' ||
-        target.role.startsWith('region-')
-    );
+    const targets = getItemTargets(itemIds, itemIds.length > 1).filter(isCanvasItemDragTarget);
     const affectedConnectionsById = new Map<string, Connection>();
     for (const itemId of itemIds) {
       const connected = connectionsByItemId.get(itemId);
@@ -9980,12 +10018,7 @@ export default function AIWorkspace() {
   const prepareCanvasItemDragPreview = useCallback((itemIds: string[]) => {
     const planKey = getCanvasItemDragPlanKey(itemIds);
     const cachedPlan = canvasConnectionRuntimeIndexRef.current.get(planKey);
-    const dragTargets = cachedPlan?.targets ?? getItemTargets(itemIds, itemIds.length > 1).filter(
-      (target) => target.role === 'node-drag' ||
-        target.role === 'annotation-drag' ||
-        target.role === 'selection-group' ||
-        target.role.startsWith('region-')
-    );
+    const dragTargets = cachedPlan?.targets ?? getItemTargets(itemIds, itemIds.length > 1).filter(isCanvasItemDragTarget);
     const targets = dragTargets.map((target) => {
       const { element } = target;
       const existingPresentation = canvasItemDragPresentationRef.current.get(element);
@@ -10031,14 +10064,7 @@ export default function AIWorkspace() {
     canvasItemDragConnectionPrepareFrameRef.current = null;
   }, []);
 
-  const cancelCanvasItemDragConnectionFrame = useCallback(() => {
-    if (canvasItemDragConnectionFrameRef.current === null) return;
-    cancelAnimationFrame(canvasItemDragConnectionFrameRef.current);
-    canvasItemDragConnectionFrameRef.current = null;
-  }, []);
-
   const flushCanvasItemDragConnectionFrame = useCallback(() => {
-    cancelCanvasItemDragConnectionFrame();
     const preview = canvasItemDragPreviewRef.current;
     if (!preview) return;
     const screenDeltaX = preview.delta.x;
@@ -10058,7 +10084,17 @@ export default function AIWorkspace() {
       const path = buildConnectionPath(connection.fromPoint, connection.toPoint);
       connection.paths.forEach((element) => element.setAttribute('d', path));
     });
-  }, [buildConnectionPath, cancelCanvasItemDragConnectionFrame]);
+  }, [buildConnectionPath]);
+
+  const flushAffectedConnectionWork = useCallback(() => {
+    flushCanvasItemDragConnectionFrame();
+    const resize = cornerResizePreviewRef.current;
+    if (!resize) return;
+    refreshDirectItemConnectionPathsRef.current(resize.itemId, {
+      width: resize.nextWidth,
+      height: resize.nextHeight,
+    });
+  }, [flushCanvasItemDragConnectionFrame]);
 
   const scheduleCanvasItemDragConnectionPreparation = useCallback((
     itemIds: string[],
@@ -10098,21 +10134,6 @@ export default function AIWorkspace() {
     });
   }, [buildCanvasItemDragPlan, buildConnectionPath, cancelCanvasItemDragConnectionPreparation, flushCanvasItemDragConnectionFrame, getCanvasItemDragPlanKey, getConnectionAnchorCanvasPoint]);
 
-  const scheduleAffectedConnectionFrame = useCallback(() => {
-    if (canvasItemDragConnectionFrameRef.current !== null) return;
-    canvasItemDragConnectionFrameRef.current = requestAnimationFrame(() => {
-      canvasItemDragConnectionFrameRef.current = null;
-      flushCanvasItemDragConnectionFrame();
-      const resize = cornerResizePreviewRef.current;
-      if (resize) {
-        refreshDirectItemConnectionPathsRef.current(resize.itemId, {
-          width: resize.nextWidth,
-          height: resize.nextHeight,
-        });
-      }
-    });
-  }, [flushCanvasItemDragConnectionFrame]);
-
   const previewCanvasItemDrag = useCallback(
     (deltaX: number, deltaY: number) => {
       const preview = canvasItemDragPreviewRef.current;
@@ -10127,10 +10148,10 @@ export default function AIWorkspace() {
       preview.targets.forEach((target) => {
         target.target.setPosition(deltaX, deltaY);
       });
-      if (preview.connections.length > 0) scheduleAffectedConnectionFrame();
+      if (preview.connections.length > 0) flushAffectedConnectionWork();
       markCanvasInteractionVisualFrame('item-drag');
     },
-    [markCanvasInteractionVisualFrame, scheduleAffectedConnectionFrame]
+    [flushAffectedConnectionWork, markCanvasInteractionVisualFrame]
   );
 
   const commitCanvasItemDragPreviewToBase = useCallback((
@@ -10140,6 +10161,10 @@ export default function AIWorkspace() {
     flushCanvasItemDragConnectionFrame();
     const preview = canvasItemDragPreviewRef.current;
     if (!preview) return;
+    for (const [itemId, finalPosition] of finalPositions) {
+      const item = itemByIdRef.current.get(itemId);
+      if (item) syncCanvasItemPortPositions({ ...item, ...finalPosition });
+    }
     preview.targets.forEach(({ target, zIndex, willChange }) => {
       const itemId = target.itemId;
       if (itemId) {
@@ -10164,11 +10189,10 @@ export default function AIWorkspace() {
       });
     });
     canvasItemDragPreviewRef.current = null;
-  }, [buildConnectionPath, cancelCanvasItemDragConnectionPreparation, flushCanvasItemDragConnectionFrame, getItemTargets]);
+  }, [buildConnectionPath, cancelCanvasItemDragConnectionPreparation, flushCanvasItemDragConnectionFrame, getItemTargets, syncCanvasItemPortPositions]);
 
   const clearCanvasItemDragPreview = useCallback((restoreConnectionPaths = false) => {
     cancelCanvasItemDragConnectionPreparation();
-    cancelCanvasItemDragConnectionFrame();
     const preview = canvasItemDragPreviewRef.current;
     if (!preview) return;
     preview.targets.forEach((target) => {
@@ -10192,7 +10216,7 @@ export default function AIWorkspace() {
       });
     }
     canvasItemDragPreviewRef.current = null;
-  }, [cancelCanvasItemDragConnectionFrame, cancelCanvasItemDragConnectionPreparation]);
+  }, [cancelCanvasItemDragConnectionPreparation]);
   clearCanvasItemDragPreviewRef.current = clearCanvasItemDragPreview;
 
   useLayoutEffect(() => {
@@ -10337,6 +10361,17 @@ export default function AIWorkspace() {
   }, [buildConnectionPath, connectionsByItemId, getConnectionAnchorCanvasPoint, getConnectionPaths]);
   refreshDirectItemConnectionPathsRef.current = refreshDirectItemConnectionPaths;
 
+  const restoreCanvasItemDragHint = useCallback((
+    target: CanvasRegisteredTarget,
+    itemId: string
+  ) => {
+    const remainsSingleSelected =
+      selectedIdsRef.current.length === 1 && selectedIdsRef.current[0] === itemId;
+    target.element.style.willChange = remainsSingleSelected
+      ? 'transform'
+      : '';
+  }, []);
+
   const commitCornerResizePreview = useCallback(() => {
     const preview = cornerResizePreviewRef.current;
     cornerResizePreviewRef.current = null;
@@ -10345,7 +10380,7 @@ export default function AIWorkspace() {
       Math.abs(preview.nextWidth - preview.startWidth) > 0.01 ||
       Math.abs(preview.nextHeight - preview.startHeight) > 0.01;
     if (preview.target) {
-      preview.target.element.style.willChange = preview.target.initialWillChange;
+      restoreCanvasItemDragHint(preview.target, preview.itemId);
     }
     if (!changed) {
       return;
@@ -10358,7 +10393,7 @@ export default function AIWorkspace() {
     ));
     syncSessionLiveState({ items: nextItems });
     stageCanvasCommit({ items: nextItems, saveSession: true });
-  }, [stageCanvasCommit, syncSessionLiveState]);
+  }, [restoreCanvasItemDragHint, stageCanvasCommit, syncSessionLiveState]);
 
   const cancelActiveItemDrag = useCallback((reason: CanvasInteractionCancelReason = 'escape') => {
     const wasDragging = isDraggingRef.current;
@@ -10514,7 +10549,6 @@ export default function AIWorkspace() {
         const nextItems = committedMove.items;
         commitCanvasItemDragPreviewToBase(finalPositions);
         draggedItemIds.forEach((itemId) => refreshDirectItemConnectionPaths(itemId));
-        syncSelectedCanvasOverlayPositions(visualViewportRef.current, draggedItemIds);
         syncSessionLiveState({ items: nextItems });
         const afterPositions: Record<string, { x: number; y: number }> = {};
         for (const [itemId, finalPosition] of finalPositions) {
@@ -10547,11 +10581,11 @@ export default function AIWorkspace() {
     canvasItemDragTransactionRef.current = null;
     if (canvasRef.current) canvasRef.current.style.cursor = '';
     altDragPrimarySourceIdRef.current = null;
+    setCanvasConnectionHitTestingDisabled(false);
+    updateCanvasInteractionPhase('idle');
     if (!moved || !transactionMatches) {
       if (transaction) restoreCanvasOverlayVisibility(transaction.overlayVisibility);
       clearCanvasItemDragPreview(true);
-      setCanvasConnectionHitTestingDisabled(false);
-      updateCanvasInteractionPhase('idle');
     }
     const visualViewport = visualViewportRef.current;
     const renderedViewport = renderedViewportRef.current;
@@ -10579,10 +10613,8 @@ export default function AIWorkspace() {
     } else if (pendingCanvasSelectionGestureRef.current) {
       restoreCanvasSelectionGestureRef.current();
     } else if (transaction) {
-      requestAnimationFrame(() => {
-        syncSelectedCanvasOverlayPositions(visualViewportRef.current, draggedItemIds);
-        restoreCanvasOverlayVisibility(transaction.overlayVisibility);
-      });
+      syncSelectedCanvasOverlayPositions(visualViewportRef.current, draggedItemIds);
+      restoreCanvasOverlayVisibility(transaction.overlayVisibility);
     }
     schedulePendingCanvasCommit();
   }, [clearCanvasItemDragPreview, commitCanvasItemDragPreviewToBase, createCurrentCanvasUndoSnapshot, imageCardAspectRatioById, imageCardCountById, imageCardModelById, imageCardPanelDrafts, imageCardProviderById, imageCardQualityById, imageCardSizeById, previewCanvasItemDrag, pushCanvasMoveUndoCommand, pushCanvasUndoSnapshot, refreshDirectItemConnectionPaths, restoreCanvasOverlayVisibility, schedulePendingCanvasCommit, setCanvasConnectionHitTestingDisabled, setImageCardAspectRatioById, setImageCardCountById, setImageCardModelById, setImageCardPanelDrafts, setImageCardProviderById, setImageCardQualityById, setImageCardSizeById, setTextCardModelById, setTextCardPanelDrafts, setTextCardProviderById, stageCanvasCommit, stageVisualViewportCommit, syncSelectedCanvasOverlayPositions, syncSessionLiveState, textCardModelById, textCardPanelDrafts, textCardProviderById, updateCanvasInteractionPhase]);
@@ -11439,7 +11471,8 @@ export default function AIWorkspace() {
     if (tool !== 'select') return;
     e.preventDefault();
     e.stopPropagation();
-    beginConnectionDragFromItem(item, e.pointerId, e.clientX, e.clientY);
+    const liveItem = itemByIdRef.current.get(item.id) ?? item;
+    beginConnectionDragFromItem(liveItem, e.pointerId, e.clientX, e.clientY);
   };
 
   const handleSelectionGroupPointerDown = useCallback(
@@ -11497,7 +11530,11 @@ export default function AIWorkspace() {
 
   const syncCanvasSelectionDom = useCallback((itemIds: readonly string[]) => {
     const visibleItemId = itemIds.length === 1 ? itemIds[0] : null;
-    const affectedIds = new Set([...canvasDomSelectedIdsRef.current, ...itemIds]);
+    const affectedIds = new Set([
+      ...sessionLiveStateRef.current.items.map((item) => item.id),
+      ...canvasDomSelectedIdsRef.current,
+      ...itemIds,
+    ]);
     affectedIds.forEach((itemId) => {
       const targets = getItemTargets([itemId]);
       const resizeTarget = targets.find((target) => (
@@ -11509,6 +11546,14 @@ export default function AIWorkspace() {
       else delete resizeTarget.element.dataset.canvasSelected;
       const outlineTarget = targets.find((target) => target.role === 'node-selection-outline');
       if (outlineTarget) outlineTarget.element.style.visibility = selected ? 'visible' : 'hidden';
+      const dragTarget = targets.find((target) => (
+        target.role === 'node-drag' || target.role === 'annotation-drag'
+      ));
+      if (dragTarget) {
+        dragTarget.element.style.willChange = selected
+          ? 'transform'
+          : '';
+      }
     });
     canvasDomSelectedIdsRef.current = [...itemIds];
   }, [getItemTargets]);
@@ -11895,12 +11940,12 @@ export default function AIWorkspace() {
             target.element.style.width = `${nextSize.width}px`;
             target.element.style.height = `${nextSize.height}px`;
           }
-          scheduleAffectedConnectionFrame();
+          syncCanvasItemPortPositions({ ...liveItem, ...nextSize });
+          flushAffectedConnectionWork();
           markCanvasInteractionVisualFrame('resize');
         },
         onEnd: () => {
           const preview = cornerResizePreviewRef.current;
-          cancelCanvasItemDragConnectionFrame();
           if (preview) {
             refreshDirectItemConnectionPaths(preview.itemId, {
               width: preview.nextWidth,
@@ -11922,17 +11967,17 @@ export default function AIWorkspace() {
         onCancel: () => {
           const preview = cornerResizePreviewRef.current;
           if (!preview) return;
-          cancelCanvasItemDragConnectionFrame();
           if (target) {
             target.element.style.width = `${preview.startWidth}px`;
             target.element.style.height = `${preview.startHeight}px`;
           }
+          syncCanvasItemPortPositions(liveItem);
           syncSelectedCanvasOverlayPositions(visualViewportRef.current, [preview.itemId]);
           refreshDirectItemConnectionPaths(preview.itemId, {
             width: preview.startWidth,
             height: preview.startHeight,
           });
-          if (target) target.element.style.willChange = target.initialWillChange;
+          if (target) restoreCanvasItemDragHint(target, preview.itemId);
           clearPendingCanvasUndoSnapshot();
           cornerResizePreviewRef.current = null;
           isCornerResizingRef.current = false;
@@ -11943,7 +11988,7 @@ export default function AIWorkspace() {
         },
       });
     },
-    [beginCanvasPan, cancelCanvasItemDragConnectionFrame, cancelInteraction, cancelZoomAnimation, clearPendingCanvasUndoSnapshot, commitCornerResizePreview, commitPendingCanvasUndoSnapshot, createCurrentCanvasUndoSnapshot, getItemTargets, hideCanvasSelectionOverlayGroups, interruptCanvasCommitForInteraction, isSpacePressed, markCanvasInteractionVisualFrame, previewCanvasSelectionDom, refreshDirectItemConnectionPaths, restoreCanvasOverlayVisibility, scheduleAffectedConnectionFrame, schedulePendingCanvasCommit, stableBeginCanvasMarquee, startPointerSession, syncSelectedCanvasOverlayPositions, tool, updateCanvasInteractionPhase]
+    [beginCanvasPan, cancelInteraction, cancelZoomAnimation, clearPendingCanvasUndoSnapshot, commitCornerResizePreview, commitPendingCanvasUndoSnapshot, createCurrentCanvasUndoSnapshot, flushAffectedConnectionWork, getItemTargets, hideCanvasSelectionOverlayGroups, interruptCanvasCommitForInteraction, isSpacePressed, markCanvasInteractionVisualFrame, previewCanvasSelectionDom, refreshDirectItemConnectionPaths, restoreCanvasItemDragHint, restoreCanvasOverlayVisibility, schedulePendingCanvasCommit, stableBeginCanvasMarquee, startPointerSession, syncCanvasItemPortPositions, syncSelectedCanvasOverlayPositions, tool, updateCanvasInteractionPhase]
   );
 
   useEffect(() => {
@@ -16752,6 +16797,7 @@ export default function AIWorkspace() {
   const stableCanvasPointerUp = useStableEvent(handleCanvasPointerUp);
   const stableCanvasPointerLeave = useStableEvent(handleCanvasPointerLeave);
   const stableOutputPortPointerDown = useStableEvent(handleOutputPortPointerDown);
+  const stableCanvasItemClick = useStableEvent(handleItemClick);
   const handlePendingMenuPointerDown = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
     event.stopPropagation();
   }, []);
@@ -17093,7 +17139,7 @@ export default function AIWorkspace() {
         onSelectionGroupPointerDown={handleSelectionGroupPointerDown}
         onItemMouseEnter={handleItemMouseEnter}
         onItemMouseLeave={handleItemMouseLeave}
-        onItemClick={handleItemClick}
+        onItemClick={stableCanvasItemClick}
         onItemPointerDown={handleItemPointerDown}
         onRegionClick={handleRegionClick}
         onCornerResizePointerDown={handleCornerResizePointerDown}
@@ -17397,55 +17443,54 @@ export default function AIWorkspace() {
         selectedImageToolbarTarget &&
         selectedImageToolbarAnchors &&
         createPortal(
-          <div data-canvas-overlay-root="true" className="pointer-events-none fixed inset-0 z-[114]">
+          <div
+            ref={getViewportOverlayRef('selected-image-toolbar')}
+            data-canvas-overlay-root="true"
+            data-canvas-viewport-overlay="true"
+            data-canvas-overlay-item-id={selectedImageToolbarTarget.itemId}
+            className="pointer-events-none fixed left-0 top-0 z-[114]"
+            style={{
+              transform: `translate3d(${selectedImageToolbarAnchors.centerX}px, ${selectedImageToolbarAnchors.topToolbarY}px, 0) translate(-50%, -100%)`,
+              transformOrigin: 'bottom center',
+              willChange: 'transform',
+            }}
+          >
             <div
-              ref={getViewportOverlayRef('selected-image-toolbar')}
-              data-canvas-viewport-overlay="true"
-              data-canvas-overlay-item-id={selectedImageToolbarTarget.itemId}
-              className="pointer-events-none fixed"
-              style={{
-                left: 0,
-                top: 0,
-                transform: `translate3d(${selectedImageToolbarAnchors.centerX}px, ${selectedImageToolbarAnchors.topToolbarY}px, 0) translate(-50%, -100%)`,
-                transformOrigin: 'bottom center',
+              data-image-node-toolbar="true"
+              className="workspace-menu-panel pointer-events-auto flex items-center gap-1 rounded-full px-2 py-1.5"
+              style={{ contain: 'layout paint style', isolation: 'isolate' }}
+              onPointerDown={(e) => {
+                e.stopPropagation();
               }}
             >
-              <div
-                data-image-node-toolbar="true"
-                className="workspace-menu-panel pointer-events-auto flex items-center gap-1 rounded-full px-2 py-1.5"
-                onPointerDown={(e) => {
-                  e.stopPropagation();
-                }}
-              >
-                {IMAGE_NODE_TOOLBAR_ACTIONS.map((action) => {
-                  const Icon = action.icon;
+              {IMAGE_NODE_TOOLBAR_ACTIONS.map((action) => {
+                const Icon = action.icon;
 
-                  return (
-                    <button
-                      key={action.id}
-                      data-image-node-toolbar-action={action.id}
-                      type="button"
-                      disabled={!action.enabled}
-                      onClick={() => {
-                        if (!action.enabled) return;
-                        void handleImageToolbarAction(action.id);
-                      }}
-                      onPointerDown={(e) => {
-                        e.stopPropagation();
-                      }}
-                      className={`workspace-control-chip inline-flex h-8 items-center gap-1.5 rounded-full px-3 text-[12px] font-medium tracking-[-0.02em] ${
-                        action.enabled
-                          ? ''
-                          : 'is-disabled'
-                      }`}
-                      title={action.enabled ? action.label : action.disabledReason ?? `${action.label} 即将支持`}
-                    >
-                      <Icon size={13} strokeWidth={2} className="shrink-0" />
-                      <span className="whitespace-nowrap">{action.label}</span>
-                    </button>
-                  );
-                })}
-              </div>
+                return (
+                  <button
+                    key={action.id}
+                    data-image-node-toolbar-action={action.id}
+                    type="button"
+                    disabled={!action.enabled}
+                    onClick={() => {
+                      if (!action.enabled) return;
+                      void handleImageToolbarAction(action.id);
+                    }}
+                    onPointerDown={(e) => {
+                      e.stopPropagation();
+                    }}
+                    className={`workspace-control-chip inline-flex h-8 items-center gap-1.5 rounded-full px-3 text-[12px] font-medium tracking-[-0.02em] ${
+                      action.enabled
+                        ? ''
+                        : 'is-disabled'
+                    }`}
+                    title={action.enabled ? action.label : action.disabledReason ?? `${action.label} 即将支持`}
+                  >
+                    <Icon size={13} strokeWidth={2} className="shrink-0" />
+                    <span className="whitespace-nowrap">{action.label}</span>
+                  </button>
+                );
+              })}
             </div>
           </div>,
           document.body
