@@ -290,6 +290,7 @@ function compactReferenceContext(value) {
       const source = text(reference.source);
       const role = text(reference.role);
       if (!id || !label || !REFERENCE_SOURCES.has(source) || !REFERENCE_ROLES.has(role)) return null;
+      if (role === 'region_target' && reference.confirmationStatus !== 'confirmed') return null;
       const annotationCount = nonNegativeInteger(reference.annotationCount);
       return {
         id,
@@ -300,6 +301,12 @@ function compactReferenceContext(value) {
         ...(annotationCount !== null ? { annotationCount } : {}),
         ...(text(reference.regionId) ? { regionId: text(reference.regionId) } : {}),
         ...(text(reference.candidateId) ? { candidateId: text(reference.candidateId) } : {}),
+        ...(reference.confirmationStatus === 'confirmed' ? { confirmationStatus: 'confirmed' } : {}),
+        ...(Array.isArray(reference.aliases)
+          ? { aliases: reference.aliases.map(text).filter(Boolean).slice(0, 6) }
+          : {}),
+        ...(text(reference.description) ? { description: text(reference.description).slice(0, 240) } : {}),
+        ...(CONFIDENCES.has(text(reference.confidence)) ? { confidence: text(reference.confidence) } : {}),
         ...(isObject(reference.targetPoint) ? { targetPoint: reference.targetPoint } : {}),
         ...(isObject(reference.targetBox) ? { targetBox: reference.targetBox } : {}),
       };
@@ -326,8 +333,10 @@ function compactReferenceContext(value) {
       if (!isObject(evidence)) return null;
       const id = text(evidence.id);
       const referenceId = text(evidence.referenceId);
-      if (!id || !knownIds.has(referenceId) || evidence.kind !== 'annotation_composite') return null;
-      return { id, referenceId, kind: 'annotation_composite' };
+      const parent = references.find((reference) => reference.id === referenceId);
+      if (!id || !parent || !['annotation_composite', 'region_crop'].includes(evidence.kind)) return null;
+      if (evidence.kind === 'region_crop' && parent.role !== 'region_target') return null;
+      return { id, referenceId, kind: evidence.kind };
     })
     .filter(Boolean);
   return {
@@ -393,6 +402,8 @@ export function compactCanvasContext(value) {
         point: { x: pointX, y: pointY },
         ...(box ? { box } : {}),
         ...(text(region.candidateId) ? { candidateId: text(region.candidateId).slice(0, 160) } : {}),
+        ...(Array.isArray(region.aliases) ? { aliases: region.aliases.map(text).filter(Boolean).slice(0, 6) } : {}),
+        ...(text(region.description) ? { description: text(region.description).slice(0, 240) } : {}),
         ...(CONFIDENCES.has(text(region.confidence)) ? { confidence: text(region.confidence) } : {}),
       };
     })
@@ -1087,6 +1098,7 @@ export function buildAgentExecutionPlannerMessages({
     'For multiple images, first decide whether the task is analysis, new generation, or editing. Only edit requires one target. Select it from explicit user relationships, inline order, declared roles, and visible content together; these are reasoning inputs for you, not runtime rules.',
     'If a unique edit target is supported with high or medium confidence, identify it as edit_target and explain the choice briefly. If confidence is low or two targets remain equally plausible, request clarification and omit imageTask.',
     'Annotation composite images are evidence attached to their parent reference. They are never independent references and must never appear in targetReferenceId or supportingReferenceIds.',
+    'Region crop images are evidence attached to a confirmed region_target reference. They are never independent references and must never appear in targetReferenceId or supportingReferenceIds.',
     'There are two separate opaque ID namespaces and they must never be mixed. contextReferences may copy only contextEntities[].id. visualContext referenceId, imageTask.targetReferenceId, and imageTask.supportingReferenceIds may copy only referenceContext.references[].id.',
     'Region IDs are a third opaque namespace. imageTask.targetRegionIds may copy only canvasContext.regionSelections[].regionId and must never contain a reference id, canvas item id, label, or invented value.',
     'When the user includes region_target references, use their region ids in imageTask.targetRegionIds, keep targetReferenceId pointed at the parent source image, and describe each selected label and normalized location in instruction and mustChange.',

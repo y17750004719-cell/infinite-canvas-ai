@@ -259,6 +259,16 @@ test('agent image execution reuses the canvas image-card request builders', () =
   assert.doesNotMatch(source, /n:\s*imageOptions\?\.count/);
 });
 
+test('agent rejects unconfirmed region targets before generic image fallback can run', () => {
+  const source = fs.readFileSync(routePath, 'utf8');
+  const rejectionIndex = source.indexOf("reference?.role === 'region_target' && reference.confirmationStatus !== 'confirmed'");
+  const normalizationIndex = source.indexOf('const runtimeReferenceContext = normalizeAgentRuntimeReferenceContext');
+  assert.ok(rejectionIndex >= 0 && rejectionIndex < normalizationIndex);
+  assert.match(source, /body\.clarificationState\?\.referenceContext/);
+  assert.match(source, /Region targets must be explicitly confirmed before sending/);
+  assert.match(source, /status: 400/);
+});
+
 test('agent preserves model-authored image task and result presentation through confirmations and asset actions', () => {
   const source = fs.readFileSync(routePath, 'utf8');
   assert.match(source, /imageTask:\s*executionPlan\?\.imageTask \? structuredClone/);

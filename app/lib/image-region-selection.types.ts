@@ -18,6 +18,7 @@ export interface RegionSelection {
   candidates: RegionCandidate[];
   selectedCandidateId?: string;
   customLabel?: string;
+  confirmationStatus?: 'pending' | 'confirmed';
   status: 'recognizing' | 'ready' | 'ambiguous' | 'failed';
   error?: string;
   recognitionRevision?: number;

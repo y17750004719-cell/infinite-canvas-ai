@@ -87,6 +87,13 @@ test('project sessions preserve normalized image region selections and request r
 
   assert.deepEqual(normalized.regionSelections?.[0]?.point, { x: 1, y: 0 });
   assert.equal(normalized.regionSelections?.[0]?.recognitionRevision, 3);
+  assert.equal(normalized.regionSelections?.[0]?.confirmationStatus, 'pending');
+
+  const confirmed = normalizeProjectSession({
+    ...normalized,
+    regionSelections: [{ ...normalized.regionSelections[0], confirmationStatus: 'confirmed' }],
+  });
+  assert.equal(confirmed.regionSelections?.[0]?.confirmationStatus, 'confirmed');
 });
 
 test('buildPersistedSession preserves normalized generated image history entries', () => {

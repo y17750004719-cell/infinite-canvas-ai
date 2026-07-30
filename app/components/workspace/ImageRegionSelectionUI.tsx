@@ -6,6 +6,12 @@ import type { CanvasItem } from '../../lib/canvas-types';
 import { imageNormalizedToItemLocal } from '../../lib/image-region-selection.mjs';
 import type { RegionSelection } from '../../lib/image-region-selection.types';
 
+const REGION_CONFIDENCE_LABELS = {
+  high: '高',
+  medium: '中',
+  low: '低',
+} as const;
+
 type RegionImageContent = {
   x: number;
   y: number;
@@ -113,7 +119,7 @@ export const CanvasRegionSelectionsLayer = memo(function CanvasRegionSelectionsL
                 willChange: 'transform',
                 opacity: 0,
               } : { left: point.x, top: point.y }}
-              title={regionLabel || region.error || '定位对象'}
+              title={`${region.confirmationStatus === 'pending' ? '待确认：' : ''}${regionLabel || region.error || '定位对象'}`}
               aria-label={`定位对象 ${regionLabel || index + 1}`}
               aria-busy={region.status === 'recognizing'}
               onPointerDown={(event) => {
@@ -154,18 +160,30 @@ export function ImageRegionCandidatePopover({
 }) {
   if (!region) return null;
 
+  const selectedCandidateId = region.selectedCandidateId || region.candidates[0]?.id;
+  const customLabel = customLabelDraft.trim();
+  const statusCopy = region.status === 'recognizing'
+    ? '正在识别对象…'
+    : region.status === 'failed'
+      ? (region.error || '识别失败，请选择候选或输入名称')
+      : region.confirmationStatus === 'pending'
+        ? '请选择并确认对象'
+        : '已确认对象';
+
   return (
     <div
       className="workspace-menu-panel absolute bottom-[148px] left-4 z-40 w-[260px] rounded-2xl p-2"
       onPointerDown={(event) => event.stopPropagation()}
-      role="listbox"
-      aria-label="对象识别候选"
+      role="dialog"
+      aria-labelledby="region-candidate-popover-title"
     >
       <div className="flex items-center justify-between gap-2 px-2 pb-1">
-        <div className="workspace-text-muted min-w-0 truncate text-[11px]">
-          {region.status === 'failed'
-            ? (region.error || '识别失败，可手动输入对象名称')
-            : region.status === 'ambiguous' ? '请选择更准确的对象' : '识别候选'}
+        <div
+          id="region-candidate-popover-title"
+          className="workspace-text-muted min-w-0 truncate text-[11px]"
+          aria-live="polite"
+        >
+          {statusCopy}
         </div>
         <div className="flex shrink-0 items-center gap-1">
           <button
@@ -188,19 +206,36 @@ export function ImageRegionCandidatePopover({
           </button>
         </div>
       </div>
-      {region.candidates.map((candidate) => (
-        <button
-          key={candidate.id}
-          type="button"
-          role="option"
-          aria-selected={candidate.id === region.selectedCandidateId}
-          className={`workspace-menu-item flex w-full items-center justify-between rounded-xl px-2.5 py-2 text-left text-xs ${candidate.id === region.selectedCandidateId ? 'is-selected' : ''}`}
-          onClick={() => onSelectCandidate(region.id, candidate.id)}
-        >
-          <span className="min-w-0 truncate font-medium">{candidate.label}</span>
-          <span className="workspace-text-muted ml-2 shrink-0 text-[10px]">{candidate.confidence}</span>
-        </button>
-      ))}
+      <div aria-label="对象识别候选" className="space-y-1">
+        {region.candidates.map((candidate, index) => {
+          const isSelected = candidate.id === selectedCandidateId;
+          const isConfirmed = region.confirmationStatus === 'confirmed'
+            && candidate.id === region.selectedCandidateId;
+          return (
+            <button
+              key={candidate.id}
+              type="button"
+              aria-label={`${candidate.label}，置信度${REGION_CONFIDENCE_LABELS[candidate.confidence]}${index === 0 ? '，推荐' : ''}${isConfirmed ? '，已确认' : ''}`}
+              data-candidate-state={isConfirmed ? 'confirmed' : isSelected ? 'selected' : 'idle'}
+              className={`workspace-menu-item w-full rounded-xl px-2.5 py-2 text-left text-xs ${isSelected ? 'is-selected' : ''}`}
+              onClick={() => onSelectCandidate(region.id, candidate.id)}
+            >
+              <span className="flex items-center justify-between gap-2">
+                <span className="min-w-0 truncate font-medium">{candidate.label}</span>
+                <span className="flex shrink-0 items-center gap-1 text-[10px]">
+                  {index === 0 && <span className="rounded bg-blue-500/15 px-1 text-blue-500">推荐</span>}
+                  {isConfirmed && <span className="text-emerald-500">已确认</span>}
+                  {!isConfirmed && isSelected && <span className="text-blue-500">已选</span>}
+                  <span className="workspace-text-muted">{REGION_CONFIDENCE_LABELS[candidate.confidence]}</span>
+                </span>
+              </span>
+              <span className="workspace-text-muted mt-1 block text-[10px] leading-4">
+                {candidate.description || '暂无补充说明'}
+              </span>
+            </button>
+          );
+        })}
+      </div>
       <div className="mt-1 flex items-center gap-1 border-t border-[var(--workspace-border)] pt-2">
         <input
           value={customLabelDraft}
@@ -212,9 +247,11 @@ export function ImageRegionCandidatePopover({
         <button
           type="button"
           className="workspace-control-chip rounded-lg px-2 py-1.5 text-[11px]"
-          onClick={() => onUseCustomLabel(region.id, region.selectedCandidateId, customLabelDraft)}
+          disabled={!customLabel}
+          aria-label="确认使用自定义名称"
+          onClick={() => onUseCustomLabel(region.id, selectedCandidateId, customLabel)}
         >
-          使用
+          确认
         </button>
       </div>
     </div>

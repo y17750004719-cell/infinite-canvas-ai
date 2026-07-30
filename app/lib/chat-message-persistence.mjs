@@ -12,6 +12,10 @@ function createLegacyReference(messageId, src, index, overrides = {}) {
     ...(Number.isFinite(overrides.annotationCount) ? { annotationCount: overrides.annotationCount } : {}),
     ...(text(overrides.regionId) ? { regionId: overrides.regionId } : {}),
     ...(text(overrides.candidateId) ? { candidateId: overrides.candidateId } : {}),
+    ...(overrides.role === 'region_target' ? { confirmationStatus: 'confirmed' } : {}),
+    ...(Array.isArray(overrides.aliases) ? { aliases: overrides.aliases } : {}),
+    ...(text(overrides.description) ? { description: overrides.description } : {}),
+    ...(['high', 'medium', 'low'].includes(overrides.confidence) ? { confidence: overrides.confidence } : {}),
     ...(overrides.targetPoint && typeof overrides.targetPoint === 'object' ? { targetPoint: overrides.targetPoint } : {}),
     ...(overrides.targetBox && typeof overrides.targetBox === 'object' ? { targetBox: overrides.targetBox } : {}),
   };

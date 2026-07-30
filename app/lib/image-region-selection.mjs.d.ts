@@ -18,6 +18,7 @@ export interface RegionSelection {
   candidates: RegionCandidate[];
   selectedCandidateId?: string;
   customLabel?: string;
+  confirmationStatus?: 'pending' | 'confirmed';
   status: 'recognizing' | 'ready' | 'ambiguous' | 'failed';
   error?: string;
   recognitionRevision?: number;
@@ -29,6 +30,10 @@ export interface AgentRegionTargetReference {
   canvasItemId?: string;
   regionId?: string;
   candidateId?: string;
+  confirmationStatus?: 'pending' | 'confirmed';
+  aliases?: string[];
+  description?: string;
+  confidence?: 'high' | 'medium' | 'low';
   targetPoint?: NormalizedPoint;
   targetBox?: NormalizedBox;
 }
@@ -39,6 +44,8 @@ export interface AgentRegionSelectionSnapshot {
   box?: NormalizedBox;
   label: string;
   candidateId?: string;
+  aliases?: string[];
+  description?: string;
   confidence?: 'high' | 'medium' | 'low';
 }
 export function clampNormalized(value: unknown): number;
@@ -49,6 +56,13 @@ export function buildRegionEvidenceCrop(input: Record<string, unknown>): Normali
 export function canvasPointToImageNormalized(input: Record<string, unknown>): NormalizedPoint | null;
 export function imageNormalizedToItemLocal(input: Record<string, unknown>): NormalizedPoint | null;
 export function normalizeLocateCandidates(value: unknown): RegionCandidate[];
+export function buildRegionRecognitionPrompt(input: {
+  mode?: 'point' | 'box';
+  point: unknown;
+  box?: unknown;
+  hasMarkedImage?: boolean;
+  hasCropImage?: boolean;
+}): string;
 export function parseLocateModelResponse(response: unknown): { candidates: RegionCandidate[]; selectedCandidateId: string; lowConfidence: boolean };
 export function selectedRegionLabel(region: Partial<RegionSelection> | null | undefined): string;
 export function buildAgentRegionSelectionSnapshot(input?: {

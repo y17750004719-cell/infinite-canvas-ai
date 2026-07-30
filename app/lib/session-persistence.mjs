@@ -33,6 +33,7 @@ const normalizeRegionSelections = (regions, items) => {
         height: Math.min(1, Math.max(0, Number(region.box.height) || 0)),
       } } : {}),
       candidates,
+      confirmationStatus: region.confirmationStatus === 'confirmed' ? 'confirmed' : 'pending',
       recognitionRevision: Number.isFinite(Number(region.recognitionRevision))
         ? Math.max(0, Math.floor(Number(region.recognitionRevision)))
         : 0,

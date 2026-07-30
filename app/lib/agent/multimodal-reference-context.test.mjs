@@ -53,6 +53,34 @@ test('annotation composites are emitted as non-selectable evidence after their p
   assert.match(parts[2].text, /never be selected as targetReferenceId/i);
 });
 
+test('confirmed region crops follow their parent and pending region targets never reach the model', () => {
+  const parts = buildMultimodalReferenceParts({
+    references: [
+      { id: 'pending', src: 'https://example.test/pending.png', label: 'Pending', source: 'canvas', role: 'region_target' },
+      {
+        id: 'region',
+        src: 'https://example.test/original.png',
+        label: '左侧老虎',
+        source: 'canvas',
+        role: 'region_target',
+        confirmationStatus: 'confirmed',
+        aliases: ['左虎'],
+        description: '画面左侧戴墨镜的老虎',
+        confidence: 'high',
+      },
+    ],
+    composerSegments: [{ type: 'reference', referenceId: 'pending' }, { type: 'reference', referenceId: 'region' }],
+    evidenceImages: [{ id: 'region:crop', referenceId: 'region', src: 'https://example.test/crop.png', kind: 'region_crop' }],
+  });
+  assert.deepEqual(parts.filter((part) => part.type === 'image_url').map((part) => part.image_url.url), [
+    'https://example.test/original.png',
+    'https://example.test/crop.png',
+  ]);
+  assert.match(parts[0].text, /Candidate aliases: 左虎/);
+  assert.match(parts[2].text, /Region crop evidence image/);
+  assert.match(parts[2].text, /never be selected as targetReferenceId/i);
+});
+
 test('identical image sources are sent once while retaining both reference ids', () => {
   const parts = buildMultimodalReferenceParts({
     references: [

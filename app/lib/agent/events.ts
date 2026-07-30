@@ -80,6 +80,10 @@ export type AgentClarificationState = {
       annotationCount?: number;
       regionId?: string;
       candidateId?: string;
+      confirmationStatus?: 'pending' | 'confirmed';
+      aliases?: string[];
+      description?: string;
+      confidence?: 'high' | 'medium' | 'low';
       targetPoint?: { x: number; y: number };
       targetBox?: { x: number; y: number; width: number; height: number };
     }>;
@@ -91,7 +95,7 @@ export type AgentClarificationState = {
       id: string;
       referenceId: string;
       src: string;
-      kind: 'annotation_composite';
+      kind: 'annotation_composite' | 'region_crop';
     }>;
   };
   contextCandidates?: AgentContextEntity[];

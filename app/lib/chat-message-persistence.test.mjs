@@ -78,3 +78,31 @@ test('distinct region targets on the same image survive message normalization', 
     { type: 'text', text: '交换两个对象' },
   ]);
 });
+
+test('sent region target persistence treats legacy references as confirmed and keeps confirmed semantics', () => {
+  const normalized = normalizeChatMessageReferences({
+    id: 'message-region-contract',
+    role: 'user',
+    content: '修改选区',
+    referenceContext: {
+      references: [
+        { id: 'legacy', src: '/image.png', label: '旧选区', source: 'canvas', role: 'region_target', regionId: 'legacy' },
+        { id: 'confirmed', src: '/image.png', label: '左侧老虎', source: 'canvas', role: 'region_target', regionId: 'confirmed', confirmationStatus: 'confirmed', aliases: ['左虎'], description: '画面左侧戴墨镜的老虎', confidence: 'high' },
+      ],
+      composerSegments: [],
+    },
+  });
+  assert.equal(normalized.referenceContext.references[0].confirmationStatus, 'confirmed');
+  assert.deepEqual(normalized.referenceContext.references[1], {
+    id: 'confirmed',
+    src: '/image.png',
+    label: '左侧老虎',
+    source: 'canvas',
+    role: 'region_target',
+    regionId: 'confirmed',
+    confirmationStatus: 'confirmed',
+    aliases: ['左虎'],
+    description: '画面左侧戴墨镜的老虎',
+    confidence: 'high',
+  });
+});

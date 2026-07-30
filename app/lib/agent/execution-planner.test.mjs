@@ -23,6 +23,8 @@ test('compact canvas context bounds and limits region prompt data', () => {
       point: { x: -2, y: 3 },
       box: { x: 0.9, y: 0.8, width: 0.5, height: 0.7 },
       candidateId: 'candidate-id',
+      aliases: ['别名'],
+      description: '左侧戴墨镜的老虎',
       confidence: 'high',
     }],
   });
@@ -35,6 +37,25 @@ test('compact canvas context bounds and limits region prompt data', () => {
   assert.equal(region.box.y, 0.8);
   assert.ok(Math.abs(region.box.width - 0.1) < 1e-12);
   assert.ok(Math.abs(region.box.height - 0.2) < 1e-12);
+  assert.deepEqual(region.aliases, ['别名']);
+  assert.equal(region.description, '左侧戴墨镜的老虎');
+});
+
+test('planner context keeps only confirmed region references and parented region crops', () => {
+  const payload = JSON.parse(buildAgentExecutionPlannerMessages({
+    userMessage: '修改选区',
+    referenceContext: {
+      references: [
+        { id: 'pending', label: '待确认', source: 'canvas', role: 'region_target' },
+        { id: 'confirmed', label: '左侧老虎', source: 'canvas', role: 'region_target', confirmationStatus: 'confirmed', aliases: ['左虎'], description: '左侧戴墨镜的老虎', confidence: 'high' },
+      ],
+      composerSegments: [],
+      evidenceImages: [{ id: 'crop', referenceId: 'confirmed', kind: 'region_crop' }],
+    },
+  })[1].content);
+  assert.deepEqual(payload.referenceContext.references.map((reference) => reference.id), ['confirmed']);
+  assert.equal(payload.referenceContext.references[0].description, '左侧戴墨镜的老虎');
+  assert.deepEqual(payload.referenceContext.evidenceImages, [{ id: 'crop', referenceId: 'confirmed', kind: 'region_crop' }]);
 });
 
 const manifests = [{

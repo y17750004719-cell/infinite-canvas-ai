@@ -452,7 +452,7 @@ test('item ports stay attached during imperative drag, resize, and immediate con
   assert.equal(dragTargetSource.includes("role === 'input-port-bridge'"), true);
   assert.equal(dragTargetSource.includes("role === 'output-port'"), true);
   assert.equal(dragTargetSource.includes("role === 'output-port-bridge'"), true);
-  assert.equal(dragPlanSource.includes('.filter(isCanvasItemDragTarget)'), true);
+  assert.equal(dragPlanSource.includes('.filter(isCanvasItemDragTarget)'), false);
   assert.equal(dragPreviewSource.includes('.filter(isCanvasItemDragTarget)'), true);
   assert.equal(dragCommitSource.includes('syncCanvasItemPortPositions({ ...item, ...finalPosition });'), true);
   assert.equal(resizeSource.includes('syncCanvasItemPortPositions({ ...liveItem, ...nextSize });'), true);

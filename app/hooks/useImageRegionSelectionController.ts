@@ -1,11 +1,20 @@
 'use client';
 
 import { useCallback, useEffect, useRef } from 'react';
+import { buildRegionRecognitionPrompt, parseLocateModelResponse } from '../lib/image-region-selection.mjs';
 import type { RegionCandidate, RegionSelection } from '../lib/image-region-selection.types';
 
-type RegionEvidence = { imageSrc?: string; evidenceImageSrc?: string; cropImageSrc?: string };
+export type RegionEvidence = { imageSrc?: string; evidenceImageSrc?: string; cropImageSrc?: string };
 
 const isAbortError = (error: unknown) => error instanceof DOMException && error.name === 'AbortError';
+const recognitionErrorMessage = (value: unknown) => {
+  const message = value instanceof Error ? value.message : String(value || '识别失败');
+  const normalized = message.toLowerCase();
+  return /(image input|image understanding|vision|multimodal|图片输入|图像输入)/.test(normalized)
+    && /(not support|unsupported|does not support|不支持)/.test(normalized)
+    ? '当前对话模型不支持图片理解，请切换模型'
+    : message;
+};
 
 export function useImageRegionSelectionController({
   setRegions,
@@ -19,8 +28,8 @@ export function useImageRegionSelectionController({
   providerId?: string;
   model?: string;
   buildEvidence: (region: RegionSelection, signal: AbortSignal) => Promise<RegionEvidence>;
-  onResolved: (region: RegionSelection, previousRegionId: string, lowConfidence: boolean) => void;
-  onFailed: (regionId: string) => void;
+  onResolved: (region: RegionSelection, previousRegionId: string, lowConfidence: boolean, evidence: RegionEvidence) => void;
+  onFailed: (regionId: string, evidence: RegionEvidence) => void;
 }) {
   const controllersRef = useRef<Map<string, AbortController>>(new Map());
   const revisionsRef = useRef<Map<string, number>>(new Map());
@@ -56,8 +65,13 @@ export function useImageRegionSelectionController({
       ? { ...candidate, status: 'recognizing', error: undefined, recognitionRevision: revision }
       : candidate));
 
+    let evidence: RegionEvidence = {};
     try {
-      let evidence: RegionEvidence = {};
+      const recognitionProviderId = providerId?.trim();
+      const recognitionModel = model?.trim();
+      if (!recognitionProviderId || !recognitionModel) {
+        throw new Error('请先选择支持图片理解的对话模型');
+      }
       try {
         evidence = await buildEvidence(region, controller.signal);
       } catch (error) {
@@ -66,44 +80,55 @@ export function useImageRegionSelectionController({
       }
       if (!isCurrentRequest()) return;
 
-      const response = await fetch('/api/image-tools/locate', {
+      const referenceImages = [evidence.imageSrc || region.imageSrc];
+      const referenceLabels = ['original-image'];
+      if (evidence.evidenceImageSrc) {
+        referenceImages.push(evidence.evidenceImageSrc);
+        referenceLabels.push('marked-location');
+      }
+      if (evidence.cropImageSrc) {
+        referenceImages.push(evidence.cropImageSrc);
+        referenceLabels.push('clean-region-crop');
+      }
+      const response = await fetch('/api/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          regionId: region.id,
-          imageSrc: evidence.imageSrc || region.imageSrc,
-          evidenceImageSrc: evidence.evidenceImageSrc || undefined,
-          cropImageSrc: evidence.cropImageSrc || undefined,
-          imageItemId: region.imageItemId,
-          mode: region.mode,
-          point: region.point,
-          box: region.box,
-          providerId: providerId || undefined,
-          model: model || undefined,
+          intent: 'chat',
+          stream: false,
+          chatProviderId: recognitionProviderId,
+          model: recognitionModel,
+          messages: [{
+            role: 'user',
+            content: buildRegionRecognitionPrompt({
+              mode: region.mode,
+              point: region.point,
+              box: region.box,
+              hasMarkedImage: Boolean(evidence.evidenceImageSrc),
+              hasCropImage: Boolean(evidence.cropImageSrc),
+            }),
+          }],
+          reference_images: referenceImages,
+          reference_labels: referenceLabels,
         }),
         signal: controller.signal,
       });
       const payload = await response.json().catch(() => null);
       if (!isCurrentRequest()) return;
-      if (!response.ok || !Array.isArray(payload?.candidates) || payload.candidates.length === 0) {
+      if (!response.ok) {
         throw new Error(payload?.error || '未能识别该区域');
       }
+      const parsed = parseLocateModelResponse(payload);
 
-      const nextId = typeof payload.regionId === 'string' && payload.regionId.trim() ? payload.regionId : region.id;
       const nextRegion: RegionSelection = {
         ...region,
-        id: nextId,
-        candidates: payload.candidates as RegionCandidate[],
-        selectedCandidateId: typeof payload.selectedCandidateId === 'string'
-          ? payload.selectedCandidateId
-          : payload.candidates[0].id,
-        status: payload.lowConfidence ? 'ambiguous' : 'ready',
+        candidates: parsed.candidates as RegionCandidate[],
+        selectedCandidateId: parsed.selectedCandidateId,
+        status: parsed.lowConfidence ? 'ambiguous' : 'ready',
         recognitionRevision: revision,
       };
-      setRegions((previous) => previous
-        .filter((candidate) => candidate.id !== region.id && candidate.id !== nextId)
-        .concat(nextRegion));
-      onResolved(nextRegion, region.id, payload.lowConfidence === true);
+      setRegions((previous) => previous.map((candidate) => candidate.id === region.id ? nextRegion : candidate));
+      onResolved(nextRegion, region.id, parsed.lowConfidence, evidence);
     } catch (error) {
       if (isAbortError(error) || !isCurrentRequest()) return;
       setRegions((previous) => previous.map((candidate) => candidate.id === region.id
@@ -111,10 +136,10 @@ export function useImageRegionSelectionController({
             ...candidate,
             status: 'failed',
             recognitionRevision: revision,
-            error: error instanceof Error ? error.message : '识别失败',
+            error: recognitionErrorMessage(error),
           }
         : candidate));
-      onFailed(region.id);
+      onFailed(region.id, evidence);
     } finally {
       if (controllersRef.current.get(region.id) === controller) {
         controllersRef.current.delete(region.id);

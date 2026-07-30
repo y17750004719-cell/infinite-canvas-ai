@@ -202,6 +202,10 @@ type AgentRuntimeReferenceContext = {
     annotationCount?: number;
     regionId?: string;
     candidateId?: string;
+    confirmationStatus?: 'pending' | 'confirmed';
+    aliases?: string[];
+    description?: string;
+    confidence?: 'high' | 'medium' | 'low';
     targetPoint?: { x: number; y: number };
     targetBox?: { x: number; y: number; width: number; height: number };
   }>;
@@ -213,7 +217,7 @@ type AgentRuntimeReferenceContext = {
     id: string;
     referenceId: string;
     src: string;
-    kind: 'annotation_composite';
+    kind: 'annotation_composite' | 'region_crop';
   }>;
 };
 
@@ -286,6 +290,7 @@ function normalizeAgentRuntimeReferenceContext(value: unknown): AgentRuntimeRefe
         ? 'reference'
         : null;
     if (!id || !src || !label || !source || !role) return [];
+    if (role === 'region_target' && reference.confirmationStatus !== 'confirmed') return [];
     return [{
       id,
       src,
@@ -300,6 +305,10 @@ function normalizeAgentRuntimeReferenceContext(value: unknown): AgentRuntimeRefe
         : {}),
       ...(typeof reference.regionId === 'string' && reference.regionId.trim() ? { regionId: reference.regionId.trim() } : {}),
       ...(typeof reference.candidateId === 'string' && reference.candidateId.trim() ? { candidateId: reference.candidateId.trim() } : {}),
+      ...(reference.confirmationStatus === 'confirmed' ? { confirmationStatus: 'confirmed' as const } : { confirmationStatus: 'pending' as const }),
+      ...(Array.isArray(reference.aliases) ? { aliases: reference.aliases.filter((value): value is string => typeof value === 'string' && Boolean(value.trim())).map((value) => value.trim()).slice(0, 6) } : {}),
+      ...(typeof reference.description === 'string' && reference.description.trim() ? { description: reference.description.trim().slice(0, 240) } : {}),
+      ...(reference.confidence === 'high' || reference.confidence === 'medium' || reference.confidence === 'low' ? { confidence: reference.confidence } : {}),
       ...(normalizeRuntimePoint(reference.targetPoint) ? { targetPoint: normalizeRuntimePoint(reference.targetPoint)! } : {}),
       ...(normalizeRuntimeBox(reference.targetBox) ? { targetBox: normalizeRuntimeBox(reference.targetBox)! } : {}),
     }];
@@ -322,8 +331,10 @@ function normalizeAgentRuntimeReferenceContext(value: unknown): AgentRuntimeRefe
     const id = typeof evidence.id === 'string' ? evidence.id.trim() : '';
     const referenceId = typeof evidence.referenceId === 'string' ? evidence.referenceId.trim() : '';
     const src = typeof evidence.src === 'string' ? evidence.src.trim() : '';
-    if (!id || !referenceId || !src || evidence.kind !== 'annotation_composite' || !knownIds.has(referenceId)) return [];
-    return [{ id, referenceId, src, kind: 'annotation_composite' as const }];
+    const parent = references.find((reference) => reference.id === referenceId);
+    if (!id || !parent || !src || (evidence.kind !== 'annotation_composite' && evidence.kind !== 'region_crop')) return [];
+    if (evidence.kind === 'region_crop' && parent.role !== 'region_target') return [];
+    return [{ id, referenceId, src, kind: evidence.kind as 'annotation_composite' | 'region_crop' }];
   }).slice(0, 14);
   return references.length > 0 || composerSegments.length > 0 || evidenceImages.length > 0
     ? { references, composerSegments, ...(evidenceImages.length > 0 ? { evidenceImages } : {}) }
@@ -623,6 +634,18 @@ export async function POST(request: NextRequest) {
   const body = await request.json().catch(() => null) as AgentRequestBody | null;
   if (!body || !Array.isArray(body.messages)) {
     return NextResponse.json({ error: 'Messages are required' }, { status: 400 });
+  }
+  const hasUnconfirmedRegion = [
+    body.referenceContext,
+    body.clarificationState?.referenceContext,
+  ].some((referenceContext) => (
+    Array.isArray(referenceContext?.references)
+    && referenceContext.references.some((reference) => (
+      reference?.role === 'region_target' && reference.confirmationStatus !== 'confirmed'
+    ))
+  ));
+  if (hasUnconfirmedRegion) {
+    return NextResponse.json({ error: 'Region targets must be explicitly confirmed before sending' }, { status: 400 });
   }
   // Treat the client-provided reference context as untrusted runtime data. Keep
   // only the fields needed by the planner/execution bridge and drop malformed

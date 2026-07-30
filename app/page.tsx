@@ -30,7 +30,10 @@ import {
   imageNormalizedToItemLocal,
 } from './lib/image-region-selection.mjs';
 import type { RegionSelection, RegionCandidate } from './lib/image-region-selection.types';
-import { useImageRegionSelectionController } from './hooks/useImageRegionSelectionController';
+import {
+  useImageRegionSelectionController,
+  type RegionEvidence,
+} from './hooks/useImageRegionSelectionController';
 import {
   isCanvasPerformanceEnabled,
   useCanvasInteractionController,
@@ -624,6 +627,11 @@ interface ChatReferenceToken {
   annotationItemIds?: string[];
   regionId?: string;
   candidateId?: string;
+  description?: string;
+  aliases?: string[];
+  confidence?: 'high' | 'medium' | 'low';
+  confirmationStatus?: 'pending' | 'confirmed';
+  previewSrc?: string;
   targetPoint?: { x: number; y: number };
   targetBox?: { x: number; y: number; width: number; height: number };
   uploadStatus?: 'uploading' | 'failed';
@@ -643,6 +651,10 @@ interface AgentReferenceContext {
     annotationCount?: number;
     regionId?: string;
     candidateId?: string;
+    description?: string;
+    aliases?: string[];
+    confidence?: 'high' | 'medium' | 'low';
+    confirmationStatus?: 'pending' | 'confirmed';
     targetPoint?: { x: number; y: number };
     targetBox?: { x: number; y: number; width: number; height: number };
   }>;
@@ -654,7 +666,7 @@ interface AgentReferenceContext {
     id: string;
     referenceId: string;
     src: string;
-    kind: 'annotation_composite';
+    kind: 'annotation_composite' | 'region_crop';
   }>;
 }
 
@@ -721,18 +733,24 @@ const mergeAdjacentChatComposerText = (segments: ChatComposerSegment[]): ChatCom
 const insertReferenceSegmentsAtTextOffset = (
   segments: ChatComposerSegment[],
   tokenIds: string[],
-  requestedOffset: number
+  requestedAnchor: { textOffset: number; referenceCount: number }
 ): ChatComposerSegment[] => {
   if (tokenIds.length === 0) return segments;
-  const offset = Math.max(0, Math.min(requestedOffset, getChatComposerPlainText(segments).length));
+  const offset = Math.max(0, Math.min(requestedAnchor.textOffset, getChatComposerPlainText(segments).length));
+  const referenceCount = Math.max(0, requestedAnchor.referenceCount);
   const inserted = tokenIds.map((tokenId) => ({ type: 'reference' as const, tokenId }));
   const next: ChatComposerSegment[] = [];
-  let consumed = 0;
+  let consumedText = 0;
+  let consumedReferences = 0;
   let didInsert = false;
 
   for (const segment of segments) {
-    if (!didInsert && segment.type === 'text' && consumed + segment.text.length >= offset) {
-      const localOffset = offset - consumed;
+    if (!didInsert && consumedText === offset && consumedReferences === referenceCount) {
+      next.push(...inserted);
+      didInsert = true;
+    }
+    if (!didInsert && segment.type === 'text' && consumedReferences === referenceCount && consumedText + segment.text.length > offset) {
+      const localOffset = offset - consumedText;
       if (localOffset > 0) next.push({ type: 'text', text: segment.text.slice(0, localOffset) });
       next.push(...inserted);
       if (localOffset < segment.text.length) next.push({ type: 'text', text: segment.text.slice(localOffset) });
@@ -740,7 +758,8 @@ const insertReferenceSegmentsAtTextOffset = (
     } else {
       next.push(segment);
     }
-    if (segment.type === 'text') consumed += segment.text.length;
+    if (segment.type === 'text') consumedText += segment.text.length;
+    else consumedReferences += 1;
   }
 
   if (!didInsert) next.push(...inserted);
@@ -2204,6 +2223,32 @@ const getRegionImageContent = (item: CanvasItem) => {
 const getRegionCandidate = (region: RegionSelection): RegionCandidate | undefined =>
   region.candidates.find((candidate) => candidate.id === region.selectedCandidateId) || region.candidates[0];
 
+const buildRegionReferenceToken = (
+  region: RegionSelection,
+  evidence: RegionEvidence = {}
+): ChatReferenceToken => {
+  const candidate = getRegionCandidate(region);
+  return {
+    id: `region-reference:${region.id}`,
+    src: region.imageSrc,
+    previewSrc: evidence.cropImageSrc || region.imageSrc,
+    label: region.status === 'recognizing' ? '识别中…' : selectedRegionLabel(region),
+    source: 'canvas',
+    canvasItemId: region.imageItemId,
+    transient: false,
+    pinned: false,
+    role: 'region_target',
+    regionId: region.id,
+    candidateId: region.selectedCandidateId,
+    description: region.customLabel ? undefined : candidate?.description,
+    aliases: region.customLabel ? [] : candidate?.aliases,
+    confidence: region.customLabel ? undefined : candidate?.confidence,
+    confirmationStatus: region.confirmationStatus || 'pending',
+    targetPoint: region.point,
+    ...(region.box ? { targetBox: region.box } : {}),
+  };
+};
+
 interface ViewportState {
   x: number;
   y: number;
@@ -2323,7 +2368,6 @@ interface CachedCanvasItemDragConnection {
 }
 
 interface CachedCanvasItemDragPlan {
-  targets: CanvasRegisteredTarget[];
   connections: CachedCanvasItemDragConnection[];
 }
 
@@ -5799,11 +5843,17 @@ export default function AIWorkspace() {
   const [hideWelcomeByCenterSkillPick, setHideWelcomeByCenterSkillPick] = useState(false);
   const [referenceImages, setReferenceImages] = useState<string[]>([]);
   const [chatReferenceTokens, setChatReferenceTokens] = useState<ChatReferenceToken[]>([]);
+  const chatReferenceTokensRef = useRef<ChatReferenceToken[]>([]);
   const [regionSelections, setRegionSelectionsState] = useState<RegionSelection[]>([]);
   const regionSelectionsRef = useRef<RegionSelection[]>([]);
+  const regionEvidenceByIdRef = useRef<Map<string, RegionEvidence>>(new Map());
   const [activeRegionMenuId, setActiveRegionMenuId] = useState<string | null>(null);
   const [regionRefineId, setRegionRefineId] = useState<string | null>(null);
   const [regionCustomLabelDraft, setRegionCustomLabelDraft] = useState('');
+
+  useLayoutEffect(() => {
+    chatReferenceTokensRef.current = chatReferenceTokens;
+  }, [chatReferenceTokens]);
   const [regionDraftPreview, setRegionDraftPreview] = useState<RegionSelection | null>(null);
   const regionDraftRef = useRef<{
     pointerId: number;
@@ -6201,7 +6251,7 @@ export default function AIWorkspace() {
   const chatFileInputRef = useRef<HTMLInputElement>(null);
   const chatInputEditorRef = useRef<HTMLDivElement>(null);
   const chatComposerSegmentsRef = useRef<ChatComposerSegment[]>([{ type: 'text', text: '' }]);
-  const chatEditorCaretOffsetRef = useRef(0);
+  const chatEditorCaretAnchorRef = useRef({ textOffset: 0, referenceCount: 0 });
   const chatContainerRef = useRef<HTMLDivElement>(null);
   const chatMessagesContentRef = useRef<HTMLDivElement>(null);
   const [isChatNearBottom, setIsChatNearBottom] = useState(true);
@@ -7748,23 +7798,27 @@ export default function AIWorkspace() {
     return getChatComposerPlainText(parseChatEditorSegments(root));
   }, [parseChatEditorSegments]);
 
-  const getChatEditorCaretOffset = useCallback(() => {
+  const getChatEditorCaretAnchor = useCallback(() => {
     const editor = chatInputEditorRef.current;
     const selection = window.getSelection();
-    if (!editor || !selection || selection.rangeCount === 0) return chatEditorCaretOffsetRef.current;
+    if (!editor || !selection || selection.rangeCount === 0) return chatEditorCaretAnchorRef.current;
     const range = selection.getRangeAt(0);
-    if (!range.collapsed || !editor.contains(range.startContainer)) return chatEditorCaretOffsetRef.current;
+    if (!range.collapsed || !editor.contains(range.startContainer)) return chatEditorCaretAnchorRef.current;
     const prefixRange = range.cloneRange();
     prefixRange.selectNodeContents(editor);
     prefixRange.setEnd(range.startContainer, range.startOffset);
     const wrapper = document.createElement('div');
     wrapper.appendChild(prefixRange.cloneContents());
-    return getChatComposerPlainText(parseChatEditorSegments(wrapper)).length;
+    const prefixSegments = parseChatEditorSegments(wrapper);
+    return {
+      textOffset: getChatComposerPlainText(prefixSegments).length,
+      referenceCount: prefixSegments.filter((segment) => segment.type === 'reference').length,
+    };
   }, [parseChatEditorSegments]);
 
   const rememberChatEditorCaretOffset = useCallback(() => {
-    chatEditorCaretOffsetRef.current = getChatEditorCaretOffset();
-  }, [getChatEditorCaretOffset]);
+    chatEditorCaretAnchorRef.current = getChatEditorCaretAnchor();
+  }, [getChatEditorCaretAnchor]);
 
   const moveCaretToEditorEnd = useCallback(() => {
     const editor = chatInputEditorRef.current;
@@ -7793,7 +7847,7 @@ export default function AIWorkspace() {
       .map((token) => token.id)
       .filter((tokenId) => !currentTokenIds.has(tokenId));
     if (missingTokenIds.length > 0) {
-      segments = insertReferenceSegmentsAtTextOffset(segments, missingTokenIds, chatEditorCaretOffsetRef.current);
+      segments = insertReferenceSegmentsAtTextOffset(segments, missingTokenIds, chatEditorCaretAnchorRef.current);
     }
     if (getChatComposerPlainText(segments) !== value) {
       segments = replaceChatComposerTextPreservingReferences(segments, value);
@@ -7842,11 +7896,13 @@ export default function AIWorkspace() {
         token.setAttribute('data-reference-signature', JSON.stringify(tokenData));
         token.setAttribute('contenteditable', 'false');
         token.className = 'workspace-reference-token group/reference relative mx-0.5 inline-flex h-7 max-w-[172px] align-middle items-center gap-1 rounded-lg px-1.5 text-[11px]';
-        token.title = tokenData.label;
+        token.title = tokenData.regionId && tokenData.confirmationStatus !== 'confirmed'
+          ? `待确认 · ${tokenData.label}`
+          : tokenData.label;
 
         const thumb = document.createElement('span');
         thumb.className = 'h-5 w-5 shrink-0 rounded-md bg-cover bg-center';
-        thumb.style.backgroundImage = `url("${tokenData.src.replace(/"/g, '\\"')}")`;
+        thumb.style.backgroundImage = `url("${(tokenData.previewSrc || tokenData.src).replace(/"/g, '\\"')}")`;
         token.appendChild(thumb);
         const label = document.createElement('span');
         label.className = 'min-w-0 truncate text-[11px] font-medium';
@@ -7860,6 +7916,12 @@ export default function AIWorkspace() {
           const badge = document.createElement('span');
           badge.className = 'shrink-0 rounded-md bg-red-500/12 px-1.5 py-0.5 text-[9px] font-medium text-red-500';
           badge.textContent = `${tokenData.annotationCount} 条标注`;
+          token.appendChild(badge);
+        }
+        if (tokenData.regionId && tokenData.confirmationStatus !== 'confirmed') {
+          const badge = document.createElement('span');
+          badge.className = 'shrink-0 rounded-md bg-amber-500/12 px-1.5 py-0.5 text-[9px] font-medium text-amber-600';
+          badge.textContent = '待确认';
           token.appendChild(badge);
         }
         if (tokenData.regionId && !tokenData.uploadStatus) {
@@ -7879,7 +7941,7 @@ export default function AIWorkspace() {
           retry.setAttribute('aria-label', '重试上传参考图');
           retry.textContent = '重试';
           token.appendChild(retry);
-        } else if (!tokenData.uploadStatus) {
+        } else if (!tokenData.uploadStatus && !tokenData.regionId) {
           const pin = document.createElement('button');
           pin.type = 'button';
           pin.setAttribute('data-reference-action', 'pin');
@@ -8730,9 +8792,6 @@ export default function AIWorkspace() {
         if (token.source === 'canvas' && token.canvasItemId) {
           dismissedCanvasReferenceIdsRef.current.add(token.canvasItemId);
         }
-        if (token.regionId) {
-          setRegionSelections((regions) => regions.filter((region) => region.id !== token.regionId));
-        }
       });
       setChatReferenceTokens((tokens) => tokens.filter((token) => !removedTokenIds.includes(token.id)));
     }
@@ -8948,8 +9007,6 @@ export default function AIWorkspace() {
     }
     if (token.previewObjectUrl) URL.revokeObjectURL(token.previewObjectUrl);
     if (token.regionId) {
-      cancelRegionRecognition(token.regionId);
-      setRegionSelections((regions) => regions.filter((region) => region.id !== token.regionId));
       setActiveRegionMenuId((current) => current === token.regionId ? null : current);
     }
     setChatReferenceTokens((tokens) => tokens.filter((candidate) => candidate.id !== token.id));
@@ -9581,31 +9638,39 @@ export default function AIWorkspace() {
   const handleRegionRecognitionResolved = useCallback((
     nextRegion: RegionSelection,
     previousRegionId: string,
-    lowConfidence: boolean
+    _lowConfidence: boolean,
+    evidence: RegionEvidence
   ) => {
-    setChatReferenceTokens((previous) => [
-      ...previous.filter((token) => token.regionId !== previousRegionId && token.regionId !== nextRegion.id),
-      {
-        id: `region-reference:${nextRegion.id}`,
-        src: nextRegion.imageSrc,
-        label: selectedRegionLabel(nextRegion),
-        source: 'canvas',
-        canvasItemId: nextRegion.imageItemId,
-        transient: false,
-        pinned: false,
-        role: 'region_target',
-        regionId: nextRegion.id,
-        candidateId: nextRegion.selectedCandidateId,
-        targetPoint: nextRegion.point,
-        ...(nextRegion.box ? { targetBox: nextRegion.box } : {}),
-      } as ChatReferenceToken,
-    ].slice(0, 14));
-    setActiveRegionMenuId(lowConfidence ? nextRegion.id : null);
+    regionEvidenceByIdRef.current.delete(previousRegionId);
+    regionEvidenceByIdRef.current.set(nextRegion.id, evidence);
+    const token = buildRegionReferenceToken(nextRegion, evidence);
+    const hasToken = chatReferenceTokensRef.current.some((candidate) => (
+      candidate.regionId === previousRegionId || candidate.regionId === nextRegion.id
+    ));
+    setChatReferenceTokens((previous) => previous.some((candidate) => (
+      candidate.regionId === previousRegionId || candidate.regionId === nextRegion.id
+    ))
+      ? previous.map((candidate) => (
+          candidate.regionId === previousRegionId || candidate.regionId === nextRegion.id ? token : candidate
+        ))
+      : previous);
+    if (hasToken) setActiveRegionMenuId(nextRegion.id);
     setRegionCustomLabelDraft('');
   }, []);
 
-  const handleRegionRecognitionFailed = useCallback((regionId: string) => {
-    setActiveRegionMenuId(regionId);
+  const handleRegionRecognitionFailed = useCallback((regionId: string, evidence: RegionEvidence) => {
+    regionEvidenceByIdRef.current.set(regionId, evidence);
+    const hasToken = chatReferenceTokensRef.current.some((token) => token.regionId === regionId);
+    setChatReferenceTokens((previous) => previous.map((token) => token.regionId === regionId
+      ? {
+          ...token,
+          label: '识别失败',
+          confirmationStatus: 'pending',
+          previewSrc: evidence.cropImageSrc || token.previewSrc,
+        }
+      : token));
+    setRegionCustomLabelDraft('');
+    if (hasToken) setActiveRegionMenuId(regionId);
   }, []);
 
   const {
@@ -9623,20 +9688,13 @@ export default function AIWorkspace() {
   });
 
   const clearSentChatReferenceTokens = useCallback(() => {
-    const removedRegionIds = chatReferenceTokens
-      .filter((token) => token.regionId && !token.pinned)
-      .map((token) => token.regionId!);
-    removedRegionIds.forEach(cancelRegionRecognition);
-    if (removedRegionIds.length > 0) {
-      setRegionSelections((regions) => regions.filter((region) => !removedRegionIds.includes(region.id)));
-      setActiveRegionMenuId((current) => current && removedRegionIds.includes(current) ? null : current);
-      setRegionRefineId((current) => current && removedRegionIds.includes(current) ? null : current);
-    }
-    setChatReferenceTokens((tokens) => tokens.filter((token) => token.pinned));
-  }, [cancelRegionRecognition, chatReferenceTokens, setRegionSelections]);
+    setChatReferenceTokens((tokens) => tokens.filter((token) => !token.regionId && token.pinned));
+    setActiveRegionMenuId(null);
+  }, []);
 
   const removeRegionSelection = useCallback((regionId: string) => {
     cancelRegionRecognition(regionId);
+    regionEvidenceByIdRef.current.delete(regionId);
     setRegionSelections((regions) => regions.filter((region) => region.id !== regionId));
     setChatReferenceTokens((tokens) => tokens.filter((token) => token.regionId !== regionId));
     setActiveRegionMenuId((current) => current === regionId ? null : current);
@@ -9647,28 +9705,21 @@ export default function AIWorkspace() {
     const region = regionSelectionsRef.current.find((candidate) => candidate.id === regionId);
     if (!region) return;
     const candidate = region.candidates.find((entry) => entry.id === candidateId) || region.candidates[0];
-    const nextRegion = {
+    const customLabelValue = customLabel?.trim();
+    if (customLabel !== undefined && !customLabelValue) return;
+    const nextRegion: RegionSelection = {
       ...region,
       selectedCandidateId: candidate?.id || region.selectedCandidateId,
-      ...(customLabel?.trim() ? { customLabel: customLabel.trim() } : { customLabel: undefined }),
+      ...(customLabelValue ? { customLabel: customLabelValue } : { customLabel: undefined }),
       status: 'ready' as const,
+      confirmationStatus: 'confirmed',
     };
     setRegionSelections((previous) => previous.map((entry) => entry.id === regionId ? nextRegion : entry));
     setChatReferenceTokens((previous) => {
-      const updatedToken = {
-        id: `region-reference:${regionId}`,
-        src: nextRegion.imageSrc,
-        label: selectedRegionLabel(nextRegion),
-        source: 'canvas' as const,
-        canvasItemId: nextRegion.imageItemId,
-        transient: false,
-        pinned: false,
-        role: 'region_target' as const,
-        regionId,
-        candidateId: nextRegion.selectedCandidateId,
-        targetPoint: nextRegion.point,
-        ...(nextRegion.box ? { targetBox: nextRegion.box } : {}),
-      } satisfies ChatReferenceToken;
+      const updatedToken = buildRegionReferenceToken(
+        nextRegion,
+        regionEvidenceByIdRef.current.get(regionId)
+      );
       const hasToken = previous.some((token) => token.regionId === regionId);
       const next = hasToken
         ? previous.map((token) => token.regionId === regionId ? { ...token, ...updatedToken } : token)
@@ -9680,8 +9731,38 @@ export default function AIWorkspace() {
 
   const handleRegionClick = useCallback((regionId: string) => {
     const region = regionSelectionsRef.current.find((candidate) => candidate.id === regionId);
+    if (!region) return;
     const regionToken = chatReferenceTokens.find((token) => token.regionId === regionId);
-    setActiveRegionMenuId((previous) => previous === regionId ? null : regionId);
+    if (!regionToken) {
+      setChatReferenceTokens((previous) => [
+        ...previous,
+        buildRegionReferenceToken(region, regionEvidenceByIdRef.current.get(regionId)),
+      ].slice(0, 14));
+      setActiveRegionMenuId(regionId);
+      if (!regionEvidenceByIdRef.current.has(regionId)) {
+        const requestedGeometry = JSON.stringify([
+          region.mode,
+          region.point,
+          region.box || null,
+          region.recognitionRevision || 0,
+        ]);
+        void uploadRegionEvidencePreview(region).then((evidence) => {
+          const currentRegion = regionSelectionsRef.current.find((candidate) => candidate.id === regionId);
+          if (!currentRegion || JSON.stringify([
+            currentRegion.mode,
+            currentRegion.point,
+            currentRegion.box || null,
+            currentRegion.recognitionRevision || 0,
+          ]) !== requestedGeometry) return;
+          regionEvidenceByIdRef.current.set(regionId, evidence);
+          setChatReferenceTokens((previous) => previous.map((token) => token.regionId === regionId
+            ? buildRegionReferenceToken(currentRegion, evidence)
+            : token));
+        }).catch(() => {});
+      }
+    } else {
+      setActiveRegionMenuId((previous) => previous === regionId ? null : regionId);
+    }
     setRegionCustomLabelDraft(region?.customLabel || regionToken?.label || '');
   }, [chatReferenceTokens]);
 
@@ -9982,7 +10063,6 @@ export default function AIWorkspace() {
 
   const buildCanvasItemDragPlan = useCallback((itemIds: readonly string[]) => {
     const itemIdSet = new Set(itemIds);
-    const targets = getItemTargets(itemIds, itemIds.length > 1).filter(isCanvasItemDragTarget);
     const affectedConnectionsById = new Map<string, Connection>();
     for (const itemId of itemIds) {
       const connected = connectionsByItemId.get(itemId);
@@ -9994,7 +10074,6 @@ export default function AIWorkspace() {
       ['visual']
     );
     const plan: CachedCanvasItemDragPlan = {
-      targets,
       connections: [],
     };
     for (const connection of affectedConnectionsById.values()) {
@@ -10009,16 +10088,14 @@ export default function AIWorkspace() {
     }
     canvasConnectionRuntimeIndexRef.current.set(getCanvasItemDragPlanKey(itemIds), plan);
     return plan;
-  }, [connectionsByItemId, getCanvasItemDragPlanKey, getConnectionPaths, getItemTargets]);
+  }, [connectionsByItemId, getCanvasItemDragPlanKey, getConnectionPaths]);
 
   useEffect(() => {
     canvasConnectionRuntimeIndexRef.current.clear();
   }, [canvasItemMembershipKey, connections]);
 
   const prepareCanvasItemDragPreview = useCallback((itemIds: string[]) => {
-    const planKey = getCanvasItemDragPlanKey(itemIds);
-    const cachedPlan = canvasConnectionRuntimeIndexRef.current.get(planKey);
-    const dragTargets = cachedPlan?.targets ?? getItemTargets(itemIds, itemIds.length > 1).filter(isCanvasItemDragTarget);
+    const dragTargets = getItemTargets(itemIds, itemIds.length > 1).filter(isCanvasItemDragTarget);
     const targets = dragTargets.map((target) => {
       const { element } = target;
       const existingPresentation = canvasItemDragPresentationRef.current.get(element);
@@ -10056,7 +10133,7 @@ export default function AIWorkspace() {
       connectionsPrepared: false,
       delta: { x: 0, y: 0 },
     };
-  }, [getCanvasItemDragPlanKey, getItemTargets]);
+  }, [getItemTargets]);
 
   const cancelCanvasItemDragConnectionPreparation = useCallback(() => {
     if (canvasItemDragConnectionPrepareFrameRef.current === null) return;
@@ -10174,6 +10251,10 @@ export default function AIWorkspace() {
         ));
         if (finalPosition && baseTarget) {
           baseTarget.element.style.transform = `translate3d(${finalPosition.x}px, ${finalPosition.y}px, 0)`;
+        }
+        if (finalPosition && target.role.startsWith('region-')) {
+          target.element.style.left = `${finalPosition.x}px`;
+          target.element.style.top = `${finalPosition.y}px`;
         }
       }
       target.setPosition(0, 0);
@@ -11288,11 +11369,21 @@ export default function AIWorkspace() {
           ...(box ? { box } : {}),
           candidates: [],
           status: 'recognizing',
+          confirmationStatus: 'pending',
           ...(existingRegionId ? { recognitionRevision: getRecognitionRevision(existingRegionId) } : {}),
         };
+        regionEvidenceByIdRef.current.delete(region.id);
         setRegionSelections((previous) => existingRegionId
           ? previous.map((candidate) => candidate.id === existingRegionId ? region : candidate)
           : [...previous, region]);
+        setChatReferenceTokens((previous) => {
+          const token = buildRegionReferenceToken(region);
+          const hasToken = previous.some((candidate) => candidate.regionId === region.id);
+          return (hasToken
+            ? previous.map((candidate) => candidate.regionId === region.id ? token : candidate)
+            : [...previous, token]
+          ).slice(0, 14);
+        });
         void startRegionRecognition(region);
       }
       return;
@@ -11838,6 +11929,7 @@ export default function AIWorkspace() {
           box: { x: point.x, y: point.y, width: 0, height: 0 },
           candidates: [],
           status: 'recognizing',
+          confirmationStatus: 'pending',
         });
         try {
           canvasRef.current?.setPointerCapture(e.pointerId);
@@ -12850,10 +12942,20 @@ export default function AIWorkspace() {
         .filter((segment): segment is Extract<ChatComposerSegment, { type: 'reference' }> => segment.type === 'reference')
         .map((segment) => segment.tokenId)
     );
+    const composerReferenceTokens = resolvedChatReferenceTokens
+      .filter((token) => composerReferenceIds.has(token.id));
+    const unresolvedRegionToken = composerReferenceTokens.find((token) => (
+      token.role === 'region_target' && token.confirmationStatus !== 'confirmed'
+    ));
+    if (unresolvedRegionToken?.regionId) {
+      setActiveRegionMenuId(unresolvedRegionToken.regionId);
+      const unresolvedRegion = regionSelectionsRef.current.find((region) => region.id === unresolvedRegionToken.regionId);
+      setRegionCustomLabelDraft(unresolvedRegion?.customLabel || '');
+      return;
+    }
     const currentReferenceContext: AgentReferenceContext | undefined = options?.input === undefined
       ? {
-          references: resolvedChatReferenceTokens
-            .filter((token) => composerReferenceIds.has(token.id))
+          references: composerReferenceTokens
             .map((token) => ({
               id: token.id,
               src: token.src,
@@ -12864,12 +12966,26 @@ export default function AIWorkspace() {
               ...(token.annotationCount ? { annotationCount: token.annotationCount } : {}),
               ...(token.regionId ? { regionId: token.regionId } : {}),
               ...(token.candidateId ? { candidateId: token.candidateId } : {}),
+              ...(token.description ? { description: token.description } : {}),
+              ...(token.aliases?.length ? { aliases: token.aliases } : {}),
+              ...(token.confidence ? { confidence: token.confidence } : {}),
+              ...(token.confirmationStatus ? { confirmationStatus: token.confirmationStatus } : {}),
               ...(token.targetPoint ? { targetPoint: token.targetPoint } : {}),
               ...(token.targetBox ? { targetBox: token.targetBox } : {}),
             })),
           composerSegments: currentComposerSegments.map((segment) => segment.type === 'text'
             ? { type: 'text' as const, text: segment.text }
             : { type: 'reference' as const, referenceId: segment.tokenId }),
+          evidenceImages: composerReferenceTokens.flatMap((token) => (
+            token.role === 'region_target' && token.regionId && token.previewSrc && token.previewSrc !== token.src
+              ? [{
+                  id: `${token.id}:region-crop`,
+                  referenceId: token.id,
+                  src: token.previewSrc,
+                  kind: 'region_crop' as const,
+                }]
+              : []
+          )),
         }
       : persistedReferenceContext;
     const regionSelectionSnapshot = buildAgentRegionSelectionSnapshot({
@@ -14743,6 +14859,7 @@ export default function AIWorkspace() {
     setImageProviderIdState(resolvedState.normalizedSession?.imageProviderId || '');
     setImageModelIdState(resolvedState.normalizedSession?.imageModelId || '');
     const resolvedRegionSelections = resolvedState.normalizedSession?.regionSelections || [];
+    regionEvidenceByIdRef.current.clear();
     regionSelectionsRef.current = resolvedRegionSelections;
     setRegionSelectionsState(resolvedRegionSelections);
     setEditingTextCardId(null);

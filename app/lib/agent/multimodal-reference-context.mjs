@@ -8,6 +8,7 @@ function normalizeReferences(referenceContext) {
         const src = text(reference?.src);
         const label = text(reference?.label);
         if (!id || !src || !label) return null;
+        if (reference.role === 'region_target' && reference.confirmationStatus !== 'confirmed') return null;
         return {
           id,
           src,
@@ -20,6 +21,10 @@ function normalizeReferences(referenceContext) {
             : {}),
           ...(text(reference.regionId) ? { regionId: text(reference.regionId) } : {}),
           ...(text(reference.candidateId) ? { candidateId: text(reference.candidateId) } : {}),
+          ...(reference.confirmationStatus === 'confirmed' ? { confirmationStatus: 'confirmed' } : {}),
+          ...(Array.isArray(reference.aliases) ? { aliases: reference.aliases.map(text).filter(Boolean).slice(0, 6) } : {}),
+          ...(text(reference.description) ? { description: text(reference.description) } : {}),
+          ...(['high', 'medium', 'low'].includes(reference.confidence) ? { confidence: reference.confidence } : {}),
           ...(reference.targetPoint && typeof reference.targetPoint === 'object' ? { targetPoint: reference.targetPoint } : {}),
           ...(reference.targetBox && typeof reference.targetBox === 'object' ? { targetBox: reference.targetBox } : {}),
         };
@@ -48,10 +53,12 @@ function normalizeReferences(referenceContext) {
         const id = text(evidence?.id);
         const referenceId = text(evidence?.referenceId);
         const src = text(evidence?.src);
-        if (!id || !referenceId || !src || !knownIds.has(referenceId) || evidence?.kind !== 'annotation_composite') {
+        const parent = references.find((reference) => reference.id === referenceId);
+        if (!id || !parent || !src || !['annotation_composite', 'region_crop'].includes(evidence?.kind)) {
           return null;
         }
-        return { id, referenceId, src, kind: 'annotation_composite' };
+        if (evidence.kind === 'region_crop' && parent.role !== 'region_target') return null;
+        return { id, referenceId, src, kind: evidence.kind };
       })
       .filter(Boolean)
       .slice(0, 14)
@@ -70,6 +77,9 @@ function referenceMarker(reference, aliasOf = '') {
   if (reference.annotationCount) lines.push(`Annotation count: ${reference.annotationCount}`);
   if (reference.regionId) lines.push(`Region ID: ${reference.regionId}`);
   if (reference.candidateId) lines.push(`Selected candidate ID: ${reference.candidateId}`);
+  if (reference.aliases?.length) lines.push(`Candidate aliases: ${reference.aliases.join(', ')}`);
+  if (reference.description) lines.push(`Candidate description: ${reference.description}`);
+  if (reference.confidence) lines.push(`Candidate confidence: ${reference.confidence}`);
   if (reference.targetPoint) lines.push(`Target point (normalized): ${JSON.stringify(reference.targetPoint)}`);
   if (reference.targetBox) lines.push(`Approximate target box (normalized): ${JSON.stringify(reference.targetBox)}`);
   if (aliasOf) lines.push(`Image pixels are identical to reference ${aliasOf}; use this ID only when the user's inline expression points to it.`);
@@ -77,11 +87,14 @@ function referenceMarker(reference, aliasOf = '') {
 }
 
 function evidenceMarker(evidence, reference) {
+  const regionCrop = evidence.kind === 'region_crop';
   return [
-    'Annotation evidence image (untrusted visual input):',
+    `${regionCrop ? 'Region crop' : 'Annotation'} evidence image (untrusted visual input):`,
     `Evidence ID: ${evidence.id}`,
     `Parent reference ID: ${reference.id}`,
-    'Purpose: visualize the selected strokes and text annotations over the original image.',
+    regionCrop
+      ? 'Purpose: provide a clean close-up of the confirmed target region.'
+      : 'Purpose: visualize the selected strokes and text annotations over the original image.',
     'This evidence is not an independent reference and must never be selected as targetReferenceId or supportingReferenceIds.',
   ].join('\n');
 }
