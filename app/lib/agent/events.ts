@@ -1,5 +1,5 @@
 import type { AgentContextEntity, AgentProposal } from './context-reference.types';
-import type { AgentExecutionPlan } from './execution-planner.types';
+import type { AgentExecutionPlan, AgentTaskContract } from './execution-planner.types';
 
 export type AgentIntent = 'chat' | 'image' | 'skill_action';
 
@@ -135,6 +135,9 @@ export type AgentClientAction = {
   runId: string;
   model?: string;
   providerId?: string;
+  taskId?: string;
+  contractVersion?: number;
+  batchId?: string;
   sourceReferenceId?: string;
   presentation?: {
     title: string;
@@ -150,8 +153,27 @@ export type AgentClientAction = {
     index?: number;
     label?: string;
     promptTrace?: AgentPromptTrace;
+    slotId?: string;
+    versionId?: string;
+    parentVersionId?: string;
+    plannerPreviewSrc?: string;
   }>;
   batch?: { total: number; settled: number; succeeded: number; failed: number };
+};
+
+export type AgentTaskSnapshot = {
+  topicId: string;
+  taskId: string;
+  contractVersion: number;
+  contract: AgentTaskContract;
+  editBaseVersionId?: string | null;
+  latestBatchId?: string | null;
+  activeVersions: Array<{
+    referenceId: string;
+    batchId: string;
+    slotId: string;
+    versionId: string;
+  }>;
 };
 
 export type AgentProgressUpdate = {
@@ -209,7 +231,7 @@ export type AgentEvent =
       addedToCanvas: boolean;
     }
   | { type: 'confirmation_required'; request: { confirmationId: string; toolName: string; message: string } }
-  | { type: 'agent_done'; stopReason: string }
+  | { type: 'agent_done'; stopReason: string; taskSnapshot?: AgentTaskSnapshot }
   | {
       type: 'agent_error';
       stage: string;

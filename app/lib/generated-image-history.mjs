@@ -8,6 +8,15 @@ function toSafePositiveNumber(value) {
   return Number.isFinite(value) && value > 0 ? value : undefined;
 }
 
+function toSafePositiveInteger(value) {
+  return Number.isInteger(value) && value > 0 ? value : undefined;
+}
+
+export function buildGeneratedHistorySlotReferenceId(slotId) {
+  const normalizedSlotId = toSafeString(slotId);
+  return normalizedSlotId ? `task-slot:${normalizedSlotId}` : '';
+}
+
 function getImageCardOutputEntries(item) {
   const normalizedOutputs = Array.isArray(item?.imageOutputs) ? item.imageOutputs : [];
   const validOutputs = normalizedOutputs.flatMap((output) => {
@@ -78,6 +87,7 @@ export function normalizeGeneratedImageHistory(entries) {
     return [{
       id,
       src,
+      plannerPreviewSrc: toSafeString(entry?.plannerPreviewSrc) || src,
       createdAt,
       source,
       sessionId: toSafeString(entry?.sessionId) || undefined,
@@ -86,6 +96,12 @@ export function normalizeGeneratedImageHistory(entries) {
       sourceItemId: toSafeString(entry?.sourceItemId) || undefined,
       topicId: toSafeString(entry?.topicId) || undefined,
       messageId: toSafeString(entry?.messageId) || undefined,
+      ...(toSafeString(entry?.taskId) ? { taskId: toSafeString(entry.taskId) } : {}),
+      ...(toSafePositiveInteger(entry?.contractVersion) ? { contractVersion: entry.contractVersion } : {}),
+      ...(toSafeString(entry?.batchId) ? { batchId: toSafeString(entry.batchId) } : {}),
+      ...(toSafeString(entry?.slotId) ? { slotId: toSafeString(entry.slotId) } : {}),
+      ...(toSafeString(entry?.versionId) ? { versionId: toSafeString(entry.versionId) } : {}),
+      ...(toSafeString(entry?.parentVersionId) ? { parentVersionId: toSafeString(entry.parentVersionId) } : {}),
       ...(entry?.operation === 'edit' || entry?.operation === 'generate' ? { operation: entry.operation } : {}),
       ...(toSafeString(entry?.sourceReferenceId) ? { sourceReferenceId: toSafeString(entry.sourceReferenceId) } : {}),
       ...(toSafeString(entry?.providerId) ? { providerId: toSafeString(entry.providerId) } : {}),
@@ -147,14 +163,23 @@ export function appendMissingGeneratedHistoryEntries(existingEntries, nextEntrie
   }
 
   const seenIds = new Set(normalizedExisting.map((entry) => entry.id));
-  const seenSrcs = new Set(normalizedExisting.map((entry) => entry.src));
+  const seenVersionIds = new Set(normalizedExisting.flatMap((entry) => (
+    entry.topicId && entry.taskId && entry.versionId ? [`${entry.topicId}:${entry.taskId}:${entry.versionId}`] : []
+  )));
+  const seenLegacySrcs = new Set(normalizedExisting.flatMap((entry) => (
+    entry.topicId && entry.taskId && entry.versionId ? [] : [entry.src]
+  )));
   const appendedEntries = normalizedNext.filter((entry) => {
-    if (seenIds.has(entry.id) || seenSrcs.has(entry.src)) {
+    const versionKey = entry.topicId && entry.taskId && entry.versionId
+      ? `${entry.topicId}:${entry.taskId}:${entry.versionId}`
+      : '';
+    if (seenIds.has(entry.id) || (versionKey ? seenVersionIds.has(versionKey) : seenLegacySrcs.has(entry.src))) {
       return false;
     }
 
     seenIds.add(entry.id);
-    seenSrcs.add(entry.src);
+    if (versionKey) seenVersionIds.add(versionKey);
+    else seenLegacySrcs.add(entry.src);
     return true;
   });
 
@@ -173,6 +198,7 @@ export function buildGeneratedHistoryEntriesFromImageCard({
   return outputEntries.map((output, index) => ({
     id: `generated-history:${normalizedSourceItemId}:${index}:${output.src}`,
     src: output.src,
+    plannerPreviewSrc: output.src,
     createdAt: buildGeneratedImageHistorySortKey(safeCreatedAt, index),
     source: 'image-card',
     sourceItemId: normalizedSourceItemId,
@@ -191,22 +217,25 @@ export function mergeGeneratedImageHistoryEntries({
   const normalizedArchiveEntries = normalizeGeneratedImageHistory(archiveEntries);
 
   const mergedEntries = [];
-  const seenSrcs = new Set();
+  const seenKeys = new Set();
 
-  const appendBySrc = (entries) => {
+  const appendUnique = (entries) => {
     entries.forEach((entry) => {
-      if (seenSrcs.has(entry.src)) {
+      const key = entry.topicId && entry.taskId && entry.versionId
+        ? `version:${entry.topicId}:${entry.taskId}:${entry.versionId}`
+        : `src:${entry.src}`;
+      if (seenKeys.has(key)) {
         return;
       }
 
-      seenSrcs.add(entry.src);
+      seenKeys.add(key);
       mergedEntries.push(entry);
     });
   };
 
-  appendBySrc(normalizedSessionEntries);
-  appendBySrc(normalizedFallbackEntries);
-  appendBySrc(normalizedArchiveEntries);
+  appendUnique(normalizedSessionEntries);
+  appendUnique(normalizedFallbackEntries);
+  appendUnique(normalizedArchiveEntries);
 
   return mergedEntries.sort((a, b) => {
     if (b.createdAt !== a.createdAt) {
@@ -216,3 +245,168 @@ export function mergeGeneratedImageHistoryEntries({
     return String(b.id).localeCompare(String(a.id));
   });
 }
+
+export function selectTopicActiveTaskSnapshot(messages, topicId) {
+  const normalizedTopicId = toSafeString(topicId);
+  if (!normalizedTopicId || !Array.isArray(messages)) return null;
+
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    const snapshot = message?.role === 'assistant' ? message.taskSnapshot : null;
+    if (
+      toSafeString(snapshot?.topicId) === normalizedTopicId
+      && toSafeString(snapshot?.taskId)
+      && toSafePositiveInteger(snapshot?.contractVersion)
+      && snapshot?.contract
+      && typeof snapshot.contract === 'object'
+      && Array.isArray(snapshot?.activeVersions)
+    ) {
+      return snapshot;
+    }
+  }
+
+  return null;
+}
+
+function taskHistoryEntries(entries, topicId, taskId) {
+  const normalizedTopicId = toSafeString(topicId);
+  const normalizedTaskId = toSafeString(taskId);
+  if (!normalizedTopicId || !normalizedTaskId) return [];
+  return normalizeGeneratedImageHistory(entries).filter((entry) => (
+    entry.topicId === normalizedTopicId && entry.taskId === normalizedTaskId
+  ));
+}
+
+export function selectLatestGeneratedImageBatch(entries, { topicId, taskId, latestBatchId } = {}) {
+  const matchingEntries = taskHistoryEntries(entries, topicId, taskId).filter((entry) => entry.batchId);
+  const requestedBatchId = toSafeString(latestBatchId);
+  if (requestedBatchId) {
+    const requestedEntries = matchingEntries.filter((entry) => entry.batchId === requestedBatchId);
+    return requestedEntries.length > 0 ? { batchId: requestedBatchId, entries: requestedEntries } : null;
+  }
+  if (matchingEntries.length === 0) return null;
+
+  const latestEntry = matchingEntries.reduce((latest, entry) => (
+    !latest || entry.createdAt >= latest.createdAt ? entry : latest
+  ), null);
+  return {
+    batchId: latestEntry.batchId,
+    entries: matchingEntries.filter((entry) => entry.batchId === latestEntry.batchId),
+  };
+}
+
+export function selectActiveGeneratedImageSlotVersions(entries, options = {}) {
+  const latestBatch = selectLatestGeneratedImageBatch(entries, options);
+  if (!latestBatch) return [];
+
+  const latestBySlot = new Map();
+  latestBatch.entries.forEach((entry) => {
+    if (!entry.slotId || !entry.versionId) return;
+    const previous = latestBySlot.get(entry.slotId);
+    if (!previous || entry.createdAt >= previous.createdAt) latestBySlot.set(entry.slotId, entry);
+  });
+  const safeLimit = Number.isFinite(options.maxActiveVersions)
+    ? Math.min(9, Math.max(0, Math.floor(options.maxActiveVersions)))
+    : 9;
+  return Array.from(latestBySlot.values()).slice(0, safeLimit);
+}
+
+/**
+ * @param {{
+ *   topicId?: string,
+ *   messages?: Array<any>,
+ *   taskSnapshot?: any,
+ *   historyEntries?: Array<any>,
+ *   maxActiveVersions?: number,
+ * }} [options]
+ */
+export function buildActiveTaskContext({ topicId, messages, taskSnapshot, historyEntries, maxActiveVersions = 9 } = {}) {
+  const normalizedTopicId = toSafeString(topicId);
+  const snapshot = taskSnapshot || selectTopicActiveTaskSnapshot(messages, normalizedTopicId);
+  if (!snapshot || snapshot.topicId !== normalizedTopicId) return null;
+
+  const taskId = toSafeString(snapshot.taskId);
+  const contractVersion = toSafePositiveInteger(snapshot.contractVersion);
+  const activeVersions = Array.isArray(snapshot.activeVersions) ? snapshot.activeVersions : [];
+  const safeLimit = Number.isFinite(maxActiveVersions)
+    ? Math.min(9, Math.max(0, Math.floor(maxActiveVersions)))
+    : 9;
+  if (!taskId || !contractVersion || !snapshot.contract || typeof snapshot.contract !== 'object') return null;
+  const topicHistory = normalizeGeneratedImageHistory(historyEntries).filter((entry) => entry.topicId === normalizedTopicId);
+  const matchingHistory = topicHistory.filter((entry) => entry.taskId === taskId);
+  const entryByVersionId = new Map(matchingHistory.flatMap((entry) => (
+    entry.versionId ? [[entry.versionId, entry]] : []
+  )));
+  const topicEntryByVersionId = new Map(topicHistory.flatMap((entry) => (
+    entry.versionId ? [[entry.versionId, entry]] : []
+  )));
+  const latestBatchId = toSafeString(snapshot.latestBatchId);
+  const editBaseVersionId = toSafeString(snapshot.editBaseVersionId);
+  const editBaseEntry = editBaseVersionId ? topicEntryByVersionId.get(editBaseVersionId) : null;
+  if (latestBatchId ? activeVersions.length === 0 : activeVersions.length > 0) return null;
+  if (latestBatchId && activeVersions.some((version) => toSafeString(version?.batchId) !== latestBatchId)) return null;
+  if (editBaseVersionId && (!editBaseEntry?.batchId || !editBaseEntry?.slotId)) return null;
+  const contractImageTask = snapshot.contract?.imageTask;
+  if (
+    editBaseEntry
+    && contractImageTask?.operation === 'edit'
+    && toSafeString(contractImageTask.targetReferenceId)
+    && toSafeString(contractImageTask.targetReferenceId) !== buildGeneratedHistorySlotReferenceId(editBaseEntry.slotId)
+  ) return null;
+  if (
+    editBaseEntry
+    && editBaseEntry.taskId !== taskId
+    && activeVersions.length > 0
+    && !activeVersions.some((version) => (
+      toSafeString(version?.batchId) === editBaseEntry.batchId
+      && toSafeString(version?.slotId) === editBaseEntry.slotId
+    ))
+  ) return null;
+
+  const slots = activeVersions.slice(0, safeLimit).flatMap((activeVersion) => {
+    const versionId = toSafeString(activeVersion?.versionId);
+    const batchId = toSafeString(activeVersion?.batchId);
+    const slotId = toSafeString(activeVersion?.slotId);
+    const referenceId = toSafeString(activeVersion?.referenceId);
+    const entry = entryByVersionId.get(versionId);
+    if (
+      !entry
+      || entry.batchId !== batchId
+      || entry.slotId !== slotId
+      || referenceId !== buildGeneratedHistorySlotReferenceId(slotId)
+    ) return [];
+
+    return [{
+      referenceId,
+      slotId,
+      versionId,
+      ...(entry.parentVersionId ? { parentVersionId: entry.parentVersionId } : {}),
+      src: entry.src,
+      plannerPreviewSrc: entry.plannerPreviewSrc,
+    }];
+  });
+  if (slots.length !== activeVersions.slice(0, safeLimit).length) return null;
+
+  return {
+    topicId: normalizedTopicId,
+    taskId,
+    contractVersion,
+    contract: snapshot.contract,
+    ...(editBaseVersionId ? { editBaseVersionId } : {}),
+    ...(editBaseEntry ? {
+      editBaseAsset: {
+        versionId: editBaseVersionId,
+        batchId: editBaseEntry.batchId,
+        slotId: editBaseEntry.slotId,
+        src: editBaseEntry.src,
+        plannerPreviewSrc: editBaseEntry.plannerPreviewSrc,
+        ...(editBaseEntry.parentVersionId ? { parentVersionId: editBaseEntry.parentVersionId } : {}),
+      },
+    } : {}),
+    latestBatch: latestBatchId ? { batchId: latestBatchId, slots } : null,
+  };
+}
+
+export const buildStableSlotReferenceId = buildGeneratedHistorySlotReferenceId;
+export const selectLatestTaskBatch = selectLatestGeneratedImageBatch;
+export const selectActiveTaskSlotVersions = selectActiveGeneratedImageSlotVersions;

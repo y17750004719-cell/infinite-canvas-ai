@@ -14,7 +14,7 @@ test('chat message persistence stores one canonical image source instead of thre
     content: '修改这张图',
     referenceImages: [src],
     referenceContext: {
-      references: [{ id: 'photo', src, label: '原图', source: 'upload', role: 'edit_target' }],
+      references: [{ id: 'photo', src, plannerPreviewSrc: '/preview/photo.webp', label: '原图', source: 'upload', role: 'edit_target' }],
       composerSegments: [
         { type: 'reference', referenceId: 'photo' },
         { type: 'text', text: '修改这张图' },
@@ -30,6 +30,7 @@ test('chat message persistence stores one canonical image source instead of thre
   assert.equal(normalized.inlineContent, undefined);
   assert.equal(normalized.referenceContext.references.length, 1);
   assert.equal(normalized.referenceContext.references[0].src, src);
+  assert.equal(normalized.referenceContext.references[0].plannerPreviewSrc, '/preview/photo.webp');
   assert.deepEqual(normalized.referenceContext.composerSegments, [
     { type: 'reference', referenceId: 'photo' },
     { type: 'text', text: '修改这张图' },

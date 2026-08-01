@@ -5,6 +5,7 @@ function createLegacyReference(messageId, src, index, overrides = {}) {
   return {
     id: text(overrides.id) || `${messageId}:reference:${index + 1}`,
     src,
+    ...(text(overrides.plannerPreviewSrc) ? { plannerPreviewSrc: overrides.plannerPreviewSrc } : {}),
     label: text(overrides.label) || `image${index + 1}`,
     source: ['upload', 'history', 'canvas'].includes(overrides.source) ? overrides.source : 'upload',
     role: ['reference', 'edit_target', 'annotation_bundle', 'region_target'].includes(overrides.role) ? overrides.role : 'reference',

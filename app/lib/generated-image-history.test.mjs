@@ -5,12 +5,27 @@ import * as generatedHistory from './generated-image-history.mjs';
 import {
   appendMissingGeneratedHistoryEntries,
   appendGeneratedImageHistoryEntries,
+  buildActiveTaskContext,
+  buildGeneratedHistorySlotReferenceId,
   buildGeneratedImageHistorySortKey,
   buildGeneratedHistoryEntriesFromImageCard,
   extractGeneratedImageTimestampFromFilename,
   mergeGeneratedImageHistoryEntries,
   normalizeGeneratedImageHistory,
+  selectActiveGeneratedImageSlotVersions,
+  selectLatestGeneratedImageBatch,
+  selectTopicActiveTaskSnapshot,
 } from './generated-image-history.mjs';
+
+const taskContract = {
+  intent: 'image',
+  skillId: null,
+  brief: {},
+  delivery: {},
+  imageTask: { operation: 'generate' },
+  generation: null,
+  execution: {},
+};
 
 test('mergeGeneratedHistoryReferences appends unique history images up to the reference limit', () => {
   assert.deepEqual(
@@ -47,6 +62,7 @@ test('normalizeGeneratedImageHistory keeps only valid generated image entries', 
     {
       id: 'history-1',
       src: '/uploads/generated/a.png',
+      plannerPreviewSrc: '/uploads/generated/a.png',
       createdAt: 10,
       source: 'chat',
       naturalWidth: 1024,
@@ -68,6 +84,7 @@ test('normalizeGeneratedImageHistory keeps only valid generated image entries', 
     {
       id: 'history-1',
       src: '/uploads/generated/a.png',
+      plannerPreviewSrc: '/uploads/generated/a.png',
       createdAt: 10,
       source: 'chat',
       sessionId: undefined,
@@ -80,6 +97,7 @@ test('normalizeGeneratedImageHistory keeps only valid generated image entries', 
     {
       id: 'generated-history-unknown-2',
       src: '/uploads/generated/archive.png',
+      plannerPreviewSrc: '/uploads/generated/archive.png',
       createdAt: 0,
       source: 'archive',
       sessionId: undefined,
@@ -156,6 +174,193 @@ test('appendMissingGeneratedHistoryEntries skips duplicates by src even when ids
       { id: 'history-3', src: '/uploads/generated/b.png' },
     ]
   );
+});
+
+test('normalizeGeneratedImageHistory preserves task version identity and preview separation', () => {
+  const [entry] = normalizeGeneratedImageHistory([{
+    id: 'history-v2',
+    src: '/original/v2.png',
+    plannerPreviewSrc: '/preview/v2.webp',
+    createdAt: 20,
+    source: 'chat',
+    topicId: 'topic-1',
+    taskId: 'task-1',
+    contractVersion: 2,
+    batchId: 'batch-1',
+    slotId: 'slot-1',
+    versionId: 'version-2',
+    parentVersionId: 'version-1',
+  }]);
+
+  assert.equal(entry.src, '/original/v2.png');
+  assert.equal(entry.plannerPreviewSrc, '/preview/v2.webp');
+  assert.deepEqual(
+    {
+      topicId: entry.topicId,
+      taskId: entry.taskId,
+      contractVersion: entry.contractVersion,
+      batchId: entry.batchId,
+      slotId: entry.slotId,
+      versionId: entry.versionId,
+      parentVersionId: entry.parentVersionId,
+    },
+    {
+      topicId: 'topic-1',
+      taskId: 'task-1',
+      contractVersion: 2,
+      batchId: 'batch-1',
+      slotId: 'slot-1',
+      versionId: 'version-2',
+      parentVersionId: 'version-1',
+    }
+  );
+});
+
+test('appendMissingGeneratedHistoryEntries preserves distinct versions with the same source', () => {
+  const base = {
+    src: '/original/shared.png',
+    createdAt: 10,
+    source: 'chat',
+    topicId: 'topic-1',
+    taskId: 'task-1',
+    contractVersion: 1,
+    batchId: 'batch-1',
+    slotId: 'slot-1',
+  };
+  const result = appendMissingGeneratedHistoryEntries(
+    [{ ...base, id: 'history-v1', versionId: 'version-1' }],
+    [{ ...base, id: 'history-v2', versionId: 'version-2', parentVersionId: 'version-1', createdAt: 20 }]
+  );
+
+  assert.deepEqual(result.map((entry) => entry.versionId), ['version-1', 'version-2']);
+});
+
+test('latest batch and active slot helpers are topic scoped and preserve parent versions', () => {
+  const entries = [
+    { id: 'legacy', src: '/legacy.png', createdAt: 100, source: 'archive' },
+    { id: 'other-topic', src: '/other.png', createdAt: 110, source: 'chat', topicId: 'topic-2', taskId: 'task-1', batchId: 'batch-x', slotId: 'slot-x', versionId: 'version-x' },
+    { id: 'v1', src: '/v1.png', createdAt: 10, source: 'chat', topicId: 'topic-1', taskId: 'task-1', batchId: 'batch-1', slotId: 'slot-1', versionId: 'version-1' },
+    { id: 'v2', src: '/v2.png', createdAt: 20, source: 'chat', topicId: 'topic-1', taskId: 'task-1', batchId: 'batch-1', slotId: 'slot-1', versionId: 'version-2', parentVersionId: 'version-1' },
+    { id: 'latest', src: '/latest.png', createdAt: 30, source: 'chat', topicId: 'topic-1', taskId: 'task-1', batchId: 'batch-2', slotId: 'slot-2', versionId: 'version-3' },
+  ];
+
+  assert.equal(selectLatestGeneratedImageBatch(entries, { topicId: 'topic-1', taskId: 'task-1' }).batchId, 'batch-2');
+  const active = selectActiveGeneratedImageSlotVersions(entries, { topicId: 'topic-1', taskId: 'task-1', latestBatchId: 'batch-1' });
+  assert.deepEqual(active.map((entry) => [entry.versionId, entry.parentVersionId]), [['version-2', 'version-1']]);
+});
+
+test('buildActiveTaskContext reconstructs exact stable slot references and caps context at nine', () => {
+  const activeVersions = Array.from({ length: 10 }, (_, index) => ({
+    referenceId: buildGeneratedHistorySlotReferenceId(`slot-${index}`),
+    batchId: 'batch-1',
+    slotId: `slot-${index}`,
+    versionId: `version-${index}`,
+  }));
+  const historyEntries = activeVersions.map((version, index) => ({
+    id: `history-${index}`,
+    src: `/original/${index}.png`,
+    plannerPreviewSrc: `/preview/${index}.webp`,
+    createdAt: index + 1,
+    source: 'chat',
+    topicId: 'topic-1',
+    taskId: 'task-1',
+    contractVersion: 3,
+    batchId: version.batchId,
+    slotId: version.slotId,
+    versionId: version.versionId,
+  }));
+  const messages = [
+    { role: 'assistant', taskSnapshot: { topicId: 'topic-2', taskId: 'wrong', contractVersion: 1, contract: taskContract, activeVersions: [] } },
+    { role: 'assistant', taskSnapshot: { topicId: 'topic-1', taskId: 'task-1', contractVersion: 3, contract: taskContract, latestBatchId: 'batch-1', activeVersions } },
+  ];
+
+  assert.equal(selectTopicActiveTaskSnapshot(messages, 'topic-1').taskId, 'task-1');
+  const context = buildActiveTaskContext({ topicId: 'topic-1', messages, historyEntries });
+  assert.equal(context.latestBatch.slots.length, 9);
+  assert.deepEqual(context.latestBatch.slots[0], {
+    referenceId: 'task-slot:slot-0',
+    slotId: 'slot-0',
+    versionId: 'version-0',
+    src: '/original/0.png',
+    plannerPreviewSrc: '/preview/0.webp',
+  });
+});
+
+test('buildActiveTaskContext rejects legacy, missing, and mismatched version references', () => {
+  const taskSnapshot = {
+    topicId: 'topic-1',
+    taskId: 'task-1',
+    contractVersion: 1,
+    contract: taskContract,
+    latestBatchId: 'batch-1',
+    activeVersions: [{ referenceId: 'task-slot:slot-1', batchId: 'batch-1', slotId: 'slot-1', versionId: 'version-1' }],
+  };
+  assert.equal(buildActiveTaskContext({ topicId: 'topic-1', taskSnapshot, historyEntries: [{ id: 'legacy', src: '/legacy.png', createdAt: 1, source: 'archive' }] }), null);
+  assert.equal(buildActiveTaskContext({
+    topicId: 'topic-1',
+    taskSnapshot: { ...taskSnapshot, activeVersions: [{ ...taskSnapshot.activeVersions[0], referenceId: 'version-1' }] },
+    historyEntries: [{ id: 'v1', src: '/v1.png', createdAt: 1, source: 'chat', topicId: 'topic-1', taskId: 'task-1', batchId: 'batch-1', slotId: 'slot-1', versionId: 'version-1' }],
+  }), null);
+});
+
+test('buildActiveTaskContext resolves an inactive pinned edit base from append-only history', () => {
+  const taskSnapshot = {
+    topicId: 'topic-1',
+    taskId: 'task-1',
+    contractVersion: 2,
+    contract: taskContract,
+    editBaseVersionId: 'version-1',
+    latestBatchId: 'batch-1',
+    activeVersions: [{ referenceId: 'task-slot:slot-1', batchId: 'batch-1', slotId: 'slot-1', versionId: 'version-2' }],
+  };
+  const historyEntries = [
+    { id: 'v1', src: '/original/v1.png', plannerPreviewSrc: '/preview/v1.webp', createdAt: 1, source: 'chat', topicId: 'topic-1', taskId: 'task-1', batchId: 'batch-1', slotId: 'slot-1', versionId: 'version-1' },
+    { id: 'v2', src: '/original/v2.png', plannerPreviewSrc: '/preview/v2.webp', createdAt: 2, source: 'chat', topicId: 'topic-1', taskId: 'task-1', batchId: 'batch-1', slotId: 'slot-1', versionId: 'version-2', parentVersionId: 'version-1' },
+  ];
+
+  const context = buildActiveTaskContext({ topicId: 'topic-1', taskSnapshot, historyEntries });
+  assert.deepEqual(context.editBaseAsset, {
+    versionId: 'version-1',
+    batchId: 'batch-1',
+    slotId: 'slot-1',
+    src: '/original/v1.png',
+    plannerPreviewSrc: '/preview/v1.webp',
+  });
+  assert.equal(context.latestBatch.slots[0].versionId, 'version-2');
+});
+
+test('buildActiveTaskContext resolves a pinned edit base from an earlier task in the same topic', () => {
+  const taskSnapshot = {
+    topicId: 'topic-1',
+    taskId: 'task-2',
+    contractVersion: 1,
+    contract: taskContract,
+    editBaseVersionId: 'version-1',
+    latestBatchId: 'batch-1',
+    activeVersions: [{ referenceId: 'task-slot:slot-1', batchId: 'batch-1', slotId: 'slot-1', versionId: 'version-2' }],
+  };
+  const historyEntries = [
+    { id: 'v1', src: '/original/v1.png', plannerPreviewSrc: '/preview/v1.webp', createdAt: 1, source: 'chat', topicId: 'topic-1', taskId: 'task-1', batchId: 'batch-1', slotId: 'slot-1', versionId: 'version-1' },
+    { id: 'v2', src: '/original/v2.png', plannerPreviewSrc: '/preview/v2.webp', createdAt: 2, source: 'chat', topicId: 'topic-1', taskId: 'task-2', batchId: 'batch-1', slotId: 'slot-1', versionId: 'version-2', parentVersionId: 'version-1' },
+  ];
+
+  const context = buildActiveTaskContext({ topicId: 'topic-1', taskSnapshot, historyEntries });
+  assert.equal(context.editBaseAsset.versionId, 'version-1');
+  assert.equal(context.latestBatch.slots[0].versionId, 'version-2');
+});
+
+test('buildActiveTaskContext rejects a pinned edit base from the wrong slot', () => {
+  const context = buildActiveTaskContext({
+    topicId: 'topic-1',
+    taskSnapshot: {
+      topicId: 'topic-1', taskId: 'task-2', contractVersion: 1,
+      contract: { ...taskContract, imageTask: { operation: 'edit', targetReferenceId: 'task-slot:slot-a' } },
+      editBaseVersionId: 'version-b', latestBatchId: 'batch-1',
+      activeVersions: [{ referenceId: 'task-slot:slot-b', batchId: 'batch-1', slotId: 'slot-b', versionId: 'version-b' }],
+    },
+    historyEntries: [{ id: 'v-b', src: '/b.png', plannerPreviewSrc: '/b.webp', createdAt: 1, source: 'chat', topicId: 'topic-1', taskId: 'task-1', batchId: 'batch-1', slotId: 'slot-b', versionId: 'version-b' }],
+  });
+  assert.equal(context, null);
 });
 
 test('buildGeneratedHistoryEntriesFromImageCard returns current image-card outputs as generated history entries', () => {

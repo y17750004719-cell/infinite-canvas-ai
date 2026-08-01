@@ -46,6 +46,7 @@ export interface AgentVisualContext {
 export interface AgentPlannerReference {
   id: string;
   src?: string;
+  plannerPreviewSrc?: string;
   label: string;
   source: 'upload' | 'history' | 'canvas';
   canvasItemId?: string;
@@ -91,15 +92,53 @@ export interface AgentRegionSelection {
 export interface AgentExecutionPlannerInput extends Record<string, unknown> {
   userMessage?: string;
   referenceContext?: AgentPlannerReferenceContext | null;
+  activeTaskContext?: AgentActiveTaskContext | null;
 }
 
 export interface AgentExecutionPlanValidationOptions extends Record<string, unknown> {
   referenceIds?: string[];
   regionIds?: string[];
+  activeTaskContext?: AgentActiveTaskContext | null;
+}
+
+export type AgentTaskRelation = 'new_task' | 'continue_task' | 'revise_task' | 'rerun_task' | 'discuss_task';
+
+export interface AgentTaskContract {
+  intent: AgentExecutionPlan['intent'];
+  skillId: string | null;
+  brief: AgentExecutionPlan['brief'];
+  delivery: AgentExecutionPlan['delivery'];
+  imageTask?: AgentImageTask;
+  generation: AgentGenerationContract | null;
+  execution: AgentExecutionPlan['execution'];
+}
+
+export interface AgentActiveTaskVersion {
+  referenceId: string;
+  batchId: string;
+  slotId: string;
+  versionId: string;
+  parentVersionId?: string;
+  src: string;
+  plannerPreviewSrc: string;
+  label?: string;
+}
+
+export interface AgentActiveTaskContext {
+  topicId: string;
+  taskId: string;
+  contractVersion: number;
+  contract: AgentTaskContract;
+  editBaseVersionId?: string | null;
+  latestBatchId?: string | null;
+  activeVersions: AgentActiveTaskVersion[];
 }
 
 export interface AgentExecutionPlan {
-  version: 2;
+  version: 3;
+  taskRelation: AgentTaskRelation;
+  taskRelationConfidence: 'high' | 'medium' | 'low';
+  taskRelationReason: string;
   intent: 'chat' | 'image' | 'skill_action' | 'analysis';
   skillId: string | null;
   confidence: 'high' | 'medium' | 'low';

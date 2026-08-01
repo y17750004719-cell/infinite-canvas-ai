@@ -74,7 +74,7 @@ test('agent route resolves context references before clarification optimization 
   assert.match(source, /selectedContextEntityIds\?:\s*string\[\]/);
   assert.match(source, /contextResolution\.status === 'resolved'/);
   assert.match(source, /dimension:\s*'context_reference'/);
-  assert.match(source, /stopReason:\s*'context_reference_required'/);
+  assert.match(source, /writeAgentDone\('context_reference_required'\)/);
   assert.match(source, /userMessage:\s*executionBrief/);
   const contextGate = source.indexOf('if (!body.clarificationResponse && contextResolution.detected)');
   const optimizer = source.indexOf('await optimizeImagePrompt', contextGate);
@@ -113,7 +113,7 @@ test('agent route streams confirmed batch images individually without a duplicat
   const source = fs.readFileSync(routePath, 'utf8');
   const loopSource = fs.readFileSync(agentLoopPath, 'utf8');
   assert.match(source, /onSettled:\s*streamIncrementally/);
-  assert.match(source, /type:\s*'add_generated_assets'[\s\S]{0,900}itemId:[\s\S]{0,500}batch:/);
+  assert.match(source, /type:\s*'add_generated_assets'[\s\S]{0,1800}itemId:[\s\S]{0,900}batch:/);
   assert.match(source, /total:\s*requests\.length/);
   assert.match(source, /settled:\s*streamedSettled/);
   assert.match(source, /succeeded:\s*streamedSucceeded/);
@@ -189,7 +189,7 @@ test('agent route uses one main-agent message hierarchy for text and referenced 
   assert.match(source, /buildMainAgentMessages\(\{/);
   assert.match(source, /referenceImages:\s*executionReferenceImages/);
   assert.doesNotMatch(source, /if \(body\.referenceImages\?\.length\) \{[\s\S]{0,1200}generatePost/);
-  assert.match(source, /const shouldUseImagePipeline = executionKind[\s\S]{0,180}executionKind === 'image_pipeline'/);
+  assert.match(source, /const shouldUseImagePipeline = executionPlan\?\.taskRelation === 'discuss_task'[\s\S]{0,240}executionKind === 'image_pipeline'/);
   assert.doesNotMatch(source, /if \(intent === 'skill_action'\)/);
   assert.match(source, /loadSkillContent\(selectedSkill\.id\)/);
   assert.match(source, /runZFlowAgentBrain\(\{/);
@@ -339,7 +339,7 @@ test('unified planner is authoritative, supports shadow mode, and survives clari
   assert.match(source, /sourceDetail: plannerResult\.sourceDetail/);
   assert.match(source, /mutationBlocked: true/);
   assert.match(source, /stage: 'planning'/);
-  assert.match(source, /stopReason: 'planner_failed'/);
+  assert.match(source, /writeAgentDone\('planner_failed'\)/);
   assert.match(source, /failureReason/);
   assert.match(source, /reason: plannerFailureReason/);
   assert.match(source, /dimension: 'planner_failure'/);
@@ -370,7 +370,7 @@ test('authoritative image execution fails closed without a complete planner cont
   assert.match(source, /executionPlan\.execution\.tool !== 'generate_image'/);
   assert.match(source, /!imageTask/);
   assert.match(source, /!presentation/);
-  assert.match(source, /executionPlan\.version !== 2/);
+  assert.match(source, /executionPlan\.version !== 3/);
   assert.match(source, /!generation/);
   assert.match(source, /referencedTaskWithoutRoles/);
   assert.match(source, /图片计划校验失败，已停止执行/);
@@ -406,7 +406,7 @@ test('explicit multi-image requests preserve deterministic image skills while by
 
 test('authoritative image plans use their final generation prompt without prompt optimization', () => {
   const source = fs.readFileSync(routePath, 'utf8');
-  assert.match(source, /const plannerGeneration = executionPlan\?\.version === 2 \? executionPlan\.generation : null/);
+  assert.match(source, /const plannerGeneration = executionPlan\?\.version === 3 \? executionPlan\.generation : null/);
   assert.match(source, /const usesPlannerGeneration = Boolean\(plannerAuthoritative && plannerGeneration\)/);
   assert.match(source, /prompt: plannerGeneration!\.prompt/);
   assert.match(source, /usesPlannerGeneration[\s\S]*await optimizeImagePrompt/);
@@ -434,4 +434,48 @@ test('agent route preserves three-mode image delivery plans through confirmation
   assert.match(source, /deliveryMode:\s*payloadDeliveryPlan\.mode/);
   assert.match(source, /panelCount:\s*payloadDeliveryPlan\.panelCount/);
   assert.match(source, /confirmationRecord\.imageDeliveryPlan/);
+});
+
+test('agent route bridges nested active task context into both authoritative planner calls', () => {
+  const source = fs.readFileSync(routePath, 'utf8');
+  assert.match(source, /activeTaskContext\?: AgentClientActiveTaskContext/);
+  assert.match(source, /function normalizeActiveTaskContext/);
+  assert.match(source, /pinnedEditTarget\.targetReferenceId === `task-slot:\$\{normalizedEditBaseAsset\.slotId\}`/);
+  assert.match(source, /latestBatch\?\.slots/);
+  assert.match(source, /const plannerPreviewSrc = typeof reference\.plannerPreviewSrc/);
+  assert.match(source, /plannerPreviewSrc: version\.plannerPreviewSrc/);
+  assert.equal((source.match(/activeTaskContext,\n\s+imageOptions:/g) || []).length, 2);
+});
+
+test('authoritative route avoids regex semantic context resolution', () => {
+  const source = fs.readFileSync(routePath, 'utf8');
+  assert.match(source, /const shouldResolveInitialContext = !plannerAuthoritative &&/);
+  assert.match(source, /const initialContextResolution = plannerAuthoritative[\s\S]{0,240}: shouldResolveInitialContext[\s\S]{0,160}resolveContextReference/);
+});
+
+test('task identities survive confirmation and enrich streamed and aggregate assets', () => {
+  const source = fs.readFileSync(routePath, 'utf8');
+  const eventsSource = fs.readFileSync(agentEventsPath, 'utf8');
+  assert.match(source, /function reserveTaskExecution/);
+  assert.match(source, /pendingTaskIdentities/);
+  assert.match(source, /identities\.slice\(0, requestedImageCount\)/);
+  assert.match(source, /identities\.slice\(requestedImageCount\)/);
+  assert.match(source, /taskExecutionReservation = \{/);
+  assert.match(source, /recordSucceededTaskIdentities/);
+  assert.match(source, /plannerPreviewSrc: asset\.src/);
+  assert.match(source, /writeAgentDone/);
+  assert.match(eventsSource, /taskSnapshot\?: AgentTaskSnapshot/);
+  for (const field of ['taskId', 'contractVersion', 'batchId', 'slotId', 'versionId', 'parentVersionId', 'plannerPreviewSrc']) {
+    assert.match(eventsSource, new RegExp(`${field}\\?`));
+  }
+});
+
+test('edit execution requires the pinned original and discuss tasks cannot mutate', () => {
+  const source = fs.readFileSync(routePath, 'utf8');
+  assert.match(source, /requireOriginalAsset\(\{/);
+  assert.match(source, /pinnedVersionId: usePinnedBase/);
+  assert.match(source, /editBaseAsset: executionEditBaseAsset/);
+  assert.match(source, /slotId \? `task-slot:\$\{slotId\}` : ''/);
+  assert.match(source, /discuss_task cannot execute mutation tools/);
+  assert.match(source, /executionPlan\?\.taskRelation === 'discuss_task'[\s\S]{0,80}\? false/);
 });

@@ -15,6 +15,7 @@ import {
   MoreHorizontal, Upload, Library, Search, BrainCircuit, Settings2, ArrowUp, ArrowDown, Square, Pin
 } from 'lucide-react';
 import { GeneratedImageHistoryEntry, ProjectSession } from './lib/db';
+import type { TaskSnapshot } from './lib/db';
 import type { CanvasItem, CanvasPoint } from './lib/canvas-types';
 import { isCanvasAnnotationItem, isCanvasAnnotationTextItem } from './lib/canvas-types';
 import {
@@ -44,6 +45,7 @@ import { ASPECT_RATIOS } from './lib/aspect-ratios';
 import {
   appendGeneratedImageHistoryEntries,
   appendMissingGeneratedHistoryEntries,
+  buildActiveTaskContext,
   buildGeneratedImageHistorySortKey,
   buildGeneratedHistoryEntriesFromImageCard,
 } from './lib/generated-image-history.mjs';
@@ -412,6 +414,7 @@ interface ChatMessage {
   agentProposalResolved?: boolean;
   resolvedContext?: { entityIds: string[]; labels: string[]; kind: string; confidence: 'high' | 'medium' };
   executionBriefSummary?: string;
+  taskSnapshot?: TaskSnapshot;
 }
 
 const updateAgentRunProgress = (
@@ -644,6 +647,7 @@ interface AgentReferenceContext {
   references: Array<{
     id: string;
     src: string;
+    plannerPreviewSrc?: string;
     label: string;
     source: ChatReferenceTokenSource;
     canvasItemId?: string;
@@ -1576,6 +1580,7 @@ const GENERATED_HISTORY_SOURCE_LABELS: Record<GeneratedImageHistoryEntry['source
 
 const createGeneratedImageHistoryEntry = ({
   src,
+  plannerPreviewSrc = src,
   naturalWidth,
   naturalHeight,
   timestamp = Date.now(),
@@ -1589,8 +1594,15 @@ const createGeneratedImageHistoryEntry = ({
   providerId,
   model,
   promptTrace,
+  taskId,
+  contractVersion,
+  batchId,
+  slotId,
+  versionId,
+  parentVersionId,
 }: {
   src: string;
+  plannerPreviewSrc?: string;
   naturalWidth?: number;
   naturalHeight?: number;
   timestamp?: number;
@@ -1604,12 +1616,19 @@ const createGeneratedImageHistoryEntry = ({
   providerId?: string;
   model?: string;
   promptTrace?: GeneratedImageHistoryEntry['promptTrace'];
+  taskId?: string;
+  contractVersion?: number;
+  batchId?: string;
+  slotId?: string;
+  versionId?: string;
+  parentVersionId?: string;
 }): GeneratedImageHistoryEntry => {
   const normalizedCreatedAt = buildGeneratedImageHistorySortKey(timestamp, sequence);
 
   return {
     id: `generated-history-${normalizedCreatedAt}-${Math.random().toString(36).slice(2, 8)}`,
     src,
+    plannerPreviewSrc,
     naturalWidth,
     naturalHeight,
     createdAt: normalizedCreatedAt,
@@ -1622,6 +1641,12 @@ const createGeneratedImageHistoryEntry = ({
     providerId,
     model,
     promptTrace,
+    taskId,
+    contractVersion,
+    batchId,
+    slotId,
+    versionId,
+    parentVersionId,
   };
 };
 
@@ -12964,6 +12989,7 @@ export default function AIWorkspace() {
             .map((token) => ({
               id: token.id,
               src: token.src,
+              plannerPreviewSrc: token.previewSrc || token.src,
               label: token.label,
               source: token.source,
               ...(token.canvasItemId ? { canvasItemId: token.canvasItemId } : {}),
@@ -13571,15 +13597,30 @@ export default function AIWorkspace() {
       runController = controller;
       generateAbortRef.current = controller;
 
+      const requestSession = getCurrentSession();
+      const requestTopicId = requestSession?.activeTopicId || 'default';
+      const requestHistory = requestSession?.id
+        ? generatedImageHistoryBySession[requestSession.id]
+          ?? persistedGeneratedImageHistoryBySessionRef.current[requestSession.id]
+          ?? requestSession.generatedImageHistory
+          ?? []
+        : [];
+      const activeTaskContext = buildActiveTaskContext({
+        topicId: requestTopicId,
+        messages: chatMessages,
+        historyEntries: requestHistory,
+        maxActiveVersions: 9,
+      });
       const agentRequestBody = {
         runId: agentRunId,
-        topicId: getCurrentSession()?.activeTopicId || 'default',
+        topicId: requestTopicId,
         messages: messagesForAPI,
         contextEntities,
         selectedContextEntityIds: options?.selectedContextEntityIds ?? selectedIds.map((id) => `canvas:${id}`),
         activeSkillId: currentSkill?.id,
         referenceImages: referencesForRequest,
         referenceContext: referenceContextForRequest,
+        activeTaskContext,
         canvasContext: {
           itemCount: items.length,
           selectedItemIds: selectedIds,
@@ -13691,7 +13732,7 @@ export default function AIWorkspace() {
               error?: string;
               message?: string;
               stage?: string;
-              reason?: 'transport' | 'invalid_reference' | 'invalid_context' | 'invalid_plan' | 'vision_unsupported' | 'vision_unavailable';
+              reason?: 'transport' | 'invalid_reference' | 'invalid_context' | 'invalid_plan' | 'vision_unsupported' | 'vision_unavailable' | 'missing_original_asset';
               retryable?: boolean;
               runId?: string;
               title?: string;
@@ -13717,15 +13758,22 @@ export default function AIWorkspace() {
                 model?: string;
                 providerId?: string;
                 sourceReferenceId?: string;
+                taskId?: string;
+                contractVersion?: number;
+                batchId?: string;
                 presentation?: { title?: string; summary?: string; operation?: 'generate' | 'edit' };
                 assets?: Array<{
                   src?: string;
+                  plannerPreviewSrc?: string;
                   naturalWidth?: number;
                   naturalHeight?: number;
                   model?: string;
                   itemId?: string;
                   index?: number;
                   label?: string;
+                  slotId?: string;
+                  versionId?: string;
+                  parentVersionId?: string;
                   promptTrace?: ChatMessage['promptTrace'];
                 }>;
                 batch?: { total?: number; settled?: number; succeeded?: number; failed?: number };
@@ -13752,6 +13800,7 @@ export default function AIWorkspace() {
               confidence?: 'high' | 'medium';
               resolvedEntityIds?: string[];
               mustPreserveCount?: number;
+              taskSnapshot?: TaskSnapshot;
             };
             try {
               event = JSON.parse(trimmed) as {
@@ -13763,7 +13812,7 @@ export default function AIWorkspace() {
                 delta?: string;
                 message?: string;
                 stage?: string;
-                reason?: 'transport' | 'invalid_reference' | 'invalid_context' | 'invalid_plan' | 'vision_unsupported' | 'vision_unavailable';
+                reason?: 'transport' | 'invalid_reference' | 'invalid_context' | 'invalid_plan' | 'vision_unsupported' | 'vision_unavailable' | 'missing_original_asset';
                 retryable?: boolean;
                 intent?: 'chat' | 'image' | 'skill_action';
                 summary?: string;
@@ -13785,8 +13834,11 @@ export default function AIWorkspace() {
                   model?: string;
                   providerId?: string;
                   sourceReferenceId?: string;
+                  taskId?: string;
+                  contractVersion?: number;
+                  batchId?: string;
                   presentation?: { title?: string; summary?: string; operation?: 'generate' | 'edit' };
-                  assets?: Array<{ src?: string; naturalWidth?: number; naturalHeight?: number; model?: string; itemId?: string; index?: number; label?: string }>;
+                  assets?: Array<{ src?: string; plannerPreviewSrc?: string; naturalWidth?: number; naturalHeight?: number; model?: string; itemId?: string; index?: number; label?: string; slotId?: string; versionId?: string; parentVersionId?: string; promptTrace?: ChatMessage['promptTrace'] }>;
                   batch?: { total?: number; settled?: number; succeeded?: number; failed?: number };
                 };
                 request?: {
@@ -13811,6 +13863,7 @@ export default function AIWorkspace() {
                 confidence?: 'high' | 'medium';
                 resolvedEntityIds?: string[];
                 mustPreserveCount?: number;
+                taskSnapshot?: TaskSnapshot;
               };
             } catch {
               continue;
@@ -14060,6 +14113,10 @@ export default function AIWorkspace() {
                   itemId?: string;
                   index?: number;
                   label?: string;
+                  plannerPreviewSrc?: string;
+                  slotId?: string;
+                  versionId?: string;
+                  parentVersionId?: string;
                   promptTrace?: ChatMessage['promptTrace'];
                 } => Boolean(asset.src)
               );
@@ -14163,15 +14220,23 @@ export default function AIWorkspace() {
                     generationSessionId,
                     loadedAssets.map(({ asset, naturalWidth, naturalHeight }, index) => createGeneratedImageHistoryEntry({
                       src: asset.src,
+                      plannerPreviewSrc: asset.plannerPreviewSrc || asset.src,
                       naturalWidth,
                       naturalHeight,
                       source: 'chat',
+                      topicId: requestTopicId,
                       messageId: imageMessages[index]?.id,
                       operation: event.action?.presentation?.operation,
                       sourceReferenceId: event.action?.sourceReferenceId,
                       providerId: event.action?.providerId,
                       model: asset.model || resolvedModel,
                       promptTrace: asset.promptTrace,
+                      taskId: event.action?.taskId,
+                      contractVersion: event.action?.contractVersion,
+                      batchId: event.action?.batchId,
+                      slotId: asset.slotId,
+                      versionId: asset.versionId,
+                      parentVersionId: asset.parentVersionId,
                     })),
                   );
                   setChatMessages(prev => [...prev, ...imageMessages]);
@@ -14224,7 +14289,10 @@ export default function AIWorkspace() {
             }
 
             if (event.type === 'agent_done') {
-              updatePendingAssistantMessage((msg) => updateAgentRunProgress(msg, { type: 'agent_done' }));
+              updatePendingAssistantMessage((msg) => ({
+                ...updateAgentRunProgress(msg, { type: 'agent_done' }),
+                ...(event.taskSnapshot ? { taskSnapshot: event.taskSnapshot } : {}),
+              }));
               continue;
             }
 

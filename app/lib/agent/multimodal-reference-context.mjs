@@ -1,11 +1,11 @@
 const text = (value) => typeof value === 'string' ? value.trim() : '';
 
-function normalizeReferences(referenceContext) {
+function normalizeReferences(referenceContext, imageSource) {
   const references = Array.isArray(referenceContext?.references)
     ? referenceContext.references
       .map((reference) => {
         const id = text(reference?.id);
-        const src = text(reference?.src);
+        const src = text(imageSource === 'preview' ? reference?.plannerPreviewSrc : reference?.src);
         const label = text(reference?.label);
         if (!id || !src || !label) return null;
         if (reference.role === 'region_target' && reference.confirmationStatus !== 'confirmed') return null;
@@ -99,8 +99,8 @@ function evidenceMarker(evidence, reference) {
   ].join('\n');
 }
 
-export function buildMultimodalReferenceParts(referenceContext, { fallbackText = '' } = {}) {
-  const normalized = normalizeReferences(referenceContext);
+export function buildMultimodalReferenceParts(referenceContext, { fallbackText = '', imageSource = 'original' } = {}) {
+  const normalized = normalizeReferences(referenceContext, imageSource);
   const referenceById = new Map(normalized.references.map((reference) => [reference.id, reference]));
   const evidenceByReferenceId = new Map();
   for (const evidence of normalized.evidenceImages) {
@@ -149,8 +149,8 @@ export function buildMultimodalReferenceParts(referenceContext, { fallbackText =
   return parts;
 }
 
-export function countMultimodalReferenceImages(referenceContext) {
-  return buildMultimodalReferenceParts(referenceContext)
+export function countMultimodalReferenceImages(referenceContext, options) {
+  return buildMultimodalReferenceParts(referenceContext, options)
     .filter((part) => part.type === 'image_url')
     .length;
 }

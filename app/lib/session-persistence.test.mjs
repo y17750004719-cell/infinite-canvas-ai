@@ -112,9 +112,17 @@ test('buildPersistedSession preserves normalized generated image history entries
       {
         id: 'history-1',
         src: '/uploads/generated/a.png',
+        plannerPreviewSrc: '/uploads/previews/a.webp',
         createdAt: 10,
         source: 'image-card',
         sourceItemId: 'image-card-1',
+        topicId: 'topic-1',
+        taskId: 'task-1',
+        contractVersion: 2,
+        batchId: 'batch-1',
+        slotId: 'slot-1',
+        versionId: 'version-2',
+        parentVersionId: 'version-1',
       },
       {
         id: 'history-2',
@@ -129,16 +137,47 @@ test('buildPersistedSession preserves normalized generated image history entries
     {
       id: 'history-1',
       src: '/uploads/generated/a.png',
+      plannerPreviewSrc: '/uploads/previews/a.webp',
       createdAt: 10,
       source: 'image-card',
       sessionId: undefined,
       naturalWidth: undefined,
       naturalHeight: undefined,
       sourceItemId: 'image-card-1',
-      topicId: undefined,
+      topicId: 'topic-1',
       messageId: undefined,
+      taskId: 'task-1',
+      contractVersion: 2,
+      batchId: 'batch-1',
+      slotId: 'slot-1',
+      versionId: 'version-2',
+      parentVersionId: 'version-1',
     },
   ]);
+});
+
+test('buildPersistedSession keeps task snapshots only on their owning assistant message', () => {
+  const taskSnapshot = {
+    topicId: 'topic-1',
+    taskId: 'task-1',
+    contractVersion: 1,
+    contract: { intent: 'image' },
+    latestBatchId: 'batch-1',
+    activeVersions: [{ referenceId: 'task-slot:slot-1', batchId: 'batch-1', slotId: 'slot-1', versionId: 'version-1' }],
+  };
+  const assistantMessage = { id: 'assistant-1', role: 'assistant', content: 'done', taskSnapshot };
+  const result = buildPersistedSession({
+    id: 'session-1',
+    items: [],
+    messages: [assistantMessage],
+    topics: [{ id: 'topic-1', messages: [assistantMessage] }],
+    activeTopicId: 'topic-1',
+    viewport: { x: 0, y: 0, scale: 1 },
+  }, {});
+
+  assert.deepEqual(result.messages[0].taskSnapshot, taskSnapshot);
+  assert.deepEqual(result.topics[0].messages[0].taskSnapshot, taskSnapshot);
+  assert.equal(result.topics[0].taskSnapshot, undefined);
 });
 
 test('buildPersistedSession keeps valid text card panel drafts for existing text card items', () => {
@@ -481,6 +520,7 @@ test('normalizeProjectSession keeps valid generated image history entries and re
     {
       id: 'history-1',
       src: '/uploads/generated/a.png',
+      plannerPreviewSrc: '/uploads/generated/a.png',
       createdAt: 10,
       source: 'chat',
       sessionId: undefined,

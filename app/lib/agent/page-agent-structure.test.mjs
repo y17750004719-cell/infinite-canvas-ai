@@ -38,6 +38,19 @@ test('agent mode posts to the agent route and handles agent events', () => {
   assert.match(source, /agent_error/);
 });
 
+test('agent requests persist and resume the topic-scoped planner task context', () => {
+  assert.match(source, /buildActiveTaskContext/);
+  assert.match(source, /maxActiveVersions:\s*9/);
+  assert.match(source, /activeTaskContext,/);
+  assert.match(source, /plannerPreviewSrc:\s*token\.previewSrc \|\| token\.src/);
+  assert.match(source, /event\.taskSnapshot \? \{ taskSnapshot: event\.taskSnapshot \}/);
+  assert.match(source, /taskId:\s*event\.action\?\.taskId/);
+  assert.match(source, /batchId:\s*event\.action\?\.batchId/);
+  assert.match(source, /slotId:\s*asset\.slotId/);
+  assert.match(source, /versionId:\s*asset\.versionId/);
+  assert.match(source, /plannerPreviewSrc:\s*asset\.plannerPreviewSrc \|\| asset\.src/);
+});
+
 test('agent clarification uses the shared editable decision popover', () => {
   assert.match(source, /showAgentClarificationModal/);
   assert.match(source, /pendingAgentClarification/);

@@ -1,8 +1,10 @@
 import type { AgentContextEntity, AgentProposal } from './agent/context-reference.types';
+import type { AgentTaskContract } from './agent/execution-planner.types';
 import type { CanvasItem } from './canvas-types';
 import type { RegionSelection } from './image-region-selection.types';
 
 export type { CanvasItem } from './canvas-types';
+export type { AgentTaskContract } from './agent/execution-planner.types';
 
 const DB_NAME = 'zo-design-db';
 const DB_VERSION = 1;
@@ -30,6 +32,7 @@ export interface ChatMessage {
     references: Array<{
       id: string;
       src: string;
+      plannerPreviewSrc?: string;
       label: string;
       source: 'upload' | 'history' | 'canvas';
       canvasItemId?: string;
@@ -136,6 +139,7 @@ export interface ChatMessage {
     confidence: 'high' | 'medium';
   };
   executionBriefSummary?: string;
+  taskSnapshot?: TaskSnapshot;
 }
 
 export interface ChatTopic {
@@ -151,18 +155,70 @@ export interface ChatTopic {
 export interface GeneratedImageHistoryEntry {
   id: string;
   src: string;
+  plannerPreviewSrc?: string;
   naturalWidth?: number;
   naturalHeight?: number;
   createdAt: number;
   source: 'chat' | 'image-card' | 'archive';
+  sessionId?: string;
   sourceItemId?: string;
   topicId?: string;
   messageId?: string;
+  taskId?: string;
+  contractVersion?: number;
+  batchId?: string;
+  slotId?: string;
+  versionId?: string;
+  parentVersionId?: string;
   operation?: 'generate' | 'edit';
   sourceReferenceId?: string;
   providerId?: string;
   model?: string;
   promptTrace?: ChatMessage['promptTrace'];
+}
+
+export interface TaskSnapshotActiveVersion {
+  referenceId: string;
+  batchId: string;
+  slotId: string;
+  versionId: string;
+}
+
+export interface TaskSnapshot {
+  topicId: string;
+  taskId: string;
+  contractVersion: number;
+  contract: AgentTaskContract;
+  editBaseVersionId?: string | null;
+  latestBatchId?: string | null;
+  activeVersions: TaskSnapshotActiveVersion[];
+}
+
+export interface ActiveTaskContext {
+  topicId: string;
+  taskId: string;
+  contractVersion: number;
+  contract: AgentTaskContract;
+  editBaseVersionId?: string;
+  editBaseAsset?: {
+    versionId: string;
+    batchId: string;
+    slotId: string;
+    src: string;
+    plannerPreviewSrc: string;
+    parentVersionId?: string;
+  };
+  latestBatch: {
+    batchId: string;
+    slots: Array<{
+      referenceId: string;
+      slotId: string;
+      versionId: string;
+      parentVersionId?: string;
+      src: string;
+      plannerPreviewSrc: string;
+    }>;
+  } | null;
 }
 
 export interface ProjectSession {

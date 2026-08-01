@@ -6,8 +6,8 @@ import { buildMultimodalReferenceParts, countMultimodalReferenceImages } from '.
 test('multimodal reference parts preserve inline text and reference order', () => {
   const context = {
     references: [
-      { id: 'target', src: 'https://example.test/target.png', label: 'Target', source: 'canvas', role: 'reference' },
-      { id: 'style', src: 'https://example.test/style.png', label: 'Style', source: 'upload', role: 'reference' },
+      { id: 'target', src: 'https://example.test/target-original.png', plannerPreviewSrc: 'https://example.test/target.png', label: 'Target', source: 'canvas', role: 'reference' },
+      { id: 'style', src: 'https://example.test/style-original.png', plannerPreviewSrc: 'https://example.test/style.png', label: 'Style', source: 'upload', role: 'reference' },
     ],
     composerSegments: [
       { type: 'text', text: '把' },
@@ -17,14 +17,14 @@ test('multimodal reference parts preserve inline text and reference order', () =
       { type: 'text', text: '的风格' },
     ],
   };
-  const parts = buildMultimodalReferenceParts(context);
+  const parts = buildMultimodalReferenceParts(context, { imageSource: 'preview' });
   assert.deepEqual(parts.filter((part) => part.type === 'image_url').map((part) => part.image_url.url), [
     'https://example.test/target.png',
     'https://example.test/style.png',
   ]);
   assert.match(parts[1].text, /Reference ID: target/);
   assert.match(parts[4].text, /Reference ID: style/);
-  assert.equal(countMultimodalReferenceImages(context), 2);
+  assert.equal(countMultimodalReferenceImages(context, { imageSource: 'preview' }), 2);
 });
 
 test('annotation composites are emitted as non-selectable evidence after their parent image', () => {
@@ -32,6 +32,7 @@ test('annotation composites are emitted as non-selectable evidence after their p
     references: [{
       id: 'annotated',
       src: 'https://example.test/original.png',
+      plannerPreviewSrc: 'https://example.test/original-preview.png',
       label: 'Annotated image',
       source: 'canvas',
       role: 'annotation_bundle',
@@ -44,9 +45,9 @@ test('annotation composites are emitted as non-selectable evidence after their p
       src: 'https://example.test/preview.png',
       kind: 'annotation_composite',
     }],
-  });
+  }, { imageSource: 'preview' });
   assert.deepEqual(parts.filter((part) => part.type === 'image_url').map((part) => part.image_url.url), [
-    'https://example.test/original.png',
+    'https://example.test/original-preview.png',
     'https://example.test/preview.png',
   ]);
   assert.match(parts[2].text, /not an independent reference/i);
@@ -56,10 +57,11 @@ test('annotation composites are emitted as non-selectable evidence after their p
 test('confirmed region crops follow their parent and pending region targets never reach the model', () => {
   const parts = buildMultimodalReferenceParts({
     references: [
-      { id: 'pending', src: 'https://example.test/pending.png', label: 'Pending', source: 'canvas', role: 'region_target' },
+      { id: 'pending', src: 'https://example.test/pending-original.png', plannerPreviewSrc: 'https://example.test/pending.png', label: 'Pending', source: 'canvas', role: 'region_target' },
       {
         id: 'region',
         src: 'https://example.test/original.png',
+        plannerPreviewSrc: 'https://example.test/original-preview.png',
         label: '左侧老虎',
         source: 'canvas',
         role: 'region_target',
@@ -71,9 +73,9 @@ test('confirmed region crops follow their parent and pending region targets neve
     ],
     composerSegments: [{ type: 'reference', referenceId: 'pending' }, { type: 'reference', referenceId: 'region' }],
     evidenceImages: [{ id: 'region:crop', referenceId: 'region', src: 'https://example.test/crop.png', kind: 'region_crop' }],
-  });
+  }, { imageSource: 'preview' });
   assert.deepEqual(parts.filter((part) => part.type === 'image_url').map((part) => part.image_url.url), [
-    'https://example.test/original.png',
+    'https://example.test/original-preview.png',
     'https://example.test/crop.png',
   ]);
   assert.match(parts[0].text, /Candidate aliases: 左虎/);
@@ -84,15 +86,28 @@ test('confirmed region crops follow their parent and pending region targets neve
 test('identical image sources are sent once while retaining both reference ids', () => {
   const parts = buildMultimodalReferenceParts({
     references: [
-      { id: 'first', src: 'https://example.test/shared.png', label: 'First', source: 'upload', role: 'reference' },
-      { id: 'second', src: 'https://example.test/shared.png', label: 'Second', source: 'history', role: 'reference' },
+      { id: 'first', src: 'https://example.test/first-original.png', plannerPreviewSrc: 'https://example.test/shared.png', label: 'First', source: 'upload', role: 'reference' },
+      { id: 'second', src: 'https://example.test/second-original.png', plannerPreviewSrc: 'https://example.test/shared.png', label: 'Second', source: 'history', role: 'reference' },
     ],
     composerSegments: [
       { type: 'reference', referenceId: 'first' },
       { type: 'reference', referenceId: 'second' },
     ],
-  });
+  }, { imageSource: 'preview' });
   assert.equal(parts.filter((part) => part.type === 'image_url').length, 1);
   assert.ok(parts.some((part) => part.type === 'text' && /Reference ID: second/.test(part.text)));
   assert.ok(parts.some((part) => part.type === 'text' && /pixels are identical to reference first/i.test(part.text)));
+});
+
+test('reference originals are never used as planner multimodal input', () => {
+  const parts = buildMultimodalReferenceParts({
+    references: [{
+      id: 'original-only',
+      src: 'https://example.test/original.png',
+      label: 'Original only',
+      source: 'history',
+      role: 'reference',
+    }],
+  }, { imageSource: 'preview' });
+  assert.equal(parts.some((part) => part.type === 'image_url'), false);
 });

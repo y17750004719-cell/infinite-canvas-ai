@@ -3,8 +3,10 @@ import assert from 'node:assert/strict';
 
 import {
   AGENT_EXECUTION_PLAN_TOOL,
+  areAgentTaskContractsEqual,
   buildAgentExecutionPlanTool,
   buildAgentExecutionPlannerMessages,
+  buildAgentTaskContract,
   buildFallbackAgentExecutionPlan,
   compactCanvasContext,
   executionPlanToBrief,
@@ -83,7 +85,10 @@ function plan(overrides = {}) {
     literalCopy,
   });
   const result = {
-    version: 2,
+    version: 3,
+    taskRelation: 'new_task',
+    taskRelationConfidence: 'high',
+    taskRelationReason: 'The user requested a separate deliverable.',
     intent: 'image',
     skillId: 'magazine-poster',
     confidence: 'high',
@@ -233,6 +238,7 @@ test('planner receives sanitized inline reference context and is the sole semant
       references: [{
         id: 'vogue-cover',
         src: 'https://private.example/original.png',
+        plannerPreviewSrc: 'https://private.example/preview.png',
         label: 'Vogue Cover',
         source: 'canvas',
         canvasItemId: 'canvas-1',
@@ -252,6 +258,7 @@ test('planner receives sanitized inline reference context and is the sole semant
         id: 'canvas-1',
         type: 'image',
         src: 'https://private.example/canvas.png',
+        plannerPreviewSrc: 'https://private.example/canvas-preview.png',
         x: 10,
         y: 20,
         width: 300,
@@ -289,7 +296,8 @@ test('planner receives sanitized inline reference context and is the sole semant
     ],
   });
   assert.doesNotMatch(structuredPart.text, /private\.example/);
-  assert.ok(messages[1].content.some((part) => part.type === 'image_url' && part.image_url.url === 'https://private.example/original.png'));
+  assert.ok(messages[1].content.some((part) => part.type === 'image_url' && part.image_url.url === 'https://private.example/preview.png'));
+  assert.ok(!messages[1].content.some((part) => part.type === 'image_url' && part.image_url.url === 'https://private.example/original.png'));
   const imageIndex = messages[1].content.findIndex((part) => part.type === 'image_url');
   assert.match(messages[1].content[imageIndex - 1].text, /Reference ID: vogue-cover/);
   assert.deepEqual(payload.canvasContext.selectedItems[0], {
@@ -302,31 +310,159 @@ test('planner receives sanitized inline reference context and is the sole semant
   });
 });
 
-test('planner tool schema is Gemini-compatible while runtime validation enforces version 2', () => {
+test('planner tool schema is Gemini-compatible while runtime validation enforces version 3', () => {
   const versionSchema = AGENT_EXECUTION_PLAN_TOOL.function.parameters.properties.plan.properties.version;
   assert.equal(versionSchema.type, 'integer');
   assert.equal(versionSchema.enum, undefined);
-  assert.match(versionSchema.description, /must be 2/i);
+  assert.match(versionSchema.description, /must be 3/i);
   assertStringEnums(AGENT_EXECUTION_PLAN_TOOL.function.parameters);
 
   const options = {
     allowedSkillIds: ['magazine-poster'],
     skillToolsById: { 'magazine-poster': ['generate_image'] },
   };
-  const valid = validateAgentExecutionPlan(plan({ version: 2 }), options);
+  const valid = validateAgentExecutionPlan(plan({ version: 3 }), options);
   assert.ok(valid.plan);
-  assert.equal(valid.plan.version, 2);
+  assert.equal(valid.plan.version, 3);
 
-  const invalid = validateAgentExecutionPlan(plan({ version: 1 }), options);
+  const invalid = validateAgentExecutionPlan(plan({ version: 2 }), options);
   assert.equal(invalid.plan, null);
   assert.ok(invalid.validationErrors.some((entry) => entry.path === 'version' && entry.code === 'unsupported_version'));
+});
+
+test('planner v3 validates all task relations and canonical contract reuse', () => {
+  const options = {
+    allowedSkillIds: ['magazine-poster'],
+    skillToolsById: { 'magazine-poster': ['generate_image'] },
+    skillPromptStylesById: { 'magazine-poster': 'json-text' },
+  };
+  const initial = validateAgentExecutionPlan(plan(), options).plan;
+  assert.ok(initial);
+  const activeTaskContext = {
+    topicId: 'topic-1',
+    taskId: 'task-1',
+    contractVersion: 1,
+    contract: buildAgentTaskContract(initial),
+    latestBatchId: 'batch-1',
+    activeVersions: [],
+  };
+  for (const taskRelation of ['continue_task', 'rerun_task']) {
+    const result = validateAgentExecutionPlan(plan({
+      taskRelation,
+      taskRelationReason: `The user requested ${taskRelation}.`,
+    }), { ...options, activeTaskContext });
+    assert.ok(result.plan, taskRelation);
+  }
+  const revised = validateAgentExecutionPlan(plan({
+    taskRelation: 'revise_task',
+    taskRelationReason: 'The requested subject changed.',
+    brief: { ...plan().brief, subject: 'a different statue' },
+  }), { ...options, activeTaskContext });
+  assert.ok(revised.plan);
+
+  const unchangedRevision = validateAgentExecutionPlan(plan({
+    taskRelation: 'revise_task',
+    taskRelationReason: 'No executable field changed.',
+  }), { ...options, activeTaskContext });
+  assert.equal(unchangedRevision.plan, null);
+  assert.ok(unchangedRevision.validationErrors.some((entry) => entry.code === 'unchanged_task_contract'));
+
+  const mismatchedContinuation = validateAgentExecutionPlan(plan({
+    taskRelation: 'continue_task',
+    taskRelationReason: 'Continue, but with a changed subject.',
+    brief: { ...plan().brief, subject: 'a different statue' },
+  }), { ...options, activeTaskContext });
+  assert.equal(mismatchedContinuation.plan, null);
+  assert.ok(mismatchedContinuation.validationErrors.some((entry) => entry.code === 'task_contract_mismatch'));
+
+  const discussed = validateAgentExecutionPlan(plan({
+    taskRelation: 'discuss_task',
+    taskRelationReason: 'The user only asked a question about the task.',
+    intent: 'chat',
+    imageTask: undefined,
+    presentation: undefined,
+    generation: null,
+    execution: { kind: 'none', requiresConfirmation: false, tool: null },
+  }), { ...options, activeTaskContext });
+  assert.ok(discussed.plan);
+});
+
+test('task contract comparison rebinds task-owned edit targets to stable references', () => {
+  const activeTaskContext = {
+    activeVersions: [{ referenceId: 'slot:one', slotId: 'slot-1', versionId: 'version-2' }],
+  };
+  const base = plan({
+    imageTask: { ...plan().imageTask, operation: 'edit', targetReferenceId: 'slot-1' },
+  });
+  const candidate = plan({
+    imageTask: { ...plan().imageTask, operation: 'edit', targetReferenceId: 'version-2' },
+  });
+  assert.equal(areAgentTaskContractsEqual(base, candidate, activeTaskContext), true);
+  assert.equal(buildAgentTaskContract(candidate, activeTaskContext).imageTask.targetReferenceId, 'slot:one');
+});
+
+test('low task-relation confidence clarifies and cannot execute mutation', () => {
+  const options = {
+    allowedSkillIds: ['magazine-poster'],
+    skillToolsById: { 'magazine-poster': ['generate_image'] },
+    skillPromptStylesById: { 'magazine-poster': 'json-text' },
+  };
+  const rejected = validateAgentExecutionPlan(plan({ taskRelationConfidence: 'low' }), options);
+  assert.equal(rejected.plan, null);
+  assert.ok(rejected.validationErrors.some((entry) => entry.code === 'clarification_required'));
+  assert.ok(rejected.validationErrors.some((entry) => entry.code === 'low_confidence_mutation'));
+
+  const clarified = validateAgentExecutionPlan(plan({
+    taskRelationConfidence: 'low',
+    taskRelationReason: 'The user may want either a new image or an edit.',
+    needsClarification: true,
+    clarification: {
+      dimension: 'image_operation',
+      question: '你希望生成新图还是编辑现有图？',
+      options: [
+        { id: 'generate', label: '生成新图', answer: '生成一张新图片' },
+        { id: 'edit', label: '编辑现有图', answer: '编辑我指定的图片' },
+      ],
+    },
+    imageTask: undefined,
+    presentation: undefined,
+    generation: null,
+    execution: { kind: 'none', requiresConfirmation: false, tool: null },
+  }), options);
+  assert.ok(clarified.plan);
+});
+
+test('active task context is capped at nine preview-only multimodal references', () => {
+  const activeVersions = Array.from({ length: 11 }, (_, index) => ({
+    referenceId: `slot:${index}`,
+    batchId: 'batch-1',
+    slotId: `slot-${index}`,
+    versionId: `version-${index}`,
+    src: `https://example.test/original-${index}.png`,
+    plannerPreviewSrc: `https://example.test/preview-${index}.png`,
+  }));
+  const messages = buildAgentExecutionPlannerMessages({
+    userMessage: '继续',
+    activeTaskContext: {
+      topicId: 'topic-1',
+      taskId: 'task-1',
+      contractVersion: 1,
+      contract: buildAgentTaskContract(plan()),
+      latestBatchId: 'batch-1',
+      activeVersions,
+    },
+  });
+  const payload = JSON.parse(messages[1].content[0].text.split('\n').slice(1).join('\n'));
+  assert.equal(payload.activeTaskContext.activeVersions.length, 9);
+  assert.deepEqual(messages[1].content.filter((part) => part.type === 'image_url').map((part) => part.image_url.url),
+    activeVersions.slice(0, 9).map((entry) => entry.plannerPreviewSrc));
 });
 
 test('planner tool schema keeps image references and context entities in separate id namespaces', () => {
   const tool = buildAgentExecutionPlanTool({
     contextEntities: [{ id: 'canvas:scene', label: 'Scene' }],
     referenceContext: {
-      references: [{ id: 'token:bottle', src: '/api/local-assets/bottle.png', label: 'Bottle', source: 'upload', role: 'reference' }],
+      references: [{ id: 'token:bottle', src: '/api/local-assets/bottle.png', plannerPreviewSrc: '/api/local-assets/bottle-preview.png', label: 'Bottle', source: 'upload', role: 'reference' }],
       composerSegments: [{ type: 'reference', referenceId: 'token:bottle' }],
     },
   });
@@ -339,7 +475,7 @@ test('planner tool schema keeps image references and context entities in separat
 
   const noContextTool = buildAgentExecutionPlanTool({
     referenceContext: {
-      references: [{ id: 'token:image', src: 'https://example.test/image.png', label: 'Image', source: 'upload', role: 'reference' }],
+      references: [{ id: 'token:image', src: 'https://example.test/image.png', plannerPreviewSrc: 'https://example.test/image-preview.png', label: 'Image', source: 'upload', role: 'reference' }],
       composerSegments: [],
     },
   });
@@ -412,7 +548,8 @@ test('imageTask and presentation are model-authored optional fields with structu
     referenceIds: ['vogue-cover', 'style-board'],
   };
   const groundedVisualContext = visualContext(['vogue-cover', 'style-board'], 'vogue-cover', 'high');
-  const validated = validateAgentExecutionPlan(plan({ visualContext: groundedVisualContext, imageTask, presentation }), options);
+  const editDelivery = { ...plan().delivery, mode: 'single', outputCount: 1 };
+  const validated = validateAgentExecutionPlan(plan({ visualContext: groundedVisualContext, imageTask, presentation, delivery: editDelivery }), options);
   assert.ok(validated.plan);
   assert.deepEqual(validated.plan.imageTask, imageTask);
   assert.deepEqual(validated.plan.presentation, presentation);
@@ -440,6 +577,7 @@ test('imageTask and presentation are model-authored optional fields with structu
   const duplicateTarget = validateAgentExecutionPlan(plan({
     visualContext: groundedVisualContext,
     imageTask: { ...imageTask, supportingReferenceIds: ['vogue-cover', 'style-board'] },
+    delivery: editDelivery,
   }), options);
   assert.ok(duplicateTarget.plan);
   assert.deepEqual(duplicateTarget.plan.imageTask.supportingReferenceIds, ['style-board']);
@@ -450,6 +588,14 @@ test('imageTask and presentation are model-authored optional fields with structu
   const incompleteContract = validateAgentExecutionPlan(missingContractArray, options);
   assert.equal(incompleteContract.plan, null);
   assert.ok(incompleteContract.validationErrors.some((entry) => entry.path === 'imageTask.mustPreserve' && entry.code === 'required'));
+
+  const multiOutputEdit = validateAgentExecutionPlan(plan({
+    visualContext: groundedVisualContext,
+    imageTask,
+    delivery: { ...plan().delivery, outputCount: 2 },
+  }), options);
+  assert.equal(multiOutputEdit.plan, null);
+  assert.ok(multiOutputEdit.validationErrors.some((entry) => entry.path === 'delivery.outputCount' && entry.code === 'edit_count_mismatch'));
 });
 
 test('image-bearing plans require complete grounded visual context and reject ambiguous edit execution', () => {
@@ -828,7 +974,7 @@ test('model-authored edit intent survives request planning without local reinter
     messages: [{ role: 'user', content: '换成狗' }],
     manifests,
     referenceContext: {
-      references: [{ id: 'vogue-cover', src: 'https://example.test/vogue.png', label: 'Vogue Cover', source: 'canvas', role: 'edit_target' }],
+      references: [{ id: 'vogue-cover', src: 'https://example.test/vogue.png', plannerPreviewSrc: 'https://example.test/vogue-preview.png', label: 'Vogue Cover', source: 'canvas', role: 'edit_target' }],
       composerSegments: [
         { type: 'reference', referenceId: 'vogue-cover' },
         { type: 'text', text: ' 换成狗' },
@@ -840,6 +986,7 @@ test('model-authored edit intent survives request planning without local reinter
       visualContext: visualContext(['vogue-cover'], 'vogue-cover', 'high'),
       imageTask,
       presentation,
+      delivery: { ...plan().delivery, mode: 'single', outputCount: 1 },
     })),
   });
   assert.equal(result.source, 'model');
@@ -921,6 +1068,7 @@ test('planner classifies unsupported and unreadable multimodal inputs without pr
     references: [{
       id: 'photo',
       src: 'https://example.test/photo.png',
+      plannerPreviewSrc: 'https://example.test/photo-preview.png',
       label: 'Photo',
       source: 'upload',
       role: 'reference',
@@ -985,7 +1133,7 @@ test('planner does not retry a typed local reference image failure', async () =>
     messages: [{ role: 'user', content: '分析这张图' }],
     manifests,
     referenceContext: {
-      references: [{ id: 'photo', src: '/api/local-assets/uploads/missing.png', label: 'Photo', source: 'upload', role: 'reference' }],
+      references: [{ id: 'photo', src: '/api/local-assets/uploads/original.png', plannerPreviewSrc: '/api/local-assets/uploads/missing.png', label: 'Photo', source: 'upload', role: 'reference' }],
       composerSegments: [{ type: 'reference', referenceId: 'photo' }],
     },
     model: 'vision-model',
@@ -1042,7 +1190,7 @@ test('planner distinguishes unknown canvas context ids from unknown image refere
     manifests,
     contextEntities: [{ id: 'canvas:scene', label: 'Scene' }],
     referenceContext: {
-      references: [{ id: 'token:image', src: 'https://example.test/image.png', label: 'Image', source: 'upload', role: 'reference' }],
+      references: [{ id: 'token:image', src: 'https://example.test/image.png', plannerPreviewSrc: 'https://example.test/image-preview.png', label: 'Image', source: 'upload', role: 'reference' }],
       composerSegments: [{ type: 'reference', referenceId: 'token:image' }],
     },
     model: 'planner-model',
@@ -1070,7 +1218,7 @@ test('planner distinguishes unknown canvas context ids from unknown image refere
     manifests,
     contextEntities: [{ id: 'canvas:scene', label: 'Scene' }],
     referenceContext: {
-      references: [{ id: 'token:image', src: 'https://example.test/image.png', label: 'Image', source: 'upload', role: 'reference' }],
+      references: [{ id: 'token:image', src: 'https://example.test/image.png', plannerPreviewSrc: 'https://example.test/image-preview.png', label: 'Image', source: 'upload', role: 'reference' }],
       composerSegments: [{ type: 'reference', referenceId: 'token:image' }],
     },
     model: 'planner-model',
