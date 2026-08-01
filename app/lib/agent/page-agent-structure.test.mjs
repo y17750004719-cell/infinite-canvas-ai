@@ -410,7 +410,7 @@ test('generated image result cards persist and render model-authored presentatio
 test('chat exposes a bottom jump control without forcing users away from history', () => {
   assert.match(source, /scrollHeight - container\.scrollTop - container\.clientHeight/);
   assert.match(source, /distanceFromBottom <= 56/);
-  assert.match(source, /const scrollChatToBottom = useCallback/);
+  assert.match(source, /const scrollChatToBottom = React\.useMemo/);
   assert.match(source, /if \(shouldFollowLatest\) \{\s*scrollChatToBottom\('auto'\)/);
   assert.match(source, /new ResizeObserver/);
   assert.match(source, /onScroll=\{handleChatContainerScroll\}/);

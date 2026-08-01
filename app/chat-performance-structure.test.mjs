@@ -106,3 +106,19 @@ test('workspace commit performance is sampled only through the existing developm
   assert.equal(pageSource.includes("console.info('[workspace-commit-perf]'"), true);
   assert.equal(pageSource.includes('<React.Profiler id="workspace-performance" onRender={handleWorkspaceProfilerRender}>'), true);
 });
+
+test('chat scroll contextSafe wrapper remains analyzable by the hooks rule', () => {
+  assert.equal(pageSource.includes('const scrollChatToBottom = React.useMemo(() => workspaceContextSafe('), true);
+});
+
+test('skill job polling declares its stable state update dependencies', () => {
+  const pollingSource = sourceBetween(
+    pageSource,
+    'useEffect(() => {\n    if (!activeSkillJobId) return;',
+    'const handleWorkspaceProfilerRender = useCallback'
+  );
+  const dependencySource = pollingSource.slice(pollingSource.lastIndexOf('}, ['));
+  assert.equal(dependencySource.includes('setChatMessages'), true);
+  assert.equal(dependencySource.includes('setItems'), true);
+  assert.equal(dependencySource.includes('updateChatMessageById'), true);
+});

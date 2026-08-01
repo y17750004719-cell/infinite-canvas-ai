@@ -6359,7 +6359,7 @@ export default function AIWorkspace() {
     return nextIsNearBottom;
   }, []);
 
-  const scrollChatToBottom = useCallback(workspaceContextSafe((behavior?: ScrollBehavior) => {
+  const scrollChatToBottom = React.useMemo(() => workspaceContextSafe((behavior?: ScrollBehavior) => {
     const container = chatContainerRef.current;
     if (!container) return;
     const resolvedBehavior = behavior || (reducedMotionRef.current ? 'auto' : 'smooth');
@@ -7568,7 +7568,20 @@ export default function AIWorkspace() {
     setCanvasImageGenerationErrorById({});
     pendingCanvasHistorySnapshotRef.current = null;
     clearConnectionInteractionStateRef.current();
-  }, []);
+  }, [
+    setConnections,
+    setImageCardAspectRatioById,
+    setImageCardCountById,
+    setImageCardModelById,
+    setImageCardPanelDrafts,
+    setImageCardProviderById,
+    setImageCardQualityById,
+    setImageCardSizeById,
+    setItems,
+    setTextCardModelById,
+    setTextCardPanelDrafts,
+    setTextCardProviderById,
+  ]);
 
   const undoCanvasEdit = useCallback(() => {
     const sessionId = currentSessionIdRef.current;
@@ -7694,7 +7707,15 @@ export default function AIWorkspace() {
       const nextEntries = Object.entries(prev).filter(([itemId]) => imageCardIds.has(itemId));
       return nextEntries.length === Object.keys(prev).length ? prev : Object.fromEntries(nextEntries);
     });
-  }, [imageCardMembershipKey]);
+  }, [
+    imageCardMembershipKey,
+    setImageCardAspectRatioById,
+    setImageCardCountById,
+    setImageCardModelById,
+    setImageCardPanelDrafts,
+    setImageCardQualityById,
+    setImageCardSizeById,
+  ]);
 
   useEffect(() => {
     selectedIdRef.current = selectedId;
@@ -8284,7 +8305,7 @@ export default function AIWorkspace() {
     flushQueuedChatMessageUpdates();
   };
 
-  const flushQueuedChatMessageUpdates = () => {
+  const flushQueuedChatMessageUpdates = useCallback(() => {
     if (pendingChatMessageUpdateTimerRef.current) {
       clearTimeout(pendingChatMessageUpdateTimerRef.current);
       pendingChatMessageUpdateTimerRef.current = null;
@@ -8305,15 +8326,15 @@ export default function AIWorkspace() {
         console.info('[chat-stream-perf]', { sampleCount: samples.length, eventToCommitP95: p95 });
       }
     }
-  };
+  }, [setChatMessages]);
 
-  const scheduleQueuedChatMessageUpdates = () => {
+  const scheduleQueuedChatMessageUpdates = useCallback(() => {
     if (pendingChatMessageUpdateTimerRef.current) return;
     pendingChatMessageUpdateStartedAtRef.current = performance.now();
     pendingChatMessageUpdateTimerRef.current = setTimeout(flushQueuedChatMessageUpdates, 64);
-  };
+  }, [flushQueuedChatMessageUpdates]);
 
-  const updateChatMessageById = (
+  const updateChatMessageById = useCallback((
     messageId: string,
     updater: (msg: ChatMessage) => ChatMessage
   ) => {
@@ -8321,7 +8342,7 @@ export default function AIWorkspace() {
     queuedUpdates.push(updater);
     pendingChatMessageUpdatesRef.current.set(messageId, queuedUpdates);
     scheduleQueuedChatMessageUpdates();
-  };
+  }, [scheduleQueuedChatMessageUpdates]);
 
   const updatePendingAssistantMessage = (
     updater: (msg: ChatMessage) => ChatMessage
@@ -8519,7 +8540,7 @@ export default function AIWorkspace() {
         img.src = imageUrl;
       });
     },
-    [getSpawnPosition, recordCurrentCanvasUndoSnapshot]
+    [getSpawnPosition, recordCurrentCanvasUndoSnapshot, setItems]
   );
 
   const addGeneratedHistoryImageToCanvas = useCallback(
@@ -8570,7 +8591,7 @@ export default function AIWorkspace() {
       recordCurrentCanvasUndoSnapshot();
       setItems((prev) => [...prev, newItem]);
     },
-    [getSpawnPosition, recordCurrentCanvasUndoSnapshot]
+    [getSpawnPosition, recordCurrentCanvasUndoSnapshot, setItems]
   );
 
   const addBackgroundRemovedImageToCanvas = useCallback(
@@ -8631,7 +8652,7 @@ export default function AIWorkspace() {
         return [...prev, newItem];
       });
     },
-    [getSpawnPosition, recordCurrentCanvasUndoSnapshot]
+    [getSpawnPosition, recordCurrentCanvasUndoSnapshot, setItems]
   );
 
   const replaceImageAssetItemFromFile = useCallback(
@@ -8672,7 +8693,7 @@ export default function AIWorkspace() {
         prev.map((item) => (item.id === itemId ? getReplacedImageAssetItem(item, imageMeta) : item))
       );
     },
-    [recordCurrentCanvasUndoSnapshot]
+    [recordCurrentCanvasUndoSnapshot, setItems]
   );
 
   const uploadImageFilesToCanvas = useCallback(
@@ -8788,6 +8809,17 @@ export default function AIWorkspace() {
       selectedId,
       selectedIds,
       selectedImageAssetItem?.id,
+      setImageCardAspectRatioById,
+      setImageCardCountById,
+      setImageCardModelById,
+      setImageCardPanelDrafts,
+      setImageCardProviderById,
+      setImageCardQualityById,
+      setImageCardSizeById,
+      setItems,
+      setTextCardModelById,
+      setTextCardPanelDrafts,
+      setTextCardProviderById,
       uploadImageFilesToCanvas,
       centerViewportOnPastedCanvasItems,
     ]
@@ -8971,7 +9003,7 @@ export default function AIWorkspace() {
         [selectedTextCardPanelItem.id]: value,
       }));
     },
-    [capturePendingCanvasUndoSnapshot, selectedTextCardPanelItem]
+    [capturePendingCanvasUndoSnapshot, selectedTextCardPanelItem, setTextCardPanelDrafts]
   );
 
   const handleSelectedImageCardPanelInputChange = useCallback(
@@ -8989,7 +9021,7 @@ export default function AIWorkspace() {
         [selectedImageCardPanelItem.id]: value,
       }));
     },
-    [capturePendingCanvasUndoSnapshot, selectedImageCardPanelItem]
+    [capturePendingCanvasUndoSnapshot, selectedImageCardPanelItem, setImageCardPanelDrafts]
   );
 
   const handleManualTextCardInputChange = useCallback((itemId: string, value: string) => {
@@ -9004,7 +9036,7 @@ export default function AIWorkspace() {
           : item
       )
     );
-  }, []);
+  }, [setItems]);
 
   const handleAnnotationTextChange = useCallback((itemId: string, value: string, height: number) => {
     setItems((prev) =>
@@ -9061,7 +9093,7 @@ export default function AIWorkspace() {
         };
       })
     );
-  }, [recordCurrentCanvasUndoSnapshot]);
+  }, [recordCurrentCanvasUndoSnapshot, setItems]);
 
   const finalizeManualTextCardEditing = useCallback((itemId: string) => {
     commitPendingCanvasUndoSnapshot();
@@ -9069,7 +9101,7 @@ export default function AIWorkspace() {
       prev.map((item) => (item.id === itemId ? finalizeManualTextCardItem(item) : item))
     );
     setEditingTextCardId((prev) => (prev === itemId ? null : prev));
-  }, [commitPendingCanvasUndoSnapshot]);
+  }, [commitPendingCanvasUndoSnapshot, setItems]);
 
   const handleTextCardDoubleClick = useCallback((itemId: string) => {
     const item = itemsRef.current.find((entry) => entry.id === itemId);
@@ -9104,7 +9136,7 @@ export default function AIWorkspace() {
       )
     );
     setEditingTextCardId(itemId);
-  }, [activeCanvasTextGenerationItemIds, connections, createCurrentCanvasUndoSnapshot]);
+  }, [activeCanvasTextGenerationItemIds, connections, createCurrentCanvasUndoSnapshot, setItems]);
 
   const handleCanvasItemDoubleClick = useCallback((itemId: string) => {
     const item = itemsRef.current.find((candidate) => candidate.id === itemId);
@@ -9136,7 +9168,7 @@ export default function AIWorkspace() {
 
       return next;
     });
-  }, [items]);
+  }, [items, setTextCardPanelDrafts]);
 
   const handleChatEditorKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
     if (e.nativeEvent.isComposing || isChatInputComposingRef.current) return;
@@ -9374,7 +9406,7 @@ export default function AIWorkspace() {
     setSelectedConnectionIds([]);
     setSelectedId(newItem.id);
     setSelectedIds([newItem.id]);
-  }, [getSpawnPosition, recordCurrentCanvasUndoSnapshot]);
+  }, [getSpawnPosition, recordCurrentCanvasUndoSnapshot, setItems]);
 
   const createTextItemAtCanvasPoint = useCallback((canvasPoint: { x: number; y: number }) => {
     const newItem = createCanvasCardItemAtCanvasPoint({
@@ -9391,7 +9423,7 @@ export default function AIWorkspace() {
     setSelectedIds([newItem.id]);
 
     return newItem;
-  }, []);
+  }, [setItems]);
 
   const createImageCardItemAtCanvasPoint = useCallback((canvasPoint: { x: number; y: number }) => {
     const newItem = createCanvasCardItemAtCanvasPoint({
@@ -9408,7 +9440,7 @@ export default function AIWorkspace() {
     setSelectedIds([newItem.id]);
 
     return newItem;
-  }, []);
+  }, [setItems]);
 
   const getConnectionAnchorCanvasPoint = useCallback((item: CanvasItem, side: 'left' | 'right') => ({
     x:
@@ -9777,7 +9809,7 @@ export default function AIWorkspace() {
     setConnections(prev => prev.filter((connection) => connection.fromItemId !== id && connection.toItemId !== id));
     if (selectedId === id) setSelectedId(null);
     setSelectedIds(prev => prev.filter(selected => selected !== id));
-  }, [recordCurrentCanvasUndoSnapshot, selectedId]);
+  }, [recordCurrentCanvasUndoSnapshot, selectedId, setConnections, setItems]);
 
   const deleteConnection = (connectionId: string) => {
     recordCurrentCanvasUndoSnapshot();
@@ -10968,7 +11000,7 @@ export default function AIWorkspace() {
     }
 
     stageCanvasPanViewportCommit(motion.targetViewport, motion);
-  }, [clearCanvasViewportPreview, previewCanvasPanMotion, setCanvasPanVisualState, stageCanvasPanViewportCommit, updateCanvasInteractionPhase]);
+  }, [clearCanvasViewportPreview, setCanvasPanVisualState, stageCanvasPanViewportCommit, updateCanvasInteractionPhase]);
 
   useEffect(() => {
     const flushCanvasSessionBoundary = (reason: string) => {
@@ -12467,7 +12499,8 @@ export default function AIWorkspace() {
       defaultWorkspaceTextModelOption.id,
       recordCurrentCanvasUndoSnapshot,
       selectedTextPanelModel.providerId,
-      workspaceTextModelOptions,
+      selectedTextCardProviderModelOptions,
+      setItems,
     ]
   );
 
@@ -12493,7 +12526,7 @@ export default function AIWorkspace() {
         [normalizedSessionId]: nextSessionEntries,
       };
     });
-  }, []);
+  }, [setGeneratedImageHistoryBySession]);
 
   const materializeImageCardHistoryForSession = useCallback((
     sessionId: string | null | undefined,
@@ -12520,7 +12553,7 @@ export default function AIWorkspace() {
         [normalizedSessionId]: nextSessionEntries,
       };
     });
-  }, []);
+  }, [setGeneratedImageHistoryBySession]);
 
   const handleCanvasImageGenerate = useCallback(
     async ({
@@ -12879,8 +12912,10 @@ export default function AIWorkspace() {
       defaultWorkspaceImageModelOption.providerId,
       imageCardProviderById,
       materializeImageCardHistoryForSession,
+      providerImageOptionProfiles,
       recordCurrentCanvasUndoSnapshot,
       selectedImageCardModel.providerId,
+      setItems,
       workspaceImageModelOptions,
     ]
   );
@@ -16099,6 +16134,7 @@ export default function AIWorkspace() {
     setImageCardProviderById,
     setImageCardQualityById,
     setImageCardSizeById,
+    setItems,
     textCardProviderById,
   ]);
 
@@ -16527,7 +16563,7 @@ export default function AIWorkspace() {
 
       clearPendingConnectionMenu();
     },
-    [pendingConnectionMenu, toCanvasPoint, createImageCardItemAtCanvasPoint, createTextItemAtCanvasPoint, clearPendingConnectionMenu, recordCurrentCanvasUndoSnapshot]
+    [pendingConnectionMenu, toCanvasPoint, createImageCardItemAtCanvasPoint, createTextItemAtCanvasPoint, clearPendingConnectionMenu, recordCurrentCanvasUndoSnapshot, setConnections]
   );
 
   const isEditableUndoRedoTarget = (target: EventTarget | null) => {
@@ -16751,7 +16787,7 @@ export default function AIWorkspace() {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
     };
-  }, [selectedId, selectedIds, connectionPointerId, selectedConnectionIds, pendingConnectionMenu, applyViewportScale, clearPendingConnectionMenu, copySelectedCanvasItemsToClipboard, deleteItem, fitCanvasItemsToViewport, hasActiveNonEditableTextSelection, recordCurrentCanvasUndoSnapshot, redoCanvasEdit, resetConnectionInteraction, tool, undoCanvasEdit]);
+  }, [selectedId, selectedIds, connectionPointerId, selectedConnectionIds, pendingConnectionMenu, applyViewportScale, clearPendingConnectionMenu, copySelectedCanvasItemsToClipboard, deleteItem, fitCanvasItemsToViewport, hasActiveNonEditableTextSelection, recordCurrentCanvasUndoSnapshot, redoCanvasEdit, resetConnectionInteraction, setConnections, setItems, tool, undoCanvasEdit]);
 
   useEffect(() => {
     const handleWindowPaste = (e: ClipboardEvent) => {
@@ -17169,7 +17205,16 @@ export default function AIWorkspace() {
         clearTimeout(timer);
       }
     };
-  }, [activeSkillJobId, activeSkillJobType, appendGeneratedImageHistoryForSession, getSpawnPosition, recordCurrentCanvasUndoSnapshot]);
+  }, [
+    activeSkillJobId,
+    activeSkillJobType,
+    appendGeneratedImageHistoryForSession,
+    getSpawnPosition,
+    recordCurrentCanvasUndoSnapshot,
+    setChatMessages,
+    setItems,
+    updateChatMessageById,
+  ]);
 
   const handleWorkspaceProfilerRender = useCallback((
     _id: string,

@@ -222,7 +222,7 @@ export function useWorkspaceSessionController<TResolvedSessionState>({
         ? snapshot.activeSession?.id || snapshot.currentSessionId || null
         : null
     );
-  }, [applyLoadedSessionState, interruptSessionPersistence, setViewMode, syncWorkspaceUrl]);
+  }, [applyLoadedSessionState, interruptSessionPersistence, setSessions, setViewMode, syncWorkspaceUrl]);
 
   const flushCurrentSessionSave = useCallback(() => {
     if (pendingSessionSaveFrameRef.current !== null) {
@@ -293,7 +293,7 @@ export function useWorkspaceSessionController<TResolvedSessionState>({
     );
 
     enqueueCoalescedSessionPersistence(updatedSession);
-  }, [buildCurrentSessionSnapshot, enqueueCoalescedSessionPersistence]);
+  }, [buildCurrentSessionSnapshot, enqueueCoalescedSessionPersistence, setSessions]);
 
   const commitCurrentSessionSnapshotBeforeTransition = useCallback(() => {
     cancelPendingSessionSave();
@@ -321,7 +321,7 @@ export function useWorkspaceSessionController<TResolvedSessionState>({
     });
 
     return result;
-  }, [buildCurrentSessionSnapshot, cancelPendingSessionSave, enqueueSessionPersistenceTask]);
+  }, [buildCurrentSessionSnapshot, cancelPendingSessionSave, enqueueSessionPersistenceTask, setSessions]);
 
   const scheduleCurrentSessionSave = useCallback(() => {
     if (pendingSessionActionRef.current) return;
@@ -398,6 +398,7 @@ export function useWorkspaceSessionController<TResolvedSessionState>({
     captureWorkspaceUiSnapshot,
     enqueueSessionPersistenceTask,
     restoreWorkspaceUiSnapshot,
+    setSessions,
     setViewMode,
     syncWorkspaceUrl,
   ]);
@@ -423,7 +424,7 @@ export function useWorkspaceSessionController<TResolvedSessionState>({
 
     setSessions(nextSessions);
     return true;
-  }, [enqueueSessionPersistenceTask]);
+  }, [enqueueSessionPersistenceTask, setSessions]);
 
   const deleteSession = useCallback(async (sessionId: string, e: MouseEvent) => {
     e.stopPropagation();
@@ -474,6 +475,7 @@ export function useWorkspaceSessionController<TResolvedSessionState>({
     enqueueSessionPersistenceTask,
     interruptSessionPersistence,
     restoreWorkspaceUiSnapshot,
+    setSessions,
     syncWorkspaceUrl,
     viewMode,
   ]);
@@ -537,7 +539,7 @@ export function useWorkspaceSessionController<TResolvedSessionState>({
     };
 
     void initProject();
-  }, [applyLoadedSessionState, createNewProject, resolveSessionPresentationState, setViewMode]);
+  }, [applyLoadedSessionState, createNewProject, resolveSessionPresentationState, setSessions, setViewMode]);
 
   useEffect(() => {
     if (currentSessionId && !isHighFrequencyInteractionActive) {
