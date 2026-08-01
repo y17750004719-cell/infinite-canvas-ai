@@ -1,28 +1,3 @@
-export interface AgentLoopResult {
-  content: string;
-  reasoningContent: string;
-  turns: number;
-  toolCalls: number;
-  mutationToolCalls: number;
-  stopReason: 'completed' | 'confirmation_required' | 'execution_required';
-  confirmation?: Record<string, unknown>;
-}
-
-export function runAgentLoop(input: {
-  messages: unknown[];
-  tools: unknown[];
-  modelFn: (request: { messages: unknown[]; tools: unknown[] }) => Promise<unknown>;
-  executeTool: (name: string, args: Record<string, unknown>, context: { toolCallId: string }) => Promise<unknown>;
-  isReadOnlyTool?: (name: string) => boolean;
-  requireMutationTool?: boolean;
-  maxTurns?: number;
-  maxToolCalls?: number;
-  onToolStart?: (event: { id: string; name: string; args: Record<string, unknown> }) => void | Promise<void>;
-  onToolResult?: (event: { id: string; name: string; result: unknown }) => void | Promise<void>;
-  serializeToolResultForModel?: (name: string, result: unknown) => unknown | Promise<unknown>;
-  serializeToolResultForPublic?: (name: string, result: unknown) => unknown | Promise<unknown>;
-}): Promise<AgentLoopResult>;
-
 export function createAgentToolResultViews(toolName: string, rawResult: unknown): {
   modelResult: Record<string, unknown>;
   publicResult: Record<string, unknown>;

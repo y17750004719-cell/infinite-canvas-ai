@@ -5663,6 +5663,7 @@ export default function AIWorkspace() {
   const { contextSafe: workspaceContextSafe } = useGSAP({ scope: editorShellRef });
   const zoomControlRef = useRef<HTMLDivElement | null>(null);
   const zoomMenuRef = useRef<HTMLDivElement | null>(null);
+  const zoomPercentageRef = useRef<HTMLSpanElement | null>(null);
   const setZoomMenuOpen = useCallback((open: boolean) => {
     const menu = zoomMenuRef.current;
     if (!menu) return;
@@ -9870,6 +9871,10 @@ export default function AIWorkspace() {
   };
 
   const previewCanvasViewport = useCallback((nextViewport: ViewportState) => {
+    const zoomPercentage = `${Math.round(nextViewport.scale * 100)}%`;
+    if (zoomPercentageRef.current?.textContent !== zoomPercentage) {
+      zoomPercentageRef.current.textContent = zoomPercentage;
+    }
     const sceneTarget = getSceneTarget();
     if (!sceneTarget) return;
 
@@ -18501,7 +18506,7 @@ export default function AIWorkspace() {
           className="workspace-text-muted rounded-md px-2 py-1 text-xs font-medium  hover:bg-[var(--workspace-control-hover)] focus-visible:outline-none group-hover:bg-[var(--workspace-control-hover)] group-focus-within:bg-[var(--workspace-control-hover)]"
           aria-label="画布缩放菜单"
         >
-          {Math.round(viewport.scale * 100)}%
+          <span ref={zoomPercentageRef}>{Math.round(viewport.scale * 100)}%</span>
         </button>
       </div>
 

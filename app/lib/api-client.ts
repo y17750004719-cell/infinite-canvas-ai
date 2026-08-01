@@ -12,6 +12,7 @@ import {
   readLocalReferenceImage,
   ReferenceImageUnavailableError,
 } from "./reference-image-source.mjs";
+import { createChatStreamEventDecoder } from "./chat-stream-events.mjs";
 const LOG_LEVEL = (process.env.LOG_LEVEL || "basic").toLowerCase();
 const LOG_ENABLED = LOG_LEVEL !== "off";
 const LOG_DEBUG = LOG_LEVEL === "debug";
@@ -1854,11 +1855,22 @@ type SupplierChatStreamPayload = {
     delta?: {
       content?: string;
       reasoning_content?: string;
+      tool_calls?: Array<{
+        index?: number;
+        id?: string;
+        function?: { name?: string; arguments?: string };
+      }>;
     };
     message?: {
       content?: string;
       reasoning_content?: string;
+      tool_calls?: Array<{
+        index?: number;
+        id?: string;
+        function?: { name?: string; arguments?: string };
+      }>;
     };
+    finish_reason?: string;
   }>;
 };
 
@@ -1879,46 +1891,10 @@ type GeminiGenerateContentPayload = {
 export type ChatStreamEvent =
   | { type: "start"; model?: string }
   | { type: "delta"; channel: "content" | "reasoning"; content: string }
+  | { type: "tool_call_start"; toolCallId: string; index: number; name?: string }
+  | { type: "tool_call_delta"; toolCallId: string; index: number; argumentsDelta: string }
+  | { type: "tool_call_end"; toolCallId: string; index: number; name: string; arguments: string }
   | { type: "done" };
-
-function extractStreamDeltaEvents(parsed: SupplierChatStreamPayload): ChatStreamEvent[] {
-  if ("candidates" in parsed) {
-    const geminiParsed = parsed as unknown as GeminiGenerateContentPayload;
-    const parts = Array.isArray(geminiParsed.candidates?.[0]?.content?.parts)
-      ? geminiParsed.candidates?.[0]?.content?.parts || []
-      : [];
-    const events: ChatStreamEvent[] = [];
-    for (const part of parts) {
-      if (!part || typeof part.text !== "string" || !part.text) {
-        continue;
-      }
-      if (part.thought) {
-        events.push({ type: "delta", channel: "reasoning", content: part.text });
-      } else {
-        events.push({ type: "delta", channel: "content", content: part.text });
-      }
-    }
-    return events;
-  }
-
-  const content =
-    parsed.choices?.[0]?.delta?.content ??
-    parsed.choices?.[0]?.message?.content ??
-    "";
-  const reasoning =
-    parsed.choices?.[0]?.delta?.reasoning_content ??
-    parsed.choices?.[0]?.message?.reasoning_content ??
-    "";
-
-  const events: ChatStreamEvent[] = [];
-  if (reasoning) {
-    events.push({ type: "delta", channel: "reasoning", content: reasoning });
-  }
-  if (content) {
-    events.push({ type: "delta", channel: "content", content });
-  }
-  return events;
-}
 
 async function convertChatMessagesToGeminiRequest(
   messages: ChatRequest["messages"],
@@ -2247,11 +2223,33 @@ export async function* chatStream(
     });
 
     const requestBody = isGeminiModel
-      ? await convertChatMessagesToGeminiRequest(requestMessages, request.signal)
+      ? {
+          ...await convertChatMessagesToGeminiRequest(requestMessages, request.signal),
+          ...(request.tools?.length
+            ? {
+                tools: [{
+                  functionDeclarations: request.tools.map((tool) => ({
+                    name: tool.function.name,
+                    description: tool.function.description,
+                    parameters: tool.function.parameters || { type: "object", properties: {} },
+                  })),
+                }],
+                toolConfig: {
+                  functionCallingConfig: resolveGeminiFunctionCallingConfig(request.toolChoice),
+                },
+              }
+            : {}),
+        }
       : {
           model,
           messages: requestMessages,
           stream: true,
+          ...(request.tools?.length
+            ? {
+                tools: request.tools,
+                tool_choice: request.toolChoice || "auto",
+              }
+            : {}),
         };
 
     response = await fetch(endpoint, {
@@ -2322,6 +2320,7 @@ export async function* chatStream(
 
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
+  const eventDecoder = createChatStreamEventDecoder();
   let buffer = "";
 
   while (true) {
@@ -2346,15 +2345,14 @@ export async function* chatStream(
       }
 
       if (payload === "[DONE]") {
+        for (const event of eventDecoder.flush()) yield event as ChatStreamEvent;
         yield { type: "done" };
         return;
       }
 
       try {
         const parsed = JSON.parse(payload) as SupplierChatStreamPayload;
-        for (const event of extractStreamDeltaEvents(parsed)) {
-          yield event;
-        }
+        for (const event of eventDecoder.decode(parsed)) yield event as ChatStreamEvent;
       } catch {
         continue;
       }
@@ -2366,15 +2364,14 @@ export async function* chatStream(
     if (payload && payload !== "[DONE]") {
       try {
         const parsed = JSON.parse(payload) as SupplierChatStreamPayload;
-        for (const event of extractStreamDeltaEvents(parsed)) {
-          yield event;
-        }
+        for (const event of eventDecoder.decode(parsed)) yield event as ChatStreamEvent;
       } catch {
         // ignore malformed tail chunk
       }
     }
   }
 
+  for (const event of eventDecoder.flush()) yield event as ChatStreamEvent;
   yield { type: "done" };
 }
 

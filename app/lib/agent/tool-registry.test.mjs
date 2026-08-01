@@ -40,6 +40,27 @@ test('executeAgentTool enforces skill allowlists and confirmation', async () => 
   assert.equal(confirmation.confirmationRequired, true);
 });
 
+test('executeAgentTool rejects schema-invalid arguments before confirmation or execution', async () => {
+  let created = 0;
+  const registry = createAgentToolRegistry({
+    createSkillJob: () => {
+      created += 1;
+      return { id: 'job-1' };
+    },
+    getSkillJob: () => null,
+  });
+  await assert.rejects(
+    () => executeAgentTool(
+      registry,
+      'start_skill_job',
+      { skillType: 123 },
+      { allowedTools: ['start_skill_job'], confirmed: true },
+    ),
+    /Invalid arguments for start_skill_job: arguments\.skillType/,
+  );
+  assert.equal(created, 0);
+});
+
 test('get_canvas_context returns only the supplied bounded summary', async () => {
   const registry = createAgentToolRegistry({ createSkillJob: () => null, getSkillJob: () => null });
   const result = await executeAgentTool(

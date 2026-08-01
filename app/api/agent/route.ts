@@ -31,9 +31,20 @@ import {
   createAgentProgressTracker,
   createAgentToolResultEvents,
   createAgentToolResultViews,
-  runAgentLoop,
 } from '../../lib/agent/agent-loop.mjs';
-import { createAgentToolRegistry, executeAgentTool, getAgentModelTools } from '../../lib/agent/tool-registry.mjs';
+import { runZFlowAgentBrain } from '../../lib/agent/pi-agent-runtime.mjs';
+import {
+  claimConfirmationContinuation,
+  fingerprintProviderModel,
+  hashEnvelopeValue,
+  resolveConfirmationImageIdentity,
+} from '../../lib/agent/confirmation-continuation.mjs';
+import {
+  createAgentToolRegistry,
+  executeAgentTool,
+  getAgentModelTools,
+  validateAgentToolArguments,
+} from '../../lib/agent/tool-registry.mjs';
 import { createSkillJob, getSkillJob, toJobSummary } from '../../lib/skill-jobs';
 import { readProviderRegistry } from '../../lib/provider-config.mjs';
 import { resolveProviderModelSelection } from '../../lib/provider-model-selection.mjs';
@@ -86,7 +97,6 @@ export const dynamic = 'force-dynamic';
 
 const MAX_AGENT_TURNS = 6;
 const MAX_TOOL_CALLS = 4;
-const DEFAULT_AGENT_MODEL = 'gemini-3.1-flash-lite-preview-thinking-medium';
 const CONFIRMATION_TTL_MS = 10 * 60 * 1000;
 const encoder = new TextEncoder();
 
@@ -139,6 +149,10 @@ function appendRegionTargetContract(prompt: string, contract: Array<Record<strin
 }
 
 type ConfirmationRecord = {
+  version?: 1;
+  confirmationId?: string;
+  runId?: string;
+  status: 'pending' | 'executing' | 'completed';
   operationId: string;
   skillSource: 'manual' | 'auto' | null;
   lastSequence: number;
@@ -167,6 +181,30 @@ type ConfirmationRecord = {
   visualContext?: AgentExecutionPlan['visualContext'];
   presentation?: AgentPlanPresentation;
   referenceContext?: AgentRuntimeReferenceContext;
+  resolvedProviderId?: string;
+  resolvedModel?: string;
+  providerModelFingerprint?: string;
+  resolvedImageProviderId?: string;
+  resolvedImageModel?: string;
+  imageProviderModelFingerprint?: string;
+  systemPrompt?: string;
+  piTranscript?: unknown[];
+  assistantToolCallIds?: string[];
+  progressSequence?: number;
+  pendingToolCall?: {
+    id: string;
+    name: string;
+    args: Record<string, unknown>;
+    argsHash: string;
+    batch: Array<{ id: string; name: string; args: Record<string, unknown> }>;
+  };
+  budgets?: {
+    turnsUsed: number;
+    toolCallsUsed: number;
+    mutationToolCallsUsed: number;
+    maxTurns: number;
+    maxToolCalls: number;
+  };
   expiresAt: number;
   execution?: Promise<Record<string, unknown>>;
   result?: Record<string, unknown>;
@@ -745,7 +783,7 @@ export async function POST(request: NextRequest) {
   const providers = (await readProviderRegistry()).providers;
   const providerImageOptionProfiles = buildProviderImageOptionProfiles(providers);
   const requestedInterfaceImageCount = normalizeAgentImageCount(body.imageOptions?.count);
-  const requestedChatModel = body.chatOptions?.model || process.env.AGENT_CHAT_MODEL || DEFAULT_AGENT_MODEL;
+  const requestedChatModel = body.chatOptions?.model || process.env.AGENT_CHAT_MODEL || undefined;
   const resolvedChatSelection = resolveProviderModelSelection({
     providers,
     purpose: 'chat',
@@ -787,6 +825,30 @@ export async function POST(request: NextRequest) {
   ) {
     return NextResponse.json({ error: 'Configured Agent Planner provider and model are not an enabled registry pair' }, { status: 500 });
   }
+  const configuredOptimizerProviderId = process.env.PROMPT_OPTIMIZER_PROVIDER_ID?.trim() || '';
+  const configuredOptimizerModel = process.env.PROMPT_OPTIMIZER_MODEL?.trim() || '';
+  if (Boolean(configuredOptimizerProviderId) !== Boolean(configuredOptimizerModel)) {
+    return NextResponse.json({ error: 'PROMPT_OPTIMIZER_PROVIDER_ID and PROMPT_OPTIMIZER_MODEL must be configured together' }, { status: 500 });
+  }
+  const explicitOptimizerSelection = configuredOptimizerProviderId && configuredOptimizerModel
+    ? resolveProviderModelSelection({
+        providers,
+        purpose: 'chat',
+        requestedProviderId: configuredOptimizerProviderId,
+        requestedModel: configuredOptimizerModel,
+      })
+    : null;
+  if (
+    explicitOptimizerSelection
+    && (
+      explicitOptimizerSelection.reason !== 'exact'
+      || explicitOptimizerSelection.providerId !== configuredOptimizerProviderId
+      || explicitOptimizerSelection.model !== configuredOptimizerModel
+    )
+  ) {
+    return NextResponse.json({ error: 'Configured prompt optimizer provider and model are not an enabled registry pair' }, { status: 500 });
+  }
+  const resolvedOptimizerSelection = explicitOptimizerSelection || resolvedChatSelection;
   const plannerTimeoutMs = Math.min(120_000, Math.max(10_000, Number(process.env.AGENT_PLANNER_TIMEOUT_MS) || 60_000));
 
   const timeoutMs = Math.min(300_000, Math.max(10_000, Number(process.env.AGENT_RUN_TIMEOUT_MS) || 180_000));
@@ -928,6 +990,7 @@ export async function POST(request: NextRequest) {
         visualContext: AgentExecutionPlan['visualContext'] | undefined = executionPlan?.visualContext,
         presentation: AgentPlanPresentation | undefined = executionPlan?.presentation,
         referenceContext: AgentRuntimeReferenceContext | undefined = runReferenceContext,
+        resolvedImageSelectionOverride?: { providerId: string; model: string },
       ) => {
         const regionTargetContract = buildRegionTargetContract(body.canvasContext, imageTask);
         const regionAwareGenerationPrompt = appendRegionTargetContract(generationPrompt, regionTargetContract);
@@ -946,8 +1009,8 @@ export async function POST(request: NextRequest) {
               skillLabel: selectedSkill?.name,
               skillContent,
               promptStyle: selectedSkill?.promptStyle || 'text',
-              providerId: process.env.PROMPT_OPTIMIZER_PROVIDER_ID,
-              optimizerModel: process.env.PROMPT_OPTIMIZER_MODEL || process.env.AGENT_CHAT_MODEL || DEFAULT_AGENT_MODEL,
+              providerId: resolvedOptimizerSelection.providerId || undefined,
+              optimizerModel: resolvedOptimizerSelection.model,
               signal: runSignal,
               chatFn: chat,
               outputCount: payloadOutputCount,
@@ -998,8 +1061,8 @@ export async function POST(request: NextRequest) {
         const resolvedImageSelection = resolveProviderModelSelection({
           providers,
           purpose: 'image',
-          requestedProviderId: imageOptions?.providerId,
-          requestedModel: imageOptions?.model,
+          requestedProviderId: resolvedImageSelectionOverride?.providerId || imageOptions?.providerId,
+          requestedModel: resolvedImageSelectionOverride?.model || imageOptions?.model,
         });
         if (!resolvedImageSelection.providerId || !resolvedImageSelection.model) {
           throw new Error('No enabled image provider and model are configured');
@@ -1318,12 +1381,16 @@ export async function POST(request: NextRequest) {
             confirmationStore.delete(requestedConfirmationId);
             throw new Error('Confirmation expired; request a new confirmation');
           }
-          if (
-            body.confirmation?.toolName !== confirmationRecord.toolName ||
-            confirmationRecord.userMessage !== latestUserMessage
-          ) {
-            throw new Error('Confirmation does not match this request');
-          }
+          const confirmedToolRegistry = createAgentToolRegistry({ createSkillJob, getSkillJob });
+          const confirmedTool = confirmedToolRegistry.get(confirmationRecord.toolName);
+          if (!confirmedTool) throw new Error(`Unknown tool: ${confirmationRecord.toolName}`);
+          validateAgentToolArguments(confirmedTool.parameters, confirmationRecord.toolArgs, confirmationRecord.toolName);
+          claimConfirmationContinuation({
+            record: confirmationRecord,
+            requestedToolName: body.confirmation?.toolName,
+            userMessage: latestUserMessage,
+            providers,
+          });
           progressTracker.resume({
             operationId: confirmationRecord.operationId,
             lastSequence: confirmationRecord.lastSequence,
@@ -1379,11 +1446,13 @@ export async function POST(request: NextRequest) {
                   confirmationRecord.visualContext,
                   confirmationRecord.presentation,
                   confirmationRecord.referenceContext,
+                  confirmationRecord.resolvedImageProviderId && confirmationRecord.resolvedImageModel
+                    ? { providerId: confirmationRecord.resolvedImageProviderId, model: confirmationRecord.resolvedImageModel }
+                    : undefined,
                 );
               }
-              const registry = createAgentToolRegistry({ createSkillJob, getSkillJob });
               const rawResult = await executeAgentTool(
-                registry,
+                confirmedToolRegistry,
                 confirmationRecord.toolName,
                 confirmationRecord.toolArgs,
                 {
@@ -1408,11 +1477,13 @@ export async function POST(request: NextRequest) {
               result = await confirmationRecord.execution!;
             } catch (error) {
               confirmationRecord.execution = undefined;
+              confirmationRecord.status = 'completed';
               throw error;
             }
           }
           confirmationRecord.result = result;
           confirmationRecord.execution = undefined;
+          confirmationRecord.status = 'completed';
           if (confirmationRecord.toolName === 'generate_image') {
             writeResolvedImageOptionUpdate(toolCallId, result);
           }
@@ -1446,8 +1517,11 @@ export async function POST(request: NextRequest) {
                 const checkpoint = progressTracker.snapshot();
                 confirmationStore.set(nextConfirmationId, {
                   ...confirmationRecord,
+                  confirmationId: nextConfirmationId,
+                  status: 'pending',
                   operationId: checkpoint.operationId,
                   lastSequence: checkpoint.lastSequence,
+                  progressSequence: checkpoint.lastSequence,
                   progressToolCallId: `${checkpoint.operationId}-generate-image-batch-${completedCount + 1}`,
                   imageOptions: { ...structuredClone(confirmationRecord.imageOptions || {}), count: nextItems.length },
                   imageCountSource: 'batch',
@@ -1501,8 +1575,11 @@ export async function POST(request: NextRequest) {
                 const checkpoint = progressTracker.snapshot();
                 confirmationStore.set(nextConfirmationId, {
                   ...confirmationRecord,
+                  confirmationId: nextConfirmationId,
+                  status: 'pending',
                   operationId: checkpoint.operationId,
                   lastSequence: checkpoint.lastSequence,
+                  progressSequence: checkpoint.lastSequence,
                   progressToolCallId: `${checkpoint.operationId}-generate-image-batch-${completedCount + 1}`,
                   imageOptions: { ...structuredClone(confirmationRecord.imageOptions || {}), count: nextCount },
                   imageCountSource: 'batch',
@@ -1526,6 +1603,189 @@ export async function POST(request: NextRequest) {
               writeEvent(controller, { type: 'agent_done', stopReason: 'awaiting_confirmation' });
               return;
             }
+          }
+          if (
+            confirmationRecord.version === 1
+            && confirmationRecord.piTranscript
+            && confirmationRecord.pendingToolCall
+            && confirmationRecord.resolvedProviderId
+            && confirmationRecord.resolvedModel
+          ) {
+            const continuationRegistry = createAgentToolRegistry({
+              createSkillJob,
+              getSkillJob,
+              generateImage: async (args: Record<string, unknown>) => {
+                const prompt = typeof args.prompt === 'string' && args.prompt.trim()
+                  ? args.prompt.trim()
+                  : confirmationRecord.generationBrief || confirmationRecord.userMessage;
+                return generateImagePayload(
+                  confirmationRecord.generationBrief || confirmationRecord.userMessage,
+                  true,
+                  confirmationRecord.imageOptions,
+                  confirmationRecord.referenceImages,
+                  prompt,
+                  {
+                    source: confirmationRecord.imageCountSource,
+                    totalCount: confirmationRecord.requestedTotalImageCount,
+                    promptOptimized: confirmationRecord.promptOptimized,
+                  },
+                  confirmationRecord.generationItems || [],
+                  undefined,
+                  confirmationRecord.imageDeliveryPlan,
+                  confirmationRecord.imageTask,
+                  confirmationRecord.visualContext,
+                  confirmationRecord.presentation,
+                  confirmationRecord.referenceContext,
+                  confirmationRecord.resolvedImageProviderId && confirmationRecord.resolvedImageModel
+                    ? { providerId: confirmationRecord.resolvedImageProviderId, model: confirmationRecord.resolvedImageModel }
+                    : undefined,
+                );
+              },
+            });
+            const continuationRawResults = new Map<string, unknown>();
+            const continuationResult = await runZFlowAgentBrain({
+              messages: [],
+              systemPrompt: confirmationRecord.systemPrompt,
+              providerId: confirmationRecord.resolvedProviderId,
+              model: confirmationRecord.resolvedModel,
+              modelMetadata: providers.find((provider) => provider.id === confirmationRecord.resolvedProviderId),
+              tools: getAgentModelTools(continuationRegistry, confirmationRecord.allowedTools).map((tool) => {
+                const registryTool = continuationRegistry.get(tool.function.name);
+                const requiresConfirmation = registryTool?.requiresConfirmation === true
+                  || (tool.function.name === 'generate_image' && Number(confirmationRecord.imageOptions?.count) > 1);
+                return {
+                  ...tool,
+                  readOnly: registryTool?.readOnly === true,
+                  requiresConfirmation,
+                  ...(requiresConfirmation ? { confirmationMessage: `确认后执行 ${tool.function.name}` } : {}),
+                };
+              }),
+              maxTurns: confirmationRecord.budgets?.maxTurns || MAX_AGENT_TURNS,
+              maxToolCalls: confirmationRecord.budgets?.maxToolCalls || MAX_TOOL_CALLS,
+              signal: runSignal,
+              chatStream,
+              continuation: {
+                transcript: confirmationRecord.piTranscript,
+                pendingCall: confirmationRecord.pendingToolCall,
+                toolResult: createAgentToolResultViews(confirmationRecord.toolName, result),
+                budgets: confirmationRecord.budgets,
+              },
+              executeTool: async (toolName, args, context) => {
+                const rawResult = await executeAgentTool(continuationRegistry, toolName, args, {
+                  allowedTools: confirmationRecord.allowedTools,
+                  confirmed: false,
+                  canvasContext: confirmationRecord.canvasContext,
+                });
+                continuationRawResults.set(String(context.toolCallId || ''), rawResult);
+                return { ...rawResult as Record<string, unknown>, ...createAgentToolResultViews(toolName, rawResult) };
+              },
+              onToolStart: ({ id, name }: any) => {
+                writeToolProgress(name, 'active', id);
+                writeEvent(controller, { type: 'tool_start', toolCallId: id, toolName: name });
+              },
+              onToolResult: ({ id, name, result: publicResult, rawResult: runtimeRawResult, isError }: any) => {
+                const rawResult = continuationRawResults.get(id) ?? runtimeRawResult ?? publicResult;
+                for (const event of createAgentToolResultEvents({
+                  source: 'loop',
+                  runId,
+                  toolCallId: id,
+                  toolName: name,
+                  rawResult,
+                })) writeEvent(controller, event as AgentEvent);
+                writeToolProgress(name, isError ? 'failed' : 'completed', id);
+              },
+            });
+            if (continuationResult.stopReason === 'error' || continuationResult.stopReason === 'aborted') {
+              throw new Error(continuationResult.errorMessage || (continuationResult.stopReason === 'aborted' ? 'Agent run aborted' : 'Agent provider failed'));
+            }
+            if (continuationResult.stopReason === 'budget_exceeded') {
+              progressTracker.settleActive('failed', '工具调用预算已用尽');
+              writeEvent(controller, {
+                type: 'agent_error',
+                stage: 'budget',
+                message: '工具调用预算已用尽，请缩小任务范围后重试',
+              });
+              return;
+            }
+            if (continuationResult.stopReason === 'confirmation_required') {
+              const nextConfirmationId = randomUUID();
+              const nextToolCallId = String(continuationResult.confirmation?.toolCallId || `${runId}-confirmation`);
+              const nextToolName = String(continuationResult.confirmation?.toolName || confirmationRecord.toolName);
+              const nextArgs = continuationResult.confirmation?.arguments && typeof continuationResult.confirmation.arguments === 'object'
+                ? continuationResult.confirmation.arguments as Record<string, unknown>
+                : {};
+              const nextBatch = Array.isArray(continuationResult.confirmation?.batch)
+                ? continuationResult.confirmation.batch as Array<{ id: string; name: string; args: Record<string, unknown> }>
+                : [{ id: nextToolCallId, name: nextToolName, args: nextArgs }];
+              const nextImageIdentity = resolveConfirmationImageIdentity({
+                providers,
+                toolName: nextToolName,
+                requestedProviderId: confirmationRecord.imageOptions?.providerId,
+                requestedModel: confirmationRecord.imageOptions?.model,
+              });
+              const checkpoint = progressTracker.snapshot();
+              confirmationStore.set(nextConfirmationId, {
+                ...confirmationRecord,
+                ...nextImageIdentity,
+                confirmationId: nextConfirmationId,
+                runId,
+                status: 'pending',
+                operationId: checkpoint.operationId,
+                lastSequence: checkpoint.lastSequence,
+                progressToolCallId: nextToolCallId,
+                toolName: nextToolName,
+                toolArgs: structuredClone(nextArgs),
+                piTranscript: structuredClone(continuationResult.transcript),
+                assistantToolCallIds: nextBatch.map((call) => call.id),
+                progressSequence: checkpoint.lastSequence,
+                pendingToolCall: {
+                  id: nextToolCallId,
+                  name: nextToolName,
+                  args: structuredClone(nextArgs),
+                  argsHash: hashEnvelopeValue(nextArgs),
+                  batch: structuredClone(nextBatch),
+                },
+                budgets: {
+                  turnsUsed: continuationResult.turns,
+                  toolCallsUsed: continuationResult.toolCalls,
+                  mutationToolCallsUsed: continuationResult.mutationToolCalls,
+                  maxTurns: confirmationRecord.budgets?.maxTurns || MAX_AGENT_TURNS,
+                  maxToolCalls: confirmationRecord.budgets?.maxToolCalls || MAX_TOOL_CALLS,
+                },
+                execution: undefined,
+                result: undefined,
+                expiresAt: Date.now() + CONFIRMATION_TTL_MS,
+              });
+              writeToolProgress(nextToolName, 'waiting', nextToolCallId);
+              writeEvent(controller, {
+                type: 'confirmation_required',
+                request: {
+                  confirmationId: nextConfirmationId,
+                  toolName: nextToolName,
+                  message: String(continuationResult.confirmation?.message || '此操作需要你的确认。'),
+                },
+              });
+              writeEvent(controller, { type: 'agent_done', stopReason: 'awaiting_confirmation' });
+              return;
+            }
+            const continuedProposal = parseAgentProposalBlock(continuationResult.content);
+            const safeContinuedContent = sanitizeAgentResponseContent(
+              continuedProposal.cleanContent,
+              continuationResult.mutationToolCalls > 0,
+            );
+            if (continuedProposal.proposal) {
+              writeEvent(controller, { type: 'proposal_presented', proposal: continuedProposal.proposal });
+            }
+            if (safeContinuedContent) {
+              writeEvent(controller, {
+                type: 'assistant_delta',
+                delta: safeContinuedContent,
+                channel: 'content',
+                model: confirmationRecord.resolvedModel,
+              });
+            }
+            writeEvent(controller, { type: 'agent_done', stopReason: continuationResult.stopReason });
+            return;
           }
           writeEvent(controller, { type: 'agent_done', stopReason: 'confirmed_tool_completed' });
           return;
@@ -2659,7 +2919,7 @@ export async function POST(request: NextRequest) {
             label: usesPlannerGeneration ? '正在准备最终图片提示词' : '正在优化图片提示词',
           });
           if (!usesPlannerGeneration) writeEvent(controller, { type: 'prompt_optimization_start' });
-          const optimizerModel = process.env.PROMPT_OPTIMIZER_MODEL || process.env.AGENT_CHAT_MODEL || DEFAULT_AGENT_MODEL;
+          const optimizerModel = resolvedOptimizerSelection.model;
           const optimizedResult = usesPlannerGeneration
             ? {
                 prompt: plannerGeneration!.prompt,
@@ -2677,7 +2937,7 @@ export async function POST(request: NextRequest) {
                 skillLabel: selectedSkill?.name,
                 skillContent,
                 promptStyle: selectedSkill?.promptStyle || 'text',
-                providerId: process.env.PROMPT_OPTIMIZER_PROVIDER_ID,
+                providerId: resolvedOptimizerSelection.providerId || undefined,
                 optimizerModel,
                 signal: runSignal,
                 chatFn: chat,
@@ -2770,18 +3030,46 @@ export async function POST(request: NextRequest) {
 
           if (requestedImageCount > 1 || executionPlan?.execution.requiresConfirmation === true) {
             const generationItems = allGenerationItems.slice(0, requestedImageCount);
+            const resolvedImageSelection = resolveProviderModelSelection({
+              providers,
+              purpose: 'image',
+              requestedProviderId: body.imageOptions?.providerId,
+              requestedModel: body.imageOptions?.model,
+            });
+            if (!resolvedImageSelection.providerId || !resolvedImageSelection.model) {
+              throw new Error('No enabled image provider and model are configured');
+            }
+            const resolvedImageProvider = providers.find((provider) => provider.id === resolvedImageSelection.providerId);
             const confirmationId = randomUUID();
             const progressToolCallId = `${runId}-generate-image-confirmation`;
             writeToolProgress('generate_image', 'waiting', progressToolCallId);
             const confirmationCheckpoint = progressTracker.snapshot();
             confirmationStore.set(confirmationId, {
+              version: 1,
+              confirmationId,
+              status: 'pending',
               operationId: confirmationCheckpoint.operationId,
               skillSource,
               lastSequence: confirmationCheckpoint.lastSequence,
+              progressSequence: confirmationCheckpoint.lastSequence,
               progressToolCallId,
               skillId: selectedSkill?.id || null,
               toolName: 'generate_image',
               toolArgs: { prompt: optimized.prompt },
+              pendingToolCall: {
+                id: progressToolCallId,
+                name: 'generate_image',
+                args: { prompt: optimized.prompt },
+                argsHash: hashEnvelopeValue({ prompt: optimized.prompt }),
+                batch: [{ id: progressToolCallId, name: 'generate_image', args: { prompt: optimized.prompt } }],
+              },
+              resolvedImageProviderId: resolvedImageSelection.providerId,
+              resolvedImageModel: resolvedImageSelection.model,
+              imageProviderModelFingerprint: fingerprintProviderModel(
+                resolvedImageProvider as unknown as Record<string, unknown>,
+                resolvedImageSelection.model,
+                'image',
+              ),
               allowedTools: ['generate_image'],
               userMessage: latestUserMessage,
               generationBrief: executionBrief,
@@ -2902,23 +3190,36 @@ export async function POST(request: NextRequest) {
             );
           },
         });
-        const modelTools = getAgentModelTools(toolRegistry, allowedTools);
+        const modelTools = getAgentModelTools(toolRegistry, allowedTools).map((tool) => {
+          const registryTool = toolRegistry.get(tool.function.name);
+          const requiresConfirmation = registryTool?.requiresConfirmation === true
+            || (tool.function.name === 'generate_image' && requestedImageCount > 1);
+          return {
+            ...tool,
+            readOnly: registryTool?.readOnly === true,
+            requiresConfirmation,
+            ...(requiresConfirmation ? {
+              confirmationMessage: tool.function.name === 'generate_image'
+                ? imageBatchPlan
+                  ? `本次将生成首批 ${requestedImageCount} 张图片，总目标 ${requestedTotalImageCount} 张，确认后继续。`
+                  : `本次将生成 ${describeImageDelivery(imageDeliveryPlan, requestedImageCount)}，确认后继续。`
+                : `确认后执行 ${tool.function.name}`,
+            } : {}),
+          };
+        });
         if (modelTools.length > 0) {
           const rawToolResults = new Map<string, unknown>();
           writeProgress({ stepId: 'composing', phase: 'planning', status: 'active', label: '正在规划下一步操作' });
-          const loopResult = await runAgentLoop({
+          const loopResult = await runZFlowAgentBrain({
             messages: chatMessages,
+            providerId: resolvedChatSelection.providerId,
+            model,
+            modelMetadata: providers.find((provider) => provider.id === resolvedChatSelection.providerId),
             tools: modelTools,
             maxTurns: MAX_AGENT_TURNS,
             maxToolCalls: MAX_TOOL_CALLS,
-            modelFn: ({ messages, tools }) => chat({
-              providerId: resolvedChatSelection.providerId || undefined,
-              model,
-              messages,
-              tools,
-              toolChoice: 'auto',
-              signal: runSignal,
-            }),
+            signal: runSignal,
+            chatStream,
             executeTool: async (toolName, args, context) => {
               if (toolName === 'generate_image' && requestedImageCount > 1) {
                 return {
@@ -2935,20 +3236,18 @@ export async function POST(request: NextRequest) {
                 canvasContext: body.canvasContext,
               });
               rawToolResults.set(context.toolCallId, rawResult);
-              return rawResult;
+              const views = createAgentToolResultViews(toolName, rawResult);
+              return { ...rawResult as Record<string, unknown>, ...views };
             },
-            isReadOnlyTool: (toolName) => toolRegistry.get(toolName)?.readOnly === true,
             requireMutationTool: executionPlan
               ? Boolean(executionPlan.execution.tool)
               : intent === 'image' || intent === 'skill_action',
-            serializeToolResultForModel: (toolName, result) => createAgentToolResultViews(toolName, result).modelResult,
-            serializeToolResultForPublic: (toolName, result) => createAgentToolResultViews(toolName, result).publicResult,
             onToolStart: ({ id, name }) => {
               writeToolProgress(name, 'active', id);
               writeEvent(controller, { type: 'tool_start', toolCallId: id, toolName: name });
             },
-            onToolResult: ({ id, name, result }) => {
-              const rawResult = rawToolResults.get(id);
+            onToolResult: ({ id, name, result, rawResult: runtimeRawResult, isError }) => {
+              const rawResult = rawToolResults.get(id) ?? runtimeRawResult;
               if (name === 'generate_image') {
                 writeResolvedImageOptionUpdate(id, rawResult);
               }
@@ -2962,9 +3261,21 @@ export async function POST(request: NextRequest) {
               if (name === 'generate_image') {
                 writeImageCompletionSummary(rawResult ?? result);
               }
-              writeToolProgress(name, 'completed', id);
+              writeToolProgress(name, isError ? 'failed' : 'completed', id);
             },
           });
+          if (loopResult.stopReason === 'error' || loopResult.stopReason === 'aborted') {
+            throw new Error(loopResult.errorMessage || (loopResult.stopReason === 'aborted' ? 'Agent run aborted' : 'Agent provider failed'));
+          }
+          if (loopResult.stopReason === 'budget_exceeded') {
+            progressTracker.settleActive('failed', '工具调用预算已用尽');
+            writeEvent(controller, {
+              type: 'agent_error',
+              stage: 'budget',
+              message: '工具调用预算已用尽，请缩小任务范围后重试',
+            });
+            return;
+          }
           writeProgress({ stepId: 'composing', phase: 'planning', status: 'completed', label: '操作规划完成' });
           if (loopResult.stopReason === 'execution_required') {
             const taskId = randomUUID();
@@ -3017,6 +3328,36 @@ export async function POST(request: NextRequest) {
           if (loopResult.stopReason === 'confirmation_required') {
             const confirmationId = randomUUID();
             const progressToolCallId = String(loopResult.confirmation?.toolCallId || `${runId}-confirmation`);
+            const confirmationToolName = String(loopResult.confirmation?.toolName || 'start_skill_job');
+            const pendingArgs = (loopResult.confirmation?.arguments && typeof loopResult.confirmation.arguments === 'object')
+              ? loopResult.confirmation.arguments as Record<string, unknown>
+              : {};
+            const pendingBatch = Array.isArray(loopResult.confirmation?.batch)
+              ? loopResult.confirmation.batch.map((call: any) => ({
+                  id: String(call?.id || ''),
+                  name: String(call?.name || ''),
+                  args: call?.args && typeof call.args === 'object' ? call.args as Record<string, unknown> : {},
+                })).filter((call: { id: string; name: string }) => call.id && call.name)
+              : [{
+                  id: progressToolCallId,
+                  name: String(loopResult.confirmation?.toolName || 'start_skill_job'),
+                  args: pendingArgs,
+                }];
+            const selectedProvider = providers.find((provider) => provider.id === resolvedChatSelection.providerId);
+            const resolvedImageSelection = confirmationToolName === 'generate_image'
+              ? resolveProviderModelSelection({
+                  providers,
+                  purpose: 'image',
+                  requestedProviderId: body.imageOptions?.providerId,
+                  requestedModel: body.imageOptions?.model,
+                })
+              : null;
+            if (confirmationToolName === 'generate_image' && (!resolvedImageSelection?.providerId || !resolvedImageSelection.model)) {
+              throw new Error('No enabled image provider and model are configured');
+            }
+            const resolvedImageProvider = confirmationToolName === 'generate_image'
+              ? providers.find((provider) => provider.id === resolvedImageSelection?.providerId)
+              : null;
             writeToolProgress(
               String(loopResult.confirmation?.toolName || 'start_skill_job'),
               'waiting',
@@ -3024,15 +3365,17 @@ export async function POST(request: NextRequest) {
             );
             const confirmationCheckpoint = progressTracker.snapshot();
             confirmationStore.set(confirmationId, {
+              version: 1,
+              confirmationId,
+              runId,
+              status: 'pending',
               operationId: confirmationCheckpoint.operationId,
               skillSource,
               lastSequence: confirmationCheckpoint.lastSequence,
               progressToolCallId,
-              skillId: selectedSkill!.id,
-              toolName: String(loopResult.confirmation?.toolName || 'start_skill_job'),
-              toolArgs: (loopResult.confirmation?.arguments && typeof loopResult.confirmation.arguments === 'object')
-                ? loopResult.confirmation.arguments as Record<string, unknown>
-                : {},
+              skillId: selectedSkill?.id || null,
+              toolName: confirmationToolName,
+              toolArgs: pendingArgs,
               allowedTools: [...allowedTools],
               userMessage: latestUserMessage,
               generationBrief: executionBrief,
@@ -3049,6 +3392,39 @@ export async function POST(request: NextRequest) {
               imageBatchPlan: imageBatchPlan ? structuredClone(imageBatchPlan) : undefined,
               imageDeliveryPlan: structuredClone(imageDeliveryPlan),
               optimizePrompt: true,
+              resolvedProviderId: resolvedChatSelection.providerId,
+              resolvedModel: model,
+              providerModelFingerprint: fingerprintProviderModel(selectedProvider as unknown as Record<string, unknown>, model),
+              ...(confirmationToolName === 'generate_image' ? {
+                resolvedImageProviderId: resolvedImageSelection?.providerId,
+                resolvedImageModel: resolvedImageSelection?.model,
+                imageProviderModelFingerprint: fingerprintProviderModel(
+                  resolvedImageProvider as unknown as Record<string, unknown>,
+                  resolvedImageSelection?.model || '',
+                  'image',
+                ),
+              } : {}),
+              systemPrompt: chatMessages
+                .filter((message) => message.role === 'system' && typeof message.content === 'string')
+                .map((message) => message.content)
+                .join('\n\n'),
+              piTranscript: structuredClone(loopResult.transcript),
+              assistantToolCallIds: pendingBatch.map((call) => call.id),
+              progressSequence: confirmationCheckpoint.lastSequence,
+              pendingToolCall: {
+                id: progressToolCallId,
+                name: String(loopResult.confirmation?.toolName || 'start_skill_job'),
+                args: structuredClone(pendingArgs),
+                argsHash: hashEnvelopeValue(pendingArgs),
+                batch: structuredClone(pendingBatch),
+              },
+              budgets: {
+                turnsUsed: loopResult.turns,
+                toolCallsUsed: loopResult.toolCalls,
+                mutationToolCallsUsed: loopResult.mutationToolCalls,
+                maxTurns: MAX_AGENT_TURNS,
+                maxToolCalls: MAX_TOOL_CALLS,
+              },
               expiresAt: Date.now() + CONFIRMATION_TTL_MS,
             });
             writeEvent(controller, {

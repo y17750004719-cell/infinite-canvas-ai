@@ -32,14 +32,19 @@ test('generate route resolves a valid provider and model pair for each purpose',
   assert.match(generateSource, /purpose:\s*"chat"/);
   assert.match(generateSource, /providerId:\s*resolvedImageSelection\.providerId/);
   assert.match(generateSource, /providerId:\s*resolvedChatSelection\.providerId/);
-  assert.match(generateSource, /hasRequestedChatSelection\s*=\s*Boolean/);
   assert.match(generateSource, /hasRequestedImageSelection\s*=\s*Boolean/);
+  assert.match(generateSource, /const resolvedChatSelection = resolveProviderModelSelection\(\{/);
+  assert.match(generateSource, /requestedProviderId:\s*requestedChatProviderId/);
+  assert.match(generateSource, /requestedModel:\s*model/);
+  assert.doesNotMatch(generateSource, /legacyChatModel|AGENT_MODEL/);
 });
 
 test('agent validates default environment and request chat selections through one resolver', () => {
   assert.match(agentSource, /const resolvedChatSelection = resolveProviderModelSelection\(\{/);
   assert.match(agentSource, /requestedProviderId:\s*body\.chatOptions\?\.providerId\s*\|\|\s*process\.env\.AGENT_CHAT_PROVIDER_ID/);
   assert.match(agentSource, /requestedModel:\s*requestedChatModel/);
+  assert.match(agentSource, /const requestedChatModel = body\.chatOptions\?\.model \|\| process\.env\.AGENT_CHAT_MODEL \|\| undefined/);
+  assert.doesNotMatch(agentSource, /DEFAULT_AGENT_MODEL|gemini-3\.1-flash-lite-preview-thinking-medium/);
   assert.doesNotMatch(agentSource, /const resolvedChatSelection = hasRequestedChatSelection/);
 });
 

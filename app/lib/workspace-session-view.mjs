@@ -23,8 +23,8 @@ export const CANVAS_TEXT_GENERATION_CONCURRENCY_LIMIT = 5;
 
 export const TEXT_PANEL_MODEL_OPTIONS = [
   {
-    id: 'gemini-3.1-flash-lite-preview-thinking-medium',
-    label: 'Gemini 3.1 Flash Lite',
+    id: '',
+    label: '未配置聊天模型',
   },
 ];
 

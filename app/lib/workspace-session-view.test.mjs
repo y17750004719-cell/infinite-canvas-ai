@@ -3088,6 +3088,8 @@ test('buildCanvasTextGenerationRequest only uses the current input, direct image
       { id: 'img-1', src: '/a.png', label: 'image2', alt: 'image2' },
     ],
     modelId: 'gemini-3.1-flash-lite-preview-thinking-medium',
+    allowedModelIds: ['gemini-3.1-flash-lite-preview-thinking-medium'],
+    fallbackModel: 'gemini-3.1-flash-lite-preview-thinking-medium',
   });
 
   assert.deepEqual(result, {
@@ -3282,25 +3284,25 @@ test('canEnterManualTextMode rejects a text card while it is generating', () => 
   assert.equal(result, false);
 });
 
-test('getDefaultTextPanelModelOption returns Gemini 3.1 Flash Lite as the default text panel model', () => {
+test('getDefaultTextPanelModelOption has no implicit chat model fallback', () => {
   const result = getDefaultTextPanelModelOption();
 
   assert.deepEqual(result, {
-    id: 'gemini-3.1-flash-lite-preview-thinking-medium',
-    label: 'Gemini 3.1 Flash Lite',
+    id: '',
+    label: '未配置聊天模型',
   });
 });
 
-test('resolveTextPanelChatModel accepts an allowed override model', () => {
+test('resolveTextPanelChatModel does not accept the removed implicit Gemini model', () => {
   const result = resolveTextPanelChatModel('gemini-3.1-flash-lite-preview-thinking-medium');
 
-  assert.equal(result, 'gemini-3.1-flash-lite-preview-thinking-medium');
+  assert.equal(result, '');
 });
 
 test('resolveTextPanelChatModel falls back to the default model for unknown overrides', () => {
   const result = resolveTextPanelChatModel('unknown-model');
 
-  assert.equal(result, 'gemini-3.1-flash-lite-preview-thinking-medium');
+  assert.equal(result, '');
 });
 
 test('canStartCanvasTextGeneration allows a new task when fewer than the concurrency limit are active', () => {

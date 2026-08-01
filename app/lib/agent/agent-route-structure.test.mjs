@@ -47,11 +47,12 @@ test('agent route exposes NDJSON orchestration events and reuses the generate ro
   assert.match(source, /clarificationState/);
   assert.match(source, /workingBrief/);
   assert.match(source, /buildMainAgentMessages/);
-  assert.match(source, /runAgentLoop/);
+  assert.match(source, /runZFlowAgentBrain/);
+  assert.match(source, /claimConfirmationContinuation/);
   assert.match(source, /getAgentModelTools/);
   assert.match(source, /maxTurns:\s*MAX_AGENT_TURNS/);
   assert.match(source, /maxToolCalls:\s*MAX_TOOL_CALLS/);
-  assert.match(source, /onToolResult:\s*\(\{ id, name, result \}\)/);
+  assert.match(source, /onToolResult:\s*\(\{ id, name, result, rawResult: runtimeRawResult, isError \}\)/);
   assert.match(source, /createAgentToolResultEvents/);
   assert.match(source, /source:\s*skillSource \|\| 'auto'/);
   assert.match(source, /application\/x-ndjson/);
@@ -191,7 +192,10 @@ test('agent route uses one main-agent message hierarchy for text and referenced 
   assert.match(source, /const shouldUseImagePipeline = executionKind[\s\S]{0,180}executionKind === 'image_pipeline'/);
   assert.doesNotMatch(source, /if \(intent === 'skill_action'\)/);
   assert.match(source, /loadSkillContent\(selectedSkill\.id\)/);
-  assert.match(source, /runAgentLoop\(\{/);
+  assert.match(source, /runZFlowAgentBrain\(\{/);
+  assert.match(source, /loopResult\.stopReason === 'error' \|\| loopResult\.stopReason === 'aborted'/);
+  assert.match(source, /loopResult\.stopReason === 'budget_exceeded'/);
+  assert.doesNotMatch(source, /\brunAgentLoop\(\{/);
 });
 
 test('agent route enforces run and tool limits', () => {
@@ -209,6 +213,19 @@ test('agent route enforces run and tool limits', () => {
   assert.match(source, /allowedTools:/);
   assert.match(source, /body\.confirmation\?\.confirmationId/);
   assert.match(source, /confirmed:\s*true/);
+  assert.match(source, /version:\s*1/);
+  assert.match(source, /argsHash:\s*hashEnvelopeValue/);
+  assert.match(source, /status:\s*'pending'/);
+  assert.match(source, /confirmationRecord\.status = 'completed'/);
+  assert.match(source, /claimConfirmationContinuation/);
+  assert.match(source, /providerModelFingerprint/);
+  assert.match(source, /resolvedImageProviderId/);
+  assert.match(source, /imageProviderModelFingerprint/);
+  assert.match(source, /piTranscript/);
+  assert.match(source, /pendingToolCall/);
+  assert.match(source, /assistantToolCallIds/);
+  assert.match(source, /progressSequence/);
+  assert.match(source, /continuation:\s*\{/);
   assert.match(source, /normalizeAgentImageCount\(body\.imageOptions\?\.count\)/);
   assert.match(source, /describeImageDelivery\(imageDeliveryPlan, requestedImageCount\)/);
   assert.doesNotMatch(source, /channel:\s*'reasoning'/);

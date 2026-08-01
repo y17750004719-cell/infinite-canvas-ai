@@ -283,7 +283,8 @@ test('canvas zoom display opens immediately without GSAP or a React visibility c
   assert.equal(zoomBlock.includes('workspace-menu-panel pointer-events-auto w-[198px] rounded-xl p-2'), true);
   assert.equal(zoomBlock.includes('hover:bg-[var(--workspace-control-hover)]'), true);
   assert.equal(zoomBlock.includes('group-focus-within:bg-[var(--workspace-control-hover)]'), true);
-  assert.equal(zoomBlock.includes('{Math.round(viewport.scale * 100)}%'), true);
+  assert.equal(zoomBlock.includes('<span ref={zoomPercentageRef}>{Math.round(viewport.scale * 100)}%</span>'), true);
+  assert.equal(pageSource.includes('zoomPercentageRef.current.textContent = zoomPercentage;'), true);
   assert.equal(zoomBlock.includes('放大'), true);
   assert.equal(zoomBlock.includes('缩小'), true);
   assert.equal(zoomBlock.includes('显示画布所有元素'), true);

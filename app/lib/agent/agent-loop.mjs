@@ -1,32 +1,3 @@
-function parseToolArguments(raw) {
-  if (!raw) return {};
-  if (typeof raw === 'object') return raw;
-  try {
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-      throw new Error('Tool arguments must be an object');
-    }
-    return parsed;
-  } catch (error) {
-    throw new Error(`Invalid tool arguments: ${error instanceof Error ? error.message : 'invalid JSON'}`);
-  }
-}
-
-function normalizeToolCalls(message) {
-  return (Array.isArray(message?.tool_calls) ? message.tool_calls : [])
-    .filter((call) => call?.function?.name)
-    .map((call, index) => ({
-      id: typeof call.id === 'string' && call.id ? call.id : `tool-call-${index + 1}`,
-      type: 'function',
-      function: {
-        name: call.function.name,
-        arguments: typeof call.function.arguments === 'string'
-          ? call.function.arguments
-          : JSON.stringify(call.function.arguments || {}),
-      },
-    }));
-}
-
 function finiteCount(value, fallback = 0) {
   return Number.isFinite(Number(value)) ? Math.max(0, Math.floor(Number(value))) : fallback;
 }
@@ -72,6 +43,13 @@ function sanitizeModelValue(value) {
 
 export function createAgentToolResultViews(toolName, rawResult) {
   const value = rawResult && typeof rawResult === 'object' ? rawResult : {};
+  if (typeof value.error === 'string' && value.error.trim()) {
+    const message = sanitizeModelValue(value.error.trim());
+    return {
+      modelResult: { error: message },
+      publicResult: { kind: 'tool_error', toolName, status: 'failed', message },
+    };
+  }
   if (toolName === 'generate_image') {
     const outputs = Array.isArray(value?.result?.outputs)
       ? value.result.outputs
@@ -310,121 +288,4 @@ export function createAgentProgressTracker({
       return { operationId: currentOperationId, lastSequence: sequence };
     },
   };
-}
-
-export async function runAgentLoop({
-  messages,
-  tools,
-  modelFn,
-  executeTool,
-  isReadOnlyTool = (_name) => false,
-  requireMutationTool = false,
-  maxTurns = 6,
-  maxToolCalls = 4,
-  onToolStart,
-  onToolResult,
-  serializeToolResultForModel = (_name, result) => result,
-  serializeToolResultForPublic = (_name, result) => result,
-}) {
-  if (typeof modelFn !== 'function') throw new Error('Agent model is unavailable');
-  if (typeof executeTool !== 'function') throw new Error('Agent tool executor is unavailable');
-  const conversation = [...(Array.isArray(messages) ? messages : [])];
-  let toolCallCount = 0;
-  let mutationToolCallCount = 0;
-  let executionCorrectionUsed = false;
-
-  for (let turn = 1; turn <= maxTurns; turn += 1) {
-    const response = await modelFn({ messages: conversation, tools });
-    const message = response?.choices?.[0]?.message || {};
-    const toolCalls = normalizeToolCalls(message);
-    if (toolCalls.length === 0) {
-      if (requireMutationTool && mutationToolCallCount === 0) {
-        if (!executionCorrectionUsed) {
-          executionCorrectionUsed = true;
-          conversation.push({
-            role: 'system',
-            content: 'This is an execution request. Call one allowed mutation tool now. Do not claim that generation or execution started unless the tool call is present. Clarification has already been handled.',
-          });
-          continue;
-        }
-        return {
-          content: '',
-          reasoningContent: '',
-          turns: turn,
-          toolCalls: toolCallCount,
-          mutationToolCalls: mutationToolCallCount,
-          stopReason: 'execution_required',
-        };
-      }
-      return {
-        content: typeof message.content === 'string' ? message.content : '',
-        reasoningContent: typeof message.reasoning_content === 'string' ? message.reasoning_content : '',
-        turns: turn,
-        toolCalls: toolCallCount,
-        mutationToolCalls: mutationToolCallCount,
-        stopReason: 'completed',
-      };
-    }
-
-    if (toolCallCount + toolCalls.length > maxToolCalls) {
-      throw new Error('Agent tool call budget exceeded');
-    }
-    if (turn >= maxTurns) {
-      throw new Error('Agent turn budget exceeded');
-    }
-    toolCallCount += toolCalls.length;
-    conversation.push({
-      role: 'assistant',
-      content: typeof message.content === 'string' ? message.content : '',
-      tool_calls: toolCalls,
-    });
-
-    const executeCall = async (call) => {
-      const name = call.function.name;
-      const args = parseToolArguments(call.function.arguments);
-      await onToolStart?.({ id: call.id, name, args });
-      const rawResult = await executeTool(name, args, { toolCallId: call.id });
-      const modelResult = await serializeToolResultForModel(name, rawResult);
-      const publicResult = await serializeToolResultForPublic(name, rawResult);
-      if (rawResult?.confirmationRequired !== true) {
-        await onToolResult?.({ id: call.id, name, result: publicResult });
-      }
-      return { call, rawResult, modelResult };
-    };
-
-    const readCalls = toolCalls.filter((call) => isReadOnlyTool(call.function.name));
-    const mutationCalls = toolCalls.filter((call) => !isReadOnlyTool(call.function.name));
-    mutationToolCallCount += mutationCalls.length;
-    const results = await Promise.all(readCalls.map(executeCall));
-    for (const call of mutationCalls) {
-      const executed = await executeCall(call);
-      results.push(executed);
-      if (executed.rawResult?.confirmationRequired === true) {
-        return {
-          content: '',
-          reasoningContent: '',
-          turns: turn,
-          toolCalls: toolCallCount,
-          mutationToolCalls: mutationToolCallCount,
-          stopReason: 'confirmation_required',
-          confirmation: {
-            ...executed.rawResult,
-            toolCallId: executed.call.id,
-            arguments: parseToolArguments(executed.call.function.arguments),
-          },
-        };
-      }
-    }
-
-    for (const { call, modelResult } of results) {
-      conversation.push({
-        role: 'tool',
-        tool_call_id: call.id,
-        name: call.function.name,
-        content: JSON.stringify(modelResult ?? null),
-      });
-    }
-  }
-
-  throw new Error('Agent turn budget exceeded');
 }

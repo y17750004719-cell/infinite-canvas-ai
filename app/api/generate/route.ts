@@ -20,7 +20,6 @@ import {
   getResolutionFailureReason,
   isOutputResolutionSufficient,
   resolveImageGenerationFallbackSizes,
-  resolveTextPanelChatModel,
 } from "../../lib/workspace-session-view.mjs";
 import { createLogger, createRequestId, serializeError } from "../../lib/logger";
 
@@ -197,7 +196,6 @@ async function saveImagesToLocal(imageUrls: string[]): Promise<Array<{
   return Promise.all(validUrls.map((imageUrl) => saveImageToLocal(imageUrl)));
 }
 
-const AGENT_MODEL = "gemini-3.1-flash-lite-preview-thinking-medium";
 const DEFAULT_IMAGE_SIZES = ["2048x2048", "1024x1024", "4096x4096", "1024x1792", "1792x1024"];
 
 type GenerateIntent = "auto" | "image" | "chat";
@@ -584,21 +582,12 @@ export async function POST(request: NextRequest) {
           reason: "legacy_default",
         };
     const requestedChatProviderId = chatProviderId || providerId;
-    const hasRequestedChatSelection = Boolean(requestedChatProviderId?.trim());
-    const legacyChatModel = resolveTextPanelChatModel(model, AGENT_MODEL);
-    const resolvedChatSelection = hasRequestedChatSelection
-      ? resolveProviderModelSelection({
-          providers: providerRegistry.providers,
-          purpose: "chat",
-          requestedProviderId: requestedChatProviderId,
-          requestedModel: model,
-        })
-      : {
-          providerId: requestedChatProviderId || null,
-          model: legacyChatModel,
-          fallback: false,
-          reason: "legacy_default",
-        };
+    const resolvedChatSelection = resolveProviderModelSelection({
+      providers: providerRegistry.providers,
+      purpose: "chat",
+      requestedProviderId: requestedChatProviderId,
+      requestedModel: model,
+    });
 
     if (
       resolved.intent === "image" &&
@@ -610,7 +599,7 @@ export async function POST(request: NextRequest) {
         { status: 400 }
       );
     }
-    if (resolved.intent === "chat" && hasRequestedChatSelection && (!resolvedChatSelection.providerId || !resolvedChatSelection.model)) {
+    if (resolved.intent === "chat" && (!resolvedChatSelection.providerId || !resolvedChatSelection.model)) {
       await logResponse(400, { mode: "chat", reason: "no_capable_provider_model" });
       return NextResponse.json(
         { status: "error", error: "No enabled chat provider and model are configured" },
@@ -918,7 +907,7 @@ export async function POST(request: NextRequest) {
     }
 
     if (body.stream === true) {
-      const resolvedChatModel = resolvedChatSelection.model || legacyChatModel;
+      const resolvedChatModel = resolvedChatSelection.model;
       const encoder = new TextEncoder();
       const stream = new ReadableStream({
         async start(controller) {
@@ -952,7 +941,7 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    const resolvedChatModel = resolvedChatSelection.model || legacyChatModel;
+    const resolvedChatModel = resolvedChatSelection.model;
     const chatResult = await chat({
       providerId: resolvedChatSelection.providerId || undefined,
       model: resolvedChatModel,

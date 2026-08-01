@@ -21,6 +21,7 @@
     "check": "npm run lint && npm run typecheck && npm test && npm run build"
   },
   "dependencies": {
+    "@earendil-works/pi-agent-core": "0.83.0",
     "@gsap/react": "^2.1.2",
     "gsap": "^3.15.0",
     "lucide-react": "0.577.0",
