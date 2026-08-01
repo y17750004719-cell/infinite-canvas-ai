@@ -318,10 +318,23 @@ test('selected overlay groups follow live geometry through transform-only writes
   assert.equal(overlaySource.includes("getCanvasItemOverlayGroup('selected-image-toolbar')"), true);
   assert.equal(overlaySource.includes("getCanvasItemOverlayGroup('selected-image-panel')"), true);
   assert.equal(overlaySource.includes("getCanvasItemOverlayGroup('selected-text-panel')"), true);
-  assert.equal(overlaySource.includes('root.style.transform = `translate3d('), true);
+  assert.equal(overlaySource.includes('writeCanvasOverlayTransform('), true);
   assert.equal(overlaySource.includes('getBoundingClientRect()'), false);
   assert.equal(overlaySource.includes('setSelectedId('), false);
   assert.equal(overlaySource.includes('setItemsState('), false);
+});
+
+test('selected overlay transforms skip duplicate style writes', () => {
+  const overlaySource = sourceBetween(
+    pageSource,
+    'const syncSelectedCanvasOverlayPositions = useCallback',
+    'const buildConnectionPath = useCallback'
+  );
+
+  assert.equal(pageSource.includes('const canvasOverlayTransformCacheRef = useRef(new WeakMap<HTMLElement, string>());'), true);
+  assert.equal(pageSource.includes('const writeCanvasOverlayTransform = useCallback'), true);
+  assert.equal(overlaySource.includes('writeCanvasOverlayTransform('), true);
+  assert.equal(overlaySource.includes('root.style.transform ='), false);
 });
 
 test('single selection reconciles every drag shell and clears stale compositor hints', () => {

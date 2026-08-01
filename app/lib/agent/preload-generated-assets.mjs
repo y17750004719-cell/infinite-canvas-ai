@@ -4,34 +4,73 @@ function appendCacheBust(src) {
   return `${src}${separator}agent_retry=1`;
 }
 
-function defaultLoadImage(src) {
+function createAbortError() {
+  const error = new Error('Generated asset preload aborted');
+  error.name = 'AbortError';
+  return error;
+}
+
+function defaultLoadImage(src, signal) {
   return new Promise((resolve, reject) => {
     const image = new window.Image();
     image.crossOrigin = 'anonymous';
-    image.onload = () => resolve({
-      naturalWidth: image.naturalWidth || image.width,
-      naturalHeight: image.naturalHeight || image.height,
-    });
-    image.onerror = () => reject(new Error(`Failed to preload generated asset: ${src}`));
+    const cleanup = () => signal?.removeEventListener('abort', handleAbort);
+    const handleAbort = () => {
+      image.onload = null;
+      image.onerror = null;
+      image.src = '';
+      cleanup();
+      reject(createAbortError());
+    };
+    image.onload = () => {
+      cleanup();
+      resolve({
+        naturalWidth: image.naturalWidth || image.width,
+        naturalHeight: image.naturalHeight || image.height,
+      });
+    };
+    image.onerror = () => {
+      cleanup();
+      reject(new Error(`Failed to preload generated asset: ${src}`));
+    };
+    if (signal?.aborted) {
+      handleAbort();
+      return;
+    }
+    signal?.addEventListener('abort', handleAbort, { once: true });
     image.src = src;
   });
 }
 
-function loadWithTimeout(loadImage, src, timeoutMs) {
+function loadWithTimeout(loadImage, src, timeoutMs, signal) {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(createAbortError());
+      return;
+    }
     const timer = setTimeout(
-      () => reject(new Error(`Generated asset preload timed out after ${timeoutMs}ms: ${src}`)),
+      () => {
+        signal?.removeEventListener('abort', handleAbort);
+        reject(new Error(`Generated asset preload timed out after ${timeoutMs}ms: ${src}`));
+      },
       timeoutMs,
     );
+    const handleAbort = () => {
+      clearTimeout(timer);
+      reject(createAbortError());
+    };
+    signal?.addEventListener('abort', handleAbort, { once: true });
     Promise.resolve()
-      .then(() => loadImage(src))
+      .then(() => loadImage(src, signal))
       .then(
         (result) => {
           clearTimeout(timer);
+          signal?.removeEventListener('abort', handleAbort);
           resolve(result);
         },
         (error) => {
           clearTimeout(timer);
+          signal?.removeEventListener('abort', handleAbort);
           reject(error);
         },
       );
@@ -43,11 +82,13 @@ export async function preloadGeneratedAsset(asset, options = {}) {
   const timeoutMs = Number.isFinite(options.timeoutMs) && options.timeoutMs > 0
     ? options.timeoutMs
     : 15_000;
+  const signal = options.signal;
   let result;
   try {
-    result = await loadWithTimeout(loadImage, asset.src, timeoutMs);
-  } catch {
-    result = await loadWithTimeout(loadImage, appendCacheBust(asset.src), timeoutMs);
+    result = await loadWithTimeout(loadImage, asset.src, timeoutMs, signal);
+  } catch (error) {
+    if (signal?.aborted || error?.name === 'AbortError') throw error;
+    result = await loadWithTimeout(loadImage, appendCacheBust(asset.src), timeoutMs, signal);
   }
   return {
     asset,

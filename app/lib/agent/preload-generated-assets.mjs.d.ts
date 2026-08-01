@@ -13,7 +13,8 @@ export interface PreloadedGeneratedAsset {
 
 export interface GeneratedAssetPreloadOptions {
   timeoutMs?: number;
-  loadImage?: (src: string) => Promise<{ naturalWidth?: number; naturalHeight?: number }>;
+  signal?: AbortSignal;
+  loadImage?: (src: string, signal?: AbortSignal) => Promise<{ naturalWidth?: number; naturalHeight?: number }>;
 }
 
 export function preloadGeneratedAsset(

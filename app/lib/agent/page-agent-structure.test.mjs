@@ -153,7 +153,10 @@ test('agent progress accumulates reached breadcrumbs without an assistant bubble
 test('every chat-generated image is materialized in both chat and the canvas', () => {
   assert.match(source, /const updateChatMessageById =/);
   assert.match(source, /processedAgentActionsRef\.current\.has\(key\)/);
-  assert.match(source, /await preloadGeneratedAssets\(freshAssets, \{ timeoutMs: 15_000 \}\)/);
+  assert.match(source, /generatedAssetPreloadChain = generatedAssetPreloadChain\.then\(async \(\) => \{/);
+  assert.match(source, /await runGeneratedAssetPreloadQueue\(/);
+  assert.match(source, /concurrency: 2/);
+  assert.match(source, /signal: controller\.signal/);
   assert.match(source, /loadedAssets\.length > 0[\s\S]{0,4000}setChatMessages\(prev => \[\.\.\.prev, \.\.\.imageMessages\]\)/);
   assert.match(source, /const canvasItems = loadedAssets\.map/);
   assert.match(source, /recordCurrentCanvasUndoSnapshot\(\);\s*setItems\(prev => \[\.\.\.prev, \.\.\.canvasItems\]\)/);

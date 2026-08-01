@@ -94,7 +94,9 @@ import {
   routeAgentProgressEvent,
   shouldShowAgentRunProgress,
 } from './lib/agent/run-progress.mjs';
-import { preloadGeneratedAssets } from './lib/agent/preload-generated-assets.mjs';
+import { preloadGeneratedAsset } from './lib/agent/preload-generated-assets.mjs';
+import { applyQueuedChatMessageUpdates } from './lib/chat-stream-update-batcher.mjs';
+import { runGeneratedAssetPreloadQueue } from './lib/generated-asset-preload-queue.mjs';
 import { buildAgentContextEntities } from './lib/agent/context-reference.mjs';
 import type { AgentContextEntity, AgentProposal } from './lib/agent/context-reference.types';
 import type {
@@ -5791,9 +5793,12 @@ export default function AIWorkspace() {
   const pendingCanvasOverlayMountFrameRef = useRef<number | null>(null);
   const pendingCanvasSelectionFinalizeFrameRef = useRef<number | null>(null);
   const cancelPendingCanvasSelectionFinalizeRef = useRef<() => void>(() => {});
+  const canvasOverlayTransformCacheRef = useRef(new WeakMap<HTMLElement, string>());
   const canvasOverlaySyncWriteCountRef = useRef(0);
   const canvasOverlayReactCommitDuringInteractionCountRef = useRef(0);
   const canvasPerformanceEnabledRef = useRef(false);
+  const workspaceCommitPerformanceSamplesRef = useRef<number[]>([]);
+  const workspaceCommitWindowRef = useRef({ startedAt: 0, count: 0 });
   const interactionCommitTokenRef = useRef(0);
   const selectedIdRef = useRef<string | null>(null);
   const selectedIdsRef = useRef<string[]>([]);
@@ -5826,8 +5831,7 @@ export default function AIWorkspace() {
   const clearConnectionSnapTargetVisualRef = useRef<() => void>(() => {});
   const clearConnectionInteractionStateRef = useRef<() => void>(() => {});
   
-  const [chatInput, setChatInput] = useState('');
-  const [chatInputRows, setChatInputRows] = useState(1);
+  const [chatInputSyncRevision, setChatInputSyncRevision] = useState(0);
   const [chatMessages, setChatMessagesState] = useState<ChatMessage[]>([]);
   const [visibleChatMessageLimit, setVisibleChatMessageLimit] = useState(80);
   const attemptedLegacyChatReferenceMigrationsRef = useRef(new Set<string>());
@@ -6299,6 +6303,10 @@ export default function AIWorkspace() {
   const streamTickerRef = useRef<((time: number) => void) | null>(null);
   const streamTickerLastTimeRef = useRef(0);
   const streamMessageIdRef = useRef<string | null>(null);
+  const pendingChatMessageUpdatesRef = useRef(new Map<string, Array<(message: ChatMessage) => ChatMessage>>());
+  const pendingChatMessageUpdateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingChatMessageUpdateStartedAtRef = useRef(0);
+  const chatStreamPaintSamplesRef = useRef<number[]>([]);
   const pendingAssistantMessageIdRef = useRef<string | null>(null);
   const currentSessionIdRef = useRef<string | null>(null);
   const scheduleCurrentSessionSaveRef = useRef<() => void>(() => {});
@@ -6307,6 +6315,22 @@ export default function AIWorkspace() {
   const suppressNextItemClickRef = useRef<string | null>(null);
   const suppressNextItemClickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const latestChatInputRef = useRef('');
+  const lastSyncedChatInputRevisionRef = useRef(chatInputSyncRevision);
+  const isChatInputComposingRef = useRef(false);
+  const pendingChatEditorSyncRef = useRef(false);
+  const pendingChatEditorMoveCaretToEndRef = useRef(false);
+  const pendingProgrammaticChatInputRef = useRef<string | null>(null);
+  const setChatInput = useCallback((value: string) => {
+    latestChatInputRef.current = value;
+    if (isChatInputComposingRef.current) {
+      pendingProgrammaticChatInputRef.current = value;
+      pendingChatEditorSyncRef.current = true;
+    }
+    setChatInputSyncRevision((revision) => revision + 1);
+  }, []);
+  const chatInputPerformanceSamplesRef = useRef<number[]>([]);
+  const chatComposerPlaceholderRef = useRef<HTMLSpanElement | null>(null);
+  const chatSendButtonRef = useRef<HTMLButtonElement | null>(null);
   const isHydratingSessionRef = useRef(false);
   const imageToolbarNoticeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const modelSelectionNoticeTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -6316,6 +6340,11 @@ export default function AIWorkspace() {
       gsap.ticker.remove(streamTickerRef.current);
       streamTickerRef.current = null;
     }
+    if (pendingChatMessageUpdateTimerRef.current) {
+      clearTimeout(pendingChatMessageUpdateTimerRef.current);
+      pendingChatMessageUpdateTimerRef.current = null;
+    }
+    pendingChatMessageUpdatesRef.current.clear();
   }, []);
 
   const updateChatNearBottomState = useCallback(() => {
@@ -6405,7 +6434,7 @@ export default function AIWorkspace() {
   const [showAgentClarificationModal, setShowAgentClarificationModal] = useState(false);
   const [agentClarificationCustomText, setAgentClarificationCustomText] = useState('');
   const [chatInputFocused, setChatInputFocused] = useState(false);
-  const [chatInputHeight, setChatInputHeight] = useState(72);
+  const chatInputHeightRef = useRef(72);
   const [copiedAssistantMessageId, setCopiedAssistantMessageId] = useState<string | null>(null);
   const [editingTextCardId, setEditingTextCardId] = useState<string | null>(null);
   const [textCardPanelDrafts, setTextCardPanelDraftsState] = useState<Record<string, string>>({});
@@ -6916,7 +6945,28 @@ export default function AIWorkspace() {
     () => resolvedChatReferenceTokens.some((token) => Boolean(token.uploadStatus)),
     [resolvedChatReferenceTokens]
   );
+  const syncChatComposerControls = useCallback((value: string) => {
+    const hasText = value.trim().length > 0;
+    if (chatComposerPlaceholderRef.current) {
+      chatComposerPlaceholderRef.current.hidden = (
+        hasText
+        || Boolean(activeSkill)
+        || resolvedChatReferenceTokens.length > 0
+        || chatInputFocused
+      );
+    }
+    if (chatSendButtonRef.current) {
+      chatSendButtonRef.current.disabled = (
+        !isGeneratingRef.current
+        && (!hasText || hasPendingChatReferenceUploads)
+      );
+    }
+  }, [activeSkill, chatInputFocused, hasPendingChatReferenceUploads, resolvedChatReferenceTokens.length]);
   const chatReferenceTokenCount = resolvedChatReferenceTokens.length;
+
+  useEffect(() => {
+    syncChatComposerControls(latestChatInputRef.current);
+  }, [isGenerating, syncChatComposerControls]);
   const activeRegionSelection = activeRegionMenuId
     ? (() => {
         const region = regionSelections.find((candidate) => candidate.id === activeRegionMenuId) || null;
@@ -7400,7 +7450,6 @@ export default function AIWorkspace() {
   const SKILL_TOKEN_SELECTOR = '[data-skill-token="true"]';
   const REFERENCE_TOKEN_SELECTOR = '[data-reference-token="true"]';
   const copiedAssistantMessageTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  latestChatInputRef.current = chatInput;
 
   const createCurrentCanvasUndoSnapshot = useCallback(() => {
     const liveState = sessionLiveStateRef.current;
@@ -7788,7 +7837,7 @@ export default function AIWorkspace() {
     editor.style.height = "auto";
     const next = Math.max(72, Math.min(editor.scrollHeight || 72, 240));
     editor.style.height = `${next}px`;
-    setChatInputHeight(next);
+    chatInputHeightRef.current = next;
   }, []);
 
   const parseChatEditorSegments = useCallback((root: HTMLElement): ChatComposerSegment[] => {
@@ -7819,10 +7868,6 @@ export default function AIWorkspace() {
     Array.from(root.childNodes).forEach(visit);
     return mergeAdjacentChatComposerText(segments);
   }, [REFERENCE_TOKEN_SELECTOR, SKILL_TOKEN_SELECTOR]);
-
-  const extractEditorPlainText = useCallback((root: HTMLElement): string => {
-    return getChatComposerPlainText(parseChatEditorSegments(root));
-  }, [parseChatEditorSegments]);
 
   const getChatEditorCaretAnchor = useCallback(() => {
     const editor = chatInputEditorRef.current;
@@ -7861,6 +7906,11 @@ export default function AIWorkspace() {
   const syncEditorTextFromState = useCallback((value: string, moveCaretToEnd = false) => {
     const editor = chatInputEditorRef.current;
     if (!editor) return;
+    if (isChatInputComposingRef.current) {
+      pendingChatEditorSyncRef.current = true;
+      pendingChatEditorMoveCaretToEndRef.current ||= moveCaretToEnd;
+      return;
+    }
 
     let segments = parseChatEditorSegments(editor);
     const validTokenIds = new Set(resolvedChatReferenceTokens.map((token) => token.id));
@@ -8145,6 +8195,7 @@ export default function AIWorkspace() {
   }, [chatMessages]);
 
   const stopStreamTypewriter = () => {
+    flushQueuedChatMessageUpdates();
     if (streamTickerRef.current) {
       gsap.ticker.remove(streamTickerRef.current);
       streamTickerRef.current = null;
@@ -8168,13 +8219,13 @@ export default function AIWorkspace() {
       const nextChunk = streamQueueRef.current.slice(0, nextChunkSize);
       streamQueueRef.current = streamQueueRef.current.slice(nextChunkSize);
 
-      setChatMessages((prev) => prev.map((msg) => {
-        if (msg.id !== messageId) return msg;
+      updateChatMessageById(messageId, (msg) => {
         return {
           ...msg,
           content: `${msg.content}${nextChunk}`,
         };
-      }));
+      });
+      flushQueuedChatMessageUpdates();
     };
     streamTickerLastTimeRef.current = 0;
     streamTickerRef.current = tickStreamTypewriter;
@@ -8193,13 +8244,13 @@ export default function AIWorkspace() {
     if (!targetMessageId || !remaining) return;
 
     streamQueueRef.current = '';
-    setChatMessages((prev) => prev.map((msg) => {
-      if (msg.id !== targetMessageId) return msg;
+    updateChatMessageById(targetMessageId, (msg) => {
       return {
         ...msg,
         content: `${msg.content}${remaining}`,
       };
-    }));
+    });
+    flushQueuedChatMessageUpdates();
   };
 
   const waitForStreamFlush = async () => {
@@ -8223,24 +8274,53 @@ export default function AIWorkspace() {
 
     flushStreamQueueNow(messageId);
 
-    setChatMessages((prev) => prev.map((msg) => {
-      if (msg.id !== messageId) return msg;
+    updateChatMessageById(messageId, (msg) => {
       return {
         ...msg,
         taskStatus: status,
         content: msg.content || fallbackContent || msg.content,
       };
-    }));
+    });
+    flushQueuedChatMessageUpdates();
+  };
+
+  const flushQueuedChatMessageUpdates = () => {
+    if (pendingChatMessageUpdateTimerRef.current) {
+      clearTimeout(pendingChatMessageUpdateTimerRef.current);
+      pendingChatMessageUpdateTimerRef.current = null;
+    }
+    const queuedUpdates = pendingChatMessageUpdatesRef.current;
+    if (queuedUpdates.size === 0) return;
+    pendingChatMessageUpdatesRef.current = new Map();
+    const queuedAt = pendingChatMessageUpdateStartedAtRef.current;
+    pendingChatMessageUpdateStartedAtRef.current = 0;
+    setChatMessages((prev) => applyQueuedChatMessageUpdates(prev, queuedUpdates));
+    if (canvasPerformanceEnabledRef.current && queuedAt > 0) {
+      const samples = chatStreamPaintSamplesRef.current;
+      if (samples.length >= 120) samples.shift();
+      samples.push(performance.now() - queuedAt);
+      if (samples.length >= 30 && samples.length % 30 === 0) {
+        const sorted = [...samples].sort((left, right) => left - right);
+        const p95 = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95))] || 0;
+        console.info('[chat-stream-perf]', { sampleCount: samples.length, eventToCommitP95: p95 });
+      }
+    }
+  };
+
+  const scheduleQueuedChatMessageUpdates = () => {
+    if (pendingChatMessageUpdateTimerRef.current) return;
+    pendingChatMessageUpdateStartedAtRef.current = performance.now();
+    pendingChatMessageUpdateTimerRef.current = setTimeout(flushQueuedChatMessageUpdates, 64);
   };
 
   const updateChatMessageById = (
     messageId: string,
     updater: (msg: ChatMessage) => ChatMessage
   ) => {
-    setChatMessages((prev) => prev.map((msg) => {
-      if (msg.id !== messageId) return msg;
-      return updater(msg);
-    }));
+    const queuedUpdates = pendingChatMessageUpdatesRef.current.get(messageId) || [];
+    queuedUpdates.push(updater);
+    pendingChatMessageUpdatesRef.current.set(messageId, queuedUpdates);
+    scheduleQueuedChatMessageUpdates();
   };
 
   const updatePendingAssistantMessage = (
@@ -8776,9 +8856,14 @@ export default function AIWorkspace() {
       } else {
         document.execCommand('insertText', false, text);
       }
-      const editorText = chatInputEditorRef.current ? extractEditorPlainText(chatInputEditorRef.current) : '';
-      setChatInput(editorText);
+      const editor = chatInputEditorRef.current;
+      const nextSegments = editor ? parseChatEditorSegments(editor) : [{ type: 'text' as const, text: '' }];
+      const editorText = getChatComposerPlainText(nextSegments);
+      chatComposerSegmentsRef.current = nextSegments;
+      latestChatInputRef.current = editorText;
+      syncChatComposerControls(editorText);
       syncEditorHeight();
+      rememberChatEditorCaretOffset();
       return;
     }
 
@@ -8797,9 +8882,26 @@ export default function AIWorkspace() {
     if (!isGeneratingRef.current) enqueueChatReferenceUploads(filesToProcess);
   };
 
+  const recordChatInputPerformance = useCallback((duration: number) => {
+    if (!canvasPerformanceEnabledRef.current) return;
+    const samples = chatInputPerformanceSamplesRef.current;
+    if (samples.length >= 120) samples.shift();
+    samples.push(duration);
+    if (samples.length < 30 || samples.length % 30 !== 0) return;
+    const sorted = [...samples].sort((left, right) => left - right);
+    const at = (ratio: number) => sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * ratio))] || 0;
+    console.info('[chat-input-perf]', {
+      sampleCount: samples.length,
+      p50: at(0.5),
+      p95: at(0.95),
+      p99: at(0.99),
+    });
+  }, []);
+
   const handleChatEditorInput = () => {
     const editor = chatInputEditorRef.current;
     if (!editor) return;
+    const startedAt = performance.now();
     const nextSegments = parseChatEditorSegments(editor);
     const previousTokenIds = new Set(
       chatComposerSegmentsRef.current
@@ -8823,9 +8925,35 @@ export default function AIWorkspace() {
     }
     chatComposerSegmentsRef.current = nextSegments;
     const editorText = getChatComposerPlainText(nextSegments);
-    setChatInput(editorText);
-    rememberChatEditorCaretOffset();
+    latestChatInputRef.current = editorText;
+    syncChatComposerControls(editorText);
     syncEditorHeight();
+    recordChatInputPerformance(performance.now() - startedAt);
+  };
+
+  const handleChatCompositionStart = () => {
+    isChatInputComposingRef.current = true;
+  };
+
+  const handleChatCompositionEnd = () => {
+    isChatInputComposingRef.current = false;
+    const programmaticValue = pendingProgrammaticChatInputRef.current;
+    pendingProgrammaticChatInputRef.current = null;
+    if (programmaticValue === null) {
+      handleChatEditorInput();
+    } else {
+      latestChatInputRef.current = programmaticValue;
+    }
+    const shouldSyncEditor = pendingChatEditorSyncRef.current || programmaticValue !== null;
+    const moveCaretToEnd = pendingChatEditorMoveCaretToEndRef.current;
+    pendingChatEditorSyncRef.current = false;
+    pendingChatEditorMoveCaretToEndRef.current = false;
+    if (shouldSyncEditor) {
+      syncEditorTextFromState(latestChatInputRef.current, moveCaretToEnd);
+      syncChatComposerControls(latestChatInputRef.current);
+      lastSyncedChatInputRevisionRef.current = chatInputSyncRevision;
+    }
+    rememberChatEditorCaretOffset();
   };
 
   const handleSelectedTextCardPanelInputChange = useCallback(
@@ -9011,6 +9139,8 @@ export default function AIWorkspace() {
   }, [items]);
 
   const handleChatEditorKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (e.nativeEvent.isComposing || isChatInputComposingRef.current) return;
+
     if ((e.key === 'Backspace' || e.key === 'Delete') && activeSkill && isCaretAtEditorStart()) {
       e.preventDefault();
       setActiveSkillForCurrentTopic(null);
@@ -9361,6 +9491,18 @@ export default function AIWorkspace() {
     });
   }, []);
 
+  const writeCanvasOverlayTransform = useCallback((element: HTMLElement, transform: string) => {
+    if (
+      canvasOverlayTransformCacheRef.current.get(element) === transform
+      && element.style.transform === transform
+    ) {
+      return false;
+    }
+    canvasOverlayTransformCacheRef.current.set(element, transform);
+    element.style.transform = transform;
+    return true;
+  }, []);
+
   const syncSelectedCanvasOverlayPositions = useCallback((
     activeViewport: ViewportState,
     changedItemIds?: readonly string[]
@@ -9381,8 +9523,10 @@ export default function AIWorkspace() {
           canvasOrigin: { x: canvasMetrics.left, y: canvasMetrics.top },
           gap: IMAGE_NODE_OVERLAY_GAP_PX,
         });
-        root.style.transform = `translate3d(${anchors.centerX}px, ${anchors.topToolbarY}px, 0) translate(-50%, -100%)`;
-        syncWriteCount += 1;
+        if (writeCanvasOverlayTransform(
+          root,
+          `translate3d(${anchors.centerX}px, ${anchors.topToolbarY}px, 0) translate(-50%, -100%)`
+        )) syncWriteCount += 1;
       }
     }
     const imagePanelGroup = getCanvasItemOverlayGroup('selected-image-panel');
@@ -9396,8 +9540,10 @@ export default function AIWorkspace() {
           canvasOrigin: { x: canvasMetrics.left, y: canvasMetrics.top },
           gap: IMAGE_NODE_OVERLAY_GAP_PX,
         });
-        root.style.transform = `translate3d(${anchors.centerX - IMAGE_CARD_GENERATION_PANEL_DEFAULT_WIDTH / 2}px, ${anchors.bottomPanelY}px, 0)`;
-        syncWriteCount += 1;
+        if (writeCanvasOverlayTransform(
+          root,
+          `translate3d(${anchors.centerX - IMAGE_CARD_GENERATION_PANEL_DEFAULT_WIDTH / 2}px, ${anchors.bottomPanelY}px, 0)`
+        )) syncWriteCount += 1;
       }
     }
     const textPanelGroup = getCanvasItemOverlayGroup('selected-text-panel');
@@ -9413,14 +9559,16 @@ export default function AIWorkspace() {
         const bottomY = canvasMetrics.top + activeViewport.y + (
           item.y + frameBounds.top + frameBounds.height
         ) * activeViewport.scale;
-        root.style.transform = `translate3d(${centerX - panelWidth / 2}px, ${bottomY + 18}px, 0)`;
-        syncWriteCount += 1;
+        if (writeCanvasOverlayTransform(
+          root,
+          `translate3d(${centerX - panelWidth / 2}px, ${bottomY + 18}px, 0)`
+        )) syncWriteCount += 1;
       }
     }
     if (canvasPerformanceEnabledRef.current) {
       canvasOverlaySyncWriteCountRef.current += syncWriteCount;
     }
-  }, [getCanvasItemOverlayGroup]);
+  }, [getCanvasItemOverlayGroup, writeCanvasOverlayTransform]);
 
   const buildConnectionPath = useCallback((from: { x: number; y: number }, to: { x: number; y: number }) => {
     const dx = Math.max(64, Math.abs(to.x - from.x) * 0.42);
@@ -12920,7 +13068,7 @@ export default function AIWorkspace() {
     selectedContextEntityIds?: string[];
     suppressUserMessage?: boolean;
   }) => {
-    const currentChatInput = options?.input ?? chatInput;
+    const currentChatInput = options?.input ?? latestChatInputRef.current;
     if (!currentChatInput.trim()) return;
     if (
       !options?.agentConfirmation
@@ -13710,6 +13858,7 @@ export default function AIWorkspace() {
         let nextGeneratedImageNumber = currentImageCount + 1;
         let progressEventRouter = createAgentProgressEventRouter();
         let suppressAssistantContentForDecision = false;
+        let generatedAssetPreloadChain = Promise.resolve();
 
         while (true) {
           const { done, value } = await reader.read();
@@ -13870,9 +14019,9 @@ export default function AIWorkspace() {
             }
 
             if (event.type === 'start' && event.model) {
-              setChatMessages(prev => prev.map((msg) => {
-                if (msg.id !== assistantId) return msg;
-                return { ...msg, model: msg.model || event.model };
+              updateChatMessageById(assistantId, (msg) => ({
+                ...msg,
+                model: msg.model || event.model,
               }));
               continue;
             }
@@ -14152,28 +14301,47 @@ export default function AIWorkspace() {
                     count: generatedAssetExpectedCount,
                   }));
                 }
-                const preloadedAssets = await preloadGeneratedAssets(freshAssets, { timeoutMs: 15_000 });
-                if (
-                  currentSessionIdRef.current !== generationSessionId
-                  || generateAbortRef.current !== controller
-                  || controller.signal.aborted
-                ) {
-                  for (const asset of freshAssets) {
+                generatedAssetPreloadChain = generatedAssetPreloadChain.then(async () => {
+                  const preloadStartedAt = performance.now();
+                  const preloadResults = await runGeneratedAssetPreloadQueue(
+                    freshAssets,
+                    (asset) => preloadGeneratedAsset(asset, {
+                      timeoutMs: 15_000,
+                      signal: controller.signal,
+                    }),
+                    {
+                      concurrency: 2,
+                      signal: controller.signal,
+                    }
+                  );
+                  if (
+                    currentSessionIdRef.current !== generationSessionId
+                    || generateAbortRef.current !== controller
+                    || controller.signal.aborted
+                  ) {
+                    for (const asset of freshAssets) {
+                      const key = getAssetActionKey(asset);
+                      processedAgentActionsRef.current.delete(key);
+                      processedAgentActionKeysForRun.delete(key);
+                    }
+                    return;
+                  }
+                  const loadedAssets = preloadResults.flatMap((result) => (
+                    result.status === 'fulfilled' ? [result.value] : []
+                  ));
+                  const failedAssets = preloadResults.flatMap((result, index) => (
+                    result.status === 'rejected'
+                      ? [{ asset: freshAssets[index], error: result.reason }]
+                      : []
+                  ));
+                  failedAssets.forEach(({ asset }) => {
                     const key = getAssetActionKey(asset);
                     processedAgentActionsRef.current.delete(key);
                     processedAgentActionKeysForRun.delete(key);
-                  }
-                  continue;
-                }
-                const loadedAssets = preloadedAssets.fulfilled;
-                preloadedAssets.failed.forEach(({ asset }) => {
-                  const key = getAssetActionKey(asset);
-                  processedAgentActionsRef.current.delete(key);
-                  processedAgentActionKeysForRun.delete(key);
-                });
-                const preloadFailureCount = preloadedAssets.failed.length;
-                generatedAssetPreloadFailureCount += preloadFailureCount;
-                if (loadedAssets.length > 0) {
+                  });
+                  const preloadFailureCount = failedAssets.length;
+                  generatedAssetPreloadFailureCount += preloadFailureCount;
+                  if (loadedAssets.length > 0) {
                   const firstImageNumber = nextGeneratedImageNumber;
                   nextGeneratedImageNumber += loadedAssets.length;
                   const firstStreamedOrdinal = streamedAssetOrdinal;
@@ -14239,16 +14407,28 @@ export default function AIWorkspace() {
                       parentVersionId: asset.parentVersionId,
                     })),
                   );
+                  flushQueuedChatMessageUpdates();
                   setChatMessages(prev => [...prev, ...imageMessages]);
                   recordCurrentCanvasUndoSnapshot();
                   setItems(prev => [...prev, ...canvasItems]);
-                  setImageCount((prev) => prev + loadedAssets.length);
-                }
-                updateChatMessageById(assistantId, (msg) => updateAgentRunProgress(msg, {
-                  type: 'assets_settled',
-                  succeeded: generatedAssetSucceededCount,
-                  failed: generatedAssetFailureCount + generatedAssetPreloadFailureCount,
-                }));
+                    setImageCount((prev) => prev + loadedAssets.length);
+                  }
+                  updateChatMessageById(assistantId, (msg) => updateAgentRunProgress(msg, {
+                    type: 'assets_settled',
+                    succeeded: generatedAssetSucceededCount,
+                    failed: generatedAssetFailureCount + generatedAssetPreloadFailureCount,
+                  }));
+                  if (canvasPerformanceEnabledRef.current) {
+                    console.info('[generated-asset-preload-perf]', {
+                      count: freshAssets.length,
+                      loaded: loadedAssets.length,
+                      failed: failedAssets.length,
+                      durationMs: performance.now() - preloadStartedAt,
+                    });
+                  }
+                }).catch((error) => {
+                  console.error('Generated asset preload queue failed:', error);
+                });
               }
               continue;
             }
@@ -14262,6 +14442,7 @@ export default function AIWorkspace() {
                 && !processedAgentCompletionSummariesRef.current.has(summaryRunId)
               ) {
                 processedAgentCompletionSummariesRef.current.add(summaryRunId);
+                flushQueuedChatMessageUpdates();
                 setChatMessages(prev => [...prev, {
                   id: `${assistantId}-completion-${summaryRunId}`,
                   role: 'assistant',
@@ -14338,6 +14519,8 @@ export default function AIWorkspace() {
             // ignore malformed trailing chunk
           }
         }
+
+        await generatedAssetPreloadChain;
 
         if (doneReceived) {
           await waitForStreamFlush();
@@ -14804,7 +14987,7 @@ export default function AIWorkspace() {
       setHideWelcomeByCenterSkillPick(true);
     }
 
-    if (source === 'center_quick_action' && !chatInput.trim()) {
+    if (source === 'center_quick_action' && !latestChatInputRef.current.trim()) {
       const prompt = SKILL_DEFAULT_PROMPTS[action.id];
       if (prompt) {
         setChatInput(prompt);
@@ -16769,8 +16952,14 @@ export default function AIWorkspace() {
   }, [currentSessionId, scrollChatToBottom]);
 
   useEffect(() => {
-    syncEditorTextFromState(chatInput);
-  }, [chatInput, syncEditorTextFromState]);
+    if (lastSyncedChatInputRevisionRef.current === chatInputSyncRevision) return;
+    if (isChatInputComposingRef.current) {
+      pendingChatEditorSyncRef.current = true;
+      return;
+    }
+    lastSyncedChatInputRevisionRef.current = chatInputSyncRevision;
+    syncEditorTextFromState(latestChatInputRef.current);
+  }, [chatInputSyncRevision, syncEditorTextFromState]);
 
   useEffect(() => {
     syncEditorTextFromState(latestChatInputRef.current);
@@ -16982,6 +17171,31 @@ export default function AIWorkspace() {
     };
   }, [activeSkillJobId, activeSkillJobType, appendGeneratedImageHistoryForSession, getSpawnPosition, recordCurrentCanvasUndoSnapshot]);
 
+  const handleWorkspaceProfilerRender = useCallback((
+    _id: string,
+    _phase: 'mount' | 'update' | 'nested-update',
+    actualDuration: number
+  ) => {
+    if (!canvasPerformanceEnabledRef.current) return;
+    const now = performance.now();
+    const samples = workspaceCommitPerformanceSamplesRef.current;
+    if (samples.length >= 120) samples.shift();
+    samples.push(actualDuration);
+    const windowSample = workspaceCommitWindowRef.current;
+    if (windowSample.startedAt === 0) windowSample.startedAt = now;
+    windowSample.count += 1;
+    const elapsed = now - windowSample.startedAt;
+    if (elapsed < 1000) return;
+    const sorted = [...samples].sort((left, right) => left - right);
+    const p95 = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * 0.95))] || 0;
+    console.info('[workspace-commit-perf]', {
+      commitsPerSecond: windowSample.count * 1000 / elapsed,
+      commitDurationP95: p95,
+      sampleCount: samples.length,
+    });
+    workspaceCommitWindowRef.current = { startedAt: now, count: 0 };
+  }, []);
+
   const stableCanvasPointerDown = useStableEvent(handleCanvasPointerDown);
   const stableCanvasPointerMove = useStableEvent(handleCanvasPointerMove);
   const stableCanvasPointerUp = useStableEvent(handleCanvasPointerUp);
@@ -17023,10 +17237,11 @@ export default function AIWorkspace() {
   }
 
   return (
-    <div
-      ref={editorShellRef}
-      className="workspace-editor-shell relative isolate flex h-screen w-full overflow-hidden"
-    >
+    <React.Profiler id="workspace-performance" onRender={handleWorkspaceProfilerRender}>
+      <div
+        ref={editorShellRef}
+        className="workspace-editor-shell relative isolate flex h-screen w-full overflow-hidden"
+      >
       {sessionActionError && <SessionActionErrorBanner message={sessionActionError} />}
       <input
         ref={fileInputRef}
@@ -19176,6 +19391,8 @@ export default function AIWorkspace() {
                     contentEditable
                     suppressContentEditableWarning
                     onInput={handleChatEditorInput}
+                    onCompositionStart={handleChatCompositionStart}
+                    onCompositionEnd={handleChatCompositionEnd}
                     onPaste={handleChatPaste}
                     onKeyDown={handleChatEditorKeyDown}
                     onMouseDown={(event) => {
@@ -19216,13 +19433,15 @@ export default function AIWorkspace() {
                       setChatInputFocused(false);
                     }}
                     className="panel-scrollbar w-full overflow-y-auto bg-transparent text-sm leading-5 outline-none whitespace-pre-wrap break-words"
-                    style={{ minHeight: '72px', maxHeight: '240px', height: `${chatInputHeight}px` }}
+                    style={{ minHeight: '72px', maxHeight: '240px', height: `${chatInputHeightRef.current}px` }}
                   />
-                  {!chatInput.trim() && !activeSkill && resolvedChatReferenceTokens.length === 0 && !chatInputFocused && (
-                    <span className="workspace-text-muted pointer-events-none absolute left-0 top-0 text-sm leading-5">
+                  <span
+                    ref={chatComposerPlaceholderRef}
+                    hidden={Boolean(latestChatInputRef.current.trim()) || Boolean(activeSkill) || resolvedChatReferenceTokens.length > 0 || chatInputFocused}
+                    className="workspace-text-muted pointer-events-none absolute left-0 top-0 text-sm leading-5"
+                  >
                       请输入你的设计需求
-                    </span>
-                  )}
+                  </span>
                 </div>
               </div>
               <div className="flex items-center gap-1 px-3 pb-3 pt-1">
@@ -19603,9 +19822,10 @@ export default function AIWorkspace() {
                   </div>
                 </div>
                 <button
+                    ref={chatSendButtonRef}
                     data-chat-composer-control="send"
                     onClick={isGenerating ? handleCancelGenerate : () => { void handleGenerate(); }}
-                    disabled={!isGenerating && (!chatInput.trim() || hasPendingChatReferenceUploads)}
+                    disabled={!isGenerating && (!latestChatInputRef.current.trim() || hasPendingChatReferenceUploads)}
                     aria-label={isGenerating ? '终止任务' : '发送'}
                     title={isGenerating ? '终止任务' : '发送'}
                     className="ml-2 inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-zinc-950 text-white disabled:cursor-not-allowed disabled:opacity-30 dark:bg-zinc-100 dark:text-zinc-950"
@@ -19700,6 +19920,7 @@ export default function AIWorkspace() {
           background-clip: padding-box;
         }
       `}</style>
-    </div>
+      </div>
+    </React.Profiler>
   );
 }

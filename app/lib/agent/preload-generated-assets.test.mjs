@@ -80,3 +80,23 @@ test('batch preloading returns successful assets and isolated final failures', a
   assert.equal(result.failed.length, 1);
   assert.equal(result.failed[0].asset.src, '/broken.png');
 });
+
+test('aborting a preload rejects immediately without starting a retry', async () => {
+  const controller = new AbortController();
+  let attempts = 0;
+  const pending = preloadGeneratedAsset(
+    { src: '/slow.png' },
+    {
+      timeoutMs: 20_000,
+      signal: controller.signal,
+      loadImage: () => {
+        attempts += 1;
+        return new Promise(() => {});
+      },
+    },
+  );
+
+  controller.abort();
+  await assert.rejects(pending, { name: 'AbortError' });
+  assert.equal(attempts, 1);
+});
