@@ -225,6 +225,38 @@ test('planner prompt requires the structured tool and separates collage style fr
   assert.deepEqual(AGENT_EXECUTION_PLAN_TOOL.function.parameters.required, ['plan']);
 });
 
+test('planner prompt requires explicit empty arrays and includes a valid complete image generation example', () => {
+  const messages = buildAgentExecutionPlannerMessages({
+    userMessage: 'Generate one botanical paper collage poster',
+    manifests,
+  });
+  const systemPrompt = messages[0].content;
+  assert.match(systemPrompt, /If an array has no values, return \[\] exactly/i);
+  assert.match(systemPrompt, /never omit the field and never return null instead of an array/i);
+  assert.match(systemPrompt, /imageTask\.supportingReferenceIds/);
+  assert.match(systemPrompt, /generation\.items/);
+
+  const examplePrefix = 'Complete single-image generation JSON example: ';
+  const exampleLine = systemPrompt
+    .split('\n')
+    .find((line) => line.startsWith(examplePrefix));
+  assert.ok(exampleLine);
+  const example = JSON.parse(exampleLine.slice(examplePrefix.length));
+  assert.deepEqual(example.imageTask.supportingReferenceIds, []);
+  assert.deepEqual(example.imageTask.targetRegionIds, []);
+  assert.deepEqual(example.generation.items, []);
+  assert.deepEqual(example.brief.style, []);
+  assert.deepEqual(example.delivery.items, []);
+
+  const validated = validateAgentExecutionPlan(example, {
+    allowedSkillIds: manifests.map((manifest) => manifest.id),
+    skillToolsById: Object.fromEntries(manifests.map((manifest) => [manifest.id, manifest.allowedTools])),
+    userMessage: 'Generate one botanical paper collage poster',
+  });
+  assert.ok(validated.plan);
+  assert.deepEqual(validated.validationErrors, []);
+});
+
 test('planner receives sanitized inline reference context and is the sole semantic intent decider', () => {
   const messages = buildAgentExecutionPlannerMessages({
     userMessage: '把它换成狗',

@@ -11,8 +11,54 @@ const REFERENCE_ROLES = new Set(['reference', 'edit_target', 'annotation_bundle'
 const VISUAL_REFERENCE_ROLES = new Set(['edit_target', 'style_reference', 'content_reference', 'layout_reference', 'unresolved']);
 const MAX_TOTAL_COUNT = 100;
 const PLANNER_TOOL_NAME = 'submit_agent_execution_plan';
-const DEFAULT_PLANNER_TIMEOUT_MS = 60_000;
+const DEFAULT_PLANNER_TIMEOUT_MS = 1_800_000;
 const GENERATED_IMAGE_PLACEHOLDER_PATTERN = /\[(?:Generated image[^\]]*omitted from chat history|聊天记录中省略了代理生成的图像)\]/gi;
+const COMPLETE_IMAGE_GENERATION_PLAN_EXAMPLE = {
+  version: 4,
+  intent: 'image',
+  confidence: 'high',
+  needsClarification: false,
+  clarification: null,
+  contextReferences: [],
+  imageTask: {
+    operation: 'generate',
+    supportingReferenceIds: [],
+    targetRegionIds: [],
+    instruction: 'Generate one new image from the user request.',
+    mustChange: [],
+    mustPreserve: [],
+  },
+  presentation: {
+    title: 'Generated image',
+    completionSummary: 'Generate one new image from the completed plan.',
+  },
+  generation: {
+    promptFormat: 'text',
+    prompt: 'Create one complete supplier-ready image matching the requested subject, composition, style, lighting, materials, colors, text, and dimensions.',
+    items: [],
+  },
+  brief: {
+    deliverable: 'One generated image',
+    subject: 'The subject requested by the user',
+    style: [],
+    literalCopy: [],
+    constraints: [],
+  },
+  delivery: {
+    mode: 'single',
+    outputCount: 1,
+    panelCount: null,
+    variationAxes: [],
+    sharedInvariants: [],
+    distinctPerItem: [],
+    items: [],
+  },
+  execution: {
+    kind: 'image_pipeline',
+    requiresConfirmation: false,
+    tool: 'generate_image',
+  },
+};
 
 const text = (value) => typeof value === 'string' ? value.trim() : '';
 const positive = (value) => {
@@ -1148,6 +1194,9 @@ export function buildAgentExecutionPlannerMessages({
     'If the user asks to edit but no unique target can be selected, set needsClarification with useful choices and omit imageTask until the ambiguity is resolved.',
     'For an executable image request, include presentation with a concise result title and a completionSummary describing the planned work. Do not claim that execution has already succeeded.',
     'Return AgentExecutionPlan version 4. For image intent, generation is required and must contain the final supplier-ready prompt; no later language model will optimize or repair it.',
+    'For every executable image request, imageTask, presentation, generation, brief, delivery, and execution must all be present and complete.',
+    'Every array-valued field in every object you return must be present. If an array has no values, return [] exactly; never omit the field and never return null instead of an array. This applies to clarification.options when clarification is present; contextReferences; visualContext.references, salientSubjects, and visibleText when visualContext is present; imageTask.supportingReferenceIds, targetRegionIds, mustChange, and mustPreserve; brief.style, literalCopy, and constraints; delivery.variationAxes, sharedInvariants, distinctPerItem, and items; and generation.items.',
+    `Complete single-image generation JSON example: ${JSON.stringify(COMPLETE_IMAGE_GENERATION_PLAN_EXAMPLE)}`,
     'generation.prompt must fully specify subject, composition, style, lighting, materials, color, literal text, dimensions, and every imageTask.mustChange and imageTask.mustPreserve requirement verbatim.',
     'For series delivery, generation.items must contain exactly outputCount complete, distinct prompts in order. For other delivery modes generation.items must be empty.',
     'generation.promptFormat must match the selected skill promptStyle, defaulting to text when no skill is selected. json-text prompts must themselves be valid JSON without Markdown fences.',
@@ -1375,7 +1424,7 @@ export async function planAgentExecutionRequest(input = {}) {
     );
   }
 
-  const timeoutMs = Math.min(120_000, Math.max(10_000, Number(input.timeoutMs) || DEFAULT_PLANNER_TIMEOUT_MS));
+  const timeoutMs = Math.min(1_800_000, Math.max(10_000, Number(input.timeoutMs) || DEFAULT_PLANNER_TIMEOUT_MS));
   const timeoutSignal = AbortSignal.timeout(timeoutMs);
   const requestSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
   const startedAt = Date.now();

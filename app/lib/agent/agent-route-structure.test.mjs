@@ -8,6 +8,7 @@ const generateRoutePath = path.resolve(import.meta.dirname, '../../api/generate/
 const apiClientPath = path.resolve(import.meta.dirname, '../api-client.ts');
 const agentEventsPath = path.resolve(import.meta.dirname, 'events.ts');
 const agentLoopPath = path.resolve(import.meta.dirname, 'agent-loop.mjs');
+const executionPlannerPath = path.resolve(import.meta.dirname, 'execution-planner.mjs');
 
 test('agent route exposes NDJSON orchestration events and reuses the generate route', () => {
   const source = fs.readFileSync(routePath, 'utf8');
@@ -352,6 +353,11 @@ test('unified planner is authoritative, supports shadow mode, and survives clari
   assert.match(source, /runtimeReferenceId[\s\S]*createHash\('sha256'\)/);
   assert.match(source, /explicitPlannerSelection[\s\S]*plannerHasVisualReferences \? resolvedChatSelection : resolvedRouterSelection/);
   assert.match(source, /AGENT_PLANNER_TIMEOUT_MS/);
+  assert.match(source, /Math\.min\(1_800_000,[\s\S]*AGENT_PLANNER_TIMEOUT_MS[\s\S]*\|\| 1_800_000\)/);
+  assert.match(source, /Math\.min\(1_800_000,[\s\S]*AGENT_RUN_TIMEOUT_MS[\s\S]*\|\| 1_800_000\)/);
+  const executionPlannerSource = fs.readFileSync(executionPlannerPath, 'utf8');
+  assert.match(executionPlannerSource, /DEFAULT_PLANNER_TIMEOUT_MS = 1_800_000/);
+  assert.match(executionPlannerSource, /Math\.min\(1_800_000,[\s\S]*DEFAULT_PLANNER_TIMEOUT_MS\)/);
   assert.match(source, /referenceContext:\s*runReferenceContext/);
   assert.match(source, /vision_unsupported/);
   assert.match(source, /vision_unavailable/);

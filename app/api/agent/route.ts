@@ -980,9 +980,9 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'Configured prompt optimizer provider and model are not an enabled registry pair' }, { status: 500 });
   }
   const resolvedOptimizerSelection = explicitOptimizerSelection || resolvedChatSelection;
-  const plannerTimeoutMs = Math.min(120_000, Math.max(10_000, Number(process.env.AGENT_PLANNER_TIMEOUT_MS) || 60_000));
+  const plannerTimeoutMs = Math.min(1_800_000, Math.max(10_000, Number(process.env.AGENT_PLANNER_TIMEOUT_MS) || 1_800_000));
 
-  const timeoutMs = Math.min(300_000, Math.max(10_000, Number(process.env.AGENT_RUN_TIMEOUT_MS) || 180_000));
+  const timeoutMs = Math.min(1_800_000, Math.max(10_000, Number(process.env.AGENT_RUN_TIMEOUT_MS) || 1_800_000));
   const timeoutSignal = AbortSignal.timeout(timeoutMs);
   const runSignal = AbortSignal.any([request.signal, timeoutSignal]);
   const stream = new ReadableStream({

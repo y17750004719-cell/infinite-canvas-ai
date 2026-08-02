@@ -73,7 +73,8 @@ IMAGE_SIZE_ALLOWLIST_GPT_IMAGE_2=1024x1024,1536x1024,1024x1536,2048x2048,2048x11
 AGENT_UNIFIED_PLANNER_ENABLED=1
 AGENT_PLANNER_PROVIDER_ID=
 AGENT_PLANNER_MODEL=
-AGENT_PLANNER_TIMEOUT_MS=60000
+AGENT_PLANNER_TIMEOUT_MS=1800000
+AGENT_RUN_TIMEOUT_MS=1800000
 AGENT_PLANNER_SHADOW_MODE=0
 ```
 
@@ -87,7 +88,8 @@ AGENT_PLANNER_SHADOW_MODE=0
 - `IMAGE_SIZE_ALLOWLIST_GPT_IMAGE_2` 可以给 `gpt-image-2` 单独声明官方推荐尺寸集，当前示例已补到 `1024x1024 / 1536x1024 / 1024x1536 / 2048x2048 / 2048x1152 / 3840x2160 / 2160x3840`
 - `AGENT_UNIFIED_PLANNER_ENABLED` 默认启用模型主导的统一需求规划；设为 `0` 可回退到旧路由流程
 - `AGENT_PLANNER_PROVIDER_ID` / `AGENT_PLANNER_MODEL` 必须成对配置；留空时，带图任务复用当前聊天模型，纯文本任务复用 Agent Router 模型
-- `AGENT_PLANNER_TIMEOUT_MS` 控制单次 Agent 多模态分析的超时，默认 `60000ms`，允许范围为 `10000ms` 到 `120000ms`
+- `AGENT_PLANNER_TIMEOUT_MS` 控制单次 Agent 多模态分析的超时，默认 `1800000ms`（1800 秒），允许范围为 `10000ms` 到 `1800000ms`
+- `AGENT_RUN_TIMEOUT_MS` 控制整次 Agent 请求的超时，默认 `1800000ms`（1800 秒），避免总运行超时提前中断规划器
 - Unified Planner 的正常执行严格只发起一次分析请求，不自动重试、不切换备用模型，也不再调用 Prompt Optimizer；失败后由用户点击“重新分析”创建新请求
 - `AGENT_PLANNER_SHADOW_MODE=1` 时只记录 Planner 结果，不改变现有执行路径，便于灰度比较
 - `.env.local` 已被 Git 忽略，不会上传到 GitHub
