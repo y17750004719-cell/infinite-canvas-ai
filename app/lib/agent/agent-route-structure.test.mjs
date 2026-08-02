@@ -479,6 +479,15 @@ test('runtime execution reserves tasks without requiring a planner plan', () => 
   assert.match(source, /if \(taskExecutionReservation\) return taskExecutionReservation/);
 });
 
+test('image confirmation reserves before snapshotting task identity and reuses the local identities', () => {
+  const source = fs.readFileSync(routePath, 'utf8');
+  const reservationIndex = source.indexOf('const confirmationTaskReservation = getTaskExecutionReservation({');
+  const identitySpreadIndex = source.indexOf('...confirmationTaskIdentity()', reservationIndex);
+  assert.ok(reservationIndex >= 0 && identitySpreadIndex > reservationIndex);
+  assert.match(source, /pendingTaskIdentities:\s*structuredClone\(confirmationTaskReservation\?\.identities\.slice\(0, requestedImageCount\)/);
+  assert.match(source, /remainingTaskIdentities:\s*structuredClone\(confirmationTaskReservation\?\.identities\.slice\(requestedImageCount\)/);
+});
+
 test('reservation keeps edit provenance distinct from regenerate provenance', () => {
   const source = fs.readFileSync(routePath, 'utf8');
   assert.match(source, /const editBaseVersionId = imageTask\?\.operation === 'edit' \? parentVersionId \|\| null : null/);

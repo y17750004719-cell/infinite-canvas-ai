@@ -3358,6 +3358,12 @@ export async function POST(request: NextRequest) {
             const progressToolCallId = `${runId}-generate-image-confirmation`;
             writeToolProgress('generate_image', 'waiting', progressToolCallId);
             const confirmationCheckpoint = progressTracker.snapshot();
+            const confirmationTaskReservation = getTaskExecutionReservation({
+              kind: 'image_pipeline',
+              tool: 'generate_image',
+              imageTask: executionPlan?.imageTask,
+              outputCount: requestedTotalImageCount,
+            });
             confirmationStore.set(confirmationId, {
               ...confirmationTaskIdentity(),
               version: 1,
@@ -3404,13 +3410,8 @@ export async function POST(request: NextRequest) {
               imageDeliveryPlan: structuredClone(imageDeliveryPlan),
               generationItems: structuredClone(generationItems),
               remainingGenerationItems: structuredClone(allGenerationItems.slice(generationItems.length)),
-              pendingTaskIdentities: structuredClone(getTaskExecutionReservation({
-                kind: 'image_pipeline',
-                tool: 'generate_image',
-                imageTask: executionPlan?.imageTask,
-                outputCount: requestedTotalImageCount,
-              })?.identities.slice(0, requestedImageCount) || []),
-              remainingTaskIdentities: structuredClone(getTaskExecutionReservation()?.identities.slice(requestedImageCount) || []),
+              pendingTaskIdentities: structuredClone(confirmationTaskReservation?.identities.slice(0, requestedImageCount) || []),
+              remainingTaskIdentities: structuredClone(confirmationTaskReservation?.identities.slice(requestedImageCount) || []),
               optimizePrompt: false,
               expiresAt: Date.now() + CONFIRMATION_TTL_MS,
             });
