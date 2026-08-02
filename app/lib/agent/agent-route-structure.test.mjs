@@ -488,6 +488,15 @@ test('image confirmation reserves before snapshotting task identity and reuses t
   assert.match(source, /remainingTaskIdentities:\s*structuredClone\(confirmationTaskReservation\?\.identities\.slice\(requestedImageCount\)/);
 });
 
+test('agent-loop image confirmation splits one reservation across current and later batches', () => {
+  const source = fs.readFileSync(routePath, 'utf8');
+  const reservationIndex = source.indexOf('const loopConfirmationTaskReservation = getTaskExecutionReservation({');
+  const identitySpreadIndex = source.indexOf('...confirmationTaskIdentity()', reservationIndex);
+  assert.ok(reservationIndex >= 0 && identitySpreadIndex > reservationIndex);
+  assert.match(source, /pendingTaskIdentities:\s*structuredClone\([\s\S]{0,100}loopConfirmationTaskReservation\?\.identities\.slice\(0, requestedImageCount\)/);
+  assert.match(source, /remainingTaskIdentities:\s*structuredClone\([\s\S]{0,100}loopConfirmationTaskReservation\?\.identities\.slice\(requestedImageCount\)/);
+});
+
 test('reservation keeps edit provenance distinct from regenerate provenance', () => {
   const source = fs.readFileSync(routePath, 'utf8');
   assert.match(source, /const editBaseVersionId = imageTask\?\.operation === 'edit' \? parentVersionId \|\| null : null/);

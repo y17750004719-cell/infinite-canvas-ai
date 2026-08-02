@@ -55,8 +55,7 @@ test('agent requests send only explicitly selected references', () => {
 test('selecting history upgrades an existing reference token provenance', () => {
   assert.match(source, /const existingIndex = nextTokens\.findIndex\(\(token\) => token\.src === src\)/);
   assert.match(source, /nextTokens\[existingIndex\] = \{[\s\S]{0,300}source: 'history'/);
-  assert.match(source, /sourceTaskId:\s*sourceEntry\.taskId/);
-  assert.match(source, /sourceVersionId:\s*sourceEntry\.versionId/);
+  assert.match(source, /mergeGeneratedHistoryTokenProvenance\(nextTokens\[existingIndex\], sourceEntry\)/);
 });
 
 test('agent clarification uses the shared editable decision popover', () => {

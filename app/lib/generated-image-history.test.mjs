@@ -9,8 +9,25 @@ import {
   buildGeneratedHistoryEntriesFromImageCard,
   extractGeneratedImageTimestampFromFilename,
   mergeGeneratedImageHistoryEntries,
+  mergeGeneratedHistoryTokenProvenance,
   normalizeGeneratedImageHistory,
 } from './generated-image-history.mjs';
+
+test('history token provenance survives versioned and legacy same-src duplicates in either order', () => {
+  const versioned = { src: '/same.png', taskId: ' task-1 ', versionId: ' version-1 ' };
+  const legacy = { src: '/same.png' };
+  const initial = { src: '/same.png', source: 'upload' };
+
+  for (const entries of [[versioned, legacy], [legacy, versioned]]) {
+    const result = entries.reduce(
+      (token, entry) => mergeGeneratedHistoryTokenProvenance(token, entry),
+      initial,
+    );
+
+    assert.equal(result.sourceTaskId, 'task-1');
+    assert.equal(result.sourceVersionId, 'version-1');
+  }
+});
 
 test('mergeGeneratedHistoryReferences appends unique history images up to the reference limit', () => {
   assert.deepEqual(

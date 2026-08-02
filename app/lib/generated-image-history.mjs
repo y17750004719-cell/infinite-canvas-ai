@@ -126,6 +126,17 @@ export function appendGeneratedImageHistoryEntries(existingEntries, nextEntries)
   return appendMissingGeneratedHistoryEntries(existingEntries, nextEntries);
 }
 
+export function mergeGeneratedHistoryTokenProvenance(existingToken, historyEntry) {
+  const sourceTaskId = toSafeString(historyEntry?.taskId);
+  const sourceVersionId = toSafeString(historyEntry?.versionId);
+
+  return {
+    ...existingToken,
+    ...(sourceTaskId ? { sourceTaskId } : {}),
+    ...(sourceVersionId ? { sourceVersionId } : {}),
+  };
+}
+
 export function mergeGeneratedHistoryReferences(currentReferences, selectedSources, maxCount = 14) {
   const safeMaxCount = Number.isFinite(maxCount) ? Math.max(0, Math.floor(maxCount)) : 14;
   const mergedReferences = [];

@@ -47,6 +47,7 @@ import {
   appendMissingGeneratedHistoryEntries,
   buildGeneratedImageHistorySortKey,
   buildGeneratedHistoryEntriesFromImageCard,
+  mergeGeneratedHistoryTokenProvenance,
 } from './lib/generated-image-history.mjs';
 import {
   buildPersistedSession,
@@ -8847,12 +8848,10 @@ export default function AIWorkspace() {
         if (existingIndex >= 0) {
           if (source === 'history' && typeof sourceEntry !== 'string') {
             nextTokens[existingIndex] = {
-              ...nextTokens[existingIndex],
+              ...mergeGeneratedHistoryTokenProvenance(nextTokens[existingIndex], sourceEntry),
               source: 'history',
               label: getReferenceTokenLabel(src, '历史图片'),
               transient: false,
-              sourceTaskId: sourceEntry.taskId,
-              sourceVersionId: sourceEntry.versionId,
             };
           }
           continue;

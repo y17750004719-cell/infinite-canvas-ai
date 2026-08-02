@@ -3693,7 +3693,7 @@ export async function POST(request: NextRequest) {
             const resolvedImageProvider = confirmationToolName === 'generate_image'
               ? providers.find((provider) => provider.id === resolvedImageSelection?.providerId)
               : null;
-            getTaskExecutionReservation({
+            const loopConfirmationTaskReservation = getTaskExecutionReservation({
               kind: confirmationToolName === 'generate_image'
                 ? 'image_pipeline'
                 : confirmationToolName === 'start_skill_job'
@@ -3737,6 +3737,14 @@ export async function POST(request: NextRequest) {
               requestedTotalImageCount,
               imageBatchPlan: imageBatchPlan ? structuredClone(imageBatchPlan) : undefined,
               imageDeliveryPlan: structuredClone(imageDeliveryPlan),
+              ...(confirmationToolName === 'generate_image' ? {
+                pendingTaskIdentities: structuredClone(
+                  loopConfirmationTaskReservation?.identities.slice(0, requestedImageCount) || [],
+                ),
+                remainingTaskIdentities: structuredClone(
+                  loopConfirmationTaskReservation?.identities.slice(requestedImageCount) || [],
+                ),
+              } : {}),
               optimizePrompt: true,
               resolvedProviderId: resolvedChatSelection.providerId,
               resolvedModel: model,
