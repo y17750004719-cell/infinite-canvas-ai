@@ -184,7 +184,6 @@ export interface PlanValidationIssue {
 
 export type AgentPlannerSourceDetail =
   | 'tool_call'
-  | 'hard_literal'
   | 'planner_failed';
 
 export interface AgentPlannerAttemptDiagnostic {

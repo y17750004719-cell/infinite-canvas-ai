@@ -1099,10 +1099,6 @@ export function validateAgentExecutionPlan(value, {
   };
 }
 
-export function buildFallbackAgentExecutionPlan() {
-  return null;
-}
-
 export function buildAgentExecutionPlannerMessages({
   userMessage,
   messages = [],
@@ -1345,32 +1341,18 @@ export function parseAgentExecutionPlan(raw, options = {}) {
 
 export async function planAgentExecutionRequest(input = {}) {
   const { model, providerId, signal, chatFn } = input;
-  const hardFallback = buildFallbackAgentExecutionPlan(input);
-  const failed = (error, validationErrors = [], attempts = 0, diagnostics = [], failureReason = 'invalid_plan', normalizedFields = []) => hardFallback
-    ? {
-        plan: hardFallback,
-        source: 'fallback',
-        sourceDetail: 'hard_literal',
-        error,
-        attempts,
-        validationErrors,
-        normalizedFields,
-        repairAttempted: false,
-        diagnostics,
-        failureReason,
-      }
-    : {
-        plan: null,
-        source: 'fallback',
-        sourceDetail: 'planner_failed',
-        error,
-        attempts,
-        validationErrors,
-        normalizedFields,
-        repairAttempted: false,
-        diagnostics,
-        failureReason,
-      };
+  const failed = (error, validationErrors = [], attempts = 0, diagnostics = [], failureReason = 'invalid_plan', normalizedFields = []) => ({
+    plan: null,
+    source: 'fallback',
+    sourceDetail: 'planner_failed',
+    error,
+    attempts,
+    validationErrors,
+    normalizedFields,
+    repairAttempted: false,
+    diagnostics,
+    failureReason,
+  });
 
   if (typeof chatFn !== 'function' || !text(model)) {
     return failed('Planner model is unavailable');

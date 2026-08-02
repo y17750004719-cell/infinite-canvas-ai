@@ -6,7 +6,6 @@ import {
   buildAgentExecutionPlanTool,
   buildAgentExecutionPlannerMessages,
   buildAgentTaskContract,
-  buildFallbackAgentExecutionPlan,
   compactCanvasContext,
   executionPlanToBrief,
   executionPlanToImageDeliveryPlan,
@@ -894,20 +893,6 @@ test('planner validates composite scope, skill ids, tools, contexts, and batch l
   assert.equal(parseAgentExecutionPlan(JSON.stringify(plan({
     delivery: { ...plan().delivery, items: plan().delivery.items.slice(0, 3) },
   })), options), null);
-});
-
-test('planner has no local semantic fallback, including explicit one-file panel wording', () => {
-  const semanticOnly = buildFallbackAgentExecutionPlan({
-    userMessage: '生成4张不同版式的海报，采用 hand-cut collage 拼贴艺术风格',
-    manifests,
-  });
-  assert.equal(semanticOnly, null);
-
-  const explicit = buildFallbackAgentExecutionPlan({
-    userMessage: '做一张四宫格，每格一个方向',
-    manifests,
-  });
-  assert.equal(explicit, null);
 });
 
 test('required tool arguments win over compatibility text and preserve magazine-poster series semantics', async () => {
