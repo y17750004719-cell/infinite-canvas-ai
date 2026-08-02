@@ -17,6 +17,30 @@
     "enabled": true
   },
   {
+    "id": "botanical-paper-collage-v0-1",
+    "name": "Botanical Paper Collage",
+    "description": "将主题、物件、情绪、照片或视觉简报转化为 9:16 竖版水彩纸本拼贴海报，使用错位堆叠的近方形纸片、自然颜料、植物性构图和可选东方题签。",
+    "triggerHints": ["botanical paper collage", "watercolor paper collage", "水彩纸本拼贴", "植物拼贴", "东方水彩拼贴", "方形纸片拼贴", "错乱拼贴", "堆叠纸片海报", "纸片拼贴海报", "竖版植物海报", "水墨植物海报", "撕纸水彩海报", "庭院植物海报"],
+    "planningGuidance": "Use for 9:16 vertical handmade-paper collage artwork with 6-9 visibly separate fragments, at least two-thirds square or near-square, arranged as a deliberately misaligned left-right stack with uneven gaps, partial overlaps, and protruding corners. Preserve natural pigments, botanical or theme-derived motifs, and optional short Chinese inscription or vermilion seal. Reject neat centered columns, orderly grids, or one seamless watercolor painting. Prefer gc-minimal-zine-poster-v0-1 for sparse small-anchor zine posters and magazine-poster for conventional publication covers or dense editorial collages.",
+    "generationContract": "Return a compact plain-text image prompt for an exact 9:16 vertical canvas, requiring 6-9 visibly separate watercolor paper fragments, at least two-thirds square or near-square, alternating left-right offsets, uneven gaps, partial overlaps, protruding corners, several medium image panels, natural pigments, optional short typography, handmade scanned-paper texture, and explicit avoidance of neat columns, grids, seamless paintings, watermarks, and platform marks; then generate the image.",
+    "allowedTools": ["generate_image", "get_canvas_context"],
+    "executionMode": "image_pipeline",
+    "promptStyle": "text",
+    "enabled": true
+  },
+  {
+    "id": "gc-minimal-zine-poster-v0-1",
+    "name": "Minimal Zine Poster",
+    "description": "将主题、句子、物件、情绪、文章构想或参考图转化为留白充足、旧纸印刷质感的日式或韩式极简 ZINE 编辑海报，并直接生成图片。",
+    "triggerHints": ["minimal zine", "ZINE 海报", "zine poster", "极简纸张海报", "旧纸海报", "孔版印刷海报", "复印质感海报", "日式独立海报", "韩式独立海报"],
+    "planningGuidance": "Use for sparse Japanese or Korean indie zine posters with aged paper, large negative space, experimental small typography, print defects, and one saturated color anchor. Do not select it from the generic word poster alone. Prefer magazine-poster for conventional magazine covers, fashion editorials, publication-led layouts, or dense collage posters.",
+    "generationContract": "Return a compact four-paragraph plain-text image prompt following the selected zine recipe, using a supported vertical 2:3 canvas, then generate the image. Preserve the user's literal copy when supplied and keep the result sparse, paper-like, non-commercial, and visibly anchored by one saturated hue.",
+    "allowedTools": ["generate_image", "get_canvas_context"],
+    "executionMode": "image_pipeline",
+    "promptStyle": "text",
+    "enabled": true
+  },
+  {
     "id": "logo",
     "name": "Logo 与品牌",
     "description": "收集品牌信息并生成 Logo 与基础视觉方向。",

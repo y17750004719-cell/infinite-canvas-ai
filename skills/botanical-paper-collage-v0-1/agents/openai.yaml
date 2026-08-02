@@ -1,0 +1,4 @@
+interface:
+  display_name: "Botanical Paper Collage"
+  short_description: "Create 9:16 watercolor botanical paper collages"
+  default_prompt: "Use $botanical-paper-collage-v0-1 to create a 9:16 watercolor paper collage poster."

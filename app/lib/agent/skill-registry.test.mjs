@@ -8,7 +8,7 @@ const projectRoot = path.resolve(import.meta.dirname, '../../..');
 
 test('skill registry exposes only enabled skills backed by real directories', async () => {
   const skills = await listSkillManifests({ projectRoot });
-  assert.deepEqual(skills.map((skill) => skill.id), ['api-helper', 'brand', 'logo', 'magazine-poster']);
+  assert.deepEqual(skills.map((skill) => skill.id), ['api-helper', 'botanical-paper-collage-v0-1', 'brand', 'gc-minimal-zine-poster-v0-1', 'logo', 'magazine-poster']);
   assert.equal(skills.every((skill) => skill.enabled), true);
 });
 
@@ -22,6 +22,12 @@ test('skill registry loads a registered SKILL.md inside the skills root', async 
   assert.match(content, /logo/i);
   const magazine = await loadSkillContent('magazine-poster', { projectRoot });
   assert.match(magazine, /JSON\.parse/);
+  const zine = await loadSkillContent('gc-minimal-zine-poster-v0-1', { projectRoot });
+  assert.match(zine, /vertical 2:3 paper canvas/);
+  const botanical = await loadSkillContent('botanical-paper-collage-v0-1', { projectRoot });
+  assert.match(botanical, /exactly 9:16/);
+  assert.match(botanical, /at least two-thirds of the fragments square or near-square/);
+  assert.match(botanical, /uneven gaps, partial overlaps, and protruding corners/);
 });
 
 test('skill registry selects the most relevant enabled skill from trigger hints', async () => {
@@ -29,7 +35,30 @@ test('skill registry selects the most relevant enabled skill from trigger hints'
   assert.equal(selectSkillForPrompt('帮我做一套品牌 VI 和品牌物料', skills)?.id, 'brand');
   assert.equal(selectSkillForPrompt('生成一个咖啡店 Logo', skills)?.id, 'logo');
   assert.equal(selectSkillForPrompt('设计一套高级杂志封面', skills)?.id, 'magazine-poster');
+  assert.equal(selectSkillForPrompt('做一张留白充足的旧纸 ZINE 海报', skills)?.id, 'gc-minimal-zine-poster-v0-1');
+  assert.equal(selectSkillForPrompt('做一张东方水彩纸本拼贴植物海报', skills)?.id, 'botanical-paper-collage-v0-1');
   assert.equal(selectSkillForPrompt('聊聊今天的灵感', skills), null);
+});
+
+test('botanical paper collage skill uses the 9:16 image pipeline with plain-text prompts', async () => {
+  const manifest = await getSkillManifest('botanical-paper-collage-v0-1', { projectRoot });
+  assert.equal(manifest.executionMode, 'image_pipeline');
+  assert.equal(manifest.promptStyle, 'text');
+  assert.deepEqual(manifest.allowedTools, ['generate_image', 'get_canvas_context']);
+  assert.match(manifest.generationContract, /9:16/);
+  assert.match(manifest.generationContract, /two-thirds square or near-square/);
+  assert.match(manifest.planningGuidance, /deliberately misaligned left-right stack/);
+  assert.match(manifest.planningGuidance, /Reject neat centered columns/);
+  assert.match(manifest.planningGuidance, /gc-minimal-zine-poster-v0-1/);
+});
+
+test('minimal zine skill uses the direct image pipeline with plain-text prompts', async () => {
+  const manifest = await getSkillManifest('gc-minimal-zine-poster-v0-1', { projectRoot });
+  assert.equal(manifest.executionMode, 'image_pipeline');
+  assert.equal(manifest.promptStyle, 'text');
+  assert.deepEqual(manifest.allowedTools, ['generate_image', 'get_canvas_context']);
+  assert.match(manifest.generationContract, /2:3/);
+  assert.match(manifest.planningGuidance, /magazine-poster/);
 });
 
 test('magazine skill opts into the direct image pipeline and JSON text prompts', async () => {
