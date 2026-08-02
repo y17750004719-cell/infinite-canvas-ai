@@ -104,6 +104,8 @@ export function normalizeGeneratedImageHistory(entries) {
       ...(toSafeString(entry?.parentVersionId) ? { parentVersionId: toSafeString(entry.parentVersionId) } : {}),
       ...(entry?.operation === 'edit' || entry?.operation === 'generate' ? { operation: entry.operation } : {}),
       ...(toSafeString(entry?.sourceReferenceId) ? { sourceReferenceId: toSafeString(entry.sourceReferenceId) } : {}),
+      ...(toSafeString(entry?.sourceTaskId) ? { sourceTaskId: toSafeString(entry.sourceTaskId) } : {}),
+      ...(toSafeString(entry?.sourceVersionId) ? { sourceVersionId: toSafeString(entry.sourceVersionId) } : {}),
       ...(toSafeString(entry?.providerId) ? { providerId: toSafeString(entry.providerId) } : {}),
       ...(toSafeString(entry?.model) ? { model: toSafeString(entry.model) } : {}),
       ...(entry?.promptTrace

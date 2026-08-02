@@ -38,10 +38,11 @@ test('agent mode posts to the agent route and handles agent events', () => {
   assert.match(source, /agent_error/);
 });
 
-test('agent requests persist and resume the topic-scoped planner task context', () => {
-  assert.match(source, /buildActiveTaskContext/);
-  assert.match(source, /maxActiveVersions:\s*9/);
-  assert.match(source, /activeTaskContext,/);
+test('agent requests send only explicitly selected references', () => {
+  assert.doesNotMatch(source, /buildActiveTaskContext/);
+  assert.doesNotMatch(source, /activeTaskContext,/);
+  assert.match(source, /sourceTaskId/);
+  assert.match(source, /sourceVersionId/);
   assert.match(source, /plannerPreviewSrc:\s*token\.previewSrc \|\| token\.src/);
   assert.match(source, /event\.taskSnapshot \? \{ taskSnapshot: event\.taskSnapshot \}/);
   assert.match(source, /taskId:\s*event\.action\?\.taskId/);
@@ -157,7 +158,7 @@ test('every chat-generated image is materialized in both chat and the canvas', (
   assert.match(source, /await runGeneratedAssetPreloadQueue\(/);
   assert.match(source, /concurrency: 2/);
   assert.match(source, /signal: controller\.signal/);
-  assert.match(source, /loadedAssets\.length > 0[\s\S]{0,4000}setChatMessages\(prev => \[\.\.\.prev, \.\.\.imageMessages\]\)/);
+  assert.match(source, /loadedAssets\.length > 0[\s\S]{0,5000}setChatMessages\(prev => \[\.\.\.prev, \.\.\.imageMessages\]\)/);
   assert.match(source, /const canvasItems = loadedAssets\.map/);
   assert.match(source, /recordCurrentCanvasUndoSnapshot\(\);\s*setItems\(prev => \[\.\.\.prev, \.\.\.canvasItems\]\)/);
   assert.match(source, /type: 'assets_settled'/);

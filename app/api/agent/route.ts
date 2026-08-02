@@ -80,14 +80,11 @@ import type {
   ExecutionBrief,
 } from '../../lib/agent/context-reference.types';
 import type {
-  AgentActiveTaskContext,
-  AgentActiveTaskVersion,
   AgentExecutionPlan,
   AgentImageTask,
   AgentPlanPresentation,
   AgentPlannerSourceDetail,
   AgentTaskContract,
-  AgentTaskRelation,
 } from '../../lib/agent/execution-planner.types';
 import type {
   AgentClarificationRequest,
@@ -186,17 +183,15 @@ type ConfirmationRecord = {
   imageTask?: AgentImageTask;
   visualContext?: AgentExecutionPlan['visualContext'];
   presentation?: AgentPlanPresentation;
-  taskRelation?: AgentTaskRelation;
   topicId?: string;
   taskId?: string;
   contractVersion?: number;
   taskContract?: AgentTaskContract;
-  editBaseVersionId?: string | null;
   pendingTaskIdentities?: AgentPendingAssetIdentity[];
   remainingTaskIdentities?: AgentPendingAssetIdentity[];
   completedTaskIdentities?: AgentPendingAssetIdentity[];
-  plannedActiveVersions?: AgentActiveTaskVersion[];
-  editBaseAsset?: AgentActiveTaskVersion;
+  sourceTaskId?: string | null;
+  sourceVersionId?: string | null;
   referenceContext?: AgentRuntimeReferenceContext;
   resolvedProviderId?: string;
   resolvedModel?: string;
@@ -264,14 +259,6 @@ type AgentTaskSnapshot = {
   activeVersions: Array<Pick<AgentPendingAssetIdentity, 'referenceId' | 'batchId' | 'slotId' | 'versionId'>>;
 };
 
-type AgentClientActiveTaskContext = Omit<AgentActiveTaskContext, 'latestBatchId' | 'activeVersions'> & {
-  editBaseAsset?: (Omit<AgentActiveTaskVersion, 'referenceId'> & { referenceId?: string }) | null;
-  latestBatch?: {
-    batchId: string;
-    slots: Array<Omit<AgentActiveTaskVersion, 'batchId'>>;
-  } | null;
-};
-
 type AgentRuntimeReferenceContext = {
   references: Array<{
     id: string;
@@ -288,6 +275,8 @@ type AgentRuntimeReferenceContext = {
     aliases?: string[];
     description?: string;
     confidence?: 'high' | 'medium' | 'low';
+    sourceTaskId?: string;
+    sourceVersionId?: string;
     targetPoint?: { x: number; y: number };
     targetBox?: { x: number; y: number; width: number; height: number };
   }>;
@@ -393,6 +382,12 @@ function normalizeAgentRuntimeReferenceContext(value: unknown): AgentRuntimeRefe
       ...(Array.isArray(reference.aliases) ? { aliases: reference.aliases.filter((value): value is string => typeof value === 'string' && Boolean(value.trim())).map((value) => value.trim()).slice(0, 6) } : {}),
       ...(typeof reference.description === 'string' && reference.description.trim() ? { description: reference.description.trim().slice(0, 240) } : {}),
       ...(reference.confidence === 'high' || reference.confidence === 'medium' || reference.confidence === 'low' ? { confidence: reference.confidence } : {}),
+      ...(source === 'history' && typeof reference.sourceTaskId === 'string' && reference.sourceTaskId.trim()
+        ? { sourceTaskId: reference.sourceTaskId.trim() }
+        : {}),
+      ...(source === 'history' && typeof reference.sourceVersionId === 'string' && reference.sourceVersionId.trim()
+        ? { sourceVersionId: reference.sourceVersionId.trim() }
+        : {}),
       ...(normalizeRuntimePoint(reference.targetPoint) ? { targetPoint: normalizeRuntimePoint(reference.targetPoint)! } : {}),
       ...(normalizeRuntimeBox(reference.targetBox) ? { targetBox: normalizeRuntimeBox(reference.targetBox)! } : {}),
     }];
@@ -513,7 +508,6 @@ type AgentRequestBody = {
   contextEntities?: AgentContextEntity[];
   selectedContextEntityIds?: string[];
   executionBrief?: ExecutionBrief;
-  activeTaskContext?: AgentClientActiveTaskContext;
   canvasContext?: Record<string, unknown>;
   chatOptions?: {
     providerId?: string;
@@ -593,6 +587,8 @@ function enrichGeneratedAssetEvents(events: unknown[], payload: any): unknown[] 
         ...(typeof payload?.taskId === 'string' ? { taskId: payload.taskId } : {}),
         ...(positiveInteger(payload?.contractVersion) ? { contractVersion: positiveInteger(payload.contractVersion)! } : {}),
         ...(typeof payload?.batchId === 'string' ? { batchId: payload.batchId } : {}),
+        ...(typeof payload?.sourceTaskId === 'string' ? { sourceTaskId: payload.sourceTaskId } : {}),
+        ...(typeof payload?.sourceVersionId === 'string' ? { sourceVersionId: payload.sourceVersionId } : {}),
         assets: event.action.assets.map((asset: Record<string, unknown>, index: number) => ({
           ...asset,
           ...(typeof outputs[index]?.slotId === 'string' ? { slotId: outputs[index].slotId } : {}),
@@ -622,171 +618,50 @@ function positiveInteger(value: unknown) {
   return Number.isFinite(count) && count > 0 ? Math.floor(count) : null;
 }
 
-function normalizeActiveTaskContext(value: unknown, topicId: string): AgentActiveTaskContext | null {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  const input = value as Record<string, unknown>;
-  const normalizedTopicId = typeof input.topicId === 'string' ? input.topicId.trim() : '';
-  const taskId = typeof input.taskId === 'string' ? input.taskId.trim() : '';
-  const contractVersion = positiveInteger(input.contractVersion);
-  if (!normalizedTopicId || normalizedTopicId !== topicId || !taskId || !contractVersion || !input.contract || typeof input.contract !== 'object') {
-    return null;
-  }
-  const latestBatch = input.latestBatch && typeof input.latestBatch === 'object' && !Array.isArray(input.latestBatch)
-    ? input.latestBatch as Record<string, unknown>
-    : null;
-  const latestBatchId = typeof latestBatch?.batchId === 'string' ? latestBatch.batchId.trim() : '';
-  const activeVersions = (Array.isArray(latestBatch?.slots) ? latestBatch.slots : []).slice(0, 9).flatMap((entry) => {
-    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return [];
-    const version = entry as Record<string, unknown>;
-    const referenceId = typeof version.referenceId === 'string' ? version.referenceId.trim() : '';
-    const slotId = typeof version.slotId === 'string' ? version.slotId.trim() : '';
-    const versionId = typeof version.versionId === 'string' ? version.versionId.trim() : '';
-    const src = typeof version.src === 'string' ? version.src.trim() : '';
-    const plannerPreviewSrc = typeof version.plannerPreviewSrc === 'string' ? version.plannerPreviewSrc.trim() : '';
-    if (!latestBatchId || !referenceId || !slotId || !versionId || !src || !plannerPreviewSrc) return [];
-    return [{
-      referenceId,
-      batchId: latestBatchId,
-      slotId,
-      versionId,
-      ...(typeof version.parentVersionId === 'string' && version.parentVersionId.trim()
-        ? { parentVersionId: version.parentVersionId.trim() }
-        : {}),
-      src,
-      plannerPreviewSrc,
-      ...(typeof version.label === 'string' && version.label.trim() ? { label: version.label.trim() } : {}),
-    }];
-  });
-  if (latestBatchId && activeVersions.length !== (Array.isArray(latestBatch?.slots) ? latestBatch.slots.length : 0)) return null;
-  return {
-    topicId: normalizedTopicId,
-    taskId,
-    contractVersion,
-    contract: structuredClone(input.contract) as AgentTaskContract,
-    editBaseVersionId: typeof input.editBaseVersionId === 'string' && input.editBaseVersionId.trim()
-      ? input.editBaseVersionId.trim()
-      : null,
-    latestBatchId: latestBatchId || null,
-    activeVersions,
-  };
-}
-
-function normalizeActiveTaskVersion(value: unknown): AgentActiveTaskVersion | null {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
-  const version = value as Record<string, unknown>;
-  const slotId = typeof version.slotId === 'string' ? version.slotId.trim() : '';
-  const referenceId = typeof version.referenceId === 'string' && version.referenceId.trim()
-    ? version.referenceId.trim()
-    : slotId ? `task-slot:${slotId}` : '';
-  const batchId = typeof version.batchId === 'string' ? version.batchId.trim() : '';
-  const versionId = typeof version.versionId === 'string' ? version.versionId.trim() : '';
-  const src = typeof version.src === 'string' ? version.src.trim() : '';
-  const plannerPreviewSrc = typeof version.plannerPreviewSrc === 'string' ? version.plannerPreviewSrc.trim() : '';
-  if (!referenceId || !batchId || !slotId || !versionId || !plannerPreviewSrc) return null;
-  return {
-    referenceId,
-    batchId,
-    slotId,
-    versionId,
-    src,
-    plannerPreviewSrc,
-    ...(typeof version.parentVersionId === 'string' && version.parentVersionId.trim()
-      ? { parentVersionId: version.parentVersionId.trim() }
-      : {}),
-    ...(typeof version.label === 'string' && version.label.trim() ? { label: version.label.trim() } : {}),
-  };
-}
-
 function reserveTaskExecution(
   plan: AgentExecutionPlan,
-  activeTaskContext: AgentActiveTaskContext | null,
-  editBaseAsset: AgentActiveTaskVersion | null,
+  referenceContext?: AgentRuntimeReferenceContext,
 ): {
-  relation: AgentTaskRelation;
   taskId: string;
   contractVersion: number;
   contract: AgentTaskContract;
-  editBaseVersionId: string | null;
   latestBatchId: string | null;
   identities: AgentPendingAssetIdentity[];
-  baseActiveVersions: AgentActiveTaskVersion[];
+  sourceTaskId: string | null;
+  sourceVersionId: string | null;
 } {
-  if (plan.taskRelation === 'discuss_task' && activeTaskContext) {
-    return {
-      relation: plan.taskRelation,
-      taskId: activeTaskContext.taskId,
-      contractVersion: activeTaskContext.contractVersion,
-      contract: structuredClone(activeTaskContext.contract),
-      editBaseVersionId: activeTaskContext.editBaseVersionId || null,
-      latestBatchId: activeTaskContext.latestBatchId || null,
-      identities: [],
-      baseActiveVersions: structuredClone(activeTaskContext.activeVersions),
-    };
+  const taskId = randomUUID();
+  const contractVersion = 1;
+  const contract = buildAgentTaskContract(plan);
+  if (!plan.imageTask || plan.execution.kind !== 'image_pipeline') {
+    return { taskId, contractVersion, contract, latestBatchId: null, identities: [], sourceTaskId: null, sourceVersionId: null };
   }
-  const taskId = plan.taskRelation === 'new_task' || !activeTaskContext ? randomUUID() : activeTaskContext.taskId;
-  const contractVersion = plan.taskRelation === 'new_task' || !activeTaskContext
-    ? 1
-    : plan.taskRelation === 'revise_task'
-      ? activeTaskContext.contractVersion + 1
-      : activeTaskContext.contractVersion;
-  const contract = buildAgentTaskContract(plan, activeTaskContext);
-  if (plan.taskRelation === 'discuss_task' || !plan.imageTask || plan.execution.kind !== 'image_pipeline') {
+  const batchId = randomUUID();
+  const sourceReferenceId = plan.imageTask.operation === 'edit'
+    ? plan.imageTask.targetReferenceId
+    : plan.imageTask.sourceReferenceId;
+  const sourceReference = sourceReferenceId
+    ? referenceContext?.references.find((reference) => reference.id === sourceReferenceId)
+    : undefined;
+  const parentVersionId = sourceReference?.sourceVersionId;
+  const identities = Array.from({ length: plan.delivery.outputCount }, () => {
+    const slotId = randomUUID();
     return {
-      relation: plan.taskRelation,
-      taskId,
-      contractVersion,
-      contract,
-      editBaseVersionId: activeTaskContext?.editBaseVersionId || null,
-      latestBatchId: null,
-      identities: [],
-      baseActiveVersions: [],
-    };
-  }
-  if (plan.imageTask.operation !== 'edit') {
-    const batchId = randomUUID();
-    return {
-      relation: plan.taskRelation,
-      taskId,
-      contractVersion,
-      contract,
-      editBaseVersionId: activeTaskContext?.editBaseVersionId || null,
-      latestBatchId: batchId,
-      identities: Array.from({ length: plan.delivery.outputCount }, () => {
-        const slotId = randomUUID();
-        return { referenceId: `task-slot:${slotId}`, batchId, slotId, versionId: randomUUID() };
-      }),
-      baseActiveVersions: [],
-    };
-  }
-  const targetReferenceId = plan.imageTask.targetReferenceId || '';
-  const pinnedVersionId = (plan.taskRelation === 'continue_task' || plan.taskRelation === 'rerun_task')
-    ? activeTaskContext?.editBaseVersionId || ''
-    : '';
-  const target = pinnedVersionId
-    ? editBaseAsset?.versionId === pinnedVersionId ? editBaseAsset : undefined
-    : activeTaskContext?.activeVersions.find((version) => (
-        version.referenceId === targetReferenceId || version.versionId === targetReferenceId
-      ));
-  if (pinnedVersionId && !target) throw new Error('missing_original_asset');
-  const batchId = target?.batchId || randomUUID();
-  const slotId = target?.slotId || randomUUID();
-  return {
-    relation: plan.taskRelation,
-    taskId,
-    contractVersion,
-    contract,
-    editBaseVersionId: target?.versionId || activeTaskContext?.editBaseVersionId || null,
-    latestBatchId: batchId,
-    identities: [{
-      referenceId: target?.referenceId || `task-slot:${slotId}`,
+      referenceId: `task-slot:${slotId}`,
       batchId,
       slotId,
       versionId: randomUUID(),
-      ...(target?.versionId ? { parentVersionId: target.versionId } : {}),
-    }],
-      baseActiveVersions: target && plan.taskRelation !== 'new_task'
-        ? structuredClone(activeTaskContext?.activeVersions || [])
-        : [],
+      ...(parentVersionId ? { parentVersionId } : {}),
+    };
+  });
+  return {
+    taskId,
+    contractVersion,
+    contract,
+    latestBatchId: batchId,
+    identities,
+    sourceTaskId: sourceReference?.sourceTaskId || null,
+    sourceVersionId: sourceReference?.sourceVersionId || null,
   };
 }
 
@@ -932,15 +807,6 @@ export async function POST(request: NextRequest) {
     ? body.runId.trim()
     : `agent-${Date.now()}`;
   const topicId = typeof body.topicId === 'string' && body.topicId.trim() ? body.topicId.trim() : 'default';
-  const parsedActiveTaskContext = normalizeActiveTaskContext(body.activeTaskContext, topicId);
-  const normalizedEditBaseAsset = normalizeActiveTaskVersion(body.activeTaskContext?.editBaseAsset);
-  const pinnedEditTarget = parsedActiveTaskContext?.contract?.imageTask;
-  const pinnedEditBaseMatchesContract = !pinnedEditTarget || pinnedEditTarget.operation !== 'edit' || !normalizedEditBaseAsset
-    || pinnedEditTarget.targetReferenceId === `task-slot:${normalizedEditBaseAsset.slotId}`;
-  const activeTaskContext = parsedActiveTaskContext;
-  const activeEditBaseAsset = pinnedEditBaseMatchesContract && normalizedEditBaseAsset?.versionId === activeTaskContext?.editBaseVersionId
-    ? normalizedEditBaseAsset
-    : null;
   const latestUserMessage = getLatestUserMessage(body.messages);
   if (!latestUserMessage) {
     return NextResponse.json({ error: 'A user message is required' }, { status: 400 });
@@ -1134,20 +1000,6 @@ export async function POST(request: NextRequest) {
         referenceImages: executionReferenceImages,
         canvasContext: body.canvasContext,
       });
-      if (!runReferenceContext && activeTaskContext?.activeVersions.length) {
-        runReferenceContext = { references: [], composerSegments: [] };
-      }
-      for (const version of activeTaskContext?.activeVersions || []) {
-        if (runReferenceContext?.references.some((reference) => reference.id === version.referenceId)) continue;
-        runReferenceContext?.references.push({
-          id: version.referenceId,
-          src: version.src,
-          plannerPreviewSrc: version.plannerPreviewSrc,
-          label: version.label || `Active task image ${version.slotId}`,
-          source: 'history',
-          role: 'reference',
-        });
-      }
       let resumedClarification = false;
       let proceedWithCurrentBrief = false;
       let clarificationSubmissionKey: string | null = null;
@@ -1168,7 +1020,7 @@ export async function POST(request: NextRequest) {
       };
       const legacyExecutionPlanDetected = Boolean(
         activeClarificationState?.executionPlan
-        && Number((activeClarificationState.executionPlan as any).version) !== 3,
+        && Number((activeClarificationState.executionPlan as any).version) !== 4,
       );
       if (legacyExecutionPlanDetected && activeClarificationState) {
         activeClarificationState.executionPlan = undefined;
@@ -1178,37 +1030,20 @@ export async function POST(request: NextRequest) {
       let executionPlanSourceDetail: AgentPlannerSourceDetail | null = executionPlan ? 'tool_call' : null;
       let executionKind: AgentExecutionPlan['execution']['kind'] | null = executionPlan?.execution.kind || null;
       let taskExecutionReservation: ReturnType<typeof reserveTaskExecution> | null = null;
-      let executionEditBaseAsset = activeEditBaseAsset;
       let completedTaskIdentities: AgentPendingAssetIdentity[] = [];
-      let taskSnapshot: AgentTaskSnapshot | undefined = activeTaskContext ? {
-        topicId,
-        taskId: activeTaskContext.taskId,
-        contractVersion: activeTaskContext.contractVersion,
-        contract: structuredClone(activeTaskContext.contract),
-        editBaseVersionId: activeTaskContext.editBaseVersionId || null,
-        latestBatchId: activeTaskContext.latestBatchId || null,
-        activeVersions: activeTaskContext.activeVersions.map(({ referenceId, batchId, slotId, versionId }) => ({
-          referenceId,
-          batchId,
-          slotId,
-          versionId,
-        })),
-      } : undefined;
+      let taskSnapshot: AgentTaskSnapshot | undefined;
       const getTaskExecutionReservation = () => {
         if (taskExecutionReservation) return taskExecutionReservation;
         if (!executionPlan) return null;
-        taskExecutionReservation = reserveTaskExecution(executionPlan, activeTaskContext, executionEditBaseAsset);
+        taskExecutionReservation = reserveTaskExecution(executionPlan, runReferenceContext);
         const reservation = taskExecutionReservation;
         taskSnapshot = {
           topicId,
           taskId: reservation.taskId,
           contractVersion: reservation.contractVersion,
           contract: structuredClone(reservation.contract),
-          editBaseVersionId: reservation.editBaseVersionId,
-          latestBatchId: reservation.relation === 'discuss_task' ? reservation.latestBatchId : null,
-          activeVersions: reservation.relation === 'discuss_task'
-            ? reservation.baseActiveVersions.map(({ referenceId, batchId, slotId, versionId }) => ({ referenceId, batchId, slotId, versionId }))
-            : [],
+          latestBatchId: reservation.latestBatchId,
+          activeVersions: [],
         };
         return reservation;
       };
@@ -1216,9 +1051,7 @@ export async function POST(request: NextRequest) {
         const reservation = getTaskExecutionReservation();
         if (!reservation || identities.length === 0) return;
         const succeededSlots = new Map(identities.map((identity) => [identity.slotId, identity]));
-        const activeVersions = reservation.baseActiveVersions
-          .filter((version) => !succeededSlots.has(version.slotId))
-          .map(({ referenceId, batchId, slotId, versionId }) => ({ referenceId, batchId, slotId, versionId }));
+        const activeVersions: AgentTaskSnapshot['activeVersions'] = [];
         completedTaskIdentities = [
           ...completedTaskIdentities.filter((identity) => !succeededSlots.has(identity.slotId)),
           ...identities,
@@ -1229,7 +1062,7 @@ export async function POST(request: NextRequest) {
           taskId: reservation.taskId,
           contractVersion: reservation.contractVersion,
           contract: structuredClone(reservation.contract),
-          editBaseVersionId: reservation.editBaseVersionId,
+          editBaseVersionId: null,
           latestBatchId: reservation.latestBatchId,
           activeVersions,
         };
@@ -1242,16 +1075,14 @@ export async function POST(request: NextRequest) {
       const confirmationTaskIdentity = () => {
         const reservation = getTaskExecutionReservation();
         return reservation ? {
-          taskRelation: reservation.relation,
           topicId,
           taskId: reservation.taskId,
           contractVersion: reservation.contractVersion,
           taskContract: structuredClone(reservation.contract),
-          editBaseVersionId: reservation.editBaseVersionId,
           pendingTaskIdentities: structuredClone(reservation.identities),
           completedTaskIdentities: structuredClone(completedTaskIdentities),
-          plannedActiveVersions: structuredClone(reservation.baseActiveVersions),
-          ...(executionEditBaseAsset ? { editBaseAsset: structuredClone(executionEditBaseAsset) } : {}),
+          sourceTaskId: reservation.sourceTaskId,
+          sourceVersionId: reservation.sourceVersionId,
         } : {};
       };
       const progressTracker = createAgentProgressTracker({
@@ -1334,14 +1165,13 @@ export async function POST(request: NextRequest) {
         resolvedImageSelectionOverride?: { providerId: string; model: string },
       ) => {
         const taskReservation = getTaskExecutionReservation();
+        const outputSourceReferenceId = imageTask?.operation === 'edit'
+          ? imageTask.targetReferenceId
+          : imageTask?.sourceReferenceId;
         let executionReferenceContext = referenceContext;
         if (imageTask?.operation === 'edit') {
-          const usePinnedBase = taskReservation?.relation === 'continue_task' || taskReservation?.relation === 'rerun_task';
           const originalAsset = requireOriginalAsset({
             targetReferenceId: imageTask.targetReferenceId,
-            pinnedVersionId: usePinnedBase ? taskReservation?.editBaseVersionId : null,
-            editBaseAsset: executionEditBaseAsset,
-            activeVersions: activeTaskContext?.activeVersions,
             references: referenceContext?.references,
           });
           const taskOriginal = 'versionId' in originalAsset ? originalAsset : null;
@@ -1357,6 +1187,8 @@ export async function POST(request: NextRequest) {
             label: taskOriginal?.label || runtimeOriginal?.label || 'edit target',
             source: taskOriginal ? 'history' as const : runtimeOriginal?.source || 'upload' as const,
             role: 'edit_target' as const,
+            ...(runtimeOriginal?.source === 'history' && runtimeOriginal.sourceTaskId ? { sourceTaskId: runtimeOriginal.sourceTaskId } : {}),
+            ...(runtimeOriginal?.source === 'history' && runtimeOriginal.sourceVersionId ? { sourceVersionId: runtimeOriginal.sourceVersionId } : {}),
           };
           if (targetIndex >= 0) references[targetIndex] = { ...references[targetIndex], ...targetReference };
           else references.push(targetReference);
@@ -1545,7 +1377,9 @@ export async function POST(request: NextRequest) {
                           contractVersion: taskReservation.contractVersion,
                           ...(identity?.batchId ? { batchId: identity.batchId } : {}),
                         } : {}),
-                        ...(imageTask?.targetReferenceId ? { sourceReferenceId: imageTask.targetReferenceId } : {}),
+                        ...(outputSourceReferenceId ? { sourceReferenceId: outputSourceReferenceId } : {}),
+                        ...(taskReservation?.sourceTaskId ? { sourceTaskId: taskReservation.sourceTaskId } : {}),
+                        ...(taskReservation?.sourceVersionId ? { sourceVersionId: taskReservation.sourceVersionId } : {}),
                         assets: assets.map((asset) => ({
                           src: asset.src,
                           naturalWidth: asset.naturalWidth,
@@ -1670,7 +1504,9 @@ export async function POST(request: NextRequest) {
             ...(effectiveGenerationItems.length ? { succeededItemIds, failedItemIds } : {}),
           },
           partialFailureMessage,
-          ...(imageTask?.targetReferenceId ? { sourceReferenceId: imageTask.targetReferenceId } : {}),
+          ...(outputSourceReferenceId ? { sourceReferenceId: outputSourceReferenceId } : {}),
+          ...(taskReservation?.sourceTaskId ? { sourceTaskId: taskReservation.sourceTaskId } : {}),
+          ...(taskReservation?.sourceVersionId ? { sourceVersionId: taskReservation.sourceVersionId } : {}),
           ...(taskReservation ? {
             taskId: taskReservation.taskId,
             contractVersion: taskReservation.contractVersion,
@@ -1739,49 +1575,6 @@ export async function POST(request: NextRequest) {
       };
       try {
         writeEvent(controller, { type: 'agent_start', runId });
-        if (legacyExecutionPlanDetected) {
-          const message = '该任务使用旧版分析计划，需要重新分析。';
-          const failedTaskId = activeClarificationState?.taskId || randomUUID();
-          const failedRequest: AgentClarificationRequest = {
-            id: randomUUID(),
-            taskId: failedTaskId,
-            question: message,
-            dimension: 'planner_failure',
-            options: [],
-            allowCustom: true,
-            allowProceed: true,
-            failed: true,
-          };
-          writeProgress({ stepId: 'routing', phase: 'planning', status: 'failed', label: '旧版计划需要重新分析' });
-          const failedCheckpoint = progressTracker.snapshot();
-          writeEvent(controller, {
-            type: 'clarification_required',
-            message,
-            request: failedRequest,
-            state: {
-              ...(activeClarificationState || {
-                taskId: failedTaskId,
-                intent: 'image' as const,
-                originalRequest: latestUserMessage,
-                workingBrief: latestUserMessage,
-                askedDimensions: [],
-                answers: [],
-              }),
-              taskId: failedTaskId,
-              operationId: failedCheckpoint.operationId,
-              lastSequence: failedCheckpoint.lastSequence,
-              executionPlan: undefined,
-              plannerFailure: {
-                reason: 'invalid_plan',
-                retryMode: 'replan',
-                failedAt: Date.now(),
-              },
-            },
-          });
-          writeEvent(controller, { type: 'agent_error', stage: 'planning', message, reason: 'invalid_plan', retryable: true });
-          writeAgentDone('planner_failed');
-          return;
-        }
         const requestedConfirmationId = body.confirmation?.confirmationId;
         if (requestedConfirmationId) {
           pruneConfirmationStore();
@@ -1801,8 +1594,7 @@ export async function POST(request: NextRequest) {
             providers,
           });
           if (
-            confirmationRecord.taskRelation
-            && confirmationRecord.taskId
+            confirmationRecord.taskId
             && confirmationRecord.contractVersion
             && confirmationRecord.taskContract
           ) {
@@ -1810,25 +1602,21 @@ export async function POST(request: NextRequest) {
               throw new Error('Confirmation does not match this topic');
             }
             taskExecutionReservation = {
-              relation: confirmationRecord.taskRelation,
               taskId: confirmationRecord.taskId,
               contractVersion: confirmationRecord.contractVersion,
               contract: structuredClone(confirmationRecord.taskContract),
-              editBaseVersionId: confirmationRecord.editBaseVersionId || null,
               latestBatchId: confirmationRecord.pendingTaskIdentities?.[0]?.batchId || null,
               identities: structuredClone(confirmationRecord.pendingTaskIdentities || []),
-              baseActiveVersions: structuredClone(confirmationRecord.plannedActiveVersions || []),
+              sourceTaskId: confirmationRecord.sourceTaskId || null,
+              sourceVersionId: confirmationRecord.sourceVersionId || null,
             };
-            executionEditBaseAsset = confirmationRecord.editBaseAsset
-              ? structuredClone(confirmationRecord.editBaseAsset)
-              : null;
             completedTaskIdentities = structuredClone(confirmationRecord.completedTaskIdentities || []);
             taskSnapshot = {
               topicId,
               taskId: confirmationRecord.taskId,
               contractVersion: confirmationRecord.contractVersion,
               contract: structuredClone(confirmationRecord.taskContract),
-              editBaseVersionId: confirmationRecord.editBaseVersionId || null,
+              editBaseVersionId: null,
               latestBatchId: null,
               activeVersions: [],
             };
@@ -2257,7 +2045,7 @@ export async function POST(request: NextRequest) {
         }
         if (
           !body.clarificationResponse
-          && !activeClarificationState
+          && (!activeClarificationState || legacyExecutionPlanDetected)
           && process.env.AGENT_UNIFIED_PLANNER_ENABLED !== '0'
         ) {
           const plannerStartedAt = Date.now();
@@ -2267,7 +2055,9 @@ export async function POST(request: NextRequest) {
           const plannerModel = plannerSelection.model;
           const plannerProviderId = plannerSelection.providerId || undefined;
           const plannerResult = await planAgentExecutionRequest({
-            userMessage: latestUserMessage,
+            userMessage: legacyExecutionPlanDetected
+              ? activeClarificationState?.workingBrief || activeClarificationState?.originalRequest || latestUserMessage
+              : latestUserMessage,
             messages: body.messages,
             manifests: skillManifests,
             contextEntities,
@@ -2275,7 +2065,6 @@ export async function POST(request: NextRequest) {
             activeSkillId: body.activeSkillId,
             hasReferenceImages: plannerHasVisualReferences,
             referenceContext: runReferenceContext,
-            activeTaskContext,
             imageOptions: body.imageOptions,
             canvasContext: body.canvasContext,
             model: plannerModel,
@@ -2663,6 +2452,7 @@ export async function POST(request: NextRequest) {
           const shouldReplan = process.env.AGENT_UNIFIED_PLANNER_ENABLED !== '0'
             && (
               isPlannerFailureRetry
+              || legacyExecutionPlanDetected
               || activeClarificationState.executionPlan?.needsClarification === true
             );
           if (shouldReplan) {
@@ -2681,7 +2471,6 @@ export async function POST(request: NextRequest) {
               activeSkillId: body.activeSkillId || activeClarificationState.skillId,
               hasReferenceImages: plannerHasVisualReferences,
               referenceContext: runReferenceContext,
-              activeTaskContext,
               imageOptions: body.imageOptions,
               canvasContext: body.canvasContext,
               model: plannerModel,
@@ -3286,17 +3075,10 @@ export async function POST(request: NextRequest) {
           writeProgress({ stepId: 'clarification', phase: 'resuming', status: 'completed', label: '已按当前信息继续' });
         }
 
-        if (executionPlan && executionPlan.execution.kind !== 'image_pipeline') {
+        if (executionPlan && executionPlan.execution.kind !== 'none' && executionPlan.execution.kind !== 'image_pipeline') {
           getTaskExecutionReservation();
         }
-        if (plannerAuthoritative && executionPlan?.taskRelation === 'discuss_task') {
-          if (executionPlan.imageTask || executionPlan.execution.tool || executionPlan.execution.kind !== 'none') {
-            throw new Error('discuss_task cannot execute mutation tools');
-          }
-        }
-        const shouldUseImagePipeline = executionPlan?.taskRelation === 'discuss_task'
-          ? false
-          : executionKind
+        const shouldUseImagePipeline = executionKind
           ? executionKind === 'image_pipeline'
           : intent === 'image' && (!selectedSkill || selectedSkill.executionMode === 'image_pipeline');
         if (shouldUseImagePipeline) {
@@ -3304,9 +3086,9 @@ export async function POST(request: NextRequest) {
             const availableReferenceIds = new Set((runReferenceContext?.references || []).map((reference) => reference.id));
             const imageTask = executionPlan?.imageTask;
             const presentation = executionPlan?.presentation;
-            const generation = executionPlan?.version === 3 ? executionPlan.generation : null;
+            const generation = executionPlan?.version === 4 ? executionPlan.generation : null;
             const invalidExecutablePlan = !executionPlan
-              || executionPlan.version !== 3
+              || executionPlan.version !== 4
               || executionPlan.intent !== 'image'
               || executionPlan.execution.kind !== 'image_pipeline'
               || executionPlan.execution.tool !== 'generate_image'
@@ -3317,9 +3099,13 @@ export async function POST(request: NextRequest) {
               !imageTask.targetReferenceId
               || !availableReferenceIds.has(imageTask.targetReferenceId)
               || imageTask.supportingReferenceIds.includes(imageTask.targetReferenceId)
+              || Boolean(imageTask.sourceReferenceId)
             );
+            const invalidGenerateSource = imageTask?.operation === 'generate' && Boolean(imageTask.sourceReferenceId)
+              && (!availableReferenceIds.has(imageTask.sourceReferenceId!)
+                || !imageTask.supportingReferenceIds.includes(imageTask.sourceReferenceId!));
             const referencedTaskWithoutRoles = Boolean(runReferenceContext?.references.length) && !imageTask;
-            if (invalidExecutablePlan || invalidEditPlan || referencedTaskWithoutRoles) {
+            if (invalidExecutablePlan || invalidEditPlan || invalidGenerateSource || referencedTaskWithoutRoles) {
               const message = '模型未能形成可安全执行的图片计划，系统已在生图前停止。请重新规划当前请求。';
               const failedTaskId = activeClarificationState?.taskId || randomUUID();
               const failedRequest: AgentClarificationRequest = {
@@ -3380,7 +3166,7 @@ export async function POST(request: NextRequest) {
             };
           }
           const imageBatchMode = imageDeliveryPlan.mode as AgentImageBatchMode;
-          const plannerGeneration = executionPlan?.version === 3 ? executionPlan.generation : null;
+          const plannerGeneration = executionPlan?.version === 4 ? executionPlan.generation : null;
           const usesPlannerGeneration = Boolean(plannerAuthoritative && plannerGeneration);
           writeProgress({
             stepId: 'prompt_optimization',

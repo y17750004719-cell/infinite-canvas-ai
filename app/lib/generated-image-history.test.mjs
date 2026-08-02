@@ -118,6 +118,8 @@ test('normalizeGeneratedImageHistory preserves agent edit provenance', () => {
     source: 'chat',
     operation: 'edit',
     sourceReferenceId: 'canvas-reference:image-1',
+    sourceTaskId: 'task-source',
+    sourceVersionId: 'version-source',
     providerId: 'comfly',
     model: 'gpt-image-2',
     promptTrace: {
@@ -130,6 +132,8 @@ test('normalizeGeneratedImageHistory preserves agent edit provenance', () => {
   }]);
   assert.equal(entry.operation, 'edit');
   assert.equal(entry.sourceReferenceId, 'canvas-reference:image-1');
+  assert.equal(entry.sourceTaskId, 'task-source');
+  assert.equal(entry.sourceVersionId, 'version-source');
   assert.equal(entry.providerId, 'comfly');
   assert.equal(entry.model, 'gpt-image-2');
   assert.equal(entry.promptTrace.finalPrompt, 'Edit the first reference image. Replace only the bottle.');

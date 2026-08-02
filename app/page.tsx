@@ -45,7 +45,6 @@ import { ASPECT_RATIOS } from './lib/aspect-ratios';
 import {
   appendGeneratedImageHistoryEntries,
   appendMissingGeneratedHistoryEntries,
-  buildActiveTaskContext,
   buildGeneratedImageHistorySortKey,
   buildGeneratedHistoryEntriesFromImageCard,
 } from './lib/generated-image-history.mjs';
@@ -636,6 +635,8 @@ interface ChatReferenceToken {
   aliases?: string[];
   confidence?: 'high' | 'medium' | 'low';
   confirmationStatus?: 'pending' | 'confirmed';
+  sourceTaskId?: string;
+  sourceVersionId?: string;
   previewSrc?: string;
   targetPoint?: { x: number; y: number };
   targetBox?: { x: number; y: number; width: number; height: number };
@@ -661,6 +662,8 @@ interface AgentReferenceContext {
     aliases?: string[];
     confidence?: 'high' | 'medium' | 'low';
     confirmationStatus?: 'pending' | 'confirmed';
+    sourceTaskId?: string;
+    sourceVersionId?: string;
     targetPoint?: { x: number; y: number };
     targetBox?: { x: number; y: number; width: number; height: number };
   }>;
@@ -1593,6 +1596,8 @@ const createGeneratedImageHistoryEntry = ({
   messageId,
   operation,
   sourceReferenceId,
+  sourceTaskId,
+  sourceVersionId,
   providerId,
   model,
   promptTrace,
@@ -1615,6 +1620,8 @@ const createGeneratedImageHistoryEntry = ({
   messageId?: string;
   operation?: 'generate' | 'edit';
   sourceReferenceId?: string;
+  sourceTaskId?: string;
+  sourceVersionId?: string;
   providerId?: string;
   model?: string;
   promptTrace?: GeneratedImageHistoryEntry['promptTrace'];
@@ -1640,6 +1647,8 @@ const createGeneratedImageHistoryEntry = ({
     messageId,
     operation,
     sourceReferenceId,
+    sourceTaskId,
+    sourceVersionId,
     providerId,
     model,
     promptTrace,
@@ -8826,13 +8835,14 @@ export default function AIWorkspace() {
   );
 
   const appendChatReferenceSources = useCallback((
-    sources: string[],
+    sources: Array<string | Pick<GeneratedImageHistoryEntry, 'src' | 'taskId' | 'versionId'>>,
     source: Exclude<ChatReferenceTokenSource, 'canvas'>
   ) => {
     setChatReferenceTokens((currentTokens) => {
       const existingSources = new Set(currentTokens.map((token) => token.src));
       const nextTokens = [...currentTokens];
-      for (const src of sources) {
+      for (const sourceEntry of sources) {
+        const src = typeof sourceEntry === 'string' ? sourceEntry : sourceEntry.src;
         if (!src || existingSources.has(src) || nextTokens.length >= 14) continue;
         existingSources.add(src);
         nextTokens.push({
@@ -8843,6 +8853,12 @@ export default function AIWorkspace() {
           transient: false,
           pinned: false,
           role: 'reference',
+          ...(source === 'history' && typeof sourceEntry !== 'string' && sourceEntry.taskId
+            ? { sourceTaskId: sourceEntry.taskId }
+            : {}),
+          ...(source === 'history' && typeof sourceEntry !== 'string' && sourceEntry.versionId
+            ? { sourceVersionId: sourceEntry.versionId }
+            : {}),
         });
       }
       return nextTokens;
@@ -13140,8 +13156,7 @@ export default function AIWorkspace() {
     const overrideReferencePayload = options?.referenceImagesOverride
       ? buildReferenceImageRequestPayload(options.referenceImagesOverride)
       : null;
-    const persistedReferenceContext = effectiveAgentClarification?.state.referenceContext
-      || [...chatMessages].reverse().find((message) => message.role === 'user' && message.referenceContext)?.referenceContext;
+    const persistedReferenceContext = effectiveAgentClarification?.state.referenceContext;
     const currentReferenceImages = overrideReferencePayload
       ? [...overrideReferencePayload.referenceImages]
       : chatReferenceImages.length > 0
@@ -13167,6 +13182,7 @@ export default function AIWorkspace() {
       return;
     }
     const currentReferenceContext: AgentReferenceContext | undefined = options?.input === undefined
+      && (composerReferenceTokens.length > 0 || !persistedReferenceContext)
       ? {
           references: composerReferenceTokens
             .map((token) => ({
@@ -13184,6 +13200,8 @@ export default function AIWorkspace() {
               ...(token.aliases?.length ? { aliases: token.aliases } : {}),
               ...(token.confidence ? { confidence: token.confidence } : {}),
               ...(token.confirmationStatus ? { confirmationStatus: token.confirmationStatus } : {}),
+              ...(token.source === 'history' && token.sourceTaskId ? { sourceTaskId: token.sourceTaskId } : {}),
+              ...(token.source === 'history' && token.sourceVersionId ? { sourceVersionId: token.sourceVersionId } : {}),
               ...(token.targetPoint ? { targetPoint: token.targetPoint } : {}),
               ...(token.targetBox ? { targetBox: token.targetBox } : {}),
             })),
@@ -13782,18 +13800,6 @@ export default function AIWorkspace() {
 
       const requestSession = getCurrentSession();
       const requestTopicId = requestSession?.activeTopicId || 'default';
-      const requestHistory = requestSession?.id
-        ? generatedImageHistoryBySession[requestSession.id]
-          ?? persistedGeneratedImageHistoryBySessionRef.current[requestSession.id]
-          ?? requestSession.generatedImageHistory
-          ?? []
-        : [];
-      const activeTaskContext = buildActiveTaskContext({
-        topicId: requestTopicId,
-        messages: chatMessages,
-        historyEntries: requestHistory,
-        maxActiveVersions: 9,
-      });
       const agentRequestBody = {
         runId: agentRunId,
         topicId: requestTopicId,
@@ -13803,7 +13809,6 @@ export default function AIWorkspace() {
         activeSkillId: currentSkill?.id,
         referenceImages: referencesForRequest,
         referenceContext: referenceContextForRequest,
-        activeTaskContext,
         canvasContext: {
           itemCount: items.length,
           selectedItemIds: selectedIds,
@@ -13942,6 +13947,8 @@ export default function AIWorkspace() {
                 model?: string;
                 providerId?: string;
                 sourceReferenceId?: string;
+                sourceTaskId?: string;
+                sourceVersionId?: string;
                 taskId?: string;
                 contractVersion?: number;
                 batchId?: string;
@@ -14018,6 +14025,8 @@ export default function AIWorkspace() {
                   model?: string;
                   providerId?: string;
                   sourceReferenceId?: string;
+                  sourceTaskId?: string;
+                  sourceVersionId?: string;
                   taskId?: string;
                   contractVersion?: number;
                   batchId?: string;
@@ -14431,6 +14440,8 @@ export default function AIWorkspace() {
                       messageId: imageMessages[index]?.id,
                       operation: event.action?.presentation?.operation,
                       sourceReferenceId: event.action?.sourceReferenceId,
+                      sourceTaskId: event.action?.sourceTaskId,
+                      sourceVersionId: event.action?.sourceVersionId,
                       providerId: event.action?.providerId,
                       model: asset.model || resolvedModel,
                       promptTrace: asset.promptTrace,
@@ -15504,7 +15515,7 @@ export default function AIWorkspace() {
     const selectedIds = new Set(selectedChatHistoryAssetIds);
     const selectedSources = generatedImageHistoryEntries
       .filter((entry) => selectedIds.has(entry.id))
-      .map((entry) => entry.src);
+      .map((entry) => ({ src: entry.src, taskId: entry.taskId, versionId: entry.versionId }));
 
     appendChatReferenceSources(selectedSources, 'history');
     setSelectedChatHistoryAssetIds([]);

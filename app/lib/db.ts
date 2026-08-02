@@ -44,6 +44,8 @@ export interface ChatMessage {
       aliases?: string[];
       description?: string;
       confidence?: 'high' | 'medium' | 'low';
+      sourceTaskId?: string;
+      sourceVersionId?: string;
       targetPoint?: { x: number; y: number };
       targetBox?: { x: number; y: number; width: number; height: number };
     }>;
@@ -63,6 +65,8 @@ export interface ChatMessage {
   imageOperation?: 'generate' | 'edit';
   imageProviderId?: string;
   sourceReferenceId?: string;
+  sourceTaskId?: string;
+  sourceVersionId?: string;
   promptTrace?: {
     sourcePrompt: string;
     finalPrompt: string;
@@ -172,6 +176,8 @@ export interface GeneratedImageHistoryEntry {
   parentVersionId?: string;
   operation?: 'generate' | 'edit';
   sourceReferenceId?: string;
+  sourceTaskId?: string;
+  sourceVersionId?: string;
   providerId?: string;
   model?: string;
   promptTrace?: ChatMessage['promptTrace'];
