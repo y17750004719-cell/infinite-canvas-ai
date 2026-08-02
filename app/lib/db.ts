@@ -200,33 +200,6 @@ export interface TaskSnapshot {
   activeVersions: TaskSnapshotActiveVersion[];
 }
 
-export interface ActiveTaskContext {
-  topicId: string;
-  taskId: string;
-  contractVersion: number;
-  contract: AgentTaskContract;
-  editBaseVersionId?: string;
-  editBaseAsset?: {
-    versionId: string;
-    batchId: string;
-    slotId: string;
-    src: string;
-    plannerPreviewSrc: string;
-    parentVersionId?: string;
-  };
-  latestBatch: {
-    batchId: string;
-    slots: Array<{
-      referenceId: string;
-      slotId: string;
-      versionId: string;
-      parentVersionId?: string;
-      src: string;
-      plannerPreviewSrc: string;
-    }>;
-  } | null;
-}
-
 export interface ProjectSession {
   schemaVersion?: 2;
   id: string;

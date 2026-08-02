@@ -620,7 +620,9 @@ function positiveInteger(value: unknown) {
 }
 
 function reserveTaskExecution(
-  plan: AgentExecutionPlan,
+  contract: AgentTaskContract,
+  imageTask: AgentImageTask | undefined,
+  outputCount: number,
   referenceContext?: AgentRuntimeReferenceContext,
 ): {
   taskId: string;
@@ -634,8 +636,7 @@ function reserveTaskExecution(
 } {
   const taskId = randomUUID();
   const contractVersion = 1;
-  const contract = buildAgentTaskContract(plan);
-  if (!plan.imageTask || plan.execution.kind !== 'image_pipeline') {
+  if (contract.execution.kind !== 'image_pipeline') {
     return {
       taskId,
       contractVersion,
@@ -648,15 +649,15 @@ function reserveTaskExecution(
     };
   }
   const batchId = randomUUID();
-  const sourceReferenceId = plan.imageTask.operation === 'edit'
-    ? plan.imageTask.targetReferenceId
-    : plan.imageTask.sourceReferenceId;
+  const sourceReferenceId = imageTask?.operation === 'edit'
+    ? imageTask.targetReferenceId
+    : imageTask?.sourceReferenceId;
   const sourceReference = sourceReferenceId
     ? referenceContext?.references.find((reference) => reference.id === sourceReferenceId)
     : undefined;
   const parentVersionId = sourceReference?.sourceVersionId;
-  const editBaseVersionId = plan.imageTask.operation === 'edit' ? parentVersionId || null : null;
-  const identities = Array.from({ length: plan.delivery.outputCount }, () => {
+  const editBaseVersionId = imageTask?.operation === 'edit' ? parentVersionId || null : null;
+  const identities = Array.from({ length: outputCount }, () => {
     const slotId = randomUUID();
     return {
       referenceId: `task-slot:${slotId}`,
@@ -1045,10 +1046,49 @@ export async function POST(request: NextRequest) {
       let taskExecutionReservation: ReturnType<typeof reserveTaskExecution> | null = null;
       let completedTaskIdentities: AgentPendingAssetIdentity[] = [];
       let taskSnapshot: AgentTaskSnapshot | undefined;
-      const getTaskExecutionReservation = () => {
+      const getTaskExecutionReservation = (runtime?: {
+        kind: AgentExecutionPlan['execution']['kind'];
+        tool: string;
+        imageTask?: AgentImageTask;
+        outputCount?: number;
+      }) => {
         if (taskExecutionReservation) return taskExecutionReservation;
-        if (!executionPlan) return null;
-        taskExecutionReservation = reserveTaskExecution(executionPlan, runReferenceContext);
+        if (!executionPlan && !runtime) return null;
+        const contract = executionPlan
+          ? buildAgentTaskContract(executionPlan)
+          : {
+              intent,
+              skillId: selectedSkill?.id || null,
+              brief: {
+                deliverable: executionBrief,
+                subject: executionBrief,
+                style: [],
+                literalCopy: [],
+                constraints: [],
+              },
+              delivery: {
+                mode: imageDeliveryPlan.mode as AgentTaskContract['delivery']['mode'],
+                outputCount: runtime?.outputCount || 1,
+                panelCount: imageDeliveryPlan.panelCount || null,
+                variationAxes: imageDeliveryPlan.variationAxes || [],
+                sharedInvariants: [],
+                distinctPerItem: [],
+                items: [],
+              },
+              ...(runtime?.imageTask ? { imageTask: structuredClone(runtime.imageTask) } : {}),
+              generation: null,
+              execution: {
+                kind: runtime!.kind,
+                requiresConfirmation: false,
+                tool: runtime!.tool,
+              },
+            } satisfies AgentTaskContract;
+        taskExecutionReservation = reserveTaskExecution(
+          contract,
+          executionPlan?.imageTask || runtime?.imageTask,
+          executionPlan?.delivery.outputCount || runtime?.outputCount || 1,
+          runReferenceContext,
+        );
         const reservation = taskExecutionReservation;
         taskSnapshot = {
           topicId,
@@ -1179,7 +1219,6 @@ export async function POST(request: NextRequest) {
         referenceContext: AgentRuntimeReferenceContext | undefined = runReferenceContext,
         resolvedImageSelectionOverride?: { providerId: string; model: string },
       ) => {
-        const taskReservation = getTaskExecutionReservation();
         const outputSourceReferenceId = imageTask?.operation === 'edit'
           ? imageTask.targetReferenceId
           : imageTask?.sourceReferenceId;
@@ -1220,6 +1259,12 @@ export async function POST(request: NextRequest) {
           || (executionPlan
             ? executionPlanToImageDeliveryPlan(executionPlan) as ImageDeliveryPlan
             : resolveImageDeliveryPlan(sourcePrompt, payloadOutputCount));
+        const taskReservation = getTaskExecutionReservation({
+          kind: 'image_pipeline',
+          tool: 'generate_image',
+          imageTask,
+          outputCount: positiveInteger(countMetadata?.totalCount) || payloadOutputCount,
+        });
         const payloadBatchMode = payloadDeliveryPlan.mode;
         if (optimizePrompt && process.env.PROMPT_PIPELINE_AGENT_ENABLED !== '0') {
           writeProgress({ stepId: 'prompt_optimization', phase: 'optimizing', status: 'active', label: '正在优化图片提示词' });
@@ -3091,9 +3136,6 @@ export async function POST(request: NextRequest) {
           writeProgress({ stepId: 'clarification', phase: 'resuming', status: 'completed', label: '已按当前信息继续' });
         }
 
-        if (executionPlan && executionPlan.execution.kind !== 'none' && executionPlan.execution.kind !== 'image_pipeline') {
-          getTaskExecutionReservation();
-        }
         const shouldUseImagePipeline = executionKind
           ? executionKind === 'image_pipeline'
           : intent === 'image' && (!selectedSkill || selectedSkill.executionMode === 'image_pipeline');
@@ -3362,7 +3404,12 @@ export async function POST(request: NextRequest) {
               imageDeliveryPlan: structuredClone(imageDeliveryPlan),
               generationItems: structuredClone(generationItems),
               remainingGenerationItems: structuredClone(allGenerationItems.slice(generationItems.length)),
-              pendingTaskIdentities: structuredClone(getTaskExecutionReservation()?.identities.slice(0, requestedImageCount) || []),
+              pendingTaskIdentities: structuredClone(getTaskExecutionReservation({
+                kind: 'image_pipeline',
+                tool: 'generate_image',
+                imageTask: executionPlan?.imageTask,
+                outputCount: requestedTotalImageCount,
+              })?.identities.slice(0, requestedImageCount) || []),
               remainingTaskIdentities: structuredClone(getTaskExecutionReservation()?.identities.slice(requestedImageCount) || []),
               optimizePrompt: false,
               expiresAt: Date.now() + CONFIRMATION_TTL_MS,
@@ -3505,6 +3552,18 @@ export async function POST(request: NextRequest) {
                     : `本次将生成 ${describeImageDelivery(imageDeliveryPlan, requestedImageCount)}，确认后继续。`,
                 };
               }
+              if (toolRegistry.get(toolName)?.readOnly !== true) {
+                getTaskExecutionReservation({
+                  kind: toolName === 'generate_image'
+                    ? 'image_pipeline'
+                    : toolName === 'start_skill_job'
+                      ? 'skill_job'
+                      : 'agent_loop',
+                  tool: toolName,
+                  imageTask: executionPlan?.imageTask,
+                  outputCount: toolName === 'generate_image' ? requestedTotalImageCount : 1,
+                });
+              }
               const rawResult = await executeAgentTool(toolRegistry, toolName, args, {
                 allowedTools,
                 confirmed: false,
@@ -3633,6 +3692,16 @@ export async function POST(request: NextRequest) {
             const resolvedImageProvider = confirmationToolName === 'generate_image'
               ? providers.find((provider) => provider.id === resolvedImageSelection?.providerId)
               : null;
+            getTaskExecutionReservation({
+              kind: confirmationToolName === 'generate_image'
+                ? 'image_pipeline'
+                : confirmationToolName === 'start_skill_job'
+                  ? 'skill_job'
+                  : 'agent_loop',
+              tool: confirmationToolName,
+              imageTask: executionPlan?.imageTask,
+              outputCount: confirmationToolName === 'generate_image' ? requestedTotalImageCount : 1,
+            });
             writeToolProgress(
               String(loopResult.confirmation?.toolName || 'start_skill_job'),
               'waiting',

@@ -14,7 +14,6 @@ export type {
   AgentExecutionPlanValidationOptions,
   AgentTaskContract,
   AgentActiveTaskVersion,
-  AgentActiveTaskContext,
   AgentImageTask,
   AgentGenerationContract,
   AgentPlanPresentation,

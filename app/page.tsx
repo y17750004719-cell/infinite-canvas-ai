@@ -8839,12 +8839,25 @@ export default function AIWorkspace() {
     source: Exclude<ChatReferenceTokenSource, 'canvas'>
   ) => {
     setChatReferenceTokens((currentTokens) => {
-      const existingSources = new Set(currentTokens.map((token) => token.src));
       const nextTokens = [...currentTokens];
       for (const sourceEntry of sources) {
         const src = typeof sourceEntry === 'string' ? sourceEntry : sourceEntry.src;
-        if (!src || existingSources.has(src) || nextTokens.length >= 14) continue;
-        existingSources.add(src);
+        if (!src) continue;
+        const existingIndex = nextTokens.findIndex((token) => token.src === src);
+        if (existingIndex >= 0) {
+          if (source === 'history' && typeof sourceEntry !== 'string') {
+            nextTokens[existingIndex] = {
+              ...nextTokens[existingIndex],
+              source: 'history',
+              label: getReferenceTokenLabel(src, '历史图片'),
+              transient: false,
+              sourceTaskId: sourceEntry.taskId,
+              sourceVersionId: sourceEntry.versionId,
+            };
+          }
+          continue;
+        }
+        if (nextTokens.length >= 14) continue;
         nextTokens.push({
           id: `${source}:${Date.now()}:${Math.random().toString(36).slice(2, 7)}`,
           src,

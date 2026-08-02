@@ -121,16 +121,6 @@ export interface AgentActiveTaskVersion {
   label?: string;
 }
 
-export interface AgentActiveTaskContext {
-  topicId: string;
-  taskId: string;
-  contractVersion: number;
-  contract: AgentTaskContract;
-  editBaseVersionId?: string | null;
-  latestBatchId?: string | null;
-  activeVersions: AgentActiveTaskVersion[];
-}
-
 export interface AgentExecutionPlan {
   version: 4;
   intent: 'chat' | 'image' | 'skill_action' | 'analysis';

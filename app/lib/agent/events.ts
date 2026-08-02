@@ -139,6 +139,8 @@ export type AgentClientAction = {
   contractVersion?: number;
   batchId?: string;
   sourceReferenceId?: string;
+  sourceTaskId?: string;
+  sourceVersionId?: string;
   presentation?: {
     title: string;
     summary: string;

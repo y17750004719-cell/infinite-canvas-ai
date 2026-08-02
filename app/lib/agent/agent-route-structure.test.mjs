@@ -466,14 +466,22 @@ test('task identities survive confirmation and enrich streamed and aggregate ass
   assert.match(source, /plannerPreviewSrc: asset\.src/);
   assert.match(source, /writeAgentDone/);
   assert.match(eventsSource, /taskSnapshot\?: AgentTaskSnapshot/);
-  for (const field of ['taskId', 'contractVersion', 'batchId', 'slotId', 'versionId', 'parentVersionId', 'plannerPreviewSrc']) {
+  for (const field of ['taskId', 'contractVersion', 'batchId', 'sourceTaskId', 'sourceVersionId', 'slotId', 'versionId', 'parentVersionId', 'plannerPreviewSrc']) {
     assert.match(eventsSource, new RegExp(`${field}\\?`));
   }
 });
 
+test('runtime execution reserves tasks without requiring a planner plan', () => {
+  const source = fs.readFileSync(routePath, 'utf8');
+  assert.match(source, /if \(!executionPlan && !runtime\) return null/);
+  assert.match(source, /kind: 'image_pipeline',[\s\S]{0,100}tool: 'generate_image'/);
+  assert.match(source, /toolRegistry\.get\(toolName\)\?\.readOnly !== true/);
+  assert.match(source, /if \(taskExecutionReservation\) return taskExecutionReservation/);
+});
+
 test('reservation keeps edit provenance distinct from regenerate provenance', () => {
   const source = fs.readFileSync(routePath, 'utf8');
-  assert.match(source, /const editBaseVersionId = plan\.imageTask\.operation === 'edit' \? parentVersionId \|\| null : null/);
+  assert.match(source, /const editBaseVersionId = imageTask\?\.operation === 'edit' \? parentVersionId \|\| null : null/);
   assert.match(source, /editBaseVersionId: reservation\.editBaseVersionId/);
   assert.match(source, /editBaseVersionId: confirmationRecord\.editBaseVersionId \|\| null/);
   assert.match(source, /sourceVersionId: confirmationRecord\.sourceVersionId \|\| null/);

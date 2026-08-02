@@ -52,6 +52,13 @@ test('agent requests send only explicitly selected references', () => {
   assert.match(source, /plannerPreviewSrc:\s*asset\.plannerPreviewSrc \|\| asset\.src/);
 });
 
+test('selecting history upgrades an existing reference token provenance', () => {
+  assert.match(source, /const existingIndex = nextTokens\.findIndex\(\(token\) => token\.src === src\)/);
+  assert.match(source, /nextTokens\[existingIndex\] = \{[\s\S]{0,300}source: 'history'/);
+  assert.match(source, /sourceTaskId:\s*sourceEntry\.taskId/);
+  assert.match(source, /sourceVersionId:\s*sourceEntry\.versionId/);
+});
+
 test('agent clarification uses the shared editable decision popover', () => {
   assert.match(source, /showAgentClarificationModal/);
   assert.match(source, /pendingAgentClarification/);
@@ -427,7 +434,8 @@ test('chat image uploads land in local assets before becoming sendable reference
   assert.match(source, /fetch\('\/api\/upload'/);
   assert.match(source, /uploadStatus: 'uploading'/);
   assert.match(source, /hasPendingChatReferenceUploads/);
-  assert.match(source, /if \(!src \|\| existingSources\.has\(src\) \|\| nextTokens\.length >= 14\) continue;/);
+  assert.match(source, /if \(!src\) continue;/);
+  assert.match(source, /if \(nextTokens\.length >= 14\) continue;/);
 });
 
 test('composer dialogs expose semantics, unique asset labels, and focus restoration', () => {
