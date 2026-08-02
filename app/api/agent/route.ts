@@ -40,6 +40,7 @@ import {
   fingerprintProviderModel,
   hashEnvelopeValue,
   resolveConfirmationImageIdentity,
+  resolveRemainingConfirmationTaskIdentities,
 } from '../../lib/agent/confirmation-continuation.mjs';
 import {
   createAgentToolRegistry,
@@ -1869,7 +1870,12 @@ export async function POST(request: NextRequest) {
                 remainingCount,
               };
               const nextCount = Math.min(nextBatchPlan.batchSize, remainingCount);
-              const nextIdentities = (confirmationRecord.remainingTaskIdentities || []).slice(0, nextCount);
+              const queuedTaskIdentities = resolveRemainingConfirmationTaskIdentities({
+                pendingTaskIdentities: confirmationRecord.pendingTaskIdentities,
+                remainingTaskIdentities: confirmationRecord.remainingTaskIdentities,
+                completedTaskIdentities,
+              });
+              const nextIdentities = queuedTaskIdentities.slice(0, nextCount);
               const nextConfirmationId = confirmationRecord.nextConfirmationId || randomUUID();
               confirmationRecord.nextConfirmationId = nextConfirmationId;
               if (!confirmationStore.has(nextConfirmationId)) {
@@ -1886,7 +1892,7 @@ export async function POST(request: NextRequest) {
                   imageCountSource: 'batch',
                   requestedTotalImageCount: nextBatchPlan.totalCount,
                   pendingTaskIdentities: structuredClone(nextIdentities),
-                  remainingTaskIdentities: structuredClone((confirmationRecord.remainingTaskIdentities || []).slice(nextCount)),
+                  remainingTaskIdentities: structuredClone(queuedTaskIdentities.slice(nextCount)),
                   completedTaskIdentities: structuredClone(completedTaskIdentities),
                   imageBatchPlan: nextBatchPlan,
                   nextConfirmationId: undefined,

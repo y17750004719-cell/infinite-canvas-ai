@@ -61,6 +61,18 @@ export function resolveConfirmationImageIdentity({ providers, toolName, requeste
   };
 }
 
+export function resolveRemainingConfirmationTaskIdentities({
+  pendingTaskIdentities = [],
+  remainingTaskIdentities = [],
+  completedTaskIdentities = [],
+}) {
+  const completedSlotIds = new Set(completedTaskIdentities.map((identity) => identity.slotId));
+  return [
+    ...pendingTaskIdentities.filter((identity) => !completedSlotIds.has(identity.slotId)),
+    ...remainingTaskIdentities,
+  ];
+}
+
 function assertPinnedProviderModel({ providers, purpose, providerId, model, fingerprint }) {
   if (!providerId || !model || !fingerprint) {
     throw new Error('Confirmation continuation envelope is invalid');

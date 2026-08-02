@@ -495,6 +495,7 @@ test('agent-loop image confirmation splits one reservation across current and la
   assert.ok(reservationIndex >= 0 && identitySpreadIndex > reservationIndex);
   assert.match(source, /pendingTaskIdentities:\s*structuredClone\([\s\S]{0,100}loopConfirmationTaskReservation\?\.identities\.slice\(0, requestedImageCount\)/);
   assert.match(source, /remainingTaskIdentities:\s*structuredClone\([\s\S]{0,100}loopConfirmationTaskReservation\?\.identities\.slice\(requestedImageCount\)/);
+  assert.match(source, /resolveRemainingConfirmationTaskIdentities\([\s\S]{0,240}pendingTaskIdentities:[\s\S]{0,160}completedTaskIdentities/);
 });
 
 test('reservation keeps edit provenance distinct from regenerate provenance', () => {

@@ -5,6 +5,7 @@ import {
   fingerprintProviderModel,
   hashEnvelopeValue,
   resolveConfirmationImageIdentity,
+  resolveRemainingConfirmationTaskIdentities,
 } from './confirmation-continuation.mjs';
 
 const providers = [{
@@ -215,4 +216,19 @@ test('chained confirmation clears inherited image identity for a non-image tool'
   assert.equal(record.resolvedImageProviderId, undefined);
   assert.equal(record.resolvedImageModel, undefined);
   assert.equal(record.imageProviderModelFingerprint, undefined);
+});
+
+test('partial image failure retries failed current identities before untouched identities', () => {
+  const identity = (slotId) => ({ slotId, versionId: `version-${slotId}`, batchId: 'batch-1' });
+  const queued = resolveRemainingConfirmationTaskIdentities({
+    pendingTaskIdentities: [identity('slot-1'), identity('slot-2'), identity('slot-3')],
+    remainingTaskIdentities: [identity('slot-4'), identity('slot-5')],
+    completedTaskIdentities: [identity('slot-1'), identity('slot-3')],
+  });
+  const nextBatch = queued.slice(0, 2);
+  const laterBatch = queued.slice(2);
+
+  assert.deepEqual(queued.map(({ slotId }) => slotId), ['slot-2', 'slot-4', 'slot-5']);
+  assert.deepEqual(nextBatch.map(({ versionId }) => versionId), ['version-slot-2', 'version-slot-4']);
+  assert.equal(nextBatch.length + laterBatch.length, 3);
 });
