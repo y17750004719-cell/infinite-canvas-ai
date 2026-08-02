@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 
 import {
   AGENT_EXECUTION_PLAN_TOOL,
-  areAgentTaskContractsEqual,
   buildAgentExecutionPlanTool,
   buildAgentExecutionPlannerMessages,
   buildAgentTaskContract,
@@ -85,10 +84,7 @@ function plan(overrides = {}) {
     literalCopy,
   });
   const result = {
-    version: 3,
-    taskRelation: 'new_task',
-    taskRelationConfidence: 'high',
-    taskRelationReason: 'The user requested a separate deliverable.',
+    version: 4,
     intent: 'image',
     skillId: 'magazine-poster',
     confidence: 'high',
@@ -310,111 +306,56 @@ test('planner receives sanitized inline reference context and is the sole semant
   });
 });
 
-test('planner tool schema is Gemini-compatible while runtime validation enforces version 3', () => {
+test('planner tool schema is Gemini-compatible while runtime validation enforces version 4', () => {
   const versionSchema = AGENT_EXECUTION_PLAN_TOOL.function.parameters.properties.plan.properties.version;
   assert.equal(versionSchema.type, 'integer');
   assert.equal(versionSchema.enum, undefined);
-  assert.match(versionSchema.description, /must be 3/i);
+  assert.match(versionSchema.description, /must be 4/i);
   assertStringEnums(AGENT_EXECUTION_PLAN_TOOL.function.parameters);
 
   const options = {
     allowedSkillIds: ['magazine-poster'],
     skillToolsById: { 'magazine-poster': ['generate_image'] },
   };
-  const valid = validateAgentExecutionPlan(plan({ version: 3 }), options);
+  const valid = validateAgentExecutionPlan(plan({ version: 4 }), options);
   assert.ok(valid.plan);
-  assert.equal(valid.plan.version, 3);
+  assert.equal(valid.plan.version, 4);
 
-  const invalid = validateAgentExecutionPlan(plan({ version: 2 }), options);
+  const invalid = validateAgentExecutionPlan(plan({ version: 3 }), options);
   assert.equal(invalid.plan, null);
   assert.ok(invalid.validationErrors.some((entry) => entry.path === 'version' && entry.code === 'unsupported_version'));
 });
 
-test('planner v3 validates all task relations and canonical contract reuse', () => {
+test('planner v4 treats every executable request as independent', () => {
   const options = {
     allowedSkillIds: ['magazine-poster'],
     skillToolsById: { 'magazine-poster': ['generate_image'] },
     skillPromptStylesById: { 'magazine-poster': 'json-text' },
   };
-  const initial = validateAgentExecutionPlan(plan(), options).plan;
-  assert.ok(initial);
-  const activeTaskContext = {
-    topicId: 'topic-1',
-    taskId: 'task-1',
-    contractVersion: 1,
-    contract: buildAgentTaskContract(initial),
-    latestBatchId: 'batch-1',
-    activeVersions: [],
-  };
-  for (const taskRelation of ['continue_task', 'rerun_task']) {
-    const result = validateAgentExecutionPlan(plan({
-      taskRelation,
-      taskRelationReason: `The user requested ${taskRelation}.`,
-    }), { ...options, activeTaskContext });
-    assert.ok(result.plan, taskRelation);
+  const first = validateAgentExecutionPlan(plan(), options);
+  const second = validateAgentExecutionPlan(plan({ brief: { ...plan().brief, subject: 'a different statue' } }), options);
+  assert.ok(first.plan);
+  assert.ok(second.plan);
+  assert.equal(first.plan.version, 4);
+  assert.equal(second.plan.version, 4);
+  for (const field of ['taskRelation', 'taskRelationConfidence', 'taskRelationReason']) {
+    assert.equal(Object.hasOwn(first.plan, field), false);
   }
-  const revised = validateAgentExecutionPlan(plan({
-    taskRelation: 'revise_task',
-    taskRelationReason: 'The requested subject changed.',
-    brief: { ...plan().brief, subject: 'a different statue' },
-  }), { ...options, activeTaskContext });
-  assert.ok(revised.plan);
-
-  const unchangedRevision = validateAgentExecutionPlan(plan({
-    taskRelation: 'revise_task',
-    taskRelationReason: 'No executable field changed.',
-  }), { ...options, activeTaskContext });
-  assert.equal(unchangedRevision.plan, null);
-  assert.ok(unchangedRevision.validationErrors.some((entry) => entry.code === 'unchanged_task_contract'));
-
-  const mismatchedContinuation = validateAgentExecutionPlan(plan({
-    taskRelation: 'continue_task',
-    taskRelationReason: 'Continue, but with a changed subject.',
-    brief: { ...plan().brief, subject: 'a different statue' },
-  }), { ...options, activeTaskContext });
-  assert.equal(mismatchedContinuation.plan, null);
-  assert.ok(mismatchedContinuation.validationErrors.some((entry) => entry.code === 'task_contract_mismatch'));
-
-  const discussed = validateAgentExecutionPlan(plan({
-    taskRelation: 'discuss_task',
-    taskRelationReason: 'The user only asked a question about the task.',
-    intent: 'chat',
-    imageTask: undefined,
-    presentation: undefined,
-    generation: null,
-    execution: { kind: 'none', requiresConfirmation: false, tool: null },
-  }), { ...options, activeTaskContext });
-  assert.ok(discussed.plan);
 });
 
-test('task contract comparison rebinds task-owned edit targets to stable references', () => {
-  const activeTaskContext = {
-    activeVersions: [{ referenceId: 'slot:one', slotId: 'slot-1', versionId: 'version-2' }],
-  };
-  const base = plan({
-    imageTask: { ...plan().imageTask, operation: 'edit', targetReferenceId: 'slot-1' },
-  });
-  const candidate = plan({
-    imageTask: { ...plan().imageTask, operation: 'edit', targetReferenceId: 'version-2' },
-  });
-  assert.equal(areAgentTaskContractsEqual(base, candidate, activeTaskContext), true);
-  assert.equal(buildAgentTaskContract(candidate, activeTaskContext).imageTask.targetReferenceId, 'slot:one');
-});
-
-test('low task-relation confidence clarifies and cannot execute mutation', () => {
+test('execution kind none is closed to mutation fields', () => {
   const options = {
     allowedSkillIds: ['magazine-poster'],
     skillToolsById: { 'magazine-poster': ['generate_image'] },
     skillPromptStylesById: { 'magazine-poster': 'json-text' },
   };
-  const rejected = validateAgentExecutionPlan(plan({ taskRelationConfidence: 'low' }), options);
+  const rejected = validateAgentExecutionPlan(plan({
+    execution: { kind: 'none', requiresConfirmation: false, tool: null },
+  }), options);
   assert.equal(rejected.plan, null);
-  assert.ok(rejected.validationErrors.some((entry) => entry.code === 'clarification_required'));
-  assert.ok(rejected.validationErrors.some((entry) => entry.code === 'low_confidence_mutation'));
+  assert.ok(rejected.validationErrors.some((entry) => entry.code === 'none_mutation_conflict'));
 
   const clarified = validateAgentExecutionPlan(plan({
-    taskRelationConfidence: 'low',
-    taskRelationReason: 'The user may want either a new image or an edit.',
     needsClarification: true,
     clarification: {
       dimension: 'image_operation',
@@ -432,30 +373,28 @@ test('low task-relation confidence clarifies and cannot execute mutation', () =>
   assert.ok(clarified.plan);
 });
 
-test('active task context is capped at nine preview-only multimodal references', () => {
-  const activeVersions = Array.from({ length: 11 }, (_, index) => ({
-    referenceId: `slot:${index}`,
-    batchId: 'batch-1',
-    slotId: `slot-${index}`,
-    versionId: `version-${index}`,
-    src: `https://example.test/original-${index}.png`,
-    plannerPreviewSrc: `https://example.test/preview-${index}.png`,
-  }));
+test('planner ignores legacy active task context and only sends explicit references', () => {
   const messages = buildAgentExecutionPlannerMessages({
-    userMessage: '继续',
+    userMessage: '生成新图',
     activeTaskContext: {
       topicId: 'topic-1',
       taskId: 'task-1',
       contractVersion: 1,
       contract: buildAgentTaskContract(plan()),
-      latestBatchId: 'batch-1',
-      activeVersions,
+      activeVersions: [{
+        referenceId: 'slot:one',
+        batchId: 'batch-1',
+        slotId: 'slot-1',
+        versionId: 'version-1',
+        src: 'https://example.test/original.png',
+        plannerPreviewSrc: 'https://example.test/preview.png',
+      }],
     },
   });
-  const payload = JSON.parse(messages[1].content[0].text.split('\n').slice(1).join('\n'));
-  assert.equal(payload.activeTaskContext.activeVersions.length, 9);
-  assert.deepEqual(messages[1].content.filter((part) => part.type === 'image_url').map((part) => part.image_url.url),
-    activeVersions.slice(0, 9).map((entry) => entry.plannerPreviewSrc));
+  const payloadText = Array.isArray(messages[1].content)
+    ? messages[1].content[0].text
+    : messages[1].content;
+  assert.doesNotMatch(payloadText, /activeTaskContext|slot:one|preview\.png/);
 });
 
 test('planner tool schema keeps image references and context entities in separate id namespaces', () => {
@@ -596,6 +535,46 @@ test('imageTask and presentation are model-authored optional fields with structu
   }), options);
   assert.equal(multiOutputEdit.plan, null);
   assert.ok(multiOutputEdit.validationErrors.some((entry) => entry.path === 'delivery.outputCount' && entry.code === 'edit_count_mismatch'));
+});
+
+test('generate sourceReferenceId is explicit and must be a supporting reference', () => {
+  const options = {
+    allowedSkillIds: ['magazine-poster'],
+    skillToolsById: { 'magazine-poster': ['generate_image'] },
+    skillPromptStylesById: { 'magazine-poster': 'json-text' },
+    referenceIds: ['source-image', 'style-board'],
+  };
+  const generatedFromSource = validateAgentExecutionPlan(plan({
+    imageTask: {
+      ...plan().imageTask,
+      sourceReferenceId: 'source-image',
+      supportingReferenceIds: ['source-image', 'style-board'],
+    },
+    visualContext: visualContext(['source-image', 'style-board']),
+  }), options);
+  assert.ok(generatedFromSource.plan);
+  assert.equal(generatedFromSource.plan.imageTask.sourceReferenceId, 'source-image');
+
+  const missingSupport = validateAgentExecutionPlan(plan({
+    imageTask: { ...plan().imageTask, sourceReferenceId: 'source-image' },
+    visualContext: visualContext(['source-image', 'style-board']),
+  }), options);
+  assert.equal(missingSupport.plan, null);
+  assert.ok(missingSupport.validationErrors.some((entry) => entry.code === 'source_reference_not_supported'));
+
+  const editSource = validateAgentExecutionPlan(plan({
+    imageTask: {
+      ...plan().imageTask,
+      operation: 'edit',
+      targetReferenceId: 'source-image',
+      sourceReferenceId: 'source-image',
+      supportingReferenceIds: [],
+    },
+    visualContext: visualContext(['source-image'], 'source-image', 'high'),
+    delivery: { ...plan().delivery, mode: 'single', outputCount: 1 },
+  }), options);
+  assert.equal(editSource.plan, null);
+  assert.ok(editSource.validationErrors.some((entry) => entry.code === 'operation_mismatch'));
 });
 
 test('image-bearing plans require complete grounded visual context and reject ambiguous edit execution', () => {

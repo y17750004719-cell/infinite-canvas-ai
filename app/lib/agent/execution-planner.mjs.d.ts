@@ -4,7 +4,6 @@ import type {
   AgentExecutionPlannerInput,
   AgentExecutionPlanValidationOptions,
   AgentTaskContract,
-  AgentActiveTaskContext,
   AgentPlannerResolution,
   AgentPlannerFailureReason,
   PlanValidationIssue,
@@ -13,7 +12,6 @@ export type {
   AgentExecutionPlan,
   AgentExecutionPlannerInput,
   AgentExecutionPlanValidationOptions,
-  AgentTaskRelation,
   AgentTaskContract,
   AgentActiveTaskVersion,
   AgentActiveTaskContext,
@@ -44,8 +42,7 @@ export function buildAgentExecutionPlannerMessages(input?: AgentExecutionPlanner
 }>;
 export function parseAgentExecutionPlan(raw: string, options?: AgentExecutionPlanValidationOptions): AgentExecutionPlan | null;
 export function validateAgentExecutionPlan(value: unknown, options?: AgentExecutionPlanValidationOptions): { plan: AgentExecutionPlan | null; validationErrors: PlanValidationIssue[]; normalizedFields: string[] };
-export function buildAgentTaskContract(plan: AgentExecutionPlan | AgentTaskContract, activeTaskContext?: AgentActiveTaskContext | null): AgentTaskContract;
-export function areAgentTaskContractsEqual(left: AgentExecutionPlan | AgentTaskContract, right: AgentExecutionPlan | AgentTaskContract, activeTaskContext?: AgentActiveTaskContext | null): boolean;
+export function buildAgentTaskContract(plan: AgentExecutionPlan | AgentTaskContract): AgentTaskContract;
 export function buildFallbackAgentExecutionPlan(input?: AgentExecutionPlannerInput): AgentExecutionPlan | null;
 export function planAgentExecutionRequest(input?: AgentExecutionPlannerInput): Promise<AgentPlannerResolution>;
 export function executionPlanToImageDeliveryPlan(plan: AgentExecutionPlan): Record<string, unknown>;

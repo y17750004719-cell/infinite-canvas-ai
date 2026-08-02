@@ -1,6 +1,7 @@
 export interface AgentImageTask {
   operation: 'generate' | 'edit';
   targetReferenceId: string | null;
+  sourceReferenceId?: string | null;
   supportingReferenceIds: string[];
   instruction: string;
   mustChange: string[];
@@ -92,16 +93,12 @@ export interface AgentRegionSelection {
 export interface AgentExecutionPlannerInput extends Record<string, unknown> {
   userMessage?: string;
   referenceContext?: AgentPlannerReferenceContext | null;
-  activeTaskContext?: AgentActiveTaskContext | null;
 }
 
 export interface AgentExecutionPlanValidationOptions extends Record<string, unknown> {
   referenceIds?: string[];
   regionIds?: string[];
-  activeTaskContext?: AgentActiveTaskContext | null;
 }
-
-export type AgentTaskRelation = 'new_task' | 'continue_task' | 'revise_task' | 'rerun_task' | 'discuss_task';
 
 export interface AgentTaskContract {
   intent: AgentExecutionPlan['intent'];
@@ -135,10 +132,7 @@ export interface AgentActiveTaskContext {
 }
 
 export interface AgentExecutionPlan {
-  version: 3;
-  taskRelation: AgentTaskRelation;
-  taskRelationConfidence: 'high' | 'medium' | 'low';
-  taskRelationReason: string;
+  version: 4;
   intent: 'chat' | 'image' | 'skill_action' | 'analysis';
   skillId: string | null;
   confidence: 'high' | 'medium' | 'low';

@@ -6,7 +6,6 @@ const MODES = new Set(['single', 'series', 'variants', 'composite']);
 const CONFIDENCES = new Set(['high', 'medium', 'low']);
 const EXECUTION_KINDS = new Set(['image_pipeline', 'skill_job', 'agent_loop', 'none']);
 const IMAGE_OPERATIONS = new Set(['generate', 'edit']);
-const TASK_RELATIONS = new Set(['new_task', 'continue_task', 'revise_task', 'rerun_task', 'discuss_task']);
 const REFERENCE_SOURCES = new Set(['upload', 'history', 'canvas']);
 const REFERENCE_ROLES = new Set(['reference', 'edit_target', 'annotation_bundle', 'region_target']);
 const VISUAL_REFERENCE_ROLES = new Set(['edit_target', 'style_reference', 'content_reference', 'layout_reference', 'unresolved']);
@@ -45,12 +44,9 @@ const compactNormalizedBox = (value) => {
 
 export const AGENT_EXECUTION_PLAN_SCHEMA = {
   type: 'object',
-  required: ['version', 'taskRelation', 'taskRelationConfidence', 'taskRelationReason', 'intent', 'confidence', 'needsClarification', 'brief', 'delivery', 'generation', 'execution'],
+  required: ['version', 'intent', 'confidence', 'needsClarification', 'brief', 'delivery', 'generation', 'execution'],
   properties: {
-    version: { type: 'integer', description: 'Execution plan schema version. Must be 3.' },
-    taskRelation: { type: 'string', enum: ['new_task', 'continue_task', 'revise_task', 'rerun_task', 'discuss_task'] },
-    taskRelationConfidence: { type: 'string', enum: ['high', 'medium', 'low'] },
-    taskRelationReason: { type: 'string' },
+    version: { type: 'integer', description: 'Execution plan schema version. Must be 4.' },
     intent: { type: 'string', enum: ['chat', 'image', 'skill_action', 'analysis'] },
     skillId: { type: 'string', description: 'Use only an id supplied in the skill manifests. Omit when no skill fits.' },
     confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
@@ -114,6 +110,10 @@ export const AGENT_EXECUTION_PLAN_SCHEMA = {
         targetReferenceId: {
           type: 'string',
           description: 'Required for edit. Omit for generate.',
+        },
+        sourceReferenceId: {
+          type: 'string',
+          description: 'Optional source for generate-from-reference. Must also appear in supportingReferenceIds. Omit for edit.',
         },
         supportingReferenceIds: { type: 'array', items: { type: 'string' } },
         targetRegionIds: { type: 'array', items: { type: 'string' } },
@@ -219,14 +219,13 @@ export const AGENT_EXECUTION_PLAN_TOOL = {
 
 export function buildAgentExecutionPlanTool(input = {}) {
   const schema = structuredClone(AGENT_EXECUTION_PLAN_SCHEMA);
-  const combinedReferenceContext = plannerReferenceContext(input.referenceContext, input.activeTaskContext);
   const contextEntityIds = Array.from(new Set(
     (Array.isArray(input.contextEntities) ? input.contextEntities : [])
       .map((entity) => text(entity?.id))
       .filter(Boolean),
   ));
   const referenceIds = Array.from(new Set(
-    (compactReferenceContext(combinedReferenceContext)?.references || [])
+    (compactReferenceContext(input.referenceContext)?.references || [])
       .map((reference) => reference.id)
       .filter(Boolean),
   ));
@@ -249,6 +248,7 @@ export function buildAgentExecutionPlanTool(input = {}) {
   if (referenceIds.length > 0) {
     schema.properties.visualContext.properties.references.items.properties.referenceId.enum = referenceIds;
     schema.properties.imageTask.properties.targetReferenceId.enum = referenceIds;
+    schema.properties.imageTask.properties.sourceReferenceId.enum = referenceIds;
     schema.properties.imageTask.properties.supportingReferenceIds.items.enum = referenceIds;
   } else {
     schema.properties.visualContext.properties.references.maxItems = 0;
@@ -351,87 +351,8 @@ function compactReferenceContext(value) {
   };
 }
 
-function compactActiveTaskContext(value) {
-  if (!isObject(value)) return null;
-  const topicId = text(value.topicId);
-  const taskId = text(value.taskId);
-  const contractVersion = positive(value.contractVersion);
-  if (!topicId || !taskId || !contractVersion || !isObject(value.contract)) return null;
-  const latestBatchId = text(value.latestBatchId) || null;
-  const activeVersions = (Array.isArray(value.activeVersions) ? value.activeVersions : [])
-    .slice(0, 9)
-    .map((entry) => {
-      if (!isObject(entry)) return null;
-      const referenceId = text(entry.referenceId);
-      const batchId = text(entry.batchId);
-      const slotId = text(entry.slotId);
-      const versionId = text(entry.versionId);
-      const src = text(entry.src);
-      const plannerPreviewSrc = text(entry.plannerPreviewSrc);
-      if (!referenceId || !batchId || !slotId || !versionId || !src || !plannerPreviewSrc) return null;
-      if (latestBatchId && batchId !== latestBatchId) return null;
-      return {
-        referenceId,
-        batchId,
-        slotId,
-        versionId,
-        ...(text(entry.parentVersionId) ? { parentVersionId: text(entry.parentVersionId) } : {}),
-        src,
-        plannerPreviewSrc,
-        ...(text(entry.label) ? { label: text(entry.label) } : {}),
-      };
-    })
-    .filter(Boolean);
-  return {
-    topicId,
-    taskId,
-    contractVersion,
-    contract: structuredClone(value.contract),
-    editBaseVersionId: text(value.editBaseVersionId) || null,
-    latestBatchId,
-    activeVersions,
-  };
-}
-
-function plannerReferenceContext(referenceContext, activeTaskContext) {
-  const active = compactActiveTaskContext(activeTaskContext);
-  const references = Array.isArray(referenceContext?.references) ? [...referenceContext.references] : [];
-  const knownIds = new Set(references.map((reference) => text(reference?.id)).filter(Boolean));
-  for (const version of active?.activeVersions || []) {
-    if (knownIds.has(version.referenceId)) continue;
-    knownIds.add(version.referenceId);
-    references.push({
-      id: version.referenceId,
-      src: version.src,
-      plannerPreviewSrc: version.plannerPreviewSrc,
-      label: version.label || `Active task image ${version.slotId}`,
-      source: 'history',
-      role: 'reference',
-    });
-  }
-  return {
-    references,
-    composerSegments: Array.isArray(referenceContext?.composerSegments) ? referenceContext.composerSegments : [],
-    evidenceImages: Array.isArray(referenceContext?.evidenceImages) ? referenceContext.evidenceImages : [],
-  };
-}
-
-function stableReferenceId(value, activeTaskContext) {
-  const id = text(value);
-  if (!id) return null;
-  const match = activeTaskContext?.activeVersions?.find((entry) => (
-    entry.referenceId === id || entry.slotId === id || entry.versionId === id
-  ));
-  return match?.referenceId || id;
-}
-
-export function buildAgentTaskContract(plan, activeTaskContext = null) {
-  const imageTask = isObject(plan?.imageTask)
-    ? {
-        ...structuredClone(plan.imageTask),
-        targetReferenceId: stableReferenceId(plan.imageTask.targetReferenceId, activeTaskContext),
-      }
-    : undefined;
+export function buildAgentTaskContract(plan) {
+  const imageTask = isObject(plan?.imageTask) ? structuredClone(plan.imageTask) : undefined;
   return {
     intent: plan?.intent,
     skillId: plan?.skillId ?? null,
@@ -441,16 +362,6 @@ export function buildAgentTaskContract(plan, activeTaskContext = null) {
     generation: plan?.generation ? structuredClone(plan.generation) : null,
     execution: structuredClone(plan?.execution),
   };
-}
-
-export function areAgentTaskContractsEqual(left, right, activeTaskContext = null) {
-  const canonicalJson = (value) => JSON.stringify(value, (_key, entry) => (
-    isObject(entry)
-      ? Object.fromEntries(Object.entries(entry).sort(([leftKey], [rightKey]) => leftKey.localeCompare(rightKey)))
-      : entry
-  ));
-  return canonicalJson(buildAgentTaskContract(left, activeTaskContext))
-    === canonicalJson(buildAgentTaskContract(right, activeTaskContext));
 }
 
 export function compactCanvasContext(value) {
@@ -641,11 +552,15 @@ function normalizeImageTask(value, intent, referenceIds, regionIds, validationEr
     validationErrors.push(issue('imageTask.operation', operation ? 'invalid_enum' : 'required', 'A valid image operation is required.'));
   }
   const targetReferenceId = text(value.targetReferenceId) || null;
+  const sourceReferenceId = text(value.sourceReferenceId) || null;
   if (operation === 'edit' && !targetReferenceId) {
     validationErrors.push(issue('imageTask.targetReferenceId', 'required', 'Image edit requires a target reference id.'));
   }
   if (operation === 'generate' && targetReferenceId) {
     validationErrors.push(issue('imageTask.targetReferenceId', 'operation_mismatch', 'Image generation cannot specify an edit target.'));
+  }
+  if (operation === 'edit' && sourceReferenceId) {
+    validationErrors.push(issue('imageTask.sourceReferenceId', 'operation_mismatch', 'Image edits derive their source from targetReferenceId and cannot specify sourceReferenceId.'));
   }
   const knownReferences = new Set(referenceIds);
   if (targetReferenceId && !knownReferences.has(targetReferenceId)) {
@@ -672,6 +587,9 @@ function normalizeImageTask(value, intent, referenceIds, regionIds, validationEr
       validationErrors.push(issue(`imageTask.supportingReferenceIds[${index}]`, 'unknown_reference', 'The supporting reference is not available in referenceContext.'));
     }
   }
+  if (sourceReferenceId && !filteredSupportingReferenceIds.includes(sourceReferenceId)) {
+    validationErrors.push(issue('imageTask.sourceReferenceId', 'source_reference_not_supported', 'sourceReferenceId must also appear in supportingReferenceIds.'));
+  }
   const instruction = text(value.instruction);
   if (!instruction) validationErrors.push(issue('imageTask.instruction', 'required', 'Image task instruction is required.'));
   const mustChange = normalizeRequiredStringArray(value.mustChange, 'imageTask.mustChange', validationErrors, normalizedFields);
@@ -694,6 +612,7 @@ function normalizeImageTask(value, intent, referenceIds, regionIds, validationEr
     ? {
         operation,
         targetReferenceId,
+        ...(sourceReferenceId ? { sourceReferenceId } : {}),
         supportingReferenceIds: filteredSupportingReferenceIds,
         instruction,
         mustChange,
@@ -959,7 +878,6 @@ export function validateAgentExecutionPlan(value, {
   manualSkillId = null,
   skillPromptStylesById = {},
   userMessage = '',
-  activeTaskContext = null,
 } = {}) {
   const validationErrors = [];
   const normalizedFields = [];
@@ -972,22 +890,7 @@ export function validateAgentExecutionPlan(value, {
   }
 
   const version = Number(value.version);
-  if (version !== 3) validationErrors.push(issue('version', 'unsupported_version', 'Only AgentExecutionPlan version 3 is supported.'));
-
-  const taskRelation = text(value.taskRelation);
-  if (!TASK_RELATIONS.has(taskRelation)) {
-    validationErrors.push(issue('taskRelation', taskRelation ? 'invalid_enum' : 'required', 'A valid task relation is required.'));
-  }
-  const taskRelationConfidence = text(value.taskRelationConfidence);
-  if (!CONFIDENCES.has(taskRelationConfidence)) {
-    validationErrors.push(issue('taskRelationConfidence', taskRelationConfidence ? 'invalid_enum' : 'required', 'A valid task relation confidence is required.'));
-  }
-  const taskRelationReason = text(value.taskRelationReason);
-  if (!taskRelationReason) validationErrors.push(issue('taskRelationReason', 'required', 'A concise task relation reason is required.'));
-  const activeTask = compactActiveTaskContext(activeTaskContext);
-  if (['continue_task', 'revise_task', 'rerun_task'].includes(taskRelation) && !activeTask) {
-    validationErrors.push(issue('taskRelation', 'active_task_required', 'This task relation requires a valid active task context.'));
-  }
+  if (version !== 4) validationErrors.push(issue('version', 'unsupported_version', 'Only AgentExecutionPlan version 4 is supported.'));
 
   const intent = text(value.intent);
   if (!INTENTS.has(intent)) validationErrors.push(issue('intent', intent ? 'invalid_enum' : 'required', 'A valid intent is required.'));
@@ -1132,6 +1035,9 @@ export function validateAgentExecutionPlan(value, {
   if (executionKind === 'none' && suppliedTool) {
     validationErrors.push(issue('execution.tool', 'execution_tool_mismatch', 'Execution kind none cannot specify a tool.'));
   }
+  if (executionKind === 'none' && (imageTask || generation || presentation)) {
+    validationErrors.push(issue('execution.kind', 'none_mutation_conflict', 'Execution kind none cannot include image mutation fields.'));
+  }
   if (executionKind === 'image_pipeline' && suppliedTool && suppliedTool !== 'generate_image') {
     validationErrors.push(issue('execution.tool', 'execution_tool_mismatch', 'image_pipeline requires generate_image.'));
   }
@@ -1155,61 +1061,13 @@ export function validateAgentExecutionPlan(value, {
     validationErrors.push(issue('generation', 'required', 'Executable image plans require supplier-ready final prompts.'));
   }
 
-  if (taskRelation === 'discuss_task') {
-    if (imageTask || generation || executionKind !== 'none' || requestedTool) {
-      validationErrors.push(issue('taskRelation', 'discussion_mutation_conflict', 'discuss_task cannot include a mutation contract or executable tool.'));
-    }
-  }
-  if (taskRelationConfidence === 'low') {
-    if (needsClarification !== true || !clarification) {
-      validationErrors.push(issue('taskRelationConfidence', 'clarification_required', 'Low-confidence task relations require clarification.'));
-    }
-    if (imageTask || executionKind !== 'none' || requestedTool) {
-      validationErrors.push(issue('taskRelationConfidence', 'low_confidence_mutation', 'Low-confidence task relations cannot execute mutation tools.'));
-    }
-  }
-
-  if (activeTask && ['continue_task', 'rerun_task', 'revise_task'].includes(taskRelation)) {
-    const candidateContract = {
-      intent,
-      skillId,
-      brief: { deliverable, subject, style, literalCopy, constraints },
-      delivery: {
-        mode,
-        outputCount,
-        panelCount: mode === 'composite' ? panelCount : null,
-        variationAxes,
-        sharedInvariants,
-        distinctPerItem,
-        items,
-      },
-      ...(imageTask ? { imageTask } : {}),
-      generation,
-      execution: {
-        kind: executionKind,
-        requiresConfirmation: executionKind === 'none' ? false : Boolean(outputCount > 1 || requiresConfirmation),
-        tool: requestedTool,
-      },
-    };
-    const sameContract = areAgentTaskContractsEqual(candidateContract, activeTask.contract, activeTask);
-    if (['continue_task', 'rerun_task'].includes(taskRelation) && !sameContract) {
-      validationErrors.push(issue('taskRelation', 'task_contract_mismatch', `${taskRelation} must reuse the active executable contract exactly.`));
-    }
-    if (taskRelation === 'revise_task' && sameContract) {
-      validationErrors.push(issue('taskRelation', 'unchanged_task_contract', 'revise_task must change the active executable contract.'));
-    }
-  }
-
   if (validationErrors.length > 0) {
     return { plan: null, validationErrors, normalizedFields };
   }
 
   return {
     plan: {
-      version: 3,
-      taskRelation,
-      taskRelationConfidence,
-      taskRelationReason,
+      version: 4,
       intent,
       skillId,
       confidence,
@@ -1256,7 +1114,6 @@ export function buildAgentExecutionPlannerMessages({
   imageOptions = null,
   canvasContext = null,
   referenceContext = null,
-  activeTaskContext = null,
 } = {}) {
   const system = [
     'You are the unified semantic planner for the Z Flow design agent.',
@@ -1269,13 +1126,11 @@ export function buildAgentExecutionPlannerMessages({
     'The activeSkillId is an explicit user choice. Preserve it exactly when present.',
     'Choose skillId only from the supplied manifests, contextReferences only from contextEntities[].id, and tools only from the selected skill allowedTools.',
     'Ask only when different answers materially change the result. Optional creative detail should be completed by the model.',
-    'Classify taskRelation independently from imageTask.operation. new_task starts a separate goal; revise_task changes the active executable contract; continue_task performs the next work under the exact active contract; rerun_task repeats the exact active contract; discuss_task only discusses the active work and performs no mutation.',
-    'A task may revise or continue with either image operation. Never infer generate versus edit from taskRelation.',
-    'Use continue_task or rerun_task only when the executable task contract exactly matches activeTaskContext.contract. Use revise_task only when that contract changes. Presentation copy, confidence, relation metadata, clarification, visual analysis, and contextReferences are not part of that comparison.',
-    'If task continuity, generate-versus-edit operation, or a unique edit target remains materially ambiguous, request clarification with useful choices and omit imageTask. Never guess an edit target.',
+    'Each executable user request is independently planned. Task identity is created by the runtime and is never inferred from conversation history.',
+    'Use execution.kind to decide whether this request executes, and imageTask.operation to distinguish new generation from editing.',
+    'If generate-versus-edit operation or a unique edit target remains materially ambiguous, request clarification with useful choices and omit imageTask. Never guess an edit target.',
     'When generate versus edit is ambiguous, use clarification dimension image_operation with choices {id:"generate", label:"生成新图", answer:"生成一张新图片"} and {id:"edit", label:"编辑现有图", answer:"编辑我指定的图片"}. When edit targets are ambiguous, use dimension edit_target and copy each candidate reference ID into its option id.',
-    'Low taskRelationConfidence must set needsClarification true, include clarification choices, omit imageTask, and use execution kind none with no tool.',
-    'For discuss_task, use execution kind none with no tool, omit imageTask, and set generation to null.',
+    'For discussion, analysis, or clarification, use execution kind none with no tool, omit imageTask and presentation, and set generation to null.',
     'The total requested output count may exceed one batch; preserve it and let the runtime enforce batching and confirmation.',
     'You are the only component that decides whether the user wants chat, analysis, a new image, or an edit to an existing image. Make that decision from the full meaning and inline reference order; the runtime will not infer intent from keywords or regular expressions.',
     'When image references are supplied, inspect the actual image pixels together with the user text. Do not plan from filenames, labels, declared roles, or token position alone.',
@@ -1290,19 +1145,19 @@ export function buildAgentExecutionPlannerMessages({
     'For region-targeted edits, preserve unmarked subjects, typography, layout, background, and lighting unless the user explicitly requests otherwise.',
     'Never substitute a filename, URL, canvas node id, label, an id from an earlier turn, or a newly invented id for either namespace.',
     'For an executable image request, include imageTask. Use operation edit only when the user wants to change a specific supplied image, set its id as targetReferenceId, and put any other visual references in supportingReferenceIds. Use operation generate for a new image and omit targetReferenceId.',
+    'For generate based on a specific supplied historical image, set sourceReferenceId to that image id and also include it in supportingReferenceIds. Otherwise omit sourceReferenceId. Never use sourceReferenceId for edit.',
     'For edit, instruction must be a complete image-editing instruction, mustChange must list the requested changes, and mustPreserve must list the relevant existing visual properties that should remain unchanged. Do not redesign unspecified content.',
     'Image edits support exactly one output in this version: set delivery.outputCount to 1.',
+    'If the user asks to edit "the previous image" but no image is explicitly supplied in the current referenceContext, request target clarification. Do not infer or retrieve an image from earlier tasks.',
     'If the user asks to edit but no unique target can be selected, set needsClarification with useful choices and omit imageTask until the ambiguity is resolved.',
     'For an executable image request, include presentation with a concise result title and a completionSummary describing the planned work. Do not claim that execution has already succeeded.',
-    'Return AgentExecutionPlan version 3 with taskRelation, taskRelationConfidence, and a concise taskRelationReason. For image intent, generation is required and must contain the final supplier-ready prompt; no later language model will optimize or repair it.',
+    'Return AgentExecutionPlan version 4. For image intent, generation is required and must contain the final supplier-ready prompt; no later language model will optimize or repair it.',
     'generation.prompt must fully specify subject, composition, style, lighting, materials, color, literal text, dimensions, and every imageTask.mustChange and imageTask.mustPreserve requirement verbatim.',
     'For series delivery, generation.items must contain exactly outputCount complete, distinct prompts in order. For other delivery modes generation.items must be empty.',
     'generation.promptFormat must match the selected skill promptStyle, defaulting to text when no skill is selected. json-text prompts must themselves be valid JSON without Markdown fences.',
     'This is the only analysis request. Call the required tool once with a complete valid plan; there will be no retry, repair request, fallback model, or prompt optimizer.',
   ].join('\n');
-  const compactedActiveTaskContext = compactActiveTaskContext(activeTaskContext);
-  const combinedReferenceContext = plannerReferenceContext(referenceContext, compactedActiveTaskContext);
-  const compactedReferenceContext = compactReferenceContext(combinedReferenceContext);
+  const compactedReferenceContext = compactReferenceContext(referenceContext);
   const structuredPayload = JSON.stringify({
     userMessage: text(userMessage),
     messages: compactConversation(messages),
@@ -1311,24 +1166,6 @@ export function buildAgentExecutionPlannerMessages({
     imageOptions: isObject(imageOptions) ? imageOptions : null,
     canvasContext: compactCanvasContext(canvasContext),
     referenceContext: compactedReferenceContext,
-    activeTaskContext: compactedActiveTaskContext
-      ? {
-          topicId: compactedActiveTaskContext.topicId,
-          taskId: compactedActiveTaskContext.taskId,
-          contractVersion: compactedActiveTaskContext.contractVersion,
-          contract: compactedActiveTaskContext.contract,
-          editBaseVersionId: compactedActiveTaskContext.editBaseVersionId,
-          latestBatchId: compactedActiveTaskContext.latestBatchId,
-          activeVersions: compactedActiveTaskContext.activeVersions.map(({ referenceId, batchId, slotId, versionId, parentVersionId, label }) => ({
-            referenceId,
-            batchId,
-            slotId,
-            versionId,
-            ...(parentVersionId ? { parentVersionId } : {}),
-            ...(label ? { label } : {}),
-          })),
-        }
-      : null,
     availableImageReferenceIds: compactedReferenceContext?.references.map((reference) => reference.id) || [],
     availableContextEntityIds: contextEntities.map((entity) => text(entity?.id)).filter(Boolean),
     selectedContextEntityIds: Array.isArray(selectedContextEntityIds) ? selectedContextEntityIds.map(text).filter(Boolean) : [],
@@ -1357,7 +1194,7 @@ export function buildAgentExecutionPlannerMessages({
       lastResolvedAt: entity.lastResolvedAt,
     })),
   });
-  const multimodalParts = buildMultimodalReferenceParts(combinedReferenceContext, {
+  const multimodalParts = buildMultimodalReferenceParts(referenceContext, {
     fallbackText: userMessage,
     imageSource: 'preview',
   });
@@ -1424,8 +1261,7 @@ function parsePlannerCandidate(response) {
 function validationOptions(input) {
   const manifests = Array.isArray(input.manifests) ? input.manifests : [];
   const contextEntities = Array.isArray(input.contextEntities) ? input.contextEntities : [];
-  const activeTaskContext = compactActiveTaskContext(input.activeTaskContext);
-  const referenceContext = compactReferenceContext(plannerReferenceContext(input.referenceContext, activeTaskContext));
+  const referenceContext = compactReferenceContext(input.referenceContext);
   const canvasContext = compactCanvasContext(input.canvasContext);
   return {
     allowedSkillIds: manifests.map((item) => item.id),
@@ -1437,7 +1273,6 @@ function validationOptions(input) {
     regionIds: canvasContext?.regionSelections.map((region) => region.regionId) || [],
     manualSkillId: input.activeSkillId,
     userMessage: input.userMessage,
-    activeTaskContext,
   };
 }
 
@@ -1467,7 +1302,7 @@ function classifyPlannerTransportFailure(error, input) {
     return 'timeout';
   }
   const hasVisualReferences = Boolean(compactReferenceContext(
-    plannerReferenceContext(input?.referenceContext, input?.activeTaskContext),
+    input?.referenceContext,
   )?.references.length);
   if (!hasVisualReferences) return 'transport';
   if (code === 'reference_image_unavailable' || name === 'referenceimageunavailableerror') {
