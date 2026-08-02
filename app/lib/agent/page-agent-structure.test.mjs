@@ -410,6 +410,14 @@ test('generated image result cards persist and render model-authored presentatio
   assert.match(source, /event\.type === 'agent_completion_summary'/);
   assert.match(source, /processedAgentCompletionSummariesRef/);
   assert.match(source, /role: 'assistant',\s*content: event\.summary/);
+  const completionSummarySource = source.slice(
+    source.indexOf("if (event.type === 'agent_completion_summary')"),
+    source.indexOf("if (event.type === 'agent_error')"),
+  );
+  assert.ok(
+    completionSummarySource.indexOf('await generatedAssetPreloadChain;')
+      < completionSummarySource.indexOf('setChatMessages(prev => [...prev, {'),
+  );
   assert.doesNotMatch(source, /generatedPresentationSummary/);
   assert.doesNotMatch(source, /resultSummary: event\.action\.presentation\.summary/);
 });

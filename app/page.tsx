@@ -14500,6 +14500,7 @@ export default function AIWorkspace() {
                 && !processedAgentCompletionSummariesRef.current.has(summaryRunId)
               ) {
                 processedAgentCompletionSummariesRef.current.add(summaryRunId);
+                await generatedAssetPreloadChain;
                 flushQueuedChatMessageUpdates();
                 setChatMessages(prev => [...prev, {
                   id: `${assistantId}-completion-${summaryRunId}`,
