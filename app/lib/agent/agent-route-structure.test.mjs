@@ -471,6 +471,14 @@ test('task identities survive confirmation and enrich streamed and aggregate ass
   }
 });
 
+test('reservation keeps edit provenance distinct from regenerate provenance', () => {
+  const source = fs.readFileSync(routePath, 'utf8');
+  assert.match(source, /const editBaseVersionId = plan\.imageTask\.operation === 'edit' \? parentVersionId \|\| null : null/);
+  assert.match(source, /editBaseVersionId: reservation\.editBaseVersionId/);
+  assert.match(source, /editBaseVersionId: confirmationRecord\.editBaseVersionId \|\| null/);
+  assert.match(source, /sourceVersionId: confirmationRecord\.sourceVersionId \|\| null/);
+});
+
 test('edit execution requires an explicitly supplied original reference', () => {
   const source = fs.readFileSync(routePath, 'utf8');
   assert.match(source, /requireOriginalAsset\(\{/);

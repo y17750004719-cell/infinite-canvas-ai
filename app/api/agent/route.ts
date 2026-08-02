@@ -192,6 +192,7 @@ type ConfirmationRecord = {
   completedTaskIdentities?: AgentPendingAssetIdentity[];
   sourceTaskId?: string | null;
   sourceVersionId?: string | null;
+  editBaseVersionId?: string | null;
   referenceContext?: AgentRuntimeReferenceContext;
   resolvedProviderId?: string;
   resolvedModel?: string;
@@ -629,12 +630,22 @@ function reserveTaskExecution(
   identities: AgentPendingAssetIdentity[];
   sourceTaskId: string | null;
   sourceVersionId: string | null;
+  editBaseVersionId: string | null;
 } {
   const taskId = randomUUID();
   const contractVersion = 1;
   const contract = buildAgentTaskContract(plan);
   if (!plan.imageTask || plan.execution.kind !== 'image_pipeline') {
-    return { taskId, contractVersion, contract, latestBatchId: null, identities: [], sourceTaskId: null, sourceVersionId: null };
+    return {
+      taskId,
+      contractVersion,
+      contract,
+      latestBatchId: null,
+      identities: [],
+      sourceTaskId: null,
+      sourceVersionId: null,
+      editBaseVersionId: null,
+    };
   }
   const batchId = randomUUID();
   const sourceReferenceId = plan.imageTask.operation === 'edit'
@@ -644,6 +655,7 @@ function reserveTaskExecution(
     ? referenceContext?.references.find((reference) => reference.id === sourceReferenceId)
     : undefined;
   const parentVersionId = sourceReference?.sourceVersionId;
+  const editBaseVersionId = plan.imageTask.operation === 'edit' ? parentVersionId || null : null;
   const identities = Array.from({ length: plan.delivery.outputCount }, () => {
     const slotId = randomUUID();
     return {
@@ -662,6 +674,7 @@ function reserveTaskExecution(
     identities,
     sourceTaskId: sourceReference?.sourceTaskId || null,
     sourceVersionId: sourceReference?.sourceVersionId || null,
+    editBaseVersionId,
   };
 }
 
@@ -1043,6 +1056,7 @@ export async function POST(request: NextRequest) {
           contractVersion: reservation.contractVersion,
           contract: structuredClone(reservation.contract),
           latestBatchId: reservation.latestBatchId,
+          editBaseVersionId: reservation.editBaseVersionId,
           activeVersions: [],
         };
         return reservation;
@@ -1062,7 +1076,7 @@ export async function POST(request: NextRequest) {
           taskId: reservation.taskId,
           contractVersion: reservation.contractVersion,
           contract: structuredClone(reservation.contract),
-          editBaseVersionId: null,
+          editBaseVersionId: reservation.editBaseVersionId,
           latestBatchId: reservation.latestBatchId,
           activeVersions,
         };
@@ -1083,6 +1097,7 @@ export async function POST(request: NextRequest) {
           completedTaskIdentities: structuredClone(completedTaskIdentities),
           sourceTaskId: reservation.sourceTaskId,
           sourceVersionId: reservation.sourceVersionId,
+          editBaseVersionId: reservation.editBaseVersionId,
         } : {};
       };
       const progressTracker = createAgentProgressTracker({
@@ -1609,6 +1624,7 @@ export async function POST(request: NextRequest) {
               identities: structuredClone(confirmationRecord.pendingTaskIdentities || []),
               sourceTaskId: confirmationRecord.sourceTaskId || null,
               sourceVersionId: confirmationRecord.sourceVersionId || null,
+              editBaseVersionId: confirmationRecord.editBaseVersionId || null,
             };
             completedTaskIdentities = structuredClone(confirmationRecord.completedTaskIdentities || []);
             taskSnapshot = {
@@ -1616,7 +1632,7 @@ export async function POST(request: NextRequest) {
               taskId: confirmationRecord.taskId,
               contractVersion: confirmationRecord.contractVersion,
               contract: structuredClone(confirmationRecord.taskContract),
-              editBaseVersionId: null,
+              editBaseVersionId: confirmationRecord.editBaseVersionId || null,
               latestBatchId: null,
               activeVersions: [],
             };
