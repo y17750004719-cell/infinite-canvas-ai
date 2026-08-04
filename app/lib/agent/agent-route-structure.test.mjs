@@ -21,9 +21,9 @@ test('agent route exposes NDJSON orchestration events and reuses the generate ro
     'context_resolved',
     'brief_compiled',
     'skill_selected',
+    'active_skill_changed',
     'clarification_required',
-    'prompt_optimization_start',
-    'prompt_optimization_done',
+    'image_prompts_ready',
     'tool_start',
     'tool_result',
     'client_action',
@@ -59,18 +59,19 @@ test('agent route exposes NDJSON orchestration events and reuses the generate ro
   assert.match(source, /application\/x-ndjson/);
 });
 
-test('agent region prompts use compacted context and preserve the region-aware planner prompt', () => {
+test('agent region prompts are compiled by the planner without post-processing', () => {
   const source = fs.readFileSync(routePath, 'utf8');
-  assert.match(source, /compactCanvasContext\(canvasContext\)/);
-  assert.match(source, /\? regionAwareOptimizedResult\.prompt/);
-  assert.match(source, /ensureOptimizedPromptCoverage\(regionAwareOptimizedResult\.prompt/);
+  const plannerSource = fs.readFileSync(executionPlannerPath, 'utf8');
+  assert.match(source, /canvasContext:\s*body\.canvasContext/);
+  assert.match(plannerSource, /canvasContext:\s*compactCanvasContext\(canvasContext\)/);
+  assert.doesNotMatch(source, /ensureOptimizedPromptCoverage|appendRegionTargetContract|optimizeImagePrompt/);
 });
 
-test('agent route resolves context references before clarification optimization and tools', () => {
+test('agent route resolves context before planning and image tools', () => {
   const source = fs.readFileSync(routePath, 'utf8');
   assert.match(source, /resolveContextReference/);
   assert.match(source, /compileExecutionBrief/);
-  assert.match(source, /ensureOptimizedPromptCoverage/);
+  assert.doesNotMatch(source, /ensureOptimizedPromptCoverage|appendRegionTargetContract|optimizeImagePrompt/);
   assert.match(source, /contextEntities\?:\s*AgentContextEntity\[\]/);
   assert.match(source, /selectedContextEntityIds\?:\s*string\[\]/);
   assert.match(source, /contextResolution\.status === 'resolved'/);
@@ -78,9 +79,9 @@ test('agent route resolves context references before clarification optimization 
   assert.match(source, /writeAgentDone\('context_reference_required'\)/);
   assert.match(source, /userMessage:\s*executionBrief/);
   const contextGate = source.indexOf('if (!body.clarificationResponse && contextResolution.detected)');
-  const optimizer = source.indexOf('await optimizeImagePrompt', contextGate);
+  const planner = source.indexOf('await planAgentExecutionRequest', contextGate);
   const imageTool = source.indexOf("executeAgentTool(toolRegistry, 'generate_image'", contextGate);
-  assert.ok(contextGate >= 0 && optimizer > contextGate && imageTool > optimizer);
+  assert.ok(contextGate >= 0 && planner > contextGate && imageTool > planner);
 });
 
 test('agent route strips structured proposals and emits public proposal events', () => {
@@ -135,6 +136,18 @@ test('agent route resolves raw user counts before briefs and validates the final
   assert.match(source, /actualRequestCount:\s*requests\.length/);
 });
 
+test('agent route exposes exact supplier prompts before image generation starts', () => {
+  const source = fs.readFileSync(routePath, 'utf8');
+  const requestValidationIndex = source.indexOf("requests.some((request) => Number(request?.n) !== 1)");
+  const promptEventIndex = source.indexOf("type: 'image_prompts_ready'", requestValidationIndex);
+  const supplierCallIndex = source.indexOf('settleCanvasImageGenerationRequests({', promptEventIndex);
+
+  assert.ok(requestValidationIndex >= 0 && promptEventIndex > requestValidationIndex);
+  assert.ok(supplierCallIndex > promptEventIndex);
+  assert.match(source.slice(requestValidationIndex, supplierCallIndex), /const prompt = request\.messages\?\.\[0\]\?\.content/);
+  assert.match(source.slice(requestValidationIndex, supplierCallIndex), /prompt,[\s\S]{0,120}promptCompilation/);
+});
+
 test('agent route resolves continuation context and final execution intent before announcing it', () => {
   const source = fs.readFileSync(routePath, 'utf8');
   assert.match(source, /resolveAgentConversationIntent/);
@@ -157,6 +170,20 @@ test('agent route rejects unbacked execution claims and requests a real mutation
   assert.match(source, /sanitizeAgentResponseContent/);
   assert.match(source, /UNBACKED_EXECUTION_CLAIM_PATTERN/);
   assert.match(source, /生成尚未实际启动/);
+});
+
+test('agent route turns isolated image operation conflicts into a user clarification', () => {
+  const source = fs.readFileSync(routePath, 'utf8');
+  assert.match(source, /function hasOnlyImageOperationAmbiguity/);
+  assert.match(source, /\.code === 'operation_mismatch'/);
+  assert.match(source, /dimension:\s*'image_operation'/);
+  assert.match(source, /id:\s*'generate'[\s\S]{0,180}label:\s*'生成新图'/);
+  assert.match(source, /id:\s*'edit'[\s\S]{0,180}label:\s*'编辑原图'/);
+  assert.match(source, /isImageOperationClarification/);
+  const plannerFailureIndex = source.indexOf('if (!plannerResult.plan)');
+  const ambiguityIndex = source.indexOf('hasOnlyImageOperationAmbiguity', plannerFailureIndex);
+  const genericFailureIndex = source.indexOf("const plannerFailureReason = plannerResult.failureReason", plannerFailureIndex);
+  assert.ok(plannerFailureIndex >= 0 && ambiguityIndex > plannerFailureIndex && genericFailureIndex > ambiguityIndex);
 });
 
 test('confirmation records preserve operation identity and skill source', () => {
@@ -297,11 +324,11 @@ test('agent preserves model-authored image task and result presentation through 
   assert.match(source, /operation:\s*imageTask\?\.operation \|\| 'generate'/);
 });
 
-test('agent image confirmations keep optimizer control server-side and report partial request results', () => {
+test('agent image confirmations preserve compiled prompts and report partial request results', () => {
   const source = fs.readFileSync(routePath, 'utf8');
-  assert.match(source, /optimizePrompt:\s*false/);
-  assert.match(source, /confirmationRecord\.optimizePrompt !== false/);
-  assert.doesNotMatch(source, /confirmationRecord\.toolArgs\.optimizePrompt/);
+  assert.match(source, /promptCompilation:\s*promptCompilation \? structuredClone\(promptCompilation\) : undefined/);
+  assert.match(source, /generationItems:\s*structuredClone\(generationItems\)/);
+  assert.doesNotMatch(source, /optimizePrompt|optimizeImagePrompt/);
   assert.match(source, /buildCanvasImageGenerationFailureMessage/);
   assert.match(source, /requestFailureCount/);
   assert.match(source, /partialFailureMessage/);
@@ -325,12 +352,10 @@ test('agent route resolves natural-language output counts before clarification a
   assert.ok(countResolutionIndex >= 0 && genericClarifierIndex > countResolutionIndex);
 });
 
-test('unified planner is authoritative, supports shadow mode, and survives clarification', () => {
+test('unified planner is authoritative and survives clarification', () => {
   const source = fs.readFileSync(routePath, 'utf8');
-  assert.match(source, /AGENT_UNIFIED_PLANNER_ENABLED/);
-  assert.match(source, /AGENT_PLANNER_SHADOW_MODE/);
-  assert.match(source, /plannerAuthoritative/);
-  assert.match(source, /planner\.shadow/);
+  assert.match(source, /const plannerAuthoritative = true/);
+  assert.doesNotMatch(source, /AGENT_UNIFIED_PLANNER_ENABLED|AGENT_PLANNER_SHADOW_MODE/);
   assert.match(source, /executionPlan:\s*structuredClone\(executionPlan\)/);
   assert.match(source, /activeClarificationState\?\.executionPlan/);
   assert.match(source, /legacyExecutionPlanDetected/);
@@ -351,7 +376,7 @@ test('unified planner is authoritative, supports shadow mode, and survives clari
   assert.match(source, /deliveryPlan[\s\S]*executionPlanToImageDeliveryPlan\(executionPlan\)/);
   assert.match(source, /buildCanonicalAgentReferenceContext/);
   assert.match(source, /runtimeReferenceId[\s\S]*createHash\('sha256'\)/);
-  assert.match(source, /explicitPlannerSelection[\s\S]*plannerHasVisualReferences \? resolvedChatSelection : resolvedRouterSelection/);
+  assert.match(source, /const plannerSelection = explicitPlannerSelection \|\| resolvedChatSelection/);
   assert.match(source, /AGENT_PLANNER_TIMEOUT_MS/);
   assert.match(source, /Math\.min\(1_800_000,[\s\S]*AGENT_PLANNER_TIMEOUT_MS[\s\S]*\|\| 1_800_000\)/);
   assert.match(source, /Math\.min\(1_800_000,[\s\S]*AGENT_RUN_TIMEOUT_MS[\s\S]*\|\| 1_800_000\)/);
@@ -372,9 +397,30 @@ test('unified planner is authoritative, supports shadow mode, and survives clari
   assert.match(source, /activeClarificationState\.executionPlan = structuredClone\(executionPlan\)/);
 });
 
+test('authoritative planning resolves and locks one local Skill before any model call', () => {
+  const source = fs.readFileSync(routePath, 'utf8');
+  const localSelectionIndex = source.indexOf('const explicitSkillDirective = isSkillSelectionResponse');
+  const firstPlannerIndex = source.indexOf('const plannerResult = await planAgentExecutionRequest');
+  const legacyRouterIndex = source.indexOf('await routeAgentRequest({');
+  assert.ok(localSelectionIndex >= 0 && firstPlannerIndex > localSelectionIndex);
+  assert.ok(legacyRouterIndex > firstPlannerIndex);
+  assert.match(source, /hasDirectSkillExecutionIntent\(latestUserMessage\)[\s\S]*findDirectSkillMatches\(latestUserMessage, skillManifests\)/);
+  assert.match(source, /dimension: 'skill_selection'/);
+  assert.match(source, /directMatches\.slice\(0, 3\)|candidates\.slice\(0, 3\)/);
+  assert.match(source, /id: 'no_skill'/);
+  assert.match(source, /writeAgentDone\('skill_selection_required'\)/);
+  assert.match(source, /manifests: selectedSkill \? \[selectedSkill\] : \[\]/);
+  assert.match(source, /lockedSkillId: selectedSkill\?\.id \|\| null/);
+  assert.match(source, /skillContent,/);
+  assert.match(source, /await ensureSelectedSkillContent\(\)[\s\S]*const plannerResult/);
+  assert.match(source, /isSkillSelectionClarification[\s\S]*const replanned = await planAgentExecutionRequest/);
+  assert.match(source, /method: skillSelectionMethod/);
+  assert.match(source, /skillContentLength: skillContent\.length/);
+});
+
 test('authoritative image execution fails closed without a complete planner contract', () => {
   const source = fs.readFileSync(routePath, 'utf8');
-  assert.match(source, /if \(plannerAuthoritative\)/);
+  assert.match(source, /const invalidExecutablePlan = !executionPlan/);
   assert.match(source, /executionPlan\.execution\.tool !== 'generate_image'/);
   assert.match(source, /!imageTask/);
   assert.match(source, /!presentation/);
@@ -387,7 +433,7 @@ test('authoritative image execution fails closed without a complete planner cont
 test('image completion summaries and prompt traces follow generated asset delivery', () => {
   const source = fs.readFileSync(routePath, 'utf8');
   assert.match(source, /promptTraceForRequest/);
-  assert.match(source, /finalPrompt: effectiveGenerationItems\[requestIndex\]\?\.prompt \|\| optimized\.prompt/);
+  assert.match(source, /finalPrompt:\s*String\(requests\[requestIndex\]\?\.messages\?\.\[0\]\?\.content \|\| ''\)/);
   assert.match(source, /type: 'agent_completion_summary'/);
   const directActionIndex = source.indexOf("source: 'direct'");
   const directSummaryIndex = source.indexOf('writeImageCompletionSummary(generationPayload)', directActionIndex);
@@ -414,18 +460,17 @@ test('explicit multi-image requests preserve deterministic image skills while by
 
 test('authoritative image plans use their final generation prompt without prompt optimization', () => {
   const source = fs.readFileSync(routePath, 'utf8');
-  assert.match(source, /const plannerGeneration = executionPlan\?\.version === 4 \? executionPlan\.generation : null/);
-  assert.match(source, /const usesPlannerGeneration = Boolean\(plannerAuthoritative && plannerGeneration\)/);
-  assert.match(source, /prompt: plannerGeneration!\.prompt/);
-  assert.match(source, /usesPlannerGeneration[\s\S]*await optimizeImagePrompt/);
-  assert.match(source, /optimizePrompt: false/);
+  assert.match(source, /const generation = executionPlan\?\.version === 4 \? executionPlan\.generation : null/);
+  assert.match(source, /const finalGenerationPrompt = generation!\.prompt/);
+  assert.match(source, /generationPrompt:\s*finalGenerationPrompt/);
+  assert.doesNotMatch(source, /optimizeImagePrompt|ensureOptimizedPromptCoverage|appendRegionTargetContract/);
 });
 
 test('series batches persist distinct prompts and retry failed issue ids', () => {
   const source = fs.readFileSync(routePath, 'utf8');
   assert.match(source, /resolveImageDeliveryPlan\(executionBrief, requestedTotalImageCount\)/);
   assert.match(source, /outputCount: requestedTotalImageCount/);
-  assert.match(source, /batchMode: imageBatchMode/);
+  assert.match(source, /const imageBatchMode = imageDeliveryPlan\.mode as AgentImageBatchMode/);
   assert.match(source, /generationItems: structuredClone\(generationItems\)/);
   assert.match(source, /remainingGenerationItems/);
   assert.match(source, /generationPrompts: effectiveGenerationItems\.map/);
@@ -438,7 +483,7 @@ test('agent route preserves three-mode image delivery plans through confirmation
   assert.match(source, /imageDeliveryPlan\?: ImageDeliveryPlan/);
   assert.match(source, /resolvedImageDeliveryMode:\s*'composite'/);
   assert.match(source, /dimension:\s*'image_delivery_scope'/);
-  assert.match(source, /applyImagePromptDeliveryContract/);
+  assert.doesNotMatch(source, /applyImagePromptDeliveryContract/);
   assert.match(source, /deliveryMode:\s*payloadDeliveryPlan\.mode/);
   assert.match(source, /panelCount:\s*payloadDeliveryPlan\.panelCount/);
   assert.match(source, /confirmationRecord\.imageDeliveryPlan/);

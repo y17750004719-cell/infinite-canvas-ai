@@ -209,6 +209,7 @@ export type AgentEvent =
     }
   | { type: 'brief_compiled'; resolvedEntityIds: string[]; summary: string; mustPreserveCount: number }
   | { type: 'skill_selected'; skillId: string; label: string; source: 'manual' | 'auto' }
+  | { type: 'active_skill_changed'; skill: { id: string; label: string } | null }
   | {
       type: 'clarification_required';
       message: string;
@@ -217,6 +218,22 @@ export type AgentEvent =
     }
   | { type: 'prompt_optimization_start' }
   | { type: 'prompt_optimization_done'; summary: string; optimized: boolean }
+  | {
+      type: 'image_prompts_ready';
+      index: number;
+      label: string;
+      prompt: string;
+      compilation?: {
+        skillId: string | null;
+        skillLabel: string | null;
+        plannerProviderId: string | null;
+        plannerModel: string;
+        referenceCount: number;
+        visualReferencesUsed: boolean;
+        durationMs: number;
+        compiledAt: number;
+      };
+    }
   | { type: 'tool_start'; toolCallId: string; toolName: string }
   | { type: 'tool_update'; toolCallId: string; message: string }
   | { type: 'tool_result'; toolCallId: string; result: unknown }

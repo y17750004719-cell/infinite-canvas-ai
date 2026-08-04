@@ -116,8 +116,6 @@ import {
 } from './lib/canvas-history.mjs';
 import {
   appendImageCardOutput,
-  buildAsyncImageTaskRequests,
-  buildCanvasImageGenerationFailureMessage,
   buildImageCardOutputsState,
   buildCanvasImagePanelSubmitInput,
   buildCanvasTextPanelSubmitInput,
@@ -168,16 +166,13 @@ import {
   getTextCardVisualState,
   normalizeImageCardAspectRatio,
   removeCanvasTextGenerationEntry,
-  resolveCanvasImageTaskExecutionMode,
   resolveFloatingPopoverOffset,
-  resolveImageCardModel,
   resolveImageCardSize,
   resolveImageCardSizeForAspectRatio,
   resolveProviderDeletionFallbacks,
   resolveWorkspaceImageCardModel,
   resolveWorkspaceTextPanelChatModel,
   resolveSessionPresentationState,
-  settleCanvasImageGenerationRequests,
   shouldPreventScrollableRegionWheelDefault,
   syncAutoResizedTextareaLayout,
   syncImageCardOptionsForProviderModel as syncWorkspaceImageCardOptionsForProviderModel,
@@ -371,6 +366,17 @@ type ChatMessageInlineSegment =
       annotationCount?: number;
     };
 
+interface AgentImagePromptCompilation {
+  skillId: string | null;
+  skillLabel: string | null;
+  plannerProviderId: string | null;
+  plannerModel: string;
+  referenceCount: number;
+  visualReferencesUsed: boolean;
+  durationMs: number;
+  compiledAt: number;
+}
+
 interface ChatMessage {
   id: string;
   role: 'user' | 'assistant' | 'skill';
@@ -395,6 +401,13 @@ interface ChatMessage {
     operation: 'generate' | 'edit';
     targetReferenceId: string | null;
   };
+  agentImagePrompts?: Array<{
+    index: number;
+    label: string;
+    prompt: string;
+    compilation?: AgentImagePromptCompilation;
+  }>;
+  agentProgressMode?: 'full' | 'compact';
   model?: string;
   imageName?: string;
   skillChoice?: SkillChoicePayload;
@@ -1118,9 +1131,9 @@ const tools = [
 ];
 
 const DEFAULT_QUICK_ACTIONS = [
-  { id: 'logo', label: 'Logo 与品牌' },
-  { id: 'brand', label: '品牌识别系统' },
-  { id: 'api-helper', label: 'API 助手' },
+  { id: 'logo', label: 'Logo 与品牌', description: '生成 Logo 与基础品牌方向。' },
+  { id: 'brand', label: '品牌识别系统', description: '创建完整的品牌识别与物料系统。' },
+  { id: 'api-helper', label: 'API 助手', description: '查阅 API 文档并生成调用代码。' },
 ];
 
 const PROVIDER_SETTINGS_PRESET_OPTIONS = [
@@ -1269,7 +1282,13 @@ const persistProviderSettingsImageApiKeys = (
       scope: row.scope,
     }));
 
-type SkillSelectSource = 'center_quick_action' | 'bottom_skill_bar';
+type SkillSelectSource = 'center_quick_action' | 'bottom_skill_bar' | 'slash_menu';
+
+interface SkillMenuAction {
+  id: string;
+  label: string;
+  description: string;
+}
 
 const SKILL_DEFAULT_PROMPTS: Record<string, string> = {
   brand: '请按品牌识别系统流程开始信息收集，先询问我行业、品牌名称、补充说明和 logo 参考图（可选）。',
@@ -1708,14 +1727,65 @@ const resizeImageCardItemToNaturalImage = (
   return resizeCanvasItemFromCenter(item, nextSize);
 };
 
-const extractCanvasGeneratedImageUrls = (result: any): string[] => {
-  if (Array.isArray(result?.result?.outputs) && result.result.outputs.length > 0) {
-    return result.result.outputs
-      .map((entry: { localUrl?: string }) => (typeof entry?.localUrl === 'string' ? entry.localUrl : ''))
-      .filter(Boolean);
+const consumeAgentImageResponse = async (response: Response) => {
+  if (!response.ok) {
+    const errorText = await response.text();
+    try {
+      const payload = JSON.parse(errorText) as { error?: string };
+      throw new Error(payload.error || `API Error: ${response.status} ${response.statusText}`);
+    } catch (error) {
+      if (error instanceof SyntaxError) {
+        throw new Error(errorText || `API Error: ${response.status} ${response.statusText}`);
+      }
+      throw error;
+    }
+  }
+  if (!response.body || !(response.headers.get('content-type') || '').includes('application/x-ndjson')) {
+    throw new Error('Agent image response is not streamable');
   }
 
-  return typeof result?.result?.localUrl === 'string' ? [result.result.localUrl] : [];
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  const assets: Array<{ src: string; naturalWidth?: number; naturalHeight?: number }> = [];
+  let buffer = '';
+  let failureMessage = '';
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split('\n');
+    buffer = lines.pop() || '';
+    for (const line of lines) {
+      if (!line.trim()) continue;
+      const event = JSON.parse(line) as {
+        type?: string;
+        message?: string;
+        error?: string;
+        request?: { question?: string };
+        action?: {
+          type?: string;
+          assets?: Array<{ src?: string; naturalWidth?: number; naturalHeight?: number }>;
+        };
+      };
+      if (event.type === 'agent_error') failureMessage = event.message || event.error || failureMessage;
+      if (event.type === 'clarification_required') {
+        throw new Error(event.message || event.request?.question || '图片任务需要补充关键信息');
+      }
+      if (event.type === 'client_action' && event.action?.type === 'add_generated_assets') {
+        for (const asset of event.action.assets || []) {
+          if (typeof asset.src === 'string' && asset.src) assets.push({
+            src: asset.src,
+            naturalWidth: asset.naturalWidth,
+            naturalHeight: asset.naturalHeight,
+          });
+        }
+      }
+    }
+  }
+  if (failureMessage && assets.length === 0) throw new Error(failureMessage);
+  const uniqueAssets = [...new Map(assets.map((asset) => [asset.src, asset])).values()];
+  if (uniqueAssets.length === 0) throw new Error('未收到有效图片响应，请重试');
+  return uniqueAssets;
 };
 
 const waitForCanvasImagePreview = (delayMs: number) =>
@@ -5870,13 +5940,23 @@ export default function AIWorkspace() {
   const [showChatModelSelector, setShowChatModelSelector] = useState(false);
   const [showImageModelSelector, setShowImageModelSelector] = useState(false);
   const [modelSelectionNotice, setModelSelectionNotice] = useState<string | null>(null);
-  const [quickActions, setQuickActions] = useState(DEFAULT_QUICK_ACTIONS);
+  const [quickActions, setQuickActions] = useState<SkillMenuAction[]>(DEFAULT_QUICK_ACTIONS);
   const [showGenerationModeMenu, setShowGenerationModeMenu] = useState(false);
   const [showSkillsMenu, setShowSkillsMenu] = useState(false);
+  const [skillMenuTrigger, setSkillMenuTrigger] = useState<'button' | 'slash' | null>(null);
+  const [skillMenuQuery, setSkillMenuQuery] = useState('');
+  const [skillMenuActiveIndex, setSkillMenuActiveIndex] = useState(0);
   const [showChatComposerMoreMenu, setShowChatComposerMoreMenu] = useState(false);
   const [showChatAssetPicker, setShowChatAssetPicker] = useState(false);
   const [selectedChatHistoryAssetIds, setSelectedChatHistoryAssetIds] = useState<string[]>([]);
   const [showModelPreferencePopover, setShowModelPreferencePopover] = useState(false);
+  const filteredQuickActions = React.useMemo(() => {
+    const query = skillMenuQuery.trim().toLocaleLowerCase();
+    if (!query) return quickActions;
+    return quickActions.filter((action) => (
+      `${action.id} ${action.label} ${action.description}`.toLocaleLowerCase().includes(query)
+    ));
+  }, [quickActions, skillMenuQuery]);
   const [imageAspectRatio, setImageAspectRatio] = useState('auto');
   const [agentImageAspectRatio, setAgentImageAspectRatio] = useState('3:4');
   const activeChatImageAspectRatio = generationMode === 'agent' ? agentImageAspectRatio : imageAspectRatio;
@@ -5917,11 +5997,15 @@ export default function AIWorkspace() {
     const controller = new AbortController();
     void fetch('/api/skills', { signal: controller.signal, cache: 'no-store' })
       .then((response) => response.ok ? response.json() : Promise.reject(new Error('Failed to load skills')))
-      .then((payload: { skills?: Array<{ id?: string; name?: string }> }) => {
+      .then((payload: { skills?: Array<{ id?: string; name?: string; description?: string }> }) => {
         const skills = Array.isArray(payload.skills)
           ? payload.skills
-              .filter((skill): skill is { id: string; name: string } => Boolean(skill.id && skill.name))
-              .map((skill) => ({ id: skill.id, label: skill.name }))
+              .filter((skill): skill is { id: string; name: string; description?: string } => Boolean(skill.id && skill.name))
+              .map((skill) => ({
+                id: skill.id,
+                label: skill.name,
+                description: skill.description || '',
+              }))
           : [];
         if (skills.length > 0) setQuickActions(skills);
       })
@@ -5932,6 +6016,13 @@ export default function AIWorkspace() {
       });
     return () => controller.abort();
   }, []);
+
+  useEffect(() => {
+    if (!showSkillsMenu || skillMenuTrigger !== 'slash') return;
+    const activeAction = filteredQuickActions[skillMenuActiveIndex];
+    if (!activeAction) return;
+    document.getElementById(`skill-option-${activeAction.id}`)?.scrollIntoView({ block: 'nearest' });
+  }, [filteredQuickActions, showSkillsMenu, skillMenuActiveIndex, skillMenuTrigger]);
 
   useGSAP(
     () => {
@@ -6319,6 +6410,7 @@ export default function AIWorkspace() {
   const chatStreamPaintSamplesRef = useRef<number[]>([]);
   const pendingAssistantMessageIdRef = useRef<string | null>(null);
   const currentSessionIdRef = useRef<string | null>(null);
+  const currentTopicIdRef = useRef('default');
   const scheduleCurrentSessionSaveRef = useRef<() => void>(() => {});
   const canvasHistoryBySessionRef = useRef<Record<string, SessionCanvasHistoryState>>({});
   const pendingCanvasHistorySnapshotRef = useRef<CanvasUndoSnapshot | null>(null);
@@ -7983,10 +8075,27 @@ export default function AIWorkspace() {
       if (activeSkill) {
         const token = document.createElement("span");
         token.setAttribute("data-skill-token", "true");
+        token.setAttribute("data-skill-id", activeSkill.id);
         token.setAttribute("data-skill-label", activeSkill.label);
         token.setAttribute("contenteditable", "false");
-        token.className = "inline-flex items-center gap-1 px-2 h-5 leading-5 rounded-full bg-violet-100 text-violet-700 text-sm font-medium align-middle mr-1";
-        token.textContent = `✧ ${activeSkill.label}`;
+        token.className = "workspace-reference-token workspace-skill-token group/skill relative mx-0.5 inline-flex h-7 max-w-[172px] items-center gap-1 rounded-lg px-1.5 align-middle text-[11px] leading-none";
+        token.title = activeSkill.label;
+        const icon = document.createElement('span');
+        icon.setAttribute('aria-hidden', 'true');
+        icon.className = 'shrink-0 text-[12px]';
+        icon.textContent = '✧';
+        token.appendChild(icon);
+        const label = document.createElement('span');
+        label.className = 'min-w-0 truncate font-medium';
+        label.textContent = activeSkill.label;
+        token.appendChild(label);
+        const remove = document.createElement('button');
+        remove.type = 'button';
+        remove.setAttribute('data-skill-action', 'remove');
+        remove.className = 'inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-md opacity-50 hover:opacity-100';
+        remove.setAttribute('aria-label', `移除 Skill：${activeSkill.label}`);
+        remove.textContent = '×';
+        token.appendChild(remove);
         editor.appendChild(token);
       }
 
@@ -8076,6 +8185,19 @@ export default function AIWorkspace() {
 
     syncEditorHeight();
   }, [activeSkill, moveCaretToEditorEnd, parseChatEditorSegments, resolvedChatReferenceTokens, syncEditorHeight]);
+
+  const closeSkillMenu = useCallback((discardSlashQuery = true) => {
+    const shouldDiscardQuery = (
+      discardSlashQuery
+      && skillMenuTrigger === 'slash'
+      && latestChatInputRef.current.startsWith('/')
+    );
+    setShowSkillsMenu(false);
+    setSkillMenuTrigger(null);
+    setSkillMenuQuery('');
+    setSkillMenuActiveIndex(0);
+    if (shouldDiscardQuery) setChatInput('');
+  }, [setChatInput, skillMenuTrigger]);
 
   const isCaretAtEditorStart = (): boolean => {
     const editor = chatInputEditorRef.current;
@@ -8921,6 +9043,10 @@ export default function AIWorkspace() {
       const editorText = getChatComposerPlainText(nextSegments);
       chatComposerSegmentsRef.current = nextSegments;
       latestChatInputRef.current = editorText;
+      if (skillMenuTrigger === 'slash' && editorText.startsWith('/')) {
+        setSkillMenuQuery(editorText.slice(1));
+        setSkillMenuActiveIndex(0);
+      }
       syncChatComposerControls(editorText);
       syncEditorHeight();
       rememberChatEditorCaretOffset();
@@ -8962,6 +9088,13 @@ export default function AIWorkspace() {
     const editor = chatInputEditorRef.current;
     if (!editor) return;
     const startedAt = performance.now();
+    const previousEditorText = latestChatInputRef.current;
+    const skillToken = editor.querySelector(SKILL_TOKEN_SELECTOR);
+    if (activeSkill && !skillToken) {
+      setActiveSkillForCurrentTopic(null);
+    } else if (skillToken && editor.firstChild !== skillToken) {
+      editor.insertBefore(skillToken, editor.firstChild);
+    }
     const nextSegments = parseChatEditorSegments(editor);
     const previousTokenIds = new Set(
       chatComposerSegmentsRef.current
@@ -8986,6 +9119,25 @@ export default function AIWorkspace() {
     chatComposerSegmentsRef.current = nextSegments;
     const editorText = getChatComposerPlainText(nextSegments);
     latestChatInputRef.current = editorText;
+    if (skillMenuTrigger === 'slash') {
+      if (!editorText.startsWith('/') || activeSkill || resolvedChatReferenceTokens.length > 0) {
+        closeSkillMenu(false);
+      } else {
+        setSkillMenuQuery(editorText.slice(1));
+        setSkillMenuActiveIndex(0);
+      }
+    } else if (
+      editorText === '/'
+      && previousEditorText.length === 0
+      && !activeSkill
+      && resolvedChatReferenceTokens.length === 0
+    ) {
+      closeChatComposerPopovers();
+      setSkillMenuTrigger('slash');
+      setSkillMenuQuery('');
+      setSkillMenuActiveIndex(0);
+      setShowSkillsMenu(true);
+    }
     syncChatComposerControls(editorText);
     syncEditorHeight();
     recordChatInputPerformance(performance.now() - startedAt);
@@ -9200,6 +9352,31 @@ export default function AIWorkspace() {
 
   const handleChatEditorKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
     if (e.nativeEvent.isComposing || isChatInputComposingRef.current) return;
+
+    if (showSkillsMenu && skillMenuTrigger === 'slash') {
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+        e.preventDefault();
+        if (filteredQuickActions.length > 0) {
+          const direction = e.key === 'ArrowDown' ? 1 : -1;
+          setSkillMenuActiveIndex((current) => (
+            (current + direction + filteredQuickActions.length) % filteredQuickActions.length
+          ));
+        }
+        return;
+      }
+      if (e.key === 'Enter' || e.key === 'Tab') {
+        e.preventDefault();
+        const selectedAction = filteredQuickActions[skillMenuActiveIndex];
+        if (selectedAction) handleQuickSkillSelect(selectedAction, 'slash_menu');
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        closeSkillMenu();
+        return;
+      }
+    }
 
     if ((e.key === 'Backspace' || e.key === 'Delete') && activeSkill && isCaretAtEditorStart()) {
       e.preventDefault();
@@ -12610,41 +12787,71 @@ export default function AIWorkspace() {
       const hasReferences = linkedImagePreviews.length > 0;
       if (!trimmedInput && !hasReferences) return;
 
-      const requestImageGeneration = async (requestBody: Record<string, unknown>, signal: AbortSignal) => {
-        const response = await fetch('/api/generate', {
+      const requestImageGeneration = async (signal: AbortSignal) => {
+        const resolvedImageProviderId = imageCardProviderById[itemId]
+          || selectedImageCardModel.providerId
+          || defaultWorkspaceImageModelOption.providerId;
+        const referenceContext = linkedImagePreviews.length > 0
+          ? {
+              references: linkedImagePreviews.map((preview, index) => ({
+                id: preview.id || `canvas-image-reference-${index + 1}`,
+                src: preview.src,
+                label: preview.label || `image${index + 1}`,
+                source: 'canvas' as const,
+                role: 'reference' as const,
+              })),
+              composerSegments: [
+                ...(trimmedInput ? [{ type: 'text' as const, text: trimmedInput }] : []),
+                ...linkedImagePreviews.map((preview, index) => ({
+                  type: 'reference' as const,
+                  referenceId: preview.id || `canvas-image-reference-${index + 1}`,
+                })),
+              ],
+            }
+          : undefined;
+        const response = await fetch('/api/agent', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(requestBody),
+          body: JSON.stringify({
+            runId: `canvas-image-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+            topicId: currentTopicIdRef.current,
+            messages: [{
+              role: 'user',
+              content: trimmedInput || '请根据所附参考图生成一张新图片。',
+            }],
+            activeSkillId: activeSkill?.id,
+            referenceImages: linkedImagePreviews.map((preview) => preview.src),
+            referenceContext,
+            canvasContext: {
+              itemCount: itemsRef.current.length,
+              selectedItemIds: [itemId],
+            },
+            chatOptions: {
+              providerId: resolvedChatSelection.providerId || chatProviderId || undefined,
+              model: resolvedChatSelection.model || chatModelId || undefined,
+            },
+            imageOptions: {
+              providerId: resolvedImageProviderId,
+              model: modelId,
+              aspectRatio,
+              size,
+              quality,
+              count,
+              autoConfirm: true,
+            },
+          }),
           signal,
         });
-
-        if (!response.ok) {
-          const errorText = await response.text();
-          let errorMessage = `API Error: ${response.status} ${response.statusText}`;
-          try {
-            const errorData = JSON.parse(errorText) as { error?: string };
-            if (errorData.error) {
-              errorMessage = errorData.error;
-            }
-          } catch {
-            if (errorText) {
-              errorMessage = errorText;
-            }
-          }
-          throw new Error(errorMessage);
-        }
-
-        const result = await response.json();
-        if (result.status !== 'completed' || result.result?.type !== 'image') {
-          throw new Error(result.error || '未收到有效图片响应，请重试');
-        }
-
-        const outputUrls = extractCanvasGeneratedImageUrls(result);
-        if (outputUrls.length === 0) {
-          throw new Error('未收到有效图片响应，请重试');
-        }
-
-        const outputMetas = await Promise.all(outputUrls.map((localUrl) => loadCanvasGeneratedImageMeta(localUrl)));
+        const assets = await consumeAgentImageResponse(response);
+        const outputMetas = await Promise.all(assets.map((asset) => (
+          asset.naturalWidth && asset.naturalHeight
+            ? {
+                src: asset.src,
+                naturalWidth: asset.naturalWidth,
+                naturalHeight: asset.naturalHeight,
+              }
+            : loadCanvasGeneratedImageMeta(asset.src)
+        )));
 
         return {
           acceptedOutputs: outputMetas,
@@ -12696,135 +12903,7 @@ export default function AIWorkspace() {
       );
 
       try {
-        const asyncRequests = buildAsyncImageTaskRequests({
-          input: trimmedInput,
-          linkedImagePreviews,
-          modelId,
-          allowedModelIds: workspaceImageModelOptions.map((option) => option.id),
-          fallbackModel: defaultWorkspaceImageModelOption.id,
-          imageProviderId:
-            imageCardProviderById[itemId] ||
-            selectedImageCardModel.providerId ||
-            defaultWorkspaceImageModelOption.providerId,
-          providerImageOptionProfiles,
-          size,
-          quality,
-          count,
-          aspectRatio,
-        });
-        const taskExecutionMode = resolveCanvasImageTaskExecutionMode({
-          modelId: resolveImageCardModel(modelId),
-          size,
-          count,
-        });
-
-        const taskResults = await settleCanvasImageGenerationRequests({
-          requests: asyncRequests,
-          executionMode: taskExecutionMode,
-          runTask: async (requestBody) => {
-            try {
-              const { acceptedOutputs, warningCount, warningMessage } = await requestImageGeneration(requestBody, controller.signal);
-
-              if (
-                currentSessionIdRef.current !== generationSessionId ||
-                !itemsRef.current.some((item) => item.id === itemId)
-              ) {
-                return { completed: 0, failed: 0, failureReason: null, warningCount: 0, warningMessage: null };
-              }
-
-              if (acceptedOutputs.length > 0) {
-                const historyTimestamp = Date.now();
-                appendGeneratedImageHistoryForSession(
-                  generationSessionId,
-                  acceptedOutputs.map((outputMeta, index) =>
-                    createGeneratedImageHistoryEntry({
-                      src: outputMeta.src,
-                      naturalWidth: outputMeta.naturalWidth,
-                      naturalHeight: outputMeta.naturalHeight,
-                      timestamp: historyTimestamp,
-                      sequence: index,
-                      source: 'image-card',
-                      sourceItemId: itemId,
-                    })
-                  )
-                );
-              }
-
-              for (const outputMeta of acceptedOutputs) {
-                setItems((prev) =>
-                  prev.map((item) => {
-                    if (item.id !== itemId) {
-                      return item;
-                    }
-
-                    const nextOutputState = appendImageCardOutput({
-                      existingOutputs: item.imageOutputs,
-                      existingActiveIndex: item.activeImageOutputIndex ?? 0,
-                      nextOutput: outputMeta,
-                    });
-
-                    return {
-                      ...resizeImageCardItemToNaturalImage(
-                        {
-                          ...item,
-                          imageVariant: 'card',
-                          ...nextOutputState,
-                        },
-                        nextOutputState.naturalWidth ?? item.naturalWidth ?? IMAGE_CARD_DEFAULT_FRAME_WIDTH,
-                        nextOutputState.naturalHeight ?? item.naturalHeight ?? IMAGE_CARD_DEFAULT_FRAME_WIDTH
-                      ),
-                      imageVariant: 'card',
-                      ...nextOutputState,
-                    };
-                  })
-                );
-              }
-
-              setActiveCanvasImageGenerations((prev) => {
-                const entry = prev[itemId];
-                if (!entry) return prev;
-                return {
-                  ...prev,
-                  [itemId]: {
-                    ...entry,
-                    completed: Math.min(entry.total, entry.completed + acceptedOutputs.length),
-                    failed: entry.failed,
-                  },
-                };
-              });
-
-              return {
-                completed: acceptedOutputs.length,
-                failed: 0,
-                failureReason: null,
-                warningCount,
-                warningMessage,
-              };
-            } catch (error) {
-              if (
-                controller.signal.aborted ||
-                currentSessionIdRef.current !== generationSessionId ||
-                !itemsRef.current.some((item) => item.id === itemId)
-              ) {
-                throw error;
-              }
-
-              setActiveCanvasImageGenerations((prev) => {
-                const entry = prev[itemId];
-                if (!entry) return prev;
-                return {
-                  ...prev,
-                  [itemId]: {
-                    ...entry,
-                    failed: Math.min(entry.total, entry.failed + 1),
-                  },
-                };
-              });
-
-              throw error;
-            }
-          },
-        });
+        const { acceptedOutputs, warningCount, warningMessage } = await requestImageGeneration(controller.signal);
 
         if (
           currentSessionIdRef.current !== generationSessionId ||
@@ -12833,69 +12912,65 @@ export default function AIWorkspace() {
           return;
         }
 
-        const failures = taskResults.filter((result) => result.status === 'rejected');
-        const requestFailureCount = failures.length;
-        const transportFailureCount = failures.reduce((total, result) => {
-          const failureClass =
-            result.reason && typeof result.reason === 'object' && 'failureClass' in result.reason
-              ? (result.reason as { failureClass?: string }).failureClass
-              : null;
-          return total + (failureClass === 'transport' ? 1 : 0);
-        }, 0);
-        const completedCount = taskResults.reduce((total, result) => {
-          if (result.status !== 'fulfilled') return total;
-          return total + (result.value?.completed ?? 0);
-        }, 0);
-        const failedCount = requestFailureCount;
-        if (completedCount > 0) {
-          const generationCompletedAt = Date.now();
-          setItems((prev) =>
-            prev.map((item) =>
-              item.id === itemId
-                ? {
-                    ...item,
-                    lastGenerationDurationMs: Math.max(0, generationCompletedAt - generationStartedAt),
-                    lastGenerationCompletedAt: generationCompletedAt,
-                  }
-                : item
-            )
-          );
+        const historyTimestamp = Date.now();
+        appendGeneratedImageHistoryForSession(
+          generationSessionId,
+          acceptedOutputs.map((outputMeta, index) => createGeneratedImageHistoryEntry({
+            src: outputMeta.src,
+            naturalWidth: outputMeta.naturalWidth,
+            naturalHeight: outputMeta.naturalHeight,
+            timestamp: historyTimestamp,
+            sequence: index,
+            source: 'image-card',
+            sourceItemId: itemId,
+          })),
+        );
+        for (const outputMeta of acceptedOutputs) {
+          setItems((prev) => prev.map((item) => {
+            if (item.id !== itemId) return item;
+            const nextOutputState = appendImageCardOutput({
+              existingOutputs: item.imageOutputs,
+              existingActiveIndex: item.activeImageOutputIndex ?? 0,
+              nextOutput: outputMeta,
+            });
+            return {
+              ...resizeImageCardItemToNaturalImage(
+                { ...item, imageVariant: 'card', ...nextOutputState },
+                nextOutputState.naturalWidth ?? item.naturalWidth ?? IMAGE_CARD_DEFAULT_FRAME_WIDTH,
+                nextOutputState.naturalHeight ?? item.naturalHeight ?? IMAGE_CARD_DEFAULT_FRAME_WIDTH,
+              ),
+              imageVariant: 'card',
+              ...nextOutputState,
+            };
+          }));
         }
-
         if (controller.signal.aborted) {
           throw new DOMException('Aborted', 'AbortError');
         }
-
-        if (failedCount > 0) {
-          setActiveCanvasImageGenerations((prev) => {
-            const entry = prev[itemId];
-            if (!entry) return prev;
-            return {
-              ...prev,
-              [itemId]: {
-                ...entry,
-                failed: Math.min(entry.total, failedCount),
-              },
-            };
-          });
-
-          if (completedCount === 0) {
-            const firstReason = failures[0]?.reason;
-            throw firstReason instanceof Error ? firstReason : new Error('未收到有效图片响应，请重试');
-          }
-
-          const failureMessage =
-            transportFailureCount > 0 && transportFailureCount === requestFailureCount
-              ? `连接中断，请重试剩余 ${failedCount} 张`
-              : buildCanvasImageGenerationFailureMessage({
-                  requestedCount: asyncRequests.length,
-                  completedCount,
-                  requestFailureCount,
-                }) || `请求 ${asyncRequests.length} 张，成功 ${completedCount} 张；请手动补生成剩余 ${failedCount} 张`;
-
+        const generationCompletedAt = Date.now();
+        setItems((prev) => prev.map((item) => item.id === itemId
+          ? {
+              ...item,
+              lastGenerationDurationMs: Math.max(0, generationCompletedAt - generationStartedAt),
+              lastGenerationCompletedAt: generationCompletedAt,
+            }
+          : item));
+        setActiveCanvasImageGenerations((prev) => {
+          const entry = prev[itemId];
+          if (!entry) return prev;
+          return {
+            ...prev,
+            [itemId]: {
+              ...entry,
+              completed: Math.min(entry.total, acceptedOutputs.length),
+              failed: Math.max(0, entry.total - acceptedOutputs.length),
+            },
+          };
+        });
+        if (warningCount > 0 && warningMessage) {
           setCanvasImageGenerationErrorById((prev) => ({
             ...prev,
-            [itemId]: failureMessage,
+            [itemId]: warningMessage,
           }));
         }
       } catch (error) {
@@ -12936,15 +13011,17 @@ export default function AIWorkspace() {
     [
       activeCanvasImageGenerations,
       appendGeneratedImageHistoryForSession,
-      defaultWorkspaceImageModelOption.id,
       defaultWorkspaceImageModelOption.providerId,
+      activeSkill?.id,
+      chatModelId,
+      chatProviderId,
       imageCardProviderById,
       materializeImageCardHistoryForSession,
-      providerImageOptionProfiles,
       recordCurrentCanvasUndoSnapshot,
+      resolvedChatSelection.model,
+      resolvedChatSelection.providerId,
       selectedImageCardModel.providerId,
       setItems,
-      workspaceImageModelOptions,
     ]
   );
 
@@ -13002,31 +13079,6 @@ export default function AIWorkspace() {
     pendingAssistantMessageIdRef.current = null;
   };
 
-  const extractMaterialRequests = (input: string): string[] => {
-    const normalized = input.toLowerCase();
-    const materialMatchers: Array<{ key: string; patterns: string[] }> = [
-      { key: 'tshirt', patterns: ['t恤', 't-shirt', 'tshirt'] },
-      { key: 'hoodie', patterns: ['卫衣', 'hoodie'] },
-      { key: 'cap', patterns: ['帽子', '棒球帽', 'cap'] },
-      { key: 'socks', patterns: ['袜子', 'socks'] },
-      { key: 'tote_bag', patterns: ['帆布袋', 'tote', '包袋'] },
-      { key: 'notebook', patterns: ['笔记本', 'notebook'] },
-      { key: 'phone_case', patterns: ['手机壳', 'phone case'] },
-      { key: 'mug', patterns: ['杯子', '马克杯', 'mug'] },
-      { key: 'sticker_pack', patterns: ['贴纸', 'sticker'] },
-      { key: 'lanyard', patterns: ['挂绳', 'lanyard'] },
-      { key: 'keychain', patterns: ['钥匙扣', 'keychain'] },
-      { key: 'mouse_pad', patterns: ['鼠标垫', 'mouse pad'] },
-      { key: 'water_bottle', patterns: ['水壶', '水杯', 'bottle'] },
-      { key: 'signage', patterns: ['导视', '标识牌', 'signage'] },
-      { key: 'packaging_box', patterns: ['包装盒', 'box packaging', 'box'] },
-    ];
-
-    return materialMatchers
-      .filter((item) => item.patterns.some((pattern) => normalized.includes(pattern)))
-      .map((item) => item.key);
-  };
-
   const extractUploadedLogoReferences = (): string[] => {
     const logoKeywordPattern = /(logo|标志|商标)/i;
 
@@ -13045,79 +13097,6 @@ export default function AIWorkspace() {
       ?.referenceImages || [];
 
     return [...latestUserImages];
-  };
-
-  const findLatestMatch = (messages: ChatMessage[], pattern: RegExp): string | null => {
-    for (let i = messages.length - 1; i >= 0; i -= 1) {
-      const content = messages[i]?.content || '';
-      const match = content.match(pattern);
-      if (match?.[1]) {
-        return match[1].trim();
-      }
-    }
-    return null;
-  };
-
-  const resolveBrandIdentity = (currentInput: string): { brandName: string; industry: string } => {
-    const brandInInput = currentInput.match(/(?:品牌名称?|品牌|名称)[:：]?\s*([^\n，,。；;]+)/i)?.[1]?.trim();
-    const industryInInput = currentInput.match(/(?:行业|类型)[:：]?\s*([^\n，,。；;]+)/i)?.[1]?.trim();
-
-    const brandFromUserHistory = findLatestMatch(chatMessages.filter((m) => m.role === 'user'), /(?:品牌名称?|品牌|名称)[:：]?\s*([^\n，,。；;]+)/i);
-    const industryFromUserHistory = findLatestMatch(chatMessages.filter((m) => m.role === 'user'), /(?:行业|类型)[:：]?\s*([^\n，,。；;]+)/i);
-
-    const brandFromAssistant = findLatestMatch(chatMessages.filter((m) => m.role === 'assistant'), /品牌名称[：:]\s*([^\n，,。；;]+)/i);
-    const industryFromAssistant = findLatestMatch(chatMessages.filter((m) => m.role === 'assistant'), /行业[：:]\s*([^\n，,。；;]+)/i);
-
-    return {
-      brandName: brandInInput || brandFromUserHistory || brandFromAssistant || 'MyBrand',
-      industry: industryInInput || industryFromUserHistory || industryFromAssistant || '消费品',
-    };
-  };
-
-  const isNoiseAssistantMessage = (msg: ChatMessage): boolean => {
-    const content = msg.content || '';
-    if (!content.trim()) return true;
-    if (msg.taskKey) return true;
-    if (/^🎯|^🧩|^✅|^⚠️|^❌|^⏹️/.test(content)) return true;
-    if (content.includes('已提交') || content.includes('生成中') || content.includes('生成失败') || content.includes('已终止')) return true;
-    if (content.includes('"action"') || content.includes('"action_input"') || content.includes('"thought"')) return true;
-    return false;
-  };
-
-  const extractStructuredBrandContext = (): { brandBrief: string; viGuide: string } => {
-    const cleanAssistantMessages = chatMessages
-      .filter((msg) => msg.role === 'assistant' && !isNoiseAssistantMessage(msg))
-      .map((msg) => msg.content.trim())
-      .filter(Boolean);
-
-    const briefKeywords = ['行业心智解析', '品牌名语义解码', '品牌内核推演', '差异化定位'];
-    const viKeywords = ['标志设计', '标准字体', '品牌色彩系统', '标识系统扩展'];
-
-    let brandBrief = '';
-    let viGuide = '';
-
-    for (let i = cleanAssistantMessages.length - 1; i >= 0; i -= 1) {
-      const content = cleanAssistantMessages[i];
-      const briefHitCount = briefKeywords.filter((k) => content.includes(k)).length;
-      const viHitCount = viKeywords.filter((k) => content.includes(k)).length;
-
-      if (!brandBrief && briefHitCount >= 2) {
-        brandBrief = content;
-      }
-      if (!viGuide && viHitCount >= 2) {
-        viGuide = content;
-      }
-      if (brandBrief && viGuide) break;
-    }
-
-    if (!brandBrief && cleanAssistantMessages.length > 0) {
-      brandBrief = cleanAssistantMessages[cleanAssistantMessages.length - 1];
-    }
-    if (!viGuide && cleanAssistantMessages.length > 1) {
-      viGuide = cleanAssistantMessages[cleanAssistantMessages.length - 2];
-    }
-
-    return { brandBrief, viGuide };
   };
 
   const handleGenerate = async (options?: {
@@ -13286,234 +13265,6 @@ export default function AIWorkspace() {
       return;
     }
     
-    const confirmPatterns = ['确认出图', '开始出图', '生成全部'];
-    const normalizedInput = currentChatInput.trim().toLowerCase();
-    const brandMaterialRequests = currentSkill?.id === 'brand' ? extractMaterialRequests(currentChatInput) : [];
-    const isLogoConfirm =
-      currentSkill?.id === 'logo' &&
-      !options?.agentConfirmation &&
-      !effectiveAgentClarification &&
-      confirmPatterns.some((pattern) => normalizedInput.includes(pattern.toLowerCase()));
-    const isBrandGenerate =
-      currentSkill?.id === 'brand' &&
-      !options?.agentConfirmation &&
-      !effectiveAgentClarification &&
-      (
-        confirmPatterns.some((pattern) => normalizedInput.includes(pattern.toLowerCase())) ||
-        brandMaterialRequests.length > 0
-      );
-    
-    if (isLogoConfirm) {
-      let brandName = 'MyBrand';
-      let industry = '咖啡';
-      
-      const brandMatch = currentChatInput.match(/(?:品牌名称?|品牌|名称)[:：]?\s*(\S+)/i);
-      if (brandMatch) brandName = brandMatch[1];
-      
-      const industryMatch = currentChatInput.match(/(?:行业|类型)[:：]?\s*(\S+)/i);
-      if (industryMatch) industry = industryMatch[1];
-      
-      const brandNameInHistory = chatMessages.find(m => 
-        m.role === 'assistant' && m.content && /品牌名称/i.test(m.content)
-      );
-      if (brandNameInHistory?.content) {
-        const extractedBrand = brandNameInHistory.content.match(/品牌名称[：:]\s*(\S+)/);
-        if (extractedBrand) brandName = extractedBrand[1];
-      }
-      
-      const userMessageId = `msg-${Date.now()}`;
-      const assistantPlaceholderId = `msg-${Date.now()}-assistant-pending`;
-      pendingAssistantMessageIdRef.current = assistantPlaceholderId;
-      setChatMessages(prev => [...prev, {
-        id: userMessageId,
-        role: 'user',
-        content: currentChatInput,
-        referenceContext: currentReferenceContext,
-        skill: currentSkill,
-      }, {
-        id: assistantPlaceholderId,
-        role: 'assistant',
-        content: '...',
-        taskStatus: 'running',
-      }]);
-      setChatInput('');
-      setIsGenerating(true);
-      setHasStartedChat(true);
-      clearSentChatReferenceTokens();
-      
-      try {
-        const response = await fetch('/api/skills/jobs', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            skillType: 'logo',
-            payload: {
-              brandName,
-              industry,
-              providerId: selectedImageProviderId,
-              model: selectedImageModelId,
-            },
-          }),
-        });
-        
-        if (!response.ok) {
-          const errorData = await response.json().catch(() => ({}));
-          throw new Error(errorData.error || 'Failed to create logo job');
-        }
-        
-        const data = await response.json();
-        processedSkillJobUrlsRef.current = new Set();
-        setActiveSkillJobId(data.jobId);
-        setActiveSkillJobType('logo');
-        setActiveSkillJobStatus({
-          completed: 0,
-          failed: 0,
-          total: data.total,
-          items: data.items,
-        });
-
-        const placeholders: ChatMessage[] = (data.items || []).map((item: { key?: string; component?: string; name: string }) => {
-          const itemKey = item.key || item.component || `item-${Math.random().toString(36).slice(2, 6)}`;
-          const messageId = `msg-${Date.now()}-logo-${itemKey}-${Math.random().toString(36).slice(2, 6)}`;
-          return {
-            id: messageId,
-            role: 'assistant',
-            content: `${item.name} 生成中...`,
-            imageName: item.name,
-            model: selectedImageModelId,
-            taskKey: `logo:${itemKey}`,
-            taskStatus: 'running',
-          };
-        });
-        
-        updatePendingAssistantMessage((msg) => ({
-          ...msg,
-          content: `🎨 已提交 ${data.total} 个 VI 素材到供应商（${industry} - ${brandName}），正在并发生成...`,
-          taskStatus: 'running',
-        }));
-        setChatMessages(prev => [...prev, ...placeholders]);
-      } catch (error) {
-        updatePendingAssistantMessage((msg) => ({
-          ...msg,
-          content: `创建任务失败: ${error instanceof Error ? error.message : '未知错误'}`,
-          taskStatus: 'failed',
-        }));
-        setIsGenerating(false);
-        pendingAssistantMessageIdRef.current = null;
-      }
-      return;
-    }
-
-    if (isBrandGenerate) {
-      const { brandName, industry } = resolveBrandIdentity(currentChatInput);
-      const { brandBrief, viGuide } = extractStructuredBrandContext();
-
-      const logoHint =
-        mergedBrandLogoReferences.length > 0
-          ? 'Follow the provided logo silhouette, line rhythm, and contrast hierarchy.'
-          : 'No explicit logo uploaded. Keep a strong central logo-like motif consistent with the brand tone.';
-
-      if (mergedBrandLogoReferences.length === 0) {
-        const missingLogoMessage: ChatMessage = {
-          id: `msg-${Date.now()}-brand-logo-required`,
-          role: 'assistant',
-          content: '请先上传一个 logo 参考图，再生成品牌物料。',
-        };
-        setChatMessages(prev => [...prev, missingLogoMessage]);
-        return;
-      }
-
-      const userMessageId = `msg-${Date.now()}`;
-      const assistantPlaceholderId = `msg-${Date.now()}-assistant-pending`;
-      pendingAssistantMessageIdRef.current = assistantPlaceholderId;
-      setChatMessages(prev => [...prev, {
-        id: userMessageId,
-        role: 'user',
-        content: currentChatInput,
-        referenceContext: currentReferenceContext,
-        skill: currentSkill,
-      }, {
-        id: assistantPlaceholderId,
-        role: 'assistant',
-        content: '...',
-        taskStatus: 'running',
-      }]);
-      setChatInput('');
-      setIsGenerating(true);
-      setHasStartedChat(true);
-      clearSentChatReferenceTokens();
-
-      try {
-        const response = await fetch('/api/skills/jobs', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            skillType: 'brand',
-            payload: {
-              brandName,
-              industry,
-              userRequirement: currentChatInput,
-              materialRequests: brandMaterialRequests,
-              logoReferenceImages: mergedBrandLogoReferences,
-              brandBrief,
-              viGuide,
-              logoReferenceHint: logoHint,
-              providerId: selectedImageProviderId,
-              model: selectedImageModelId,
-            },
-          }),
-        });
-
-        if (!response.ok) {
-          const errorData = await response.json().catch(() => ({}));
-          throw new Error(errorData.error || 'Failed to create brand job');
-        }
-
-        const data = await response.json();
-        processedSkillJobUrlsRef.current = new Set();
-        setActiveSkillJobId(data.jobId);
-        setActiveSkillJobType('brand');
-        setActiveSkillJobStatus({
-          completed: 0,
-          failed: 0,
-          total: data.total,
-          items: data.items,
-        });
-
-        const placeholders: ChatMessage[] = (data.items || []).map((item: { key?: string; component?: string; name: string }) => {
-          const itemKey = item.key || item.component || `item-${Math.random().toString(36).slice(2, 6)}`;
-          return {
-            id: `msg-${Date.now()}-brand-${itemKey}-${Math.random().toString(36).slice(2, 6)}`,
-            role: 'assistant',
-            content: `${item.name} 生成中...`,
-            imageName: item.name,
-            model: selectedImageModelId,
-            taskKey: `brand:${itemKey}`,
-            taskStatus: 'running',
-          };
-        });
-
-        const isSpecificMaterial = brandMaterialRequests.length > 0;
-        updatePendingAssistantMessage((msg) => ({
-          ...msg,
-          content: isSpecificMaterial
-            ? `🎯 已提交 ${data.total} 个指定品牌物料任务（${industry} - ${brandName}），正在异步生成...`
-            : `🧩 已提交品牌九宫格物料任务（${industry} - ${brandName}），正在异步生成...`,
-          taskStatus: 'running',
-        }));
-        setChatMessages(prev => [...prev, ...placeholders]);
-      } catch (error) {
-        updatePendingAssistantMessage((msg) => ({
-          ...msg,
-          content: `创建任务失败: ${error instanceof Error ? error.message : '未知错误'}`,
-          taskStatus: 'failed',
-        }));
-        setIsGenerating(false);
-        pendingAssistantMessageIdRef.current = null;
-      }
-      return;
-    }
-    
     const userMessage: ChatMessage = {
       id: `msg-${Date.now()}`,
       role: 'user',
@@ -13529,7 +13280,9 @@ export default function AIWorkspace() {
     };
     const assistantPlaceholderId = `msg-${Date.now()}-assistant-pending`;
     const agentRunId = `agent-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    if (generationMode === 'agent') {
+    const hasRegionTarget = (currentReferenceContext?.references || []).some((reference) => reference.role === 'region_target');
+    const usesAgentRequest = generationMode !== 'chat' || hasRegionTarget;
+    if (usesAgentRequest) {
       setActiveAgentRunMarker({
         runId: agentRunId,
         userMessageId: userMessage.id,
@@ -13557,13 +13310,19 @@ export default function AIWorkspace() {
     setChatMessages(prev => [...prev, ...(options?.suppressUserMessage ? [] : [userMessage]), {
       id: assistantPlaceholderId,
       role: 'assistant',
-      content: generationMode === 'agent' ? '' : '...',
+      content: usesAgentRequest ? '' : '...',
       taskStatus: 'running',
-      agentRunProgress: generationMode === 'agent'
+      agentRunProgress: usesAgentRequest
         ? createInitialAgentRunProgress(agentRunId)
         : undefined,
+      agentProgressMode: usesAgentRequest
+        ? generationMode === 'image' ? 'compact' : 'full'
+        : undefined,
     }]);
-    if (!options?.suppressUserMessage) setChatInput('');
+    if (!options?.suppressUserMessage) {
+      setChatInput('');
+      setActiveSkillForCurrentTopic(null);
+    }
     setIsGenerating(true);
     setHasStartedChat(true);
     const processedAgentActionKeysForRun = new Set<string>();
@@ -13584,7 +13343,7 @@ export default function AIWorkspace() {
         const brandName = brandMatch?.[1] || 'MyBrand';
         const industry = industryMatch?.[1] || '消费品';
 
-        const logoPrompt = `${brandName} ${industry} 品牌logo设计，简洁现代，高识别度，矢量风格，白底，适合数字媒体与印刷`; 
+        const logoPrompt = `${brandName} ${industry} 品牌符号设计，简洁现代，高识别度，矢量风格，白底，适合数字媒体与印刷`;
         const bootstrapMessageId = `msg-${Date.now()}-brand-logo-bootstrap`;
 
         setChatMessages(prev => [...prev, {
@@ -13596,26 +13355,29 @@ export default function AIWorkspace() {
         }]);
 
         try {
-          const logoResponse = await fetch('/api/generate', {
+          const logoResponse = await fetch('/api/agent', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
+              runId: `brand-symbol-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+              topicId: getCurrentSession()?.activeTopicId || 'default',
               messages: [{ role: 'user', content: logoPrompt }],
-              size: '1024x1024',
-              intent: 'image',
-              imageProviderId: selectedImageProviderId,
-              model: selectedImageModelId,
+              chatOptions: {
+                providerId: selectedChatProviderId,
+                model: selectedChatModelId,
+              },
+              imageOptions: {
+                providerId: selectedImageProviderId,
+                model: selectedImageModelId,
+                aspectRatio: '1:1',
+                size: '1024x1024',
+                quality: 'auto',
+                count: 1,
+                autoConfirm: true,
+              },
             }),
           });
-
-          if (!logoResponse.ok) {
-            const errorText = await logoResponse.text();
-            throw new Error(errorText || `API Error: ${logoResponse.status}`);
-          }
-
-          const logoResult = await logoResponse.json();
-          const logoData = logoResult?.result;
-          const logoUrl = logoData?.localUrl || logoData?.data?.[0]?.url;
+          const logoUrl = (await consumeAgentImageResponse(logoResponse))[0]?.src;
           if (!logoUrl) {
             throw new Error('未返回可用 logo 图片');
           }
@@ -13732,7 +13494,7 @@ export default function AIWorkspace() {
         annotationItemIds: [...selectedCanvasAnnotationContext.annotationItemIds],
       };
       if (
-        generationMode === 'agent' &&
+        usesAgentRequest &&
         annotationContextForRequest.targetImage &&
         annotationContextForRequest.annotationCount > 0 &&
         !annotationContextForRequest.ambiguousImageTarget
@@ -13847,7 +13609,7 @@ export default function AIWorkspace() {
         imageOptions: {
           providerId: selectedImageProviderId,
           model: selectedImageModelId,
-          aspectRatio: agentImageAspectRatio,
+          aspectRatio: generationMode === 'image' ? imageAspectRatio : agentImageAspectRatio,
           size: '2048x2048',
           quality: 'auto',
           count: 1,
@@ -13857,15 +13619,13 @@ export default function AIWorkspace() {
         clarificationRequest: effectiveAgentClarification?.request,
         clarificationResponse: effectiveAgentClarificationResponse,
       };
-      const hasRegionTarget = (currentReferenceContext?.references || []).some((reference) => reference.role === 'region_target');
-      const requestEndpoint = generationMode === 'agent' ? '/api/agent' : '/api/generate';
-      const resolvedRequestEndpoint = hasRegionTarget ? '/api/agent' : requestEndpoint;
+      const resolvedRequestEndpoint = usesAgentRequest ? '/api/agent' : '/api/generate';
       if (!options?.suppressUserMessage) clearSentChatReferenceTokens();
 
       const response = await fetch(resolvedRequestEndpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(generationMode === 'agent' || hasRegionTarget ? agentRequestBody : requestBody),
+        body: JSON.stringify(usesAgentRequest ? agentRequestBody : requestBody),
         signal: controller.signal,
       });
       
@@ -13944,7 +13704,11 @@ export default function AIWorkspace() {
               intent?: 'chat' | 'image' | 'skill_action';
               summary?: string;
               label?: string;
+              index?: number;
+              prompt?: string;
+              compilation?: AgentImagePromptCompilation;
               skillId?: string;
+              skill?: { id?: string; label?: string } | null;
               source?: 'manual' | 'auto';
               operationId?: string;
               sequence?: number;
@@ -14020,7 +13784,11 @@ export default function AIWorkspace() {
                 intent?: 'chat' | 'image' | 'skill_action';
                 summary?: string;
                 label?: string;
+                index?: number;
+                prompt?: string;
+                compilation?: AgentImagePromptCompilation;
                 skillId?: string;
+                skill?: { id?: string; label?: string } | null;
                 source?: 'manual' | 'auto';
                 runId?: string;
                 operationId?: string;
@@ -14149,6 +13917,10 @@ export default function AIWorkspace() {
               continue;
             }
 
+            if (event.type === 'active_skill_changed') {
+              continue;
+            }
+
             if (event.type === 'clarification_required') {
               suppressAssistantContentForDecision = true;
               const requestPayload = event.request;
@@ -14188,9 +13960,32 @@ export default function AIWorkspace() {
             }
 
             if (event.type === 'skill_selected' && event.label && !currentSkill) {
+              const selectedSkill = { id: event.skillId || 'auto', label: event.label || 'Skill' };
+              setChatMessages((messages) => messages.map((message) => (
+                message.id === userMessage.id ? { ...message, skill: selectedSkill } : message
+              )));
+              continue;
+            }
+
+            if (
+              event.type === 'image_prompts_ready'
+              && Number.isInteger(event.index)
+              && typeof event.prompt === 'string'
+              && event.prompt.length > 0
+            ) {
+              const promptIndex = event.index as number;
+              const promptEntry = {
+                index: promptIndex,
+                label: event.label || `图片 ${promptIndex + 1}`,
+                prompt: event.prompt,
+                ...(event.compilation ? { compilation: event.compilation } : {}),
+              };
               updatePendingAssistantMessage((msg) => ({
                 ...msg,
-                skill: { id: event.skillId || 'auto', label: event.label || 'Skill' },
+                agentImagePrompts: [
+                  ...(msg.agentImagePrompts || []).filter((entry) => entry.index !== promptIndex),
+                  promptEntry,
+                ].sort((left, right) => left.index - right.index),
               }));
               continue;
             }
@@ -14713,7 +14508,7 @@ export default function AIWorkspace() {
       }
 
       updateActiveStreamMessageStatus('failed', '生成失败，请重试');
-      updatePendingAssistantMessage((msg) => generationMode === 'agent'
+      updatePendingAssistantMessage((msg) => usesAgentRequest
         ? {
             ...updateAgentRunProgress(msg, { type: 'agent_error' }),
             taskStatus: 'failed',
@@ -14726,7 +14521,7 @@ export default function AIWorkspace() {
           });
     } finally {
       stopStreamTypewriter();
-      if (generationMode === 'agent') setActiveAgentRunMarker(undefined);
+      if (usesAgentRequest) setActiveAgentRunMarker(undefined);
       for (const key of processedAgentActionKeysForRun) {
         processedAgentActionsRef.current.delete(key);
       }
@@ -15037,9 +14832,13 @@ export default function AIWorkspace() {
   };
 
   const handleQuickSkillSelect = (
-    action: { id: string; label: string },
+    action: Pick<SkillMenuAction, 'id' | 'label'>,
     source: SkillSelectSource
   ) => {
+    if (source === 'slash_menu') {
+      setChatInput('');
+      closeSkillMenu(false);
+    }
     const selectedSkill = { id: action.id, label: action.label };
     setActiveSkillForCurrentTopic(selectedSkill);
     if (source === 'center_quick_action') {
@@ -15482,12 +15281,12 @@ export default function AIWorkspace() {
   const closeChatComposerPopovers = useCallback(() => {
     setShowChatComposerMoreMenu(false);
     setShowChatAssetPicker(false);
-    setShowSkillsMenu(false);
+    closeSkillMenu();
     setShowGenerationModeMenu(false);
     setShowModelPreferencePopover(false);
     setShowChatModelSelector(false);
     setShowImageModelSelector(false);
-  }, []);
+  }, [closeSkillMenu]);
 
   useEffect(() => {
     if (
@@ -15539,7 +15338,8 @@ export default function AIWorkspace() {
 
   useEffect(() => {
     currentSessionIdRef.current = currentSessionId;
-  }, [currentSessionId]);
+    currentTopicIdRef.current = sessions.find((session) => session.id === currentSessionId)?.activeTopicId || 'default';
+  }, [currentSessionId, sessions]);
 
   useEffect(() => {
     pendingCanvasHistorySnapshotRef.current = null;
@@ -16873,7 +16673,7 @@ export default function AIWorkspace() {
         setShowImageModelSelector(false);
       }
       if (skillsMenuRef.current && !skillsMenuRef.current.contains(e.target as Node)) {
-        setShowSkillsMenu(false);
+        closeSkillMenu();
       }
       if (chatComposerMoreMenuRef.current && !chatComposerMoreMenuRef.current.contains(e.target as Node)) {
         setShowChatComposerMoreMenu(false);
@@ -16916,7 +16716,7 @@ export default function AIWorkspace() {
       document.addEventListener('pointerdown', handlePointerDownOutside);
       return () => document.removeEventListener('pointerdown', handlePointerDownOutside);
     }
-  }, [showAvatarMenu, showProjectMenu, showAddNodeMenu, showGeneratedImageHistoryPanel, showHistoryPanel, showGenerationModeMenu, showChatModelSelector, showImageModelSelector, showSkillsMenu, showChatComposerMoreMenu, showChatAssetPicker, showModelPreferencePopover, showTextPanelProviderMenu, showImageCardProviderMenu, showImageCardModelMenu, showImageCardSettingsMenu, showTextPanelModelMenu, editingSessionId, hasActiveAssistantTextSelection, isNodeInsideAssistantSelectable]);
+  }, [showAvatarMenu, showProjectMenu, showAddNodeMenu, showGeneratedImageHistoryPanel, showHistoryPanel, showGenerationModeMenu, showChatModelSelector, showImageModelSelector, showSkillsMenu, showChatComposerMoreMenu, showChatAssetPicker, showModelPreferencePopover, showTextPanelProviderMenu, showImageCardProviderMenu, showImageCardModelMenu, showImageCardSettingsMenu, showTextPanelModelMenu, editingSessionId, hasActiveAssistantTextSelection, isNodeInsideAssistantSelectable, closeSkillMenu]);
 
   useEffect(() => {
     if (!showChatModelSelector && !showImageModelSelector && !showChatComposerMoreMenu && !showChatAssetPicker && !showModelPreferencePopover && !showSkillsMenu && !showGenerationModeMenu) return;
@@ -19053,17 +18853,20 @@ export default function AIWorkspace() {
                     >
                   {msg.role === 'user' ? (
                     <div className="flex flex-col items-end max-w-[90%]">
-                      {msg.skill && (
-                        <div className="workspace-token-chip mb-[10px] flex w-fit items-center gap-0.5 rounded-md px-1 py-0.5">
-                          <Sparkles size={8} className="flex-shrink-0" />
-                          <span className="text-[10px] font-bold leading-none">{msg.skill.label}</span>
-                        </div>
-                      )}
                       <div
                         className="workspace-message-user panel-scrollbar overflow-y-auto rounded-[20px] px-3.5 py-2.5"
                         style={{ maxHeight: '240px' }}
                       >
                         <div className="text-sm leading-7 whitespace-pre-wrap break-words">
+                          {msg.skill && (
+                            <span
+                              className="workspace-reference-token workspace-skill-token mx-0.5 inline-flex h-7 max-w-[172px] items-center gap-1 rounded-lg px-1.5 align-middle text-[11px] leading-none"
+                              title={msg.skill.label}
+                            >
+                              <Sparkles size={11} className="shrink-0" />
+                              <span className="min-w-0 truncate font-medium">{msg.skill.label}</span>
+                            </span>
+                          )}
                           {userInlineContent.map((segment, index) => segment.type === 'text' ? (
                             <React.Fragment key={`${msg.id}-text-${index}`}>{segment.text}</React.Fragment>
                           ) : (
@@ -19157,8 +18960,18 @@ export default function AIWorkspace() {
                           role="status"
                           aria-live="polite"
                         >
-                          {msg.agentRunProgress.steps.map((step) => {
+                          {msg.agentRunProgress.steps
+                            .filter((step) => (
+                              msg.agentProgressMode !== 'compact'
+                              || step.status === 'failed'
+                              || step.stepId === 'prompt_optimization'
+                              || step.stepId === 'generate_image'
+                            ))
+                            .map((step) => {
                             const canOpenDecision = step.status === 'waiting' && hasPendingAgentDecision(msg);
+                            const imagePrompts = step.stepId === 'prompt_optimization'
+                              ? msg.agentImagePrompts || []
+                              : [];
                             const className = `agent-progress-enter flex min-h-7 items-center gap-2.5 rounded-md text-left ${
                               canOpenDecision ? '-mx-1 px-1  hover:bg-[var(--workspace-control-hover)]' : ''
                             } ${
@@ -19181,6 +18994,74 @@ export default function AIWorkspace() {
                                 </span>
                               </>
                             );
+                            if (imagePrompts.length > 0) {
+                              return (
+                                <details key={`${step.stepId}:${step.toolCallId || ''}`} className="group">
+                                  <summary className={`${className} cursor-pointer list-none [&::-webkit-details-marker]:hidden`}>
+                                    {content}
+                                    <ChevronRight
+                                      size={13}
+                                      className="ml-auto flex-none transition-transform group-open:rotate-90"
+                                      aria-hidden="true"
+                                    />
+                                  </summary>
+                                  <div className="panel-scrollbar ml-5 mt-1 max-h-[320px] overflow-y-auto rounded-xl border border-[var(--workspace-border)] bg-[var(--workspace-surface-soft)] p-3">
+                                    {imagePrompts.map((entry, promptPosition) => {
+                                      const copyKey = `${msg.id}:prompt:${entry.index}`;
+                                      const promptLabel = imagePrompts.length > 1
+                                        ? entry.label || `图片 ${promptPosition + 1}`
+                                        : '最终 Prompt';
+                                      return (
+                                        <div
+                                          key={entry.index}
+                                          className="border-t border-[var(--workspace-border)] pt-3 first:border-t-0 first:pt-0"
+                                        >
+                                          <div className="mb-2 flex items-center justify-between gap-3 text-[11px] font-medium text-[var(--workspace-text-muted)]">
+                                            <span>{promptLabel}</span>
+                                            <button
+                                              type="button"
+                                              className="workspace-control-chip inline-flex h-7 flex-none items-center gap-1 rounded-lg px-2 text-[11px]"
+                                              onClick={(event) => {
+                                                event.stopPropagation();
+                                                void handleCopyAssistantMessage(copyKey, entry.prompt);
+                                              }}
+                                              aria-label={`复制${promptLabel}提示词`}
+                                            >
+                                              {copiedAssistantMessageId === copyKey ? <Check size={12} /> : <Copy size={12} />}
+                                              <span>{copiedAssistantMessageId === copyKey ? '已复制' : '复制'}</span>
+                                            </button>
+                                          </div>
+                                          {entry.compilation && (
+                                            <div className="mb-3 grid gap-1 rounded-lg bg-[var(--workspace-surface)] px-2.5 py-2 text-[11px] leading-4 text-[var(--workspace-text-muted)]">
+                                              <span>
+                                                Skill：{entry.compilation.skillLabel
+                                                  ? `${entry.compilation.skillLabel}（${entry.compilation.skillId}）`
+                                                  : '未使用 Skill'}
+                                              </span>
+                                              <span>
+                                                Planner：{entry.compilation.plannerProviderId
+                                                  ? `${entry.compilation.plannerProviderId} / `
+                                                  : ''}{entry.compilation.plannerModel}
+                                              </span>
+                                              <span>
+                                                参考图：{entry.compilation.visualReferencesUsed
+                                                  ? `已读取 ${entry.compilation.referenceCount} 张`
+                                                  : '未使用'}
+                                                {' · '}编译耗时 {(entry.compilation.durationMs / 1000).toFixed(1)} 秒
+                                              </span>
+                                              <span>完成：{new Date(entry.compilation.compiledAt).toLocaleString()}</span>
+                                            </div>
+                                          )}
+                                          <pre className="whitespace-pre-wrap break-words [overflow-wrap:anywhere] font-sans text-[12px] leading-5 text-[var(--workspace-text-primary)]">
+                                            {entry.prompt}
+                                          </pre>
+                                        </div>
+                                      );
+                                    })}
+                                  </div>
+                                </details>
+                              );
+                            }
                             return canOpenDecision ? (
                               <button
                                 key={`${step.stepId}:${step.toolCallId || ''}`}
@@ -19396,10 +19277,11 @@ export default function AIWorkspace() {
               }}
               onClose={closeAgentClarificationModal}
               {...(!pendingAgentClarification.request.failed
-                && !['creative_direction', 'context_reference'].includes(pendingAgentClarification.request.dimension)
+                && !['creative_direction', 'context_reference', 'image_operation', 'skill_selection'].includes(pendingAgentClarification.request.dimension)
                 ? { skipLabel: '按当前信息开始制作', onSkip: () => submitAgentClarification(true) }
                 : {})}
               {...(!pendingAgentClarification.request.failed
+                && pendingAgentClarification.request.dimension !== 'skill_selection'
                 ? {
                     custom: {
                       label: '自定义回答',
@@ -19458,6 +19340,15 @@ export default function AIWorkspace() {
                   <div
                     ref={chatInputEditorRef}
                     contentEditable
+                    role="textbox"
+                    aria-multiline="true"
+                    aria-autocomplete={skillMenuTrigger === 'slash' ? 'list' : 'none'}
+                    aria-controls={showSkillsMenu ? 'skill-menu-listbox' : undefined}
+                    aria-activedescendant={
+                      skillMenuTrigger === 'slash' && filteredQuickActions[skillMenuActiveIndex]
+                        ? `skill-option-${filteredQuickActions[skillMenuActiveIndex].id}`
+                        : undefined
+                    }
                     suppressContentEditableWarning
                     onInput={handleChatEditorInput}
                     onCompositionStart={handleChatCompositionStart}
@@ -19466,12 +19357,22 @@ export default function AIWorkspace() {
                     onKeyDown={handleChatEditorKeyDown}
                     onMouseDown={(event) => {
                       const target = event.target as HTMLElement;
-                      if (target.closest('[data-reference-action]')) {
+                      if (target.closest('[data-reference-action], [data-skill-action]')) {
                         event.preventDefault();
                       }
                     }}
                     onClick={(event) => {
                       const target = event.target as HTMLElement;
+                      const skillAction = target.closest('[data-skill-action]')?.getAttribute('data-skill-action');
+                      if (skillAction === 'remove') {
+                        event.stopPropagation();
+                        setActiveSkillForCurrentTopic(null);
+                        window.requestAnimationFrame(() => {
+                          chatInputEditorRef.current?.focus();
+                          moveCaretToEditorEnd();
+                        });
+                        return;
+                      }
                       const action = target.closest('[data-reference-action]')?.getAttribute('data-reference-action');
                       if (!action) return;
                       const tokenNode = target.closest(REFERENCE_TOKEN_SELECTOR) as HTMLElement | null;
@@ -19659,39 +19560,82 @@ export default function AIWorkspace() {
                   </div>
                   <div className="relative" ref={skillsMenuRef}>
                     {showSkillsMenu && (
-                      <div className="workspace-menu-panel absolute bottom-full left-0 z-20 mb-2 min-w-[180px] rounded-2xl p-1">
-                        {quickActions.map((action) => {
+                      <div
+                        id="skill-menu-listbox"
+                        className="workspace-menu-panel absolute bottom-full left-0 z-20 mb-2 w-[min(320px,calc(100vw-2rem))] rounded-2xl p-1.5"
+                        role="listbox"
+                        aria-label="选择 Skill"
+                      >
+                        <div className="workspace-text-muted flex items-center justify-between px-2.5 py-1.5 text-[10px]">
+                          <span>选择 Skill</span>
+                          {skillMenuTrigger === 'slash' && <span>/{skillMenuQuery}</span>}
+                        </div>
+                        <div className="panel-scrollbar max-h-[280px] overflow-y-auto">
+                        {filteredQuickActions.map((action, index) => {
                           const isActive = activeSkill?.id === action.id;
+                          const isHighlighted = skillMenuTrigger === 'slash'
+                            ? skillMenuActiveIndex === index
+                            : isActive;
                           return (
                             <button
+                              id={`skill-option-${action.id}`}
                               key={action.id}
+                              type="button"
+                              role="option"
+                              aria-selected={isHighlighted}
+                              onMouseDown={(event) => {
+                                if (skillMenuTrigger === 'slash') event.preventDefault();
+                              }}
+                              onMouseEnter={() => {
+                                if (skillMenuTrigger === 'slash') setSkillMenuActiveIndex(index);
+                              }}
                               onClick={() => {
-                                handleQuickSkillSelect(action, 'bottom_skill_bar');
-                                setShowSkillsMenu(false);
+                                const source = skillMenuTrigger === 'slash' ? 'slash_menu' : 'bottom_skill_bar';
+                                handleQuickSkillSelect(action, source);
+                                if (source !== 'slash_menu') closeSkillMenu(false);
                                 setTimeout(() => {
                                   chatInputEditorRef.current?.focus();
                                   moveCaretToEditorEnd();
                                 }, 0);
                               }}
-                              className={`workspace-menu-item flex w-full items-center justify-between gap-2 rounded-xl border border-transparent px-3 py-1.5 text-xs ${isActive ? 'is-selected' : ''}`}
+                              className={`workspace-menu-item flex w-full items-start gap-2 rounded-xl border border-transparent px-3 py-2 text-left ${isHighlighted ? 'is-selected' : ''}`}
                             >
-                              <span className="flex items-center gap-1.5">
-                                <Sparkles size={11} />
-                                <span>{action.label}</span>
+                              <Sparkles size={12} className="mt-0.5 shrink-0" />
+                              <span className="min-w-0 flex-1">
+                                <span className="flex items-center gap-2 text-xs font-medium">
+                                  <span className="truncate">{action.label}</span>
+                                  <span className="workspace-text-muted shrink-0 font-mono text-[10px]">/{action.id}</span>
+                                </span>
+                                {action.description && (
+                                  <span className="workspace-text-muted mt-0.5 block line-clamp-2 text-[10px] leading-4">
+                                    {action.description}
+                                  </span>
+                                )}
                               </span>
-                              {isActive && <span className="workspace-text-muted text-[10px]">✓</span>}
+                              {isActive && <span className="workspace-text-muted mt-0.5 shrink-0 text-[10px]">✓</span>}
                             </button>
                           );
                         })}
+                        {filteredQuickActions.length === 0 && (
+                          <div className="workspace-text-muted px-3 py-5 text-center text-xs">
+                            未找到匹配的 Skill
+                          </div>
+                        )}
+                        </div>
                       </div>
                     )}
                     <button
                       data-chat-composer-control="skills"
                       onClick={(e) => {
                         e.stopPropagation();
-                        const nextOpen = !showSkillsMenu;
+                        const nextOpen = !showSkillsMenu || skillMenuTrigger !== 'button';
                         closeChatComposerPopovers();
-                        setShowSkillsMenu(nextOpen);
+                        if (nextOpen) {
+                          setSkillMenuTrigger('button');
+                          setSkillMenuQuery('');
+                          setSkillMenuActiveIndex(0);
+                          setShowSkillsMenu(true);
+                        }
                       }}
                       disabled={isGenerating}
                       aria-label="Skills"

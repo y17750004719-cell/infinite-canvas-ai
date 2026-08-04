@@ -26,7 +26,8 @@ test('right chat defaults to agent and loads skills from the registry api', () =
 });
 
 test('agent mode posts to the agent route and handles agent events', () => {
-  assert.match(source, /generationMode === 'agent' \? '\/api\/agent' : '\/api\/generate'/);
+  assert.match(source, /const usesAgentRequest = generationMode !== 'chat' \|\| hasRegionTarget/);
+  assert.match(source, /const resolvedRequestEndpoint = usesAgentRequest \? '\/api\/agent' : '\/api\/generate'/);
   assert.match(source, /routing_start/);
   assert.match(source, /clarification_required/);
   assert.match(source, /agentClarification/);
@@ -34,8 +35,21 @@ test('agent mode posts to the agent route and handles agent events', () => {
   assert.match(source, /按当前信息开始制作/);
   assert.match(source, /prompt_optimization_start/);
   assert.match(source, /prompt_optimization_done/);
+  assert.match(source, /image_prompts_ready/);
   assert.match(source, /client_action/);
   assert.match(source, /agent_error/);
+});
+
+test('direct image and canvas image requests use the Planner-backed agent route', () => {
+  const requestModeIndex = source.indexOf("const usesAgentRequest = generationMode !== 'chat'");
+  const requestEndpointIndex = source.indexOf("const resolvedRequestEndpoint = usesAgentRequest ? '/api/agent'", requestModeIndex);
+  const canvasHandlerIndex = source.indexOf('const handleCanvasImageGenerate = useCallback');
+  const canvasAgentIndex = source.indexOf("fetch('/api/agent'", canvasHandlerIndex);
+  assert.ok(requestModeIndex >= 0 && requestEndpointIndex > requestModeIndex);
+  assert.match(source.slice(requestModeIndex, requestEndpointIndex), /generationMode !== 'chat'/);
+  assert.ok(canvasHandlerIndex >= 0 && canvasAgentIndex > canvasHandlerIndex);
+  assert.match(source, /consumeAgentImageResponse\(response\)/);
+  assert.doesNotMatch(source, /fetch\('\/api\/skills\/jobs',\s*\{\s*method:\s*'POST'/);
 });
 
 test('agent requests send only explicitly selected references', () => {
@@ -67,7 +81,7 @@ test('agent clarification uses the shared editable decision popover', () => {
   assert.doesNotMatch(decisionPopoverSource, /aria-modal="true"/);
   assert.match(decisionPopoverSource, /自定义回答|custom\.label/);
   assert.match(source, /按当前信息开始制作/);
-  assert.match(source, /\['creative_direction', 'context_reference'\]\.includes/);
+  assert.match(source, /\['creative_direction', 'context_reference', 'image_operation', 'skill_selection'\]\.includes/);
   assert.match(source, /retry:\s*true/);
   assert.match(source, /!options\?\.agentClarification/);
   assert.match(source, /agentClarificationResponsePayload/);
@@ -119,12 +133,24 @@ test('agent proposals and context entities persist and submit stable selections'
   assert.match(source, /pendingAgentProposal\.options\.map/);
   assert.match(source, /selectedContextEntityIds:\s*\[option\.entityId\]/);
   assert.match(source, /已采用：/);
-  assert.match(source, /\['creative_direction', 'context_reference'\]\.includes/);
+  assert.match(source, /\['creative_direction', 'context_reference', 'image_operation', 'skill_selection'\]\.includes/);
+});
+
+test('server-selected Skills annotate the sent message without repopulating the next draft', () => {
+  const activeSkillChangeStart = source.indexOf("if (event.type === 'active_skill_changed')");
+  const skillSelectedStart = source.indexOf("if (event.type === 'skill_selected'", activeSkillChangeStart);
+  assert.ok(activeSkillChangeStart >= 0 && skillSelectedStart > activeSkillChangeStart);
+  assert.doesNotMatch(source.slice(activeSkillChangeStart, skillSelectedStart), /setActiveSkillForCurrentTopic/);
+  assert.match(source, /event\.type === 'skill_selected' && event\.label && !currentSkill/);
+  assert.match(source, /message\.id === userMessage\.id \? \{ \.\.\.message, skill: selectedSkill \}/);
+  assert.match(source, /setChatInput\(''\);\s*setActiveSkillForCurrentTopic\(null\);/);
+  assert.match(source, /pendingAgentClarification\.request\.dimension !== 'skill_selection'/);
 });
 
 test('agent progress accumulates reached breadcrumbs without an assistant bubble', () => {
   assert.match(source, /createInitialAgentRunProgress/);
-  assert.match(source, /agentRunProgress:\s*generationMode === 'agent'[\s\S]{0,120}createInitialAgentRunProgress\(agentRunId\)/);
+  assert.match(source, /agentRunProgress:\s*usesAgentRequest[\s\S]{0,120}createInitialAgentRunProgress\(agentRunId\)/);
+  assert.match(source, /agentProgressMode:\s*usesAgentRequest[\s\S]{0,120}generationMode === 'image' \? 'compact' : 'full'/);
   assert.match(source, /reduceAgentRunProgress/);
   assert.match(source, /event\.type === 'progress_update'/);
   assert.match(source, /createAgentProgressEventRouter/);
@@ -134,7 +160,8 @@ test('agent progress accumulates reached breadcrumbs without an assistant bubble
   assert.match(source, /hasActiveAgentImageGeneration/);
   assert.match(source, /getAgentProgressDurationLabel\(step, generationClockMs\)/);
   assert.match(source, /timestampMs\?: number/);
-  assert.match(source, /agentRunProgress\.steps\.map/);
+  assert.match(source, /msg\.agentRunProgress\.steps\s*\.filter/);
+  assert.match(source, /step\.stepId === 'generate_image'[\s\S]{0,120}\.map/);
   assert.match(source, /formatAgentProgressLabel\(step\)/);
   assert.match(source, /getAgentProgressCompletionLabel/);
   assert.match(source, /✍️ 回复已完成/);
@@ -155,6 +182,18 @@ test('agent progress accumulates reached breadcrumbs without an assistant bubble
   assert.match(motionControllerSource, /'\.agent-progress-enter'/);
   assert.match(motionControllerSource, /prefers-reduced-motion: reduce/);
   assert.match(motionControllerSource, /gsap\.fromTo\(/);
+});
+
+test('agent final image prompts persist on the progress message and expand on demand', () => {
+  assert.match(source, /agentImagePrompts\?:\s*Array/);
+  assert.match(source, /event\.type === 'image_prompts_ready'/);
+  assert.match(source, /agentImagePrompts:\s*\[/);
+  assert.match(source, /step\.stepId === 'prompt_optimization'/);
+  assert.match(source, /<details[\s\S]{0,300}<summary/);
+  assert.match(source, /max-h-\[320px\]/);
+  assert.match(source, /handleCopyAssistantMessage\(copyKey, entry\.prompt\)/);
+  assert.match(source, /aria-label=\{`复制\$\{promptLabel\}提示词`\}/);
+  assert.match(source, /new Date\(entry\.compilation\.compiledAt\)\.toLocaleString\(\)/);
 });
 
 test('every chat-generated image is materialized in both chat and the canvas', () => {
@@ -267,7 +306,7 @@ test('right chat exposes adaptive chat and image provider model selectors', () =
   assert.match(source, /未配置生图模型/);
 });
 
-test('chat panel sends selected providers and models to agent and direct routes', () => {
+test('chat panel sends selected providers and models to planner and chat routes', () => {
   assert.match(source, /chatOptions:\s*\{/);
   assert.match(source, /chatOptions:\s*\{[\s\S]{0,140}providerId:\s*selectedChatProviderId/);
   assert.match(source, /chatOptions:\s*\{[\s\S]{0,180}model:\s*selectedChatModelId/);
@@ -277,12 +316,12 @@ test('chat panel sends selected providers and models to agent and direct routes'
   assert.match(source, /requestBody\.imageProviderId/);
 });
 
-test('agent image preferences default to 2K and portrait 3:4 without changing direct image mode', () => {
+test('agent and compact image modes preserve their separate aspect-ratio preferences', () => {
   assert.match(source, /const \[imageAspectRatio, setImageAspectRatio\] = useState\('auto'\)/);
   assert.match(source, /const \[agentImageAspectRatio, setAgentImageAspectRatio\] = useState\('3:4'\)/);
   assert.match(source, /generationMode === 'agent' \? agentImageAspectRatio : imageAspectRatio/);
   assert.match(source, /generationMode === 'agent'\s*\? setAgentImageAspectRatio\(option\.id\)\s*:\s*setImageAspectRatio\(option\.id\)/);
-  assert.match(source, /imageOptions:\s*\{[\s\S]{0,260}aspectRatio:\s*agentImageAspectRatio/);
+  assert.match(source, /imageOptions:\s*\{[\s\S]{0,260}aspectRatio:\s*generationMode === 'image' \? imageAspectRatio : agentImageAspectRatio/);
   assert.match(source, /imageOptions:\s*\{[\s\S]{0,320}size:\s*'2048x2048'/);
   assert.match(source, /imageOptions:\s*\{[\s\S]{0,360}quality:\s*'auto'/);
   assert.match(source, /imageOptions:\s*\{[\s\S]{0,400}count:\s*1/);
@@ -297,8 +336,12 @@ test('chat panel keeps persisted model selections available while provider setti
 });
 
 test('brand bootstrap logo generation follows the selected image provider and model', () => {
-  assert.match(source, /const logoResponse = await fetch\('\/api\/generate'[\s\S]{0,420}imageProviderId:\s*selectedImageProviderId/);
-  assert.match(source, /const logoResponse = await fetch\('\/api\/generate'[\s\S]{0,460}model:\s*selectedImageModelId/);
+  const logoRequestStart = source.indexOf("const logoResponse = await fetch('/api/agent'");
+  const logoRequestEnd = source.indexOf('const logoUrl =', logoRequestStart);
+  const logoRequestSource = source.slice(logoRequestStart, logoRequestEnd);
+  assert.ok(logoRequestStart >= 0 && logoRequestEnd > logoRequestStart);
+  assert.match(logoRequestSource, /providerId:\s*selectedImageProviderId/);
+  assert.match(logoRequestSource, /model:\s*selectedImageModelId/);
   assert.match(source, /const bootstrapMessageId[\s\S]{0,420}model:\s*selectedImageModelId/);
 });
 
@@ -342,6 +385,38 @@ test('chat composer uses the supplied Lovart skills icon as a theme-aware mask',
   assert.equal(fs.existsSync(skillsIconPath), true);
   assert.match(source, /lovart-skills\.svg/);
   assert.match(source, /maskImage/);
+});
+
+test('Skill tokens reuse reference token styling, stay first, and support explicit removal', () => {
+  const skillBlockStart = source.indexOf('if (activeSkill) {', source.indexOf('const shouldRebuild'));
+  const skillAppendIndex = source.indexOf('editor.appendChild(token);', skillBlockStart);
+  const composerSegmentLoopIndex = source.indexOf('for (const segment of segments)', skillAppendIndex);
+  assert.ok(skillBlockStart >= 0 && skillAppendIndex > skillBlockStart);
+  assert.ok(composerSegmentLoopIndex > skillAppendIndex);
+  assert.match(source.slice(skillBlockStart, composerSegmentLoopIndex), /workspace-reference-token workspace-skill-token/);
+  assert.match(source.slice(skillBlockStart, composerSegmentLoopIndex), /data-skill-action', 'remove'/);
+  assert.match(source, /target\.closest\('\[data-reference-action\], \[data-skill-action\]'\)/);
+  assert.match(source, /skillAction === 'remove'[\s\S]{0,180}setActiveSkillForCurrentTopic\(null\)/);
+  assert.match(source, /\(e\.key === 'Backspace' \|\| e\.key === 'Delete'\)[\s\S]{0,160}setActiveSkillForCurrentTopic\(null\)/);
+  assert.match(source, /editor\.firstChild !== skillToken[\s\S]{0,100}editor\.insertBefore\(skillToken, editor\.firstChild\)/);
+  const userMessageStart = source.indexOf("{msg.role === 'user' ? (");
+  const sentSkillIndex = source.indexOf('{msg.skill && (', userMessageStart);
+  const sentContentIndex = source.indexOf('userInlineContent.map', sentSkillIndex);
+  assert.ok(userMessageStart >= 0 && sentSkillIndex > userMessageStart && sentContentIndex > sentSkillIndex);
+  assert.match(source.slice(sentSkillIndex, sentContentIndex), /workspace-reference-token workspace-skill-token/);
+});
+
+test('slash opens the searchable Skill menu only from an empty composer', () => {
+  assert.match(source, /editorText === '\/'[\s\S]{0,180}previousEditorText\.length === 0[\s\S]{0,180}!activeSkill[\s\S]{0,180}resolvedChatReferenceTokens\.length === 0/);
+  assert.match(source, /setSkillMenuTrigger\('slash'\)/);
+  assert.match(source, /`\$\{action\.id\} \$\{action\.label\} \$\{action\.description\}`/);
+  assert.match(source, /description: skill\.description \|\| ''/);
+  assert.match(source, /e\.key === 'ArrowDown' \|\| e\.key === 'ArrowUp'/);
+  assert.match(source, /skill-option-\$\{activeAction\.id\}[\s\S]{0,120}scrollIntoView\(\{ block: 'nearest' \}\)/);
+  assert.match(source, /e\.key === 'Enter' \|\| e\.key === 'Tab'/);
+  assert.match(source, /e\.key === 'Escape'[\s\S]{0,160}closeSkillMenu\(\)/);
+  assert.match(source, /shouldDiscardQuery[\s\S]{0,220}latestChatInputRef\.current\.startsWith\('\/'\)[\s\S]{0,240}setChatInput\(''\)/);
+  assert.match(source, /未找到匹配的 Skill/);
 });
 
 test('chat composer more menu exposes uploads, history selection, and disabled search', () => {
@@ -410,9 +485,10 @@ test('generated image result cards persist and render model-authored presentatio
   assert.match(source, /event\.type === 'agent_completion_summary'/);
   assert.match(source, /processedAgentCompletionSummariesRef/);
   assert.match(source, /role: 'assistant',\s*content: event\.summary/);
+  const completionSummaryStart = source.indexOf("if (event.type === 'agent_completion_summary')");
   const completionSummarySource = source.slice(
-    source.indexOf("if (event.type === 'agent_completion_summary')"),
-    source.indexOf("if (event.type === 'agent_error')"),
+    completionSummaryStart,
+    source.indexOf("if (event.type === 'agent_error')", completionSummaryStart),
   );
   assert.ok(
     completionSummarySource.indexOf('await generatedAssetPreloadChain;')

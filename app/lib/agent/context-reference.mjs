@@ -480,20 +480,6 @@ export function compileExecutionBrief({ userMessage, contextResolution } = {}) {
   };
 }
 
-/**
- * @param {string} prompt
- * @param {import('./context-reference.types').ExecutionBrief} [executionBrief]
- */
-export function ensureOptimizedPromptCoverage(prompt, executionBrief) {
-  const optimized = text(prompt);
-  const anchors = normalizeAliases(executionBrief?.mustPreserve);
-  if (!optimized || anchors.length === 0) return optimized;
-  const normalized = optimized.toLowerCase();
-  const missing = anchors.filter((anchor) => !normalized.includes(anchor.toLowerCase()));
-  if (missing.length === 0) return optimized;
-  return `${optimized}\n\nAuthoritative requirements — preserve exactly:\n${executionBrief.plainText}`.trim();
-}
-
 export function isReferentialShorthand(value) {
   const message = text(value);
   if (!message || LITERAL_NUMBER_PATTERN.test(message)) return false;

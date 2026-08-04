@@ -4,7 +4,6 @@ import assert from 'node:assert/strict';
 import {
   buildAgentContextEntities,
   compileExecutionBrief,
-  ensureOptimizedPromptCoverage,
   extractLegacyProposal,
   isReferentialShorthand,
   parseAgentProposalBlock,
@@ -76,15 +75,13 @@ test('extracts legacy markdown tables only when they are actionable proposals', 
   assert.equal(extractLegacyProposal({ id: 'knowledge', content: '| 年份 | 销量 |\n| 2024 | 10 |\n| 2025 | 12 |' }), null);
 });
 
-test('compiles selected context into an authoritative brief and restores missing anchors', () => {
+test('compiles selected context into an authoritative brief', () => {
   const entities = buildAgentContextEntities({ messages: [{ id: 'assistant-1', role: 'assistant', content: '', agentProposal: proposal }] });
   const contextResolution = resolveContextReference({ userMessage: '按照3生成图片，背景改成红色', entities });
   const brief = compileExecutionBrief({ userMessage: '按照3生成图片，背景改成红色', contextResolution });
   assert.match(brief.plainText, /两只德牧或杜宾/);
   assert.match(brief.plainText, /背景改成红色/);
-  const prompt = ensureOptimizedPromptCoverage('A fashion magazine cover on a red background.', brief);
-  assert.match(prompt, /Authoritative requirements/);
-  assert.match(prompt, /解构主义宽肩西装/);
+  assert.deepEqual(brief.mustPreserve, ['先锋双犬（The Dog Duo）', '两只德牧或杜宾', '解构主义宽肩西装']);
 });
 
 test('resolves generated images and selected canvas objects without using image binaries as text', () => {

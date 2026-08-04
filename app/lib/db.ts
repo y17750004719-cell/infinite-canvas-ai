@@ -74,6 +74,22 @@ export interface ChatMessage {
     operation: 'generate' | 'edit';
     targetReferenceId: string | null;
   };
+  agentImagePrompts?: Array<{
+    index: number;
+    label: string;
+    prompt: string;
+    compilation?: {
+      skillId: string | null;
+      skillLabel: string | null;
+      plannerProviderId: string | null;
+      plannerModel: string;
+      referenceCount: number;
+      visualReferencesUsed: boolean;
+      durationMs: number;
+      compiledAt: number;
+    };
+  }>;
+  agentProgressMode?: 'full' | 'compact';
   inlineContent?: Array<
     | { type: 'text'; text: string }
     | {

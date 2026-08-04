@@ -70,6 +70,5 @@ export function resolveContextReference(input?: {
   selectedEntityIds?: string[];
 }): AgentContextResolution;
 export function compileExecutionBrief(input?: { userMessage?: string; contextResolution?: AgentContextResolution }): ExecutionBrief;
-export function ensureOptimizedPromptCoverage(prompt: string, executionBrief?: ExecutionBrief): string;
 export function isReferentialShorthand(value: string): boolean;
 export const AGENT_PROPOSAL_MARKERS: { start: string; end: string };

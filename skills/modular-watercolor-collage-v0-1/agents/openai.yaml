@@ -1,4 +1,4 @@
 interface:
   display_name: "Modular Watercolor Collage"
-  short_description: "Create modular watercolor fields on one paper surface"
-  default_prompt: "Use $modular-watercolor-collage-v0-1 to create a modular watercolor-field artwork, defaulting to 9:16 unless I specify another ratio."
+  short_description: "Compile modular watercolor collage image prompts"
+  default_prompt: "Use $modular-watercolor-collage-v0-1 to compile a final four-paragraph modular watercolor collage prompt from my request."

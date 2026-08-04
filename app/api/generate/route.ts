@@ -485,8 +485,21 @@ export async function POST(request: NextRequest) {
       .filter((msg) => msg.role === "user" && typeof msg.content === "string")
       .map((msg) => msg.content);
     const latestRawUserMessage = [...userMessageTexts].reverse()[0] || "";
-    
-    if (skill) {
+    const resolved = resolveIntent(intent, latestRawUserMessage, hasReferenceImages);
+
+    if (resolved.intent === "image" && skill) {
+      await logResponse(400, { mode: "image", reason: "image_skill_requires_planner", skill });
+      return NextResponse.json(
+        {
+          status: "error",
+          code: "image_skill_requires_planner",
+          error: "Image requests with a Skill must be compiled by the Agent Planner first.",
+        },
+        { status: 400 },
+      );
+    }
+
+    if (resolved.intent === "chat" && skill) {
       const skillContent = loadSkillContent(skill);
       if (skillContent) {
         if (incomingMessages.length > 0 && incomingMessages[0].role === 'user') {
@@ -548,8 +561,6 @@ export async function POST(request: NextRequest) {
             .map((part) => part.text)
             .join("\n")
         : "";
-    const resolved = resolveIntent(intent, latestUserMessage, hasReferenceImages);
-
     debugLog("Resolved generation intent", {
       reqId,
       requestedIntent: intent || "auto",

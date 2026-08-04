@@ -165,7 +165,29 @@ test('buildPersistedSession keeps task snapshots only on their owning assistant 
     latestBatchId: 'batch-1',
     activeVersions: [{ referenceId: 'task-slot:slot-1', batchId: 'batch-1', slotId: 'slot-1', versionId: 'version-1' }],
   };
-  const assistantMessage = { id: 'assistant-1', role: 'assistant', content: 'done', taskSnapshot };
+  const agentImagePrompts = [{
+    index: 0,
+    label: '图片 1',
+    prompt: '最终供应商 Prompt',
+    compilation: {
+      skillId: 'modular-watercolor-collage-v0-1',
+      skillLabel: 'Modular Watercolor Collage',
+      plannerProviderId: 'planner-provider',
+      plannerModel: 'planner-model',
+      referenceCount: 1,
+      visualReferencesUsed: true,
+      durationMs: 1200,
+      compiledAt: 123456,
+    },
+  }];
+  const assistantMessage = {
+    id: 'assistant-1',
+    role: 'assistant',
+    content: 'done',
+    taskSnapshot,
+    agentImagePrompts,
+    agentProgressMode: 'compact',
+  };
   const result = buildPersistedSession({
     id: 'session-1',
     items: [],
@@ -177,6 +199,10 @@ test('buildPersistedSession keeps task snapshots only on their owning assistant 
 
   assert.deepEqual(result.messages[0].taskSnapshot, taskSnapshot);
   assert.deepEqual(result.topics[0].messages[0].taskSnapshot, taskSnapshot);
+  assert.deepEqual(result.messages[0].agentImagePrompts, agentImagePrompts);
+  assert.deepEqual(result.topics[0].messages[0].agentImagePrompts, agentImagePrompts);
+  assert.equal(result.messages[0].agentProgressMode, 'compact');
+  assert.equal(result.topics[0].messages[0].agentProgressMode, 'compact');
   assert.equal(result.topics[0].taskSnapshot, undefined);
 });
 

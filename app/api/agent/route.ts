@@ -2,22 +2,23 @@ import { NextRequest, NextResponse } from 'next/server';
 import { createHash, randomUUID } from 'node:crypto';
 import { POST as generatePost } from '../generate/route';
 import { chat, chatStream } from '../../lib/api-client';
-import { optimizeImagePrompt } from '../../lib/agent/image-pipeline.mjs';
 import {
-  applyImagePromptDeliveryContract,
   resolveAgentConversationIntent,
   resolveImageDeliveryPlan,
 } from '../../lib/agent/prompt-optimizer.mjs';
 import {
+  findDirectSkillMatches,
+  hasDirectSkillExecutionIntent,
   listSkillManifests,
   loadSkillContent,
+  resolveExplicitSkillDirective,
   selectSkillForPrompt,
+  shouldInjectActiveSkill,
 } from '../../lib/agent/skill-registry.mjs';
 import { buildMainAgentMessages } from '../../lib/agent/main-agent.mjs';
 import { routeAgentRequest } from '../../lib/agent/skill-router.mjs';
 import {
   buildAgentTaskContract,
-  compactCanvasContext,
   executionPlanToBrief,
   executionPlanToImageDeliveryPlan,
   planAgentExecutionRequest,
@@ -70,7 +71,6 @@ import {
 } from '../../lib/workspace-session-view.mjs';
 import {
   compileExecutionBrief,
-  ensureOptimizedPromptCoverage,
   isReferentialShorthand,
   parseAgentProposalBlock,
   resolveContextReference,
@@ -116,41 +116,92 @@ function summarizePlannerNormalizations(fields: unknown) {
   };
 }
 
-function buildRegionTargetContract(canvasContext: Record<string, unknown> | undefined, imageTask?: AgentImageTask) {
-  const normalizedCanvasContext = compactCanvasContext(canvasContext);
-  const regions = Array.isArray(normalizedCanvasContext?.regionSelections) ? normalizedCanvasContext.regionSelections : [];
-  const targetIds = new Set(imageTask?.targetRegionIds || []);
-  return regions
-    .filter((region) => region && typeof region === 'object' && (!targetIds.size || targetIds.has(String((region as Record<string, unknown>).regionId))))
-    .map((region) => {
-      const value = region as Record<string, unknown>;
-      return {
-        regionId: String(value.regionId || ''),
-        label: String(value.label || 'target object'),
-        point: value.point,
-        ...(value.box ? { approximateBox: value.box } : {}),
-        ...(value.confidence ? { confidence: value.confidence } : {}),
-      };
-    })
-    .filter((region) => region.regionId);
+function summarizePromptQuality(prompt: unknown) {
+  const value = typeof prompt === 'string' ? prompt : '';
+  const lines = value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  const normalizedLines = lines.map((line) => line.toLowerCase().replace(/\s+/g, ' '));
+  return {
+    characterCount: value.length,
+    paragraphCount: value.split(/\n\s*\n/).filter((paragraph) => paragraph.trim()).length,
+    duplicateLineCount: normalizedLines.length - new Set(normalizedLines).size,
+    containsLegacyMandatoryContract: /Mandatory image task contract|Output contract:/i.test(value),
+  };
 }
 
-function appendRegionTargetContract(prompt: string, contract: Array<Record<string, unknown>>) {
-  if (!contract.length) return prompt;
-  const source = String(prompt || '').trim();
-  try {
-    const parsed = JSON.parse(source);
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      parsed.target_regions = contract;
-      return JSON.stringify(parsed);
-    }
-  } catch {
-    // Text prompts use the explicit contract below.
-  }
-  return `${source}\n\nTarget region contract (semantic guidance, no pixel mask):\n${contract.map((region, index) => (
-    `${index + 1}. ${JSON.stringify(region)}`
-  )).join('\n')}\nPreserve all unmarked subjects, typography, layout, background, and lighting unless explicitly changed.`;
+function hasOnlyImageOperationAmbiguity(validationErrors: unknown) {
+  const entries = Array.isArray(validationErrors) ? validationErrors : [];
+  return entries.length > 0 && entries.every((entry) => {
+    if (!entry || typeof entry !== 'object') return false;
+    const issue = entry as { code?: unknown; path?: unknown };
+    return issue.code === 'operation_mismatch'
+      && ['imageTask.targetReferenceId', 'imageTask.sourceReferenceId']
+        .includes(String(issue.path || ''));
+  });
 }
+
+function createImageOperationClarificationRequest(taskId: string): AgentClarificationRequest {
+  return {
+    id: randomUUID(),
+    taskId,
+    question: '这张参考图是用于生成一张新图，还是直接编辑原图？',
+    dimension: 'image_operation',
+    options: [
+      {
+        id: 'generate',
+        label: '生成新图',
+        answer: '使用参考图作为内容与构图来源，生成一张新图片。',
+        description: '保留参考关系，但不把原图当作直接编辑目标。',
+      },
+      {
+        id: 'edit',
+        label: '编辑原图',
+        answer: '直接编辑我提供的原图。',
+        description: '把参考图作为必须保留和修改的编辑目标。',
+      },
+    ],
+    allowCustom: true,
+    allowProceed: true,
+  };
+}
+
+function createSkillSelectionClarificationRequest(
+  taskId: string,
+  candidates: Array<{ id: string; name: string; description?: string }>,
+): AgentClarificationRequest {
+  return {
+    id: randomUUID(),
+    taskId,
+    question: '这个请求同时匹配多个 Skill，请选择要使用哪一个。',
+    dimension: 'skill_selection',
+    options: [
+      ...candidates.slice(0, 3).map((candidate) => ({
+        id: candidate.id,
+        label: candidate.name,
+        answer: `使用 ${candidate.name}（${candidate.id}）处理当前任务。`,
+        ...(candidate.description ? { description: candidate.description } : {}),
+      })),
+      {
+        id: 'no_skill',
+        label: '不使用 Skill',
+        answer: '不使用 Skill，按普通模式处理当前任务。',
+        description: '不注入任何 Skill 正文，由普通 Planner 理解需求。',
+      },
+    ],
+    allowCustom: true,
+    allowProceed: true,
+  };
+}
+
+type AgentImagePromptCompilation = {
+  skillId: string | null;
+  skillLabel: string | null;
+  plannerProviderId: string | null;
+  plannerModel: string;
+  referenceCount: number;
+  visualReferencesUsed: boolean;
+  durationMs: number;
+  compiledAt: number;
+};
 
 type ConfirmationRecord = {
   version?: 1;
@@ -171,6 +222,7 @@ type ConfirmationRecord = {
   imageOptions?: AgentRequestBody['imageOptions'];
   imageCountSource?: AgentImageCountSource;
   promptOptimized?: boolean;
+  promptCompilation?: AgentImagePromptCompilation;
   requestedTotalImageCount?: number;
   imageBatchPlan?: AgentImageBatchPlan;
   nextConfirmationId?: string;
@@ -178,7 +230,6 @@ type ConfirmationRecord = {
   imageDeliveryPlan?: ImageDeliveryPlan;
   generationItems?: AgentImageGenerationItem[];
   remainingGenerationItems?: AgentImageGenerationItem[];
-  optimizePrompt?: boolean;
   generationBrief?: string;
   executionBrief?: ExecutionBrief;
   imageTask?: AgentImageTask;
@@ -227,6 +278,7 @@ type ConfirmationRecord = {
 type AgentImageCountSource = 'clarification' | 'prompt' | 'interface' | 'default' | 'batch';
 type AgentImageBatchMode = 'series' | 'variants' | 'composite';
 type ImageDeliveryPlan = ReturnType<typeof resolveImageDeliveryPlan>;
+type SkillSelectionMethod = 'manual_ui' | 'manual_text' | 'local_direct' | 'user_choice' | 'none';
 
 type AgentImageGenerationItem = {
   id: string;
@@ -522,6 +574,7 @@ type AgentRequestBody = {
     size?: string;
     quality?: string;
     count?: number;
+    autoConfirm?: boolean;
   };
   confirmation?: { confirmationId?: string; toolName?: string };
   clarificationState?: AgentClarificationState;
@@ -826,9 +879,8 @@ export async function POST(request: NextRequest) {
   if (!latestUserMessage) {
     return NextResponse.json({ error: 'A user message is required' }, { status: 400 });
   }
-  const unifiedPlannerEnabled = process.env.AGENT_UNIFIED_PLANNER_ENABLED !== '0';
-  const plannerShadowMode = process.env.AGENT_PLANNER_SHADOW_MODE === '1';
-  const plannerAuthoritative = unifiedPlannerEnabled && !plannerShadowMode;
+  const plannerShadowMode = false;
+  const plannerAuthoritative = true;
   const conversationIntent = plannerAuthoritative
     ? { intent: 'chat' as const, brief: latestUserMessage, inherited: false, needsDirectionConfirmation: false }
     : resolveAgentConversationIntent(
@@ -956,30 +1008,6 @@ export async function POST(request: NextRequest) {
   ) {
     return NextResponse.json({ error: 'Configured Agent Planner provider and model are not an enabled registry pair' }, { status: 500 });
   }
-  const configuredOptimizerProviderId = process.env.PROMPT_OPTIMIZER_PROVIDER_ID?.trim() || '';
-  const configuredOptimizerModel = process.env.PROMPT_OPTIMIZER_MODEL?.trim() || '';
-  if (Boolean(configuredOptimizerProviderId) !== Boolean(configuredOptimizerModel)) {
-    return NextResponse.json({ error: 'PROMPT_OPTIMIZER_PROVIDER_ID and PROMPT_OPTIMIZER_MODEL must be configured together' }, { status: 500 });
-  }
-  const explicitOptimizerSelection = configuredOptimizerProviderId && configuredOptimizerModel
-    ? resolveProviderModelSelection({
-        providers,
-        purpose: 'chat',
-        requestedProviderId: configuredOptimizerProviderId,
-        requestedModel: configuredOptimizerModel,
-      })
-    : null;
-  if (
-    explicitOptimizerSelection
-    && (
-      explicitOptimizerSelection.reason !== 'exact'
-      || explicitOptimizerSelection.providerId !== configuredOptimizerProviderId
-      || explicitOptimizerSelection.model !== configuredOptimizerModel
-    )
-  ) {
-    return NextResponse.json({ error: 'Configured prompt optimizer provider and model are not an enabled registry pair' }, { status: 500 });
-  }
-  const resolvedOptimizerSelection = explicitOptimizerSelection || resolvedChatSelection;
   const plannerTimeoutMs = Math.min(1_800_000, Math.max(10_000, Number(process.env.AGENT_PLANNER_TIMEOUT_MS) || 1_800_000));
 
   const timeoutMs = Math.min(1_800_000, Math.max(10_000, Number(process.env.AGENT_RUN_TIMEOUT_MS) || 1_800_000));
@@ -994,6 +1022,8 @@ export async function POST(request: NextRequest) {
       let selectedSkill = body.activeSkillId
         ? skillManifests.find((manifest) => manifest.id === body.activeSkillId) || null
         : null;
+      let skillSelectionMethod: SkillSelectionMethod = body.activeSkillId ? 'manual_ui' : 'none';
+      let skillCandidateIds: string[] = [];
       let skillContent = '';
       let contextResolution = structuredClone(initialContextResolution) as AgentContextResolution;
       let executionBriefData = structuredClone(initialExecutionBrief) as ExecutionBrief;
@@ -1044,6 +1074,7 @@ export async function POST(request: NextRequest) {
       let executionPlanSource: 'model' | 'fallback' | null = executionPlan ? 'model' : null;
       let executionPlanSourceDetail: AgentPlannerSourceDetail | null = executionPlan ? 'tool_call' : null;
       let executionKind: AgentExecutionPlan['execution']['kind'] | null = executionPlan?.execution.kind || null;
+      let promptCompilation: AgentImagePromptCompilation | undefined;
       let taskExecutionReservation: ReturnType<typeof reserveTaskExecution> | null = null;
       let completedTaskIdentities: AgentPendingAssetIdentity[] = [];
       let taskSnapshot: AgentTaskSnapshot | undefined;
@@ -1153,6 +1184,13 @@ export async function POST(request: NextRequest) {
         toolCallId?: string;
         toolName?: string;
       }) => progressTracker.update(input);
+      const ensureSelectedSkillContent = async () => {
+        if (!selectedSkill || skillContent) return skillContent;
+        writeProgress({ stepId: 'skill_loading', phase: 'loading', status: 'active', label: `正在加载 ${selectedSkill.name}` });
+        skillContent = await loadSkillContent(selectedSkill.id);
+        writeProgress({ stepId: 'skill_loading', phase: 'loading', status: 'completed', label: `${selectedSkill.name} 已加载` });
+        return skillContent;
+      };
       const writeToolProgress = (
         toolName: string,
         status: 'active' | 'waiting' | 'completed' | 'failed',
@@ -1206,7 +1244,6 @@ export async function POST(request: NextRequest) {
       };
       const generateImagePayload = async (
         sourcePrompt: string,
-        optimizePrompt = true,
         imageOptions = body.imageOptions,
         referenceImages = body.referenceImages,
         generationPrompt = sourcePrompt,
@@ -1253,8 +1290,8 @@ export async function POST(request: NextRequest) {
             ...(referenceContext?.evidenceImages ? { evidenceImages: referenceContext.evidenceImages } : {}),
           };
         }
-        const regionTargetContract = buildRegionTargetContract(body.canvasContext, imageTask);
-        const regionAwareGenerationPrompt = appendRegionTargetContract(generationPrompt, regionTargetContract);
+        const finalGenerationPrompt = String(generationPrompt || '').trim();
+        if (!finalGenerationPrompt) throw new Error('Planner returned an empty image prompt');
         const payloadOutputCount = normalizeAgentImageCount(imageOptions?.count);
         const payloadDeliveryPlan = deliveryPlan
           || (executionPlan
@@ -1267,63 +1304,19 @@ export async function POST(request: NextRequest) {
           outputCount: positiveInteger(countMetadata?.totalCount) || payloadOutputCount,
         });
         const payloadBatchMode = payloadDeliveryPlan.mode;
-        if (optimizePrompt && process.env.PROMPT_PIPELINE_AGENT_ENABLED !== '0') {
-          writeProgress({ stepId: 'prompt_optimization', phase: 'optimizing', status: 'active', label: '正在优化图片提示词' });
-        }
-        const optimizedResult = optimizePrompt && process.env.PROMPT_PIPELINE_AGENT_ENABLED !== '0'
-          ? await optimizeImagePrompt({
-              userPrompt: regionAwareGenerationPrompt,
-              skillLabel: selectedSkill?.name,
-              skillContent,
-              promptStyle: selectedSkill?.promptStyle || 'text',
-              providerId: resolvedOptimizerSelection.providerId || undefined,
-              optimizerModel: resolvedOptimizerSelection.model,
-              signal: runSignal,
-              chatFn: chat,
-              outputCount: payloadOutputCount,
-              batchMode: payloadBatchMode,
-              imageTask,
-              visualContext,
-            })
-          : { prompt: regionAwareGenerationPrompt, optimized: false };
-        const optimized = {
-          ...optimizedResult,
-          prompt: applyImagePromptDeliveryContract(selectedSkill?.promptStyle === 'json-text'
-            ? optimizedResult.prompt
-            : ensureOptimizedPromptCoverage(optimizedResult.prompt, executionBriefData), payloadDeliveryPlan),
-        };
-        const optimizedItems = 'items' in optimizedResult && Array.isArray(optimizedResult.items)
-          ? optimizedResult.items
-          : [];
         const effectiveGenerationItems: AgentImageGenerationItem[] = generationItems.length
-          ? generationItems.map((item) => ({
-              ...item,
-              prompt: applyImagePromptDeliveryContract(item.prompt, payloadDeliveryPlan),
-            }))
-          : optimizedItems.length
-            ? optimizedItems.map((item: any) => ({
-              id: `series-${item.index}`,
-              index: item.index,
-              label: item.label,
-              subject: item.subject,
-              prompt: applyImagePromptDeliveryContract(selectedSkill?.promptStyle === 'json-text'
-                ? item.prompt
-                : ensureOptimizedPromptCoverage(item.prompt, executionBriefData), payloadDeliveryPlan),
-            }))
+          ? generationItems
             : payloadOutputCount > 1
               ? Array.from({ length: payloadOutputCount }, (_, index) => ({
                   id: `${payloadBatchMode}-${index + 1}`,
                   index: index + 1,
                   label: payloadBatchMode === 'composite' ? `多宫格 ${index + 1}` : `变体 ${index + 1}`,
                   subject: payloadBatchMode === 'composite' ? 'composite image' : 'image variant',
-                  prompt: optimized.prompt,
+                  prompt: finalGenerationPrompt,
                 }))
               : [];
         if (payloadBatchMode === 'series' && payloadOutputCount > 1 && effectiveGenerationItems.length !== payloadOutputCount) {
           throw new Error(`未能形成完整的 ${payloadOutputCount} 期系列生成计划，请重试。`);
-        }
-        if (optimizePrompt && process.env.PROMPT_PIPELINE_AGENT_ENABLED !== '0') {
-          writeProgress({ stepId: 'prompt_optimization', phase: 'optimizing', status: 'completed', label: '图片提示词优化完成' });
         }
         const resolvedImageSelection = resolveProviderModelSelection({
           providers,
@@ -1345,7 +1338,7 @@ export async function POST(request: NextRequest) {
         });
         const { options: resolvedImageOptions, requests } = buildAgentImageGenerationRequests({
           prompt: sourcePrompt,
-          generationPrompt: optimized.prompt,
+          generationPrompt: finalGenerationPrompt,
           generationPrompts: effectiveGenerationItems.map((item) => item.prompt),
           linkedImagePreviews: resolvedReferences.linkedImagePreviews,
           referenceIds: resolvedReferences.referenceIds,
@@ -1365,6 +1358,19 @@ export async function POST(request: NextRequest) {
         if (requests.some((request) => Number(request?.n) !== 1)) {
           throw new Error('批量图片请求必须拆分为独立的 n:1 任务。');
         }
+        requests.forEach((request, index) => {
+          const prompt = request.messages?.[0]?.content;
+          if (typeof prompt !== 'string' || !prompt) {
+            throw new Error(`图片 ${index + 1} 的最终提示词为空。`);
+          }
+          writeEvent(controller, {
+            type: 'image_prompts_ready',
+            index,
+            label: effectiveGenerationItems[index]?.label || `图片 ${index + 1}`,
+            prompt,
+            ...(promptCompilation ? { compilation: promptCompilation } : {}),
+          });
+        });
         void contextLogger.info('image.requests_built', 'Agent image requests built', {
           requestedCount: payloadOutputCount,
           actualRequestCount: requests.length,
@@ -1375,6 +1381,7 @@ export async function POST(request: NextRequest) {
           imageOperation: imageTask?.operation || 'generate',
           editTargetReferenceId: imageTask?.targetReferenceId || null,
           streamed: streamOptions?.enabled === true && requests.length > 1,
+          promptQuality: requests.map((request) => summarizePromptQuality(request.messages?.[0]?.content)),
         });
         const executionMode = resolveCanvasImageTaskExecutionMode({
           modelId: resolvedImageSelection.model,
@@ -1382,10 +1389,10 @@ export async function POST(request: NextRequest) {
           count: resolvedImageOptions.count,
         });
         const streamIncrementally = streamOptions?.enabled === true && requests.length > 1;
-        const promptWasOptimized = countMetadata?.promptOptimized ?? optimized.optimized;
+        const promptWasOptimized = countMetadata?.promptOptimized ?? false;
         const promptTraceForRequest = (requestIndex: number) => ({
           sourcePrompt,
-          finalPrompt: effectiveGenerationItems[requestIndex]?.prompt || optimized.prompt,
+          finalPrompt: String(requests[requestIndex]?.messages?.[0]?.content || ''),
           optimized: promptWasOptimized,
           operation: imageTask?.operation || 'generate' as const,
           targetReferenceId: imageTask?.targetReferenceId || null,
@@ -1557,7 +1564,7 @@ export async function POST(request: NextRequest) {
               ...(asset.plannerPreviewSrc ? { plannerPreviewSrc: asset.plannerPreviewSrc } : {}),
             })),
           },
-          optimized: optimized.optimized,
+          optimized: promptWasOptimized,
           requestStats: {
             requested: requests.length,
             succeeded: successfulPayloads.length,
@@ -1644,6 +1651,9 @@ export async function POST(request: NextRequest) {
             confirmationStore.delete(requestedConfirmationId);
             throw new Error('Confirmation expired; request a new confirmation');
           }
+          promptCompilation = confirmationRecord.promptCompilation
+            ? structuredClone(confirmationRecord.promptCompilation)
+            : undefined;
           const confirmedToolRegistry = createAgentToolRegistry({ createSkillJob, getSkillJob });
           const confirmedTool = confirmedToolRegistry.get(confirmationRecord.toolName);
           if (!confirmedTool) throw new Error(`Unknown tool: ${confirmationRecord.toolName}`);
@@ -1719,7 +1729,6 @@ export async function POST(request: NextRequest) {
                   : confirmationRecord.generationBrief || confirmationRecord.userMessage;
                 return generateImagePayload(
                   confirmationRecord.generationBrief || confirmationRecord.userMessage,
-                  confirmationRecord.optimizePrompt !== false,
                   confirmationRecord.imageOptions,
                   confirmationRecord.referenceImages,
                   prompt,
@@ -1930,7 +1939,6 @@ export async function POST(request: NextRequest) {
                   : confirmationRecord.generationBrief || confirmationRecord.userMessage;
                 return generateImagePayload(
                   confirmationRecord.generationBrief || confirmationRecord.userMessage,
-                  true,
                   confirmationRecord.imageOptions,
                   confirmationRecord.referenceImages,
                   prompt,
@@ -2110,15 +2118,151 @@ export async function POST(request: NextRequest) {
           });
           skillSource = activeClarificationState.skillSource ?? skillSource;
         }
+        const isSkillSelectionResponse = Boolean(
+          body.clarificationResponse
+          && body.clarificationRequest?.dimension === 'skill_selection'
+          && activeClarificationState,
+        );
+        const explicitSkillDirective = isSkillSelectionResponse
+          ? null
+          : resolveExplicitSkillDirective(latestUserMessage, skillManifests);
+        let activeSkillChange: { id: string; label: string } | null | undefined;
+
+        if (explicitSkillDirective?.type === 'clear') {
+          selectedSkill = null;
+          skillSource = null;
+          skillSelectionMethod = 'manual_text';
+          activeSkillChange = null;
+        } else if (explicitSkillDirective?.type === 'select') {
+          selectedSkill = explicitSkillDirective.manifest;
+          skillSource = 'manual';
+          skillSelectionMethod = 'manual_text';
+          skillCandidateIds = [selectedSkill.id];
+          activeSkillChange = { id: selectedSkill.id, label: selectedSkill.name };
+        } else if (isSkillSelectionResponse) {
+          const selectedOptionId = String(body.clarificationResponse?.selectedOptionId || '').trim();
+          const permittedIds = new Set((body.clarificationRequest?.options || []).map((option) => option.id));
+          skillCandidateIds = [...permittedIds].filter((id) => id !== 'no_skill');
+          if (!selectedOptionId || !permittedIds.has(selectedOptionId)) {
+            throw new Error('Skill selection response does not match the pending request');
+          }
+          if (selectedOptionId === 'no_skill') {
+            selectedSkill = null;
+            skillSource = null;
+            activeSkillChange = null;
+            if (activeClarificationState) {
+              delete activeClarificationState.skillId;
+              activeClarificationState.skillSource = null;
+            }
+          } else {
+            selectedSkill = skillManifests.find((manifest) => manifest.id === selectedOptionId) || null;
+            if (!selectedSkill) throw new Error('The selected skill is no longer available; please restart the request');
+            skillSource = 'manual';
+            activeSkillChange = { id: selectedSkill.id, label: selectedSkill.name };
+            if (activeClarificationState) {
+              activeClarificationState.skillId = selectedSkill.id;
+              activeClarificationState.skillSource = 'manual';
+            }
+          }
+          skillSelectionMethod = 'user_choice';
+        } else {
+          const activeUiSkill = body.activeSkillId
+            ? skillManifests.find((manifest) => manifest.id === body.activeSkillId) || null
+            : null;
+          if (activeUiSkill && (
+            isPotentialDesignExecutionRequest(latestUserMessage)
+            || shouldInjectActiveSkill(latestUserMessage, activeUiSkill)
+          )) {
+            selectedSkill = activeUiSkill;
+            skillSource = 'manual';
+            skillSelectionMethod = 'manual_ui';
+            skillCandidateIds = [selectedSkill.id];
+          } else if (activeClarificationState) {
+            selectedSkill = activeClarificationState.skillId
+              ? skillManifests.find((manifest) => manifest.id === activeClarificationState?.skillId) || null
+              : null;
+            if (activeClarificationState.skillId && !selectedSkill) {
+              throw new Error('The selected skill is no longer available; please restart the request');
+            }
+            skillSource = selectedSkill ? activeClarificationState.skillSource || 'manual' : null;
+            skillSelectionMethod = selectedSkill
+              ? activeClarificationState.skillSource === 'auto' ? 'local_direct' : 'manual_ui'
+              : 'none';
+            skillCandidateIds = selectedSkill ? [selectedSkill.id] : [];
+          } else {
+            selectedSkill = null;
+            skillSource = null;
+            const directMatches = hasDirectSkillExecutionIntent(latestUserMessage)
+              ? findDirectSkillMatches(latestUserMessage, skillManifests)
+              : [];
+            skillCandidateIds = directMatches.map((entry) => entry.manifest.id);
+            if (directMatches.length > 1) {
+              const taskId = randomUUID();
+              const clarificationRequest = createSkillSelectionClarificationRequest(
+                taskId,
+                directMatches.map((entry) => entry.manifest),
+              );
+              writeEvent(controller, { type: 'routing_start' });
+              writeProgress({ stepId: 'routing', phase: 'routing', status: 'completed', label: '需要选择 Skill' });
+              writeProgress({ stepId: 'clarification', phase: 'waiting_input', status: 'waiting', label: '等待选择 Skill' });
+              const checkpoint = progressTracker.snapshot();
+              writeEvent(controller, {
+                type: 'clarification_required',
+                message: clarificationRequest.question,
+                request: clarificationRequest,
+                state: {
+                  taskId,
+                  operationId: checkpoint.operationId,
+                  skillSource: null,
+                  lastSequence: checkpoint.lastSequence,
+                  intent: directMatches.every((entry) => entry.manifest.executionMode === 'image_pipeline') ? 'image' : 'skill_action',
+                  originalRequest: latestUserMessage,
+                  workingBrief: latestUserMessage,
+                  askedDimensions: [],
+                  answers: [],
+                  referenceImages: executionReferenceImages,
+                  ...(runReferenceContext ? { referenceContext: structuredClone(runReferenceContext) } : {}),
+                },
+              });
+              writeAgentDone('skill_selection_required');
+              void contextLogger.info('skill.selection_required', 'Multiple local Skill candidates require user selection', {
+                method: 'none',
+                candidateIds: skillCandidateIds,
+                fullSkillInjected: false,
+                skillContentLength: 0,
+                mutationBlocked: true,
+              });
+              return;
+            }
+            if (directMatches.length === 1) {
+              selectedSkill = directMatches[0].manifest;
+              skillSource = 'auto';
+              skillSelectionMethod = 'local_direct';
+            } else {
+              skillSelectionMethod = 'none';
+            }
+          }
+        }
+
+        await ensureSelectedSkillContent();
+        if (activeSkillChange !== undefined) {
+          writeEvent(controller, { type: 'active_skill_changed', skill: activeSkillChange });
+        }
+        void contextLogger.info('skill.selection', 'Agent Skill selection resolved locally before planning', {
+          method: skillSelectionMethod,
+          selectedSkillId: selectedSkill?.id || null,
+          candidateIds: skillCandidateIds,
+          fullSkillInjected: Boolean(selectedSkill && skillContent),
+          skillContentLength: skillContent.length,
+        });
         if (
           !body.clarificationResponse
           && (!activeClarificationState || legacyExecutionPlanDetected)
-          && process.env.AGENT_UNIFIED_PLANNER_ENABLED !== '0'
+          && plannerAuthoritative
         ) {
           const plannerStartedAt = Date.now();
           const plannerHasVisualReferences = Boolean(runReferenceContext?.references.length);
-          const plannerSelection = explicitPlannerSelection
-            || (plannerHasVisualReferences ? resolvedChatSelection : resolvedRouterSelection);
+          const plannerSelection = explicitPlannerSelection || resolvedChatSelection;
           const plannerModel = plannerSelection.model;
           const plannerProviderId = plannerSelection.providerId || undefined;
           const plannerResult = await planAgentExecutionRequest({
@@ -2126,10 +2270,12 @@ export async function POST(request: NextRequest) {
               ? activeClarificationState?.workingBrief || activeClarificationState?.originalRequest || latestUserMessage
               : latestUserMessage,
             messages: body.messages,
-            manifests: skillManifests,
+            manifests: selectedSkill ? [selectedSkill] : [],
             contextEntities,
             selectedContextEntityIds,
-            activeSkillId: body.activeSkillId,
+            activeSkillId: skillSource === 'manual' ? selectedSkill?.id || null : null,
+            lockedSkillId: selectedSkill?.id || null,
+            skillContent,
             hasReferenceImages: plannerHasVisualReferences,
             referenceContext: runReferenceContext,
             imageOptions: body.imageOptions,
@@ -2140,6 +2286,18 @@ export async function POST(request: NextRequest) {
             signal: runSignal,
             chatFn: chat,
           });
+          if (plannerResult.plan?.intent === 'image') {
+            promptCompilation = {
+              skillId: selectedSkill?.id || null,
+              skillLabel: selectedSkill?.name || null,
+              plannerProviderId: plannerProviderId || null,
+              plannerModel,
+              referenceCount: runReferenceContext?.references.length || 0,
+              visualReferencesUsed: plannerHasVisualReferences,
+              durationMs: Date.now() - plannerStartedAt,
+              compiledAt: Date.now(),
+            };
+          }
           if (plannerShadowMode) {
             const shadowPlan = plannerResult.plan;
             void contextLogger.info('planner.shadow', 'Unified planner shadow result', {
@@ -2189,6 +2347,43 @@ export async function POST(request: NextRequest) {
             });
           } else {
             if (!plannerResult.plan) {
+              if (hasOnlyImageOperationAmbiguity(plannerResult.validationErrors)) {
+                const taskId = randomUUID();
+                const clarificationRequest = createImageOperationClarificationRequest(taskId);
+                writeProgress({ stepId: 'routing', phase: 'planning', status: 'completed', label: '图片操作方式需要确认' });
+                writeProgress({ stepId: 'clarification', phase: 'waiting_input', status: 'waiting', label: '等待确认生成或编辑方式' });
+                const checkpoint = progressTracker.snapshot();
+                writeEvent(controller, {
+                  type: 'clarification_required',
+                  message: clarificationRequest.question,
+                  request: clarificationRequest,
+                  state: {
+                    taskId,
+                    operationId: checkpoint.operationId,
+                    skillSource,
+                    lastSequence: checkpoint.lastSequence,
+                    intent: 'image',
+                    ...(selectedSkill ? { skillId: selectedSkill.id } : {}),
+                    originalRequest: latestUserMessage,
+                    workingBrief: latestUserMessage,
+                    askedDimensions: [],
+                    answers: [],
+                    referenceImages: executionReferenceImages,
+                    ...(runReferenceContext ? { referenceContext: structuredClone(runReferenceContext) } : {}),
+                  },
+                });
+                writeAgentDone('clarification_required');
+                void contextLogger.info('planner.operation_ambiguous', 'Planner image operation requires user clarification', {
+                  durationMs: Date.now() - plannerStartedAt,
+                  providerId: plannerProviderId || null,
+                  model: plannerModel,
+                  validationErrors: plannerResult.validationErrors,
+                  normalizedFields: plannerResult.normalizedFields || [],
+                  visualReferenceCount: runReferenceContext?.references.length || 0,
+                  mutationBlocked: true,
+                });
+                return;
+              }
               const plannerFailureReason = plannerResult.failureReason || 'invalid_plan';
               const plannerFailureMessage = plannerFailureReason === 'timeout'
                 ? 'Agent 分析超时，未生成有效执行计划。请重新分析。'
@@ -2246,6 +2441,7 @@ export async function POST(request: NextRequest) {
                   skillSource,
                   lastSequence: failedCheckpoint.lastSequence,
                   intent: 'image',
+                  ...(selectedSkill ? { skillId: selectedSkill.id } : {}),
                   originalRequest: latestUserMessage,
                   workingBrief: latestUserMessage,
                   askedDimensions: [],
@@ -2289,7 +2485,7 @@ export async function POST(request: NextRequest) {
             selectedSkill = executionPlan.skillId
               ? skillManifests.find((manifest) => manifest.id === executionPlan?.skillId) || null
               : null;
-            skillSource = selectedSkill ? (body.activeSkillId ? 'manual' : 'auto') : null;
+            skillSource = selectedSkill ? skillSource || (body.activeSkillId ? 'manual' : 'auto') : null;
             const referenced = executionPlan.contextReferences
               .map((id) => contextEntities.find((entity) => entity.id === id))
               .filter((entity): entity is AgentContextEntity => Boolean(entity));
@@ -2487,6 +2683,8 @@ export async function POST(request: NextRequest) {
         if (body.clarificationResponse && activeClarificationState && body.clarificationRequest) {
           const retryClarification = body.clarificationResponse.retry === true;
           const isPlannerFailureRequest = body.clarificationRequest.dimension === 'planner_failure';
+          const isImageOperationClarification = body.clarificationRequest.dimension === 'image_operation';
+          const isSkillSelectionClarification = body.clarificationRequest.dimension === 'skill_selection';
           const isPlannerFailureRetry = isPlannerFailureRequest
             && retryClarification
             && body.clarificationResponse.retryMode === 'replan'
@@ -2516,26 +2714,29 @@ export async function POST(request: NextRequest) {
             ? activeClarificationState.originalRequest
             : activeClarificationState.workingBrief || activeClarificationState.originalRequest;
           executionReferenceImages = [...(activeClarificationState.referenceImages || executionReferenceImages)];
-          const shouldReplan = process.env.AGENT_UNIFIED_PLANNER_ENABLED !== '0'
+          const shouldReplan = plannerAuthoritative
             && (
               isPlannerFailureRetry
+              || isImageOperationClarification
+              || isSkillSelectionClarification
               || legacyExecutionPlanDetected
               || activeClarificationState.executionPlan?.needsClarification === true
             );
           if (shouldReplan) {
             const plannerStartedAt = Date.now();
             const plannerHasVisualReferences = Boolean(runReferenceContext?.references.length);
-            const plannerSelection = explicitPlannerSelection
-              || (plannerHasVisualReferences ? resolvedChatSelection : resolvedRouterSelection);
+            const plannerSelection = explicitPlannerSelection || resolvedChatSelection;
             const plannerModel = plannerSelection.model;
             const plannerProviderId = plannerSelection.providerId || undefined;
             const replanned = await planAgentExecutionRequest({
               userMessage: executionBrief,
               messages: body.messages,
-              manifests: skillManifests,
+              manifests: selectedSkill ? [selectedSkill] : [],
               contextEntities,
               selectedContextEntityIds,
-              activeSkillId: body.activeSkillId || activeClarificationState.skillId,
+              activeSkillId: skillSource === 'manual' ? selectedSkill?.id || null : null,
+              lockedSkillId: selectedSkill?.id || null,
+              skillContent,
               hasReferenceImages: plannerHasVisualReferences,
               referenceContext: runReferenceContext,
               imageOptions: body.imageOptions,
@@ -2546,7 +2747,53 @@ export async function POST(request: NextRequest) {
               signal: runSignal,
               chatFn: chat,
             });
+            if (replanned.plan?.intent === 'image') {
+              promptCompilation = {
+                skillId: selectedSkill?.id || null,
+                skillLabel: selectedSkill?.name || null,
+                plannerProviderId: plannerProviderId || null,
+                plannerModel,
+                referenceCount: runReferenceContext?.references.length || 0,
+                visualReferencesUsed: plannerHasVisualReferences,
+                durationMs: Date.now() - plannerStartedAt,
+                compiledAt: Date.now(),
+              };
+            }
             if (!replanned.plan) {
+              if (
+                !activeClarificationState.askedDimensions.includes('image_operation')
+                && hasOnlyImageOperationAmbiguity(replanned.validationErrors)
+              ) {
+                const clarificationRequest = createImageOperationClarificationRequest(activeClarificationState.taskId);
+                writeProgress({ stepId: 'clarification', phase: 'waiting_input', status: 'waiting', label: '等待确认生成或编辑方式' });
+                const checkpoint = progressTracker.snapshot();
+                writeEvent(controller, {
+                  type: 'clarification_required',
+                  message: clarificationRequest.question,
+                  request: clarificationRequest,
+                  state: {
+                    ...activeClarificationState,
+                    operationId: checkpoint.operationId,
+                    skillSource,
+                    lastSequence: checkpoint.lastSequence,
+                    executionPlan: undefined,
+                    plannerFailure: undefined,
+                    referenceImages: [...executionReferenceImages],
+                    ...(runReferenceContext ? { referenceContext: structuredClone(runReferenceContext) } : {}),
+                  },
+                });
+                writeAgentDone('clarification_required');
+                void contextLogger.info('planner.operation_ambiguous', 'Replanned image operation requires user clarification', {
+                  durationMs: Date.now() - plannerStartedAt,
+                  providerId: plannerProviderId || null,
+                  model: plannerModel,
+                  validationErrors: replanned.validationErrors,
+                  normalizedFields: replanned.normalizedFields || [],
+                  visualReferenceCount: runReferenceContext?.references.length || 0,
+                  mutationBlocked: true,
+                });
+                return;
+              }
               const failureReason = replanned.failureReason || 'invalid_plan';
               const message = failureReason === 'timeout'
                 ? 'Agent 分析超时，未生成有效执行计划。请重新分析。'
@@ -2805,6 +3052,10 @@ export async function POST(request: NextRequest) {
         }
         void contextLogger.info('routing.resolved', 'Agent routing decision resolved', {
           decisionSource: executionPlanSource || routingDecision?.source || null,
+          skillSelectionMethod,
+          skillCandidateIds,
+          fullSkillInjected: Boolean(selectedSkill && skillContent),
+          skillContentLength: skillContent.length,
           sourceDetail: executionPlanSourceDetail,
           plannerConfidence: executionPlan?.confidence || null,
           conversationIntent: conversationIntent.intent,
@@ -2847,13 +3098,7 @@ export async function POST(request: NextRequest) {
           return;
         }
 
-        if (selectedSkill) {
-          writeProgress({ stepId: 'skill_loading', phase: 'loading', status: 'active', label: `正在加载 ${selectedSkill.name}` });
-        }
-        skillContent = selectedSkill ? await loadSkillContent(selectedSkill.id) : '';
-        if (selectedSkill) {
-          writeProgress({ stepId: 'skill_loading', phase: 'loading', status: 'completed', label: `${selectedSkill.name} 已加载` });
-        }
+        await ensureSelectedSkillContent();
         const shouldResolveImageCount = intent === 'image'
           || Boolean(selectedSkill?.allowedTools?.includes('generate_image'));
         if (shouldResolveImageCount) {
@@ -3146,77 +3391,75 @@ export async function POST(request: NextRequest) {
           ? executionKind === 'image_pipeline'
           : intent === 'image' && (!selectedSkill || selectedSkill.executionMode === 'image_pipeline');
         if (shouldUseImagePipeline) {
-          if (plannerAuthoritative) {
-            const availableReferenceIds = new Set((runReferenceContext?.references || []).map((reference) => reference.id));
-            const imageTask = executionPlan?.imageTask;
-            const presentation = executionPlan?.presentation;
-            const generation = executionPlan?.version === 4 ? executionPlan.generation : null;
-            const invalidExecutablePlan = !executionPlan
-              || executionPlan.version !== 4
-              || executionPlan.intent !== 'image'
-              || executionPlan.execution.kind !== 'image_pipeline'
-              || executionPlan.execution.tool !== 'generate_image'
-              || !imageTask
-              || !presentation
-              || !generation;
-            const invalidEditPlan = imageTask?.operation === 'edit' && (
-              !imageTask.targetReferenceId
-              || !availableReferenceIds.has(imageTask.targetReferenceId)
-              || imageTask.supportingReferenceIds.includes(imageTask.targetReferenceId)
-              || Boolean(imageTask.sourceReferenceId)
-            );
-            const invalidGenerateSource = imageTask?.operation === 'generate' && Boolean(imageTask.sourceReferenceId)
-              && (!availableReferenceIds.has(imageTask.sourceReferenceId!)
-                || !imageTask.supportingReferenceIds.includes(imageTask.sourceReferenceId!));
-            const referencedTaskWithoutRoles = Boolean(runReferenceContext?.references.length) && !imageTask;
-            if (invalidExecutablePlan || invalidEditPlan || invalidGenerateSource || referencedTaskWithoutRoles) {
-              const message = '模型未能形成可安全执行的图片计划，系统已在生图前停止。请重新规划当前请求。';
-              const failedTaskId = activeClarificationState?.taskId || randomUUID();
-              const failedRequest: AgentClarificationRequest = {
-                id: randomUUID(),
+          const availableReferenceIds = new Set((runReferenceContext?.references || []).map((reference) => reference.id));
+          const imageTask = executionPlan?.imageTask;
+          const presentation = executionPlan?.presentation;
+          const generation = executionPlan?.version === 4 ? executionPlan.generation : null;
+          const invalidExecutablePlan = !executionPlan
+            || executionPlan.version !== 4
+            || executionPlan.intent !== 'image'
+            || executionPlan.execution.kind !== 'image_pipeline'
+            || executionPlan.execution.tool !== 'generate_image'
+            || !imageTask
+            || !presentation
+            || !generation;
+          const invalidEditPlan = imageTask?.operation === 'edit' && (
+            !imageTask.targetReferenceId
+            || !availableReferenceIds.has(imageTask.targetReferenceId)
+            || imageTask.supportingReferenceIds.includes(imageTask.targetReferenceId)
+            || Boolean(imageTask.sourceReferenceId)
+          );
+          const invalidGenerateSource = imageTask?.operation === 'generate' && Boolean(imageTask.sourceReferenceId)
+            && (!availableReferenceIds.has(imageTask.sourceReferenceId!)
+              || !imageTask.supportingReferenceIds.includes(imageTask.sourceReferenceId!));
+          const referencedTaskWithoutRoles = Boolean(runReferenceContext?.references.length) && !imageTask;
+          if (invalidExecutablePlan || invalidEditPlan || invalidGenerateSource || referencedTaskWithoutRoles) {
+            const message = '模型未能形成可安全执行的图片计划，系统已在生图前停止。请重新规划当前请求。';
+            const failedTaskId = activeClarificationState?.taskId || randomUUID();
+            const failedRequest: AgentClarificationRequest = {
+              id: randomUUID(),
+              taskId: failedTaskId,
+              question: message,
+              dimension: 'planner_failure',
+              options: [],
+              allowCustom: true,
+              allowProceed: true,
+              failed: true,
+            };
+            const failedCheckpoint = progressTracker.snapshot();
+            writeProgress({ stepId: 'routing', phase: 'planning', status: 'failed', label: '图片计划校验失败，已停止执行' });
+            writeEvent(controller, {
+              type: 'clarification_required',
+              message,
+              request: failedRequest,
+              state: {
                 taskId: failedTaskId,
-                question: message,
-                dimension: 'planner_failure',
-                options: [],
-                allowCustom: true,
-                allowProceed: true,
-                failed: true,
-              };
-              const failedCheckpoint = progressTracker.snapshot();
-              writeProgress({ stepId: 'routing', phase: 'planning', status: 'failed', label: '图片计划校验失败，已停止执行' });
-              writeEvent(controller, {
-                type: 'clarification_required',
-                message,
-                request: failedRequest,
-                state: {
-                  taskId: failedTaskId,
-                  operationId: failedCheckpoint.operationId,
-                  skillSource,
-                  lastSequence: failedCheckpoint.lastSequence,
-                  intent: 'image',
-                  originalRequest: activeClarificationState?.originalRequest || latestUserMessage,
-                  workingBrief: activeClarificationState?.originalRequest || latestUserMessage,
-                  askedDimensions: [],
-                  answers: [],
-                  referenceImages: [...executionReferenceImages],
-                  ...(runReferenceContext ? { referenceContext: structuredClone(runReferenceContext) } : {}),
-                  plannerFailure: {
-                    reason: 'invalid_plan',
-                    retryMode: 'replan',
-                    failedAt: Date.now(),
-                  },
+                operationId: failedCheckpoint.operationId,
+                skillSource,
+                lastSequence: failedCheckpoint.lastSequence,
+                intent: 'image',
+                originalRequest: activeClarificationState?.originalRequest || latestUserMessage,
+                workingBrief: activeClarificationState?.originalRequest || latestUserMessage,
+                askedDimensions: [],
+                answers: [],
+                referenceImages: [...executionReferenceImages],
+                ...(runReferenceContext ? { referenceContext: structuredClone(runReferenceContext) } : {}),
+                plannerFailure: {
+                  reason: 'invalid_plan',
+                  retryMode: 'replan',
+                  failedAt: Date.now(),
                 },
-              });
-              writeEvent(controller, {
-                type: 'agent_error',
-                stage: 'planning',
-                message,
-                reason: 'invalid_plan',
-                retryable: true,
-              });
-              writeAgentDone('planner_failed');
-              return;
-            }
+              },
+            });
+            writeEvent(controller, {
+              type: 'agent_error',
+              stage: 'planning',
+              message,
+              reason: 'invalid_plan',
+              retryable: true,
+            });
+            writeAgentDone('planner_failed');
+            return;
           }
           turns += 1;
           const refinedDeliveryPlan = executionPlan
@@ -3230,94 +3473,33 @@ export async function POST(request: NextRequest) {
             };
           }
           const imageBatchMode = imageDeliveryPlan.mode as AgentImageBatchMode;
-          const plannerGeneration = executionPlan?.version === 4 ? executionPlan.generation : null;
-          const usesPlannerGeneration = Boolean(plannerAuthoritative && plannerGeneration);
           writeProgress({
             stepId: 'prompt_optimization',
             phase: 'optimizing',
             status: 'active',
-            label: usesPlannerGeneration ? '正在准备最终图片提示词' : '正在优化图片提示词',
+            label: '正在准备最终图片提示词',
           });
-          if (!usesPlannerGeneration) writeEvent(controller, { type: 'prompt_optimization_start' });
-          const optimizerModel = resolvedOptimizerSelection.model;
-          const optimizedResult = usesPlannerGeneration
-            ? {
-                prompt: plannerGeneration!.prompt,
-                optimized: false,
-                summary: 'Agent 已在单次分析中生成最终图片提示词',
-                items: plannerGeneration!.items.map((item, index) => ({
-                  ...item,
-                  subject: executionPlan?.delivery.items[index]?.subject || item.label,
-                })),
-              }
-            : process.env.PROMPT_PIPELINE_AGENT_ENABLED === '0'
-            ? { prompt: executionBrief, optimized: false, summary: '已保留你的原始设计要求' }
-            : await optimizeImagePrompt({
-                userPrompt: executionBrief,
-                skillLabel: selectedSkill?.name,
-                skillContent,
-                promptStyle: selectedSkill?.promptStyle || 'text',
-                providerId: resolvedOptimizerSelection.providerId || undefined,
-                optimizerModel,
-                signal: runSignal,
-                chatFn: chat,
-                outputCount: requestedTotalImageCount,
-                batchMode: imageBatchMode,
-                plannerItems: executionPlan?.delivery.items || [],
-                imageTask: executionPlan?.imageTask || null,
-                visualContext: executionPlan?.visualContext || null,
-              });
-          const sourceOptimizedItems = 'items' in optimizedResult && Array.isArray(optimizedResult.items)
-            ? optimizedResult.items
-            : null;
-          const regionAwareOptimizedResult = usesPlannerGeneration
-            ? {
-                ...optimizedResult,
-                prompt: appendRegionTargetContract(
-                  optimizedResult.prompt,
-                  buildRegionTargetContract(body.canvasContext, executionPlan?.imageTask),
-                ),
-                ...(sourceOptimizedItems ? {
-                  items: sourceOptimizedItems.map((item: any) => ({
-                    ...item,
-                    prompt: appendRegionTargetContract(
-                      item.prompt,
-                      buildRegionTargetContract(body.canvasContext, executionPlan?.imageTask),
-                    ),
-                  })),
-                } : {}),
-              }
-            : optimizedResult;
-          const optimized = {
-            ...regionAwareOptimizedResult,
-            prompt: usesPlannerGeneration || selectedSkill?.promptStyle === 'json-text'
-              ? regionAwareOptimizedResult.prompt
-              : ensureOptimizedPromptCoverage(regionAwareOptimizedResult.prompt, executionBriefData),
-          };
-          const optimizedItems = 'items' in regionAwareOptimizedResult && Array.isArray(regionAwareOptimizedResult.items)
-            ? regionAwareOptimizedResult.items
-            : [];
-          const optimizedSubject = 'structured' in regionAwareOptimizedResult
-            ? regionAwareOptimizedResult.structured?.subject
-            : undefined;
+          const finalGenerationPrompt = generation!.prompt;
+          const plannerGenerationItems = generation!.items.map((item, index) => ({
+            ...item,
+            subject: executionPlan?.delivery.items[index]?.subject || item.label,
+          }));
           const plannerSeriesItems = executionPlan?.delivery?.items || [];
           const allGenerationItems: AgentImageGenerationItem[] = requestedTotalImageCount > 1
             ? imageBatchMode === 'series'
-              ? (optimizedItems.length > 0 ? optimizedItems : plannerSeriesItems).map((item: any) => ({
+              ? (plannerGenerationItems.length > 0 ? plannerGenerationItems : plannerSeriesItems).map((item: any) => ({
                   id: `series-${item.index}`,
                   index: item.index,
                   label: item.label || `系列 ${item.index}`,
-                  subject: item.subject || optimizedSubject || 'series item',
-                  prompt: usesPlannerGeneration || selectedSkill?.promptStyle === 'json-text'
-                    ? item.prompt || executionBrief
-                    : ensureOptimizedPromptCoverage(item.prompt || `${optimized.prompt}\n\nSpecific direction: ${item.variation || item.subject || item.label}`, executionBriefData),
+                  subject: item.subject || 'series item',
+                  prompt: item.prompt || finalGenerationPrompt,
                 }))
               : Array.from({ length: requestedTotalImageCount }, (_, index) => ({
                   id: `${imageBatchMode}-${index + 1}`,
                   index: index + 1,
                   label: imageBatchMode === 'composite' ? `多宫格 ${index + 1}` : `变体 ${index + 1}`,
-                  subject: optimizedSubject || (imageBatchMode === 'composite' ? 'composite image' : 'image variant'),
-                  prompt: optimized.prompt,
+                  subject: imageBatchMode === 'composite' ? 'composite image' : 'image variant',
+                  prompt: finalGenerationPrompt,
                 }))
             : [];
           if (requestedTotalImageCount > 1 && allGenerationItems.length !== requestedTotalImageCount) {
@@ -3334,21 +3516,28 @@ export async function POST(request: NextRequest) {
                 : [],
             });
           }
-          if (!usesPlannerGeneration) {
-            writeEvent(controller, {
-              type: 'prompt_optimization_done',
-              summary: optimized.summary,
-              optimized: optimized.optimized,
-            });
-          }
           writeProgress({
             stepId: 'prompt_optimization',
             phase: 'optimizing',
             status: 'completed',
-            label: usesPlannerGeneration ? '最终图片提示词已准备' : '图片提示词优化完成',
+            label: '最终图片提示词已准备',
           });
 
-          if (requestedImageCount > 1 || executionPlan?.execution.requiresConfirmation === true) {
+          const requiresImageConfirmation = (
+            (requestedImageCount > 1 && body.imageOptions?.autoConfirm !== true)
+            || executionPlan?.execution.requiresConfirmation === true
+          );
+          if (requiresImageConfirmation) {
+            const previewPromptEntries = allGenerationItems.length > 0
+              ? allGenerationItems
+              : [{ id: 'image-1', index: 1, label: '图片 1', subject: 'image', prompt: finalGenerationPrompt }];
+            previewPromptEntries.forEach((item, index) => writeEvent(controller, {
+              type: 'image_prompts_ready',
+              index,
+              label: item.label || `图片 ${index + 1}`,
+              prompt: item.prompt,
+              ...(promptCompilation ? { compilation: promptCompilation } : {}),
+            }));
             const generationItems = allGenerationItems.slice(0, requestedImageCount);
             const resolvedImageSelection = resolveProviderModelSelection({
               providers,
@@ -3382,13 +3571,13 @@ export async function POST(request: NextRequest) {
               progressToolCallId,
               skillId: selectedSkill?.id || null,
               toolName: 'generate_image',
-              toolArgs: { prompt: optimized.prompt },
+              toolArgs: { prompt: finalGenerationPrompt },
               pendingToolCall: {
                 id: progressToolCallId,
                 name: 'generate_image',
-                args: { prompt: optimized.prompt },
-                argsHash: hashEnvelopeValue({ prompt: optimized.prompt }),
-                batch: [{ id: progressToolCallId, name: 'generate_image', args: { prompt: optimized.prompt } }],
+                args: { prompt: finalGenerationPrompt },
+                argsHash: hashEnvelopeValue({ prompt: finalGenerationPrompt }),
+                batch: [{ id: progressToolCallId, name: 'generate_image', args: { prompt: finalGenerationPrompt } }],
               },
               resolvedImageProviderId: resolvedImageSelection.providerId,
               resolvedImageModel: resolvedImageSelection.model,
@@ -3409,7 +3598,8 @@ export async function POST(request: NextRequest) {
               canvasContext: body.canvasContext ? structuredClone(body.canvasContext) : undefined,
               imageOptions: { ...structuredClone(body.imageOptions || {}), count: requestedImageCount },
               imageCountSource: requestedImageCountSource,
-              promptOptimized: optimized.optimized,
+              promptOptimized: false,
+              promptCompilation: promptCompilation ? structuredClone(promptCompilation) : undefined,
               requestedTotalImageCount,
               imageBatchPlan: imageBatchPlan ? structuredClone(imageBatchPlan) : undefined,
               imageBatchMode,
@@ -3418,7 +3608,6 @@ export async function POST(request: NextRequest) {
               remainingGenerationItems: structuredClone(allGenerationItems.slice(generationItems.length)),
               pendingTaskIdentities: structuredClone(confirmationTaskReservation?.identities.slice(0, requestedImageCount) || []),
               remainingTaskIdentities: structuredClone(confirmationTaskReservation?.identities.slice(requestedImageCount) || []),
-              optimizePrompt: false,
               expiresAt: Date.now() + CONFIRMATION_TTL_MS,
             });
             writeEvent(controller, {
@@ -3447,14 +3636,13 @@ export async function POST(request: NextRequest) {
           const toolRegistry = createAgentToolRegistry({
             generateImage: async () => generateImagePayload(
               executionBrief,
-              false,
               body.imageOptions,
               executionReferenceImages,
-              optimized.prompt,
+              finalGenerationPrompt,
               {
                 source: requestedImageCountSource,
                 totalCount: requestedTotalImageCount,
-                promptOptimized: optimized.optimized,
+                promptOptimized: false,
               },
               allGenerationItems,
               undefined,
@@ -3508,7 +3696,6 @@ export async function POST(request: NextRequest) {
               : executionBrief;
             return generateImagePayload(
               executionBrief,
-              true,
               body.imageOptions,
               executionReferenceImages,
               prompt,
@@ -3740,6 +3927,7 @@ export async function POST(request: NextRequest) {
               canvasContext: body.canvasContext ? structuredClone(body.canvasContext) : undefined,
               imageOptions: { ...structuredClone(body.imageOptions || {}), count: requestedImageCount },
               imageCountSource: requestedImageCountSource,
+              promptCompilation: promptCompilation ? structuredClone(promptCompilation) : undefined,
               requestedTotalImageCount,
               imageBatchPlan: imageBatchPlan ? structuredClone(imageBatchPlan) : undefined,
               imageDeliveryPlan: structuredClone(imageDeliveryPlan),
@@ -3751,7 +3939,6 @@ export async function POST(request: NextRequest) {
                   loopConfirmationTaskReservation?.identities.slice(requestedImageCount) || [],
                 ),
               } : {}),
-              optimizePrompt: true,
               resolvedProviderId: resolvedChatSelection.providerId,
               resolvedModel: model,
               providerModelFingerprint: fingerprintProviderModel(selectedProvider as unknown as Record<string, unknown>, model),

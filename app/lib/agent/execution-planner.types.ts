@@ -93,11 +93,14 @@ export interface AgentRegionSelection {
 export interface AgentExecutionPlannerInput extends Record<string, unknown> {
   userMessage?: string;
   referenceContext?: AgentPlannerReferenceContext | null;
+  lockedSkillId?: string | null;
+  skillContent?: string;
 }
 
 export interface AgentExecutionPlanValidationOptions extends Record<string, unknown> {
   referenceIds?: string[];
   regionIds?: string[];
+  lockedSkillId?: string | null;
 }
 
 export interface AgentTaskContract {

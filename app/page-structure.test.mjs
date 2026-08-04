@@ -1145,12 +1145,12 @@ test('image card model selection stays scoped to the current provider model list
   assert.equal(modelSelectBlock.includes('findWorkspaceModelOption(workspaceImageModelOptions, modelId, selectedImageCardProviderId);'), false);
 });
 
-test('image card generation always uses async task requests instead of keeping a single-image sync branch', () => {
+test('image card generation delegates request construction and execution to the Planner-backed agent route', () => {
   assert.equal(pageSource.includes('if (count <= 1) {'), false);
   assert.equal(pageSource.includes('buildCanvasImageGenerationRequest({'), false);
-  assert.equal(pageSource.includes('const asyncRequests = buildAsyncImageTaskRequests({'), true);
-  assert.equal(pageSource.includes('const taskExecutionMode = resolveCanvasImageTaskExecutionMode({'), true);
-  assert.equal(pageSource.includes('settleCanvasImageGenerationRequests({'), true);
+  assert.equal(pageSource.includes('const asyncRequests = buildAsyncImageTaskRequests({'), false);
+  assert.equal(pageSource.includes("const response = await fetch('/api/agent'"), true);
+  assert.equal(pageSource.includes('const assets = await consumeAgentImageResponse(response);'), true);
 });
 
 test('image card generation no longer treats accepted outputs as validation failures', () => {
@@ -1174,13 +1174,13 @@ test('image card generation no longer treats accepted outputs as validation fail
   assert.equal(generateBlock.includes('返回图未达到'), false);
 });
 
-test('image card generation uses the shared failure message helper for partial success states', () => {
+test('image card generation consumes Agent warning metadata without rebuilding supplier failure messages', () => {
   assert.equal(
     pageSource.includes('buildCanvasImageGenerationFailureMessage('),
-    true
+    false
   );
   assert.equal(
-    pageSource.includes('[itemId]: failureMessage,'),
+    pageSource.includes('[itemId]: warningMessage,'),
     true
   );
   assert.equal(pageSource.includes('validationFailureCount,'), false);
