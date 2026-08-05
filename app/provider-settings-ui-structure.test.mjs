@@ -6,11 +6,17 @@ import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const pageSource = fs.readFileSync(path.join(__dirname, 'page.tsx'), 'utf8');
+const motionControllerSource = fs.readFileSync(
+  path.join(__dirname, 'components/GsapMotionController.tsx'),
+  'utf8'
+);
+const globalStylesSource = fs.readFileSync(path.join(__dirname, 'globals.css'), 'utf8');
 
-test('page adds a dedicated left rail settings item and modal state for provider settings', () => {
+test('page adds a dedicated left rail settings item and isolated modal gate for provider settings', () => {
   assert.equal(pageSource.includes("{ id: 'settings', label: '设置', icon: Settings }"), true);
+  assert.equal(pageSource.includes('const ProviderSettingsModalGate = memo(React.forwardRef<'), true);
   assert.equal(
-    pageSource.includes("const [showProviderSettingsModal, setShowProviderSettingsModal] = useState(false);"),
+    pageSource.includes('const providerSettingsModalGateRef = useRef<ProviderSettingsModalGateHandle | null>(null);'),
     true
   );
   assert.equal(pageSource.includes('const openProviderSettingsModal = useCallback(() => {'), true);
@@ -21,6 +27,67 @@ test('page routes both left rail settings and top bar settings to the same provi
   assert.equal(pageSource.includes('openProviderSettingsModal();'), true);
   assert.equal(pageSource.includes('title="设置"'), true);
   assert.equal(pageSource.includes('onClick={openProviderSettingsModal}'), true);
+  assert.equal(
+    pageSource.includes("data-provider-settings-trigger={item.id === 'settings' ? 'true' : undefined}"),
+    true
+  );
+});
+
+test('provider settings opens without changing root modal state or refetching loaded settings', () => {
+  const openStart = pageSource.indexOf('const openProviderSettingsModal = useCallback(() => {');
+  const openEnd = pageSource.indexOf('\n  }, []);', openStart);
+  const openSource = pageSource.slice(openStart, openEnd);
+
+  assert.equal(openSource.includes('providerSettingsModalGateRef.current?.open();'), true);
+  assert.equal(openSource.includes('setShowProviderSettingsModal'), false);
+  assert.equal(openSource.includes('loadProviderSettings'), false);
+  assert.equal(pageSource.includes('<ProviderSettingsModalGate'), true);
+  assert.equal(pageSource.includes('setShowProviderSettingsModal'), false);
+  assert.equal(pageSource.includes('window.requestIdleCallback(prepare, { timeout: 2000 })'), true);
+  assert.equal(pageSource.includes('const cachedContentRef = useRef<React.ReactNode>(null);'), true);
+  assert.equal(pageSource.includes("const cachedRenderRevisionRef = useRef('');"), true);
+  assert.equal(pageSource.includes('const providerSettingsModalOpenRef = useRef(false);'), true);
+  assert.equal(pageSource.includes('openRef={providerSettingsModalOpenRef}'), true);
+  assert.match(pageSource, /cachedContentRef\.current === null\s*\|\| openRef\.current/);
+  assert.equal(pageSource.includes('cachedRenderRevisionRef.current !== renderRevision'), true);
+  assert.match(
+    pageSource,
+    /\}\), \(previous, next\) => \(\s*!next\.openRef\.current\s*&& previous\.renderRevision === next\.renderRevision/
+  );
+  assert.equal(pageSource.includes('const providerSettingsRenderRevision = ['), true);
+  assert.equal(pageSource.includes('providerSettingsSaving,'), true);
+  assert.equal(pageSource.includes('providerSettingsTesting,'), true);
+  assert.equal(pageSource.includes('providerSettingsFetchingModels,'), true);
+  assert.equal(pageSource.includes('renderRevision={providerSettingsRenderRevision}'), true);
+  assert.equal(pageSource.includes('data-provider-settings-modal="true"'), true);
+  assert.equal(pageSource.includes("classList.toggle('is-open', open)"), true);
+  assert.equal(pageSource.includes("modal.toggleAttribute('inert', true)"), true);
+  assert.equal(pageSource.includes("modal.setAttribute('aria-hidden', 'true')"), true);
+  assert.equal(pageSource.includes("modal.removeAttribute('inert')"), true);
+  assert.equal(pageSource.includes("modal.setAttribute('aria-hidden', 'false')"), true);
+  const visualToggleIndex = pageSource.indexOf("openingShell?.classList.toggle('is-open', open)");
+  const accessibilityFrameIndex = pageSource.indexOf('accessibilityFrameRef.current = requestAnimationFrame(', visualToggleIndex);
+  const accessibilityTimerIndex = pageSource.indexOf('accessibilityTimerRef.current = setTimeout(', accessibilityFrameIndex);
+  assert.equal(visualToggleIndex < accessibilityFrameIndex, true);
+  assert.equal(accessibilityFrameIndex < accessibilityTimerIndex, true);
+  assert.equal(pageSource.includes('data-provider-settings-opening-shell="true"'), true);
+  assert.equal(pageSource.includes("modal.classList.add('is-open')"), true);
+  assert.equal(pageSource.includes("console.info('[provider-settings-perf]', JSON.stringify({"), true);
+  assert.equal(pageSource.includes('data-gsap-motion-exclude="true"'), true);
+  assert.equal(motionControllerSource.includes('[data-gsap-motion-exclude="true"]'), true);
+  assert.match(
+    globalStylesSource,
+    /\[data-provider-settings-modal="true"\] \{[\s\S]{0,240}clip-path: inset\(50%\);[\s\S]{0,240}pointer-events: auto;/
+  );
+  assert.match(
+    globalStylesSource,
+    /\[data-provider-settings-modal="true"\]\.is-open \{[\s\S]{0,120}clip-path: inset\(0\);/
+  );
+  assert.doesNotMatch(
+    globalStylesSource,
+    /\[data-provider-settings-modal="true"\]\.is-open \{[^}]*pointer-events:/
+  );
+  assert.equal(pageSource.includes('document.documentElement.dataset.providerSettingsOpen'), false);
 });
 
 test('provider settings modal loads and saves provider registry through the settings api', () => {
@@ -41,7 +108,9 @@ test('provider settings modal loads and saves provider registry through the sett
   assert.equal(pageSource.includes('应用选择'), true);
   assert.equal(pageSource.includes('API Key'), true);
   assert.equal(pageSource.includes('测试连接'), true);
-  assert.equal(pageSource.includes('设为主供应商'), true);
+  assert.equal(pageSource.includes('name="primary-provider"'), true);
+  assert.equal(pageSource.includes('checked={provider.primary}'), true);
+  assert.equal(pageSource.includes('disabled={provider.enabled === false}'), true);
   assert.equal(pageSource.includes('连接成功'), true);
   assert.equal(pageSource.includes('连接失败'), true);
   assert.equal(pageSource.includes("type=\"text\""), true);
@@ -200,4 +269,23 @@ test('provider settings modal uses a provider list instead of the legacy single-
   assert.equal(pageSource.includes('PROVIDER_PROTOCOL_OPTIONS.map'), true);
   assert.equal(pageSource.includes('PROVIDER_IMAGE_REQUEST_MODE_OPTIONS.map'), true);
   assert.equal(pageSource.includes('handleProviderSettingsProviderChange(e.target.value as ProviderSettingsProviderId)'), false);
+});
+
+test('canvas defaults reuse the resolved session provider and model selections', () => {
+  assert.equal(
+    pageSource.includes("findWorkspaceModelOption(\n      workspaceImageModelOptions,\n      resolvedImageSelection.model || '',"),
+    true
+  );
+  assert.equal(
+    pageSource.includes("findWorkspaceModelOption(\n      workspaceTextModelOptions,\n      resolvedChatSelection.model || '',"),
+    true
+  );
+  assert.match(
+    pageSource,
+    /selectableTextProviders\.find[\s\S]{0,180}defaultWorkspaceTextModelOption\.providerId/
+  );
+  assert.match(
+    pageSource,
+    /selectableImageProviders\.find[\s\S]{0,180}defaultWorkspaceImageModelOption\.providerId/
+  );
 });

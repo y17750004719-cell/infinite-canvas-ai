@@ -197,6 +197,7 @@ const GLOBAL_NOTICE_Z = 220;
 const CANVAS_CLIPBOARD_PASTE_OFFSET = { x: 32, y: 32 };
 const CANVAS_VIEWPORT_ANIMATION_SECONDS = 0.12;
 const CANVAS_SNAPSHOT_COMMIT_IDLE_MS = 1200;
+const CANVAS_WHEEL_BURST_END_MS = 150;
 const CANVAS_IMAGE_WORKING_SET_ENTER_SCREENS = 1;
 const CANVAS_IMAGE_WORKING_SET_RETAIN_SCREENS = 1.5;
 const CANVAS_IMAGE_WORKING_SET_RELEASE_MS = 500;
@@ -739,6 +740,31 @@ const getChatComposerPlainText = (segments: ChatComposerSegment[]): string =>
     .map((segment) => segment.text)
     .join('');
 
+const parseSlashSkillInput = (value: string) => {
+  if (!value.startsWith('/')) return null;
+  return { body: value.replace(/^\/\s*/, '') };
+};
+
+const getPlainContentEditableText = (root: HTMLElement): string => {
+  let text = '';
+  const visit = (node: Node) => {
+    if (node.nodeType === Node.TEXT_NODE) {
+      text += (node.textContent || '').replace(/\u00A0/g, ' ');
+      return;
+    }
+    if (node.nodeType !== Node.ELEMENT_NODE) return;
+    const element = node as HTMLElement;
+    if (element.tagName === 'BR') {
+      text += '\n';
+      return;
+    }
+    Array.from(element.childNodes).forEach(visit);
+    if (element !== root && /^(DIV|P|LI)$/.test(element.tagName)) text += '\n';
+  };
+  Array.from(root.childNodes).forEach(visit);
+  return text;
+};
+
 const mergeAdjacentChatComposerText = (segments: ChatComposerSegment[]): ChatComposerSegment[] => {
   const merged: ChatComposerSegment[] = [];
   for (const segment of segments) {
@@ -1134,7 +1160,10 @@ const DEFAULT_QUICK_ACTIONS = [
   { id: 'logo', label: 'Logo 与品牌', description: '生成 Logo 与基础品牌方向。' },
   { id: 'brand', label: '品牌识别系统', description: '创建完整的品牌识别与物料系统。' },
   { id: 'api-helper', label: 'API 助手', description: '查阅 API 文档并生成调用代码。' },
-];
+].map((action) => ({
+  ...action,
+  searchText: `${action.id} ${action.label} ${action.description}`.toLocaleLowerCase(),
+}));
 
 const PROVIDER_SETTINGS_PRESET_OPTIONS = [
   { id: 'comfly', name: 'Comfly', baseUrl: 'https://ai.comfly.org/v1', protocol: 'openai', imageRequestMode: 'openai' },
@@ -1288,6 +1317,7 @@ interface SkillMenuAction {
   id: string;
   label: string;
   description: string;
+  searchText: string;
 }
 
 const SKILL_DEFAULT_PROMPTS: Record<string, string> = {
@@ -5150,12 +5180,16 @@ const CanvasViewport = memo(function CanvasViewport({
     >
       <CanvasBackgroundLayer theme={themePalette} />
       <div
-        ref={canvasSceneRef}
-        data-canvas-world="true"
-        data-canvas-scene="true"
-        className="pointer-events-none absolute inset-0"
-        style={{ transformOrigin: '0 0' }}
+        data-canvas-viewport-clip="true"
+        className="pointer-events-none absolute inset-0 overflow-hidden"
       >
+        <div
+          ref={canvasSceneRef}
+          data-canvas-world="true"
+          data-canvas-scene="true"
+          className="pointer-events-none absolute inset-0"
+          style={{ transformOrigin: '0 0' }}
+        >
         <CanvasConnectionsLayer
           connections={connections}
           theme={themePalette}
@@ -5231,6 +5265,7 @@ const CanvasViewport = memo(function CanvasViewport({
           onRegionClick={onRegionClick}
           getItemTargetRef={getItemTargetRef}
         />
+        </div>
       </div>
       <div data-canvas-screen-overlay="true" className="pointer-events-none absolute inset-0">
         <CanvasConnectionPreviewLayer
@@ -5763,6 +5798,121 @@ function WorkspaceThemeToggle({
   );
 }
 
+type ProviderSettingsModalGateHandle = {
+  open: () => void;
+  close: () => void;
+};
+
+type ProviderSettingsModalGateProps = {
+  render: () => React.ReactNode;
+  renderRevision: string;
+  openRef: React.MutableRefObject<boolean>;
+};
+
+const ProviderSettingsModalGate = memo(React.forwardRef<
+  ProviderSettingsModalGateHandle,
+  ProviderSettingsModalGateProps
+>(function ProviderSettingsModalGate({ render, renderRevision, openRef }, ref) {
+  const [isMounted, setIsMounted] = useState(false);
+  const isMountedRef = useRef(false);
+  const pendingOpenRef = useRef(false);
+  const cachedContentRef = useRef<React.ReactNode>(null);
+  const cachedRenderRevisionRef = useRef('');
+  const accessibilityFrameRef = useRef<number | null>(null);
+  const accessibilityTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const cancelAccessibilityRelease = useCallback(() => {
+    if (accessibilityFrameRef.current !== null) {
+      cancelAnimationFrame(accessibilityFrameRef.current);
+      accessibilityFrameRef.current = null;
+    }
+    if (accessibilityTimerRef.current !== null) {
+      clearTimeout(accessibilityTimerRef.current);
+      accessibilityTimerRef.current = null;
+    }
+  }, []);
+
+  const setModalOpen = useCallback((open: boolean) => {
+    cancelAccessibilityRelease();
+    openRef.current = open;
+    const openStartedAt = open && isCanvasPerformanceEnabled() ? performance.now() : null;
+    const modal = document.querySelector<HTMLElement>('[data-provider-settings-modal="true"]');
+    const openingShell = document.querySelector<HTMLElement>('[data-provider-settings-opening-shell="true"]');
+    openingShell?.classList.toggle('is-open', open);
+    if (modal && open) {
+      accessibilityFrameRef.current = requestAnimationFrame(() => {
+        accessibilityFrameRef.current = null;
+        if (openStartedAt !== null) {
+          console.info('[provider-settings-perf]', JSON.stringify({
+            kind: 'visual-frame',
+            openToVisualFrameMs: performance.now() - openStartedAt,
+          }));
+        }
+        accessibilityTimerRef.current = setTimeout(() => {
+          accessibilityTimerRef.current = null;
+          if (!openRef.current) return;
+          modal.classList.add('is-open');
+          modal.removeAttribute('inert');
+          modal.setAttribute('aria-hidden', 'false');
+          openingShell?.classList.remove('is-open');
+        }, 0);
+      });
+    } else if (modal) {
+      modal.classList.remove('is-open');
+      modal.toggleAttribute('inert', true);
+      modal.setAttribute('aria-hidden', 'true');
+    }
+    document.querySelector('[data-provider-settings-trigger="true"]')?.classList.toggle('is-active', open);
+  }, [cancelAccessibilityRelease, openRef]);
+
+  React.useImperativeHandle(ref, () => ({
+    open: () => {
+      pendingOpenRef.current = true;
+      if (isMountedRef.current) setModalOpen(true);
+      else setIsMounted(true);
+    },
+    close: () => {
+      pendingOpenRef.current = false;
+      setModalOpen(false);
+    },
+  }), [setModalOpen]);
+
+  useLayoutEffect(() => {
+    if (!isMounted) return;
+    isMountedRef.current = true;
+    setModalOpen(pendingOpenRef.current);
+  }, [isMounted, setModalOpen]);
+
+  useEffect(() => {
+    if (isMounted) return;
+    const prepare = () => React.startTransition(() => setIsMounted(true));
+    if (typeof window.requestIdleCallback === 'function') {
+      const idleId = window.requestIdleCallback(prepare, { timeout: 2000 });
+      return () => window.cancelIdleCallback(idleId);
+    }
+    const timerId = window.setTimeout(prepare, 500);
+    return () => window.clearTimeout(timerId);
+  }, [isMounted]);
+
+  useEffect(() => () => {
+    setModalOpen(false);
+  }, [setModalOpen]);
+
+  if (!isMounted) return null;
+  if (
+    cachedContentRef.current === null
+    || openRef.current
+    || cachedRenderRevisionRef.current !== renderRevision
+  ) {
+    cachedContentRef.current = render();
+    cachedRenderRevisionRef.current = renderRevision;
+  }
+  return cachedContentRef.current;
+}), (previous, next) => (
+  !next.openRef.current
+  && previous.renderRevision === next.renderRevision
+));
+
 export default function AIWorkspace() {
   const { theme, toggleTheme } = useWorkspaceTheme();
   const themePalette = WORKSPACE_THEME_PALETTES[theme];
@@ -5872,6 +6022,18 @@ export default function AIWorkspace() {
   } | null>(null);
   const pendingCanvasOverlayMountFrameRef = useRef<number | null>(null);
   const pendingCanvasSelectionFinalizeFrameRef = useRef<number | null>(null);
+  const wheelPreviewFrameRef = useRef<number | null>(null);
+  const wheelBurstCommitTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const wheelBurstPerfRef = useRef<{
+    token: number;
+    startedAt: number;
+    eventCount: number;
+    firstPreviewAt: number | null;
+    pendingViewport: ViewportState | null;
+    lastFrameAt: number | null;
+    frameGaps: number[];
+    frameId: number | null;
+  } | null>(null);
   const cancelPendingCanvasSelectionFinalizeRef = useRef<() => void>(() => {});
   const canvasOverlayTransformCacheRef = useRef(new WeakMap<HTMLElement, string>());
   const canvasOverlaySyncWriteCountRef = useRef(0);
@@ -5946,6 +6108,18 @@ export default function AIWorkspace() {
   const [skillMenuTrigger, setSkillMenuTrigger] = useState<'button' | 'slash' | null>(null);
   const [skillMenuQuery, setSkillMenuQuery] = useState('');
   const [skillMenuActiveIndex, setSkillMenuActiveIndex] = useState(0);
+  const skillMenuQueryRef = useRef('');
+  const skillMenuActiveIndexRef = useRef(0);
+  const skillMenuKeyboardNavigationRef = useRef(false);
+  const pendingSkillMenuPaintRef = useRef<{
+    kind: 'open' | 'query';
+    startedAt: number;
+  } | null>(null);
+  const pendingSkillSelectionPaintRef = useRef<{
+    source: SkillSelectSource;
+    skillId: string;
+    startedAt: number;
+  } | null>(null);
   const [showChatComposerMoreMenu, setShowChatComposerMoreMenu] = useState(false);
   const [showChatAssetPicker, setShowChatAssetPicker] = useState(false);
   const [selectedChatHistoryAssetIds, setSelectedChatHistoryAssetIds] = useState<string[]>([]);
@@ -5953,9 +6127,7 @@ export default function AIWorkspace() {
   const filteredQuickActions = React.useMemo(() => {
     const query = skillMenuQuery.trim().toLocaleLowerCase();
     if (!query) return quickActions;
-    return quickActions.filter((action) => (
-      `${action.id} ${action.label} ${action.description}`.toLocaleLowerCase().includes(query)
-    ));
+    return quickActions.filter((action) => action.searchText.includes(query));
   }, [quickActions, skillMenuQuery]);
   const [imageAspectRatio, setImageAspectRatio] = useState('auto');
   const [agentImageAspectRatio, setAgentImageAspectRatio] = useState('3:4');
@@ -6005,6 +6177,7 @@ export default function AIWorkspace() {
                 id: skill.id,
                 label: skill.name,
                 description: skill.description || '',
+                searchText: `${skill.id} ${skill.name} ${skill.description || ''}`.toLocaleLowerCase(),
               }))
           : [];
         if (skills.length > 0) setQuickActions(skills);
@@ -6019,10 +6192,55 @@ export default function AIWorkspace() {
 
   useEffect(() => {
     if (!showSkillsMenu || skillMenuTrigger !== 'slash') return;
+    if (!skillMenuKeyboardNavigationRef.current) return;
+    skillMenuKeyboardNavigationRef.current = false;
     const activeAction = filteredQuickActions[skillMenuActiveIndex];
     if (!activeAction) return;
     document.getElementById(`skill-option-${activeAction.id}`)?.scrollIntoView({ block: 'nearest' });
   }, [filteredQuickActions, showSkillsMenu, skillMenuActiveIndex, skillMenuTrigger]);
+
+  useEffect(() => {
+    if (!canvasPerformanceEnabledRef.current || !showSkillsMenu) return;
+    const pending = pendingSkillMenuPaintRef.current;
+    pendingSkillMenuPaintRef.current = null;
+    let paintFrameId = 0;
+    const frameId = requestAnimationFrame(() => {
+      paintFrameId = requestAnimationFrame(() => {
+        console.info('[skill-menu-perf]', {
+          kind: pending?.kind ?? (skillMenuQuery ? 'query' : 'open'),
+          trigger: skillMenuTrigger,
+          queryLength: skillMenuQuery.length,
+          resultCount: filteredQuickActions.length,
+          stateToFirstPaintMs: pending ? performance.now() - pending.startedAt : null,
+        });
+      });
+    });
+    return () => {
+      cancelAnimationFrame(frameId);
+      if (paintFrameId) cancelAnimationFrame(paintFrameId);
+    };
+  }, [filteredQuickActions.length, showSkillsMenu, skillMenuQuery, skillMenuTrigger]);
+
+  useEffect(() => {
+    const pending = pendingSkillSelectionPaintRef.current;
+    if (!canvasPerformanceEnabledRef.current || !pending || activeSkill?.id !== pending.skillId) return;
+    pendingSkillSelectionPaintRef.current = null;
+    let paintFrameId = 0;
+    const frameId = requestAnimationFrame(() => {
+      paintFrameId = requestAnimationFrame(() => {
+        console.info('[skill-menu-perf]', {
+          kind: 'select',
+          source: pending.source,
+          skillId: pending.skillId,
+          selectionToFirstPaintMs: performance.now() - pending.startedAt,
+        });
+      });
+    });
+    return () => {
+      cancelAnimationFrame(frameId);
+      if (paintFrameId) cancelAnimationFrame(paintFrameId);
+    };
+  }, [activeSkill?.id]);
 
   useGSAP(
     () => {
@@ -6212,7 +6430,8 @@ export default function AIWorkspace() {
   const [showProjectMenu, setShowProjectMenu] = useState(false);
   const [showHistoryPanel, setShowHistoryPanel] = useState(false);
   const [showGeneratedImageHistoryPanel, setShowGeneratedImageHistoryPanel] = useState(false);
-  const [showProviderSettingsModal, setShowProviderSettingsModal] = useState(false);
+  const providerSettingsModalGateRef = useRef<ProviderSettingsModalGateHandle | null>(null);
+  const providerSettingsModalOpenRef = useRef(false);
   const [providerSettingsLoading, setProviderSettingsLoading] = useState(false);
   const [providerSettingsLoaded, setProviderSettingsLoaded] = useState(false);
   const [providerSettingsSaving, setProviderSettingsSaving] = useState(false);
@@ -6236,6 +6455,16 @@ export default function AIWorkspace() {
   const [providerSettingsFetchedModelCategoryById, setProviderSettingsFetchedModelCategoryById] =
     useState<Record<string, 'image' | 'chat'>>({});
   const [isProviderSettingsApiKeyVisible, setIsProviderSettingsApiKeyVisible] = useState(false);
+  const providerSettingsRenderRevision = [
+    providerSettingsLoaded,
+    providerSettingsLoading,
+    providerSettingsSaving,
+    providerSettingsTesting,
+    providerSettingsFetchingModels,
+    providerSettingsError || '',
+    providerSettingsSelectedProviderId,
+    providerSettingsProviders.length,
+  ].join(':');
   const [generatedImageHistoryBySession, setGeneratedImageHistoryBySessionState] = useState<Record<string, GeneratedImageHistoryEntry[]>>({});
   const [archiveGeneratedImageHistoryEntries, setArchiveGeneratedImageHistoryEntries] = useState<GeneratedImageHistoryEntry[]>([]);
   const [showAddNodeMenu, setShowAddNodeMenu] = useState(false);
@@ -6422,6 +6651,7 @@ export default function AIWorkspace() {
   const pendingChatEditorSyncRef = useRef(false);
   const pendingChatEditorMoveCaretToEndRef = useRef(false);
   const pendingProgrammaticChatInputRef = useRef<string | null>(null);
+  const chatCompositionStartedAtRef = useRef(0);
   const setChatInput = useCallback((value: string) => {
     latestChatInputRef.current = value;
     if (isChatInputComposingRef.current) {
@@ -6536,7 +6766,6 @@ export default function AIWorkspace() {
   const [showAgentClarificationModal, setShowAgentClarificationModal] = useState(false);
   const [agentClarificationCustomText, setAgentClarificationCustomText] = useState('');
   const [chatInputFocused, setChatInputFocused] = useState(false);
-  const chatInputHeightRef = useRef(72);
   const [copiedAssistantMessageId, setCopiedAssistantMessageId] = useState<string | null>(null);
   const [editingTextCardId, setEditingTextCardId] = useState<string | null>(null);
   const [textCardPanelDrafts, setTextCardPanelDraftsState] = useState<Record<string, string>>({});
@@ -6818,6 +7047,17 @@ export default function AIWorkspace() {
     panReactViewportCommitCountRef.current = 0;
     viewportTweenRef.current?.cancel();
     viewportTweenRef.current = null;
+    if (wheelBurstCommitTimerRef.current !== null) {
+      clearTimeout(wheelBurstCommitTimerRef.current);
+      wheelBurstCommitTimerRef.current = null;
+    }
+    if (wheelPreviewFrameRef.current !== null) {
+      cancelAnimationFrame(wheelPreviewFrameRef.current);
+      wheelPreviewFrameRef.current = null;
+    }
+    const pendingWheelSampleFrameId = wheelBurstPerfRef.current?.frameId;
+    if (pendingWheelSampleFrameId != null) cancelAnimationFrame(pendingWheelSampleFrameId);
+    wheelBurstPerfRef.current = null;
     const sceneTarget = getSceneTarget();
     const activeViewport = visualViewportRef.current;
     sceneTarget?.setViewportTransform(activeViewport.x, activeViewport.y, activeViewport.scale);
@@ -7243,17 +7483,27 @@ export default function AIWorkspace() {
     [enabledProviderSettingsProviders]
   );
   const defaultWorkspaceImageModelOption =
+    findWorkspaceModelOption(
+      workspaceImageModelOptions,
+      resolvedImageSelection.model || '',
+      resolvedImageSelection.providerId || ''
+    ) ||
     workspaceImageModelOptions[0] ||
     createWorkspaceModelOptions([], 'image', IMAGE_CARD_MODEL_OPTIONS, getProviderSettingsProviderLabel)[0];
   const defaultWorkspaceTextModelOption =
+    findWorkspaceModelOption(
+      workspaceTextModelOptions,
+      resolvedChatSelection.model || '',
+      resolvedChatSelection.providerId || ''
+    ) ||
     workspaceTextModelOptions[0] ||
     createWorkspaceModelOptions([], 'chat', TEXT_PANEL_MODEL_OPTIONS, getProviderSettingsProviderLabel)[0];
   const selectedTextCardProviderId = selectedTextCardPanelItem
     ? (
         selectableTextProviders.find((provider) => provider.id === textCardProviderById[selectedTextCardPanelItem.id])?.id ||
-        selectableTextProviders[0]?.id ||
+        defaultWorkspaceTextModelOption.providerId ||
         textCardProviderById[selectedTextCardPanelItem.id] ||
-        defaultWorkspaceTextModelOption.providerId
+        selectableTextProviders[0]?.id
       )
     : defaultWorkspaceTextModelOption.providerId;
   const selectedTextCardProviderLabel =
@@ -7273,9 +7523,9 @@ export default function AIWorkspace() {
   const selectedImageCardProviderId = selectedImageCardPanelItem
     ? (
         selectableImageProviders.find((provider) => provider.id === imageCardProviderById[selectedImageCardPanelItem.id])?.id ||
-        selectableImageProviders[0]?.id ||
+        defaultWorkspaceImageModelOption.providerId ||
         imageCardProviderById[selectedImageCardPanelItem.id] ||
-        defaultWorkspaceImageModelOption.providerId
+        selectableImageProviders[0]?.id
       )
     : defaultWorkspaceImageModelOption.providerId;
   const selectedImageCardProviderLabel =
@@ -7954,15 +8204,6 @@ export default function AIWorkspace() {
     };
   }, []);
 
-  const syncEditorHeight = useCallback(() => {
-    const editor = chatInputEditorRef.current;
-    if (!editor) return;
-    editor.style.height = "auto";
-    const next = Math.max(72, Math.min(editor.scrollHeight || 72, 240));
-    editor.style.height = `${next}px`;
-    chatInputHeightRef.current = next;
-  }, []);
-
   const parseChatEditorSegments = useCallback((root: HTMLElement): ChatComposerSegment[] => {
     const segments: ChatComposerSegment[] = [];
     const visit = (node: Node) => {
@@ -8183,21 +8424,46 @@ export default function AIWorkspace() {
       chatComposerSegmentsRef.current = segments;
     }
 
-    syncEditorHeight();
-  }, [activeSkill, moveCaretToEditorEnd, parseChatEditorSegments, resolvedChatReferenceTokens, syncEditorHeight]);
+  }, [activeSkill, moveCaretToEditorEnd, parseChatEditorSegments, resolvedChatReferenceTokens]);
 
   const closeSkillMenu = useCallback((discardSlashQuery = true) => {
-    const shouldDiscardQuery = (
+    const slashInput = (
       discardSlashQuery
       && skillMenuTrigger === 'slash'
-      && latestChatInputRef.current.startsWith('/')
-    );
+    ) ? parseSlashSkillInput(latestChatInputRef.current) : null;
     setShowSkillsMenu(false);
     setSkillMenuTrigger(null);
+    skillMenuQueryRef.current = '';
+    skillMenuActiveIndexRef.current = 0;
+    skillMenuKeyboardNavigationRef.current = false;
     setSkillMenuQuery('');
     setSkillMenuActiveIndex(0);
-    if (shouldDiscardQuery) setChatInput('');
+    if (slashInput) setChatInput(slashInput.body);
   }, [setChatInput, skillMenuTrigger]);
+
+  const syncSlashSkillMenu = (value: string, startedAt: number) => {
+    const slashInput = parseSlashSkillInput(value);
+    if (!slashInput) {
+      if (skillMenuTrigger === 'slash') closeSkillMenu(false);
+      return;
+    }
+
+    const isOpening = skillMenuTrigger !== 'slash';
+    if (isOpening) closeChatComposerPopovers();
+    if (canvasPerformanceEnabledRef.current) {
+      pendingSkillMenuPaintRef.current = { kind: isOpening ? 'open' : 'query', startedAt };
+    }
+    skillMenuQueryRef.current = '';
+    skillMenuActiveIndexRef.current = 0;
+    if (isOpening) {
+      setSkillMenuTrigger('slash');
+      setShowSkillsMenu(true);
+    }
+    React.startTransition(() => {
+      setSkillMenuQuery('');
+      setSkillMenuActiveIndex(0);
+    });
+  };
 
   const isCaretAtEditorStart = (): boolean => {
     const editor = chatInputEditorRef.current;
@@ -9019,6 +9285,7 @@ export default function AIWorkspace() {
   };
 
   const handleChatPaste = async (e: React.ClipboardEvent<HTMLDivElement>) => {
+    const startedAt = performance.now();
     const imageFiles = extractImageFilesFromClipboardItems(e.clipboardData.items);
 
     if (imageFiles.length === 0) {
@@ -9039,17 +9306,27 @@ export default function AIWorkspace() {
         document.execCommand('insertText', false, text);
       }
       const editor = chatInputEditorRef.current;
-      const nextSegments = editor ? parseChatEditorSegments(editor) : [{ type: 'text' as const, text: '' }];
+      const nextSegments = editor
+        ? activeSkill || resolvedChatReferenceTokens.length > 0 || editor.querySelector(`${SKILL_TOKEN_SELECTOR}, ${REFERENCE_TOKEN_SELECTOR}`)
+          ? parseChatEditorSegments(editor)
+          : [{ type: 'text' as const, text: getPlainContentEditableText(editor) }]
+        : [{ type: 'text' as const, text: '' }];
       const editorText = getChatComposerPlainText(nextSegments);
       chatComposerSegmentsRef.current = nextSegments;
       latestChatInputRef.current = editorText;
-      if (skillMenuTrigger === 'slash' && editorText.startsWith('/')) {
-        setSkillMenuQuery(editorText.slice(1));
-        setSkillMenuActiveIndex(0);
-      }
+      syncSlashSkillMenu(editorText, startedAt);
       syncChatComposerControls(editorText);
-      syncEditorHeight();
       rememberChatEditorCaretOffset();
+      if (canvasPerformanceEnabledRef.current) {
+        const inputWorkMs = performance.now() - startedAt;
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+          console.info('[chat-input-perf]', {
+            kind: 'paste-text',
+            inputWorkMs,
+            inputToFirstPaintMs: performance.now() - startedAt,
+          });
+        }));
+      }
       return;
     }
 
@@ -9066,6 +9343,13 @@ export default function AIWorkspace() {
     const filesToProcess = imageFiles.slice(0, remainingSlots);
 
     if (!isGeneratingRef.current) enqueueChatReferenceUploads(filesToProcess);
+    if (canvasPerformanceEnabledRef.current) {
+      console.info('[chat-input-perf]', {
+        kind: 'paste-images',
+        imageCount: filesToProcess.length,
+        handlerMs: performance.now() - startedAt,
+      });
+    }
   };
 
   const recordChatInputPerformance = useCallback((duration: number) => {
@@ -9088,63 +9372,64 @@ export default function AIWorkspace() {
     const editor = chatInputEditorRef.current;
     if (!editor) return;
     const startedAt = performance.now();
-    const previousEditorText = latestChatInputRef.current;
-    const skillToken = editor.querySelector(SKILL_TOKEN_SELECTOR);
+    const skillToken = activeSkill ? editor.querySelector(SKILL_TOKEN_SELECTOR) : null;
     if (activeSkill && !skillToken) {
       setActiveSkillForCurrentTopic(null);
     } else if (skillToken && editor.firstChild !== skillToken) {
       editor.insertBefore(skillToken, editor.firstChild);
     }
-    const nextSegments = parseChatEditorSegments(editor);
-    const previousTokenIds = new Set(
-      chatComposerSegmentsRef.current
-        .filter((segment): segment is Extract<ChatComposerSegment, { type: 'reference' }> => segment.type === 'reference')
-        .map((segment) => segment.tokenId)
+    const hasStructuredTokens = Boolean(
+      activeSkill ||
+      resolvedChatReferenceTokens.length > 0 ||
+      editor.querySelector(`${SKILL_TOKEN_SELECTOR}, ${REFERENCE_TOKEN_SELECTOR}`)
     );
-    const nextTokenIds = new Set(
-      nextSegments
-        .filter((segment): segment is Extract<ChatComposerSegment, { type: 'reference' }> => segment.type === 'reference')
-        .map((segment) => segment.tokenId)
-    );
-    const removedTokenIds = [...previousTokenIds].filter((tokenId) => !nextTokenIds.has(tokenId));
-    if (removedTokenIds.length > 0) {
-      const removedTokens = resolvedChatReferenceTokens.filter((token) => removedTokenIds.includes(token.id));
-      removedTokens.forEach((token) => {
-        if (token.source === 'canvas' && token.canvasItemId) {
-          dismissedCanvasReferenceIdsRef.current.add(token.canvasItemId);
-        }
-      });
-      setChatReferenceTokens((tokens) => tokens.filter((token) => !removedTokenIds.includes(token.id)));
+    const nextSegments = hasStructuredTokens
+      ? parseChatEditorSegments(editor)
+      : [{ type: 'text' as const, text: getPlainContentEditableText(editor) }];
+    if (hasStructuredTokens) {
+      const previousTokenIds = new Set(
+        chatComposerSegmentsRef.current
+          .filter((segment): segment is Extract<ChatComposerSegment, { type: 'reference' }> => segment.type === 'reference')
+          .map((segment) => segment.tokenId)
+      );
+      const nextTokenIds = new Set(
+        nextSegments
+          .filter((segment): segment is Extract<ChatComposerSegment, { type: 'reference' }> => segment.type === 'reference')
+          .map((segment) => segment.tokenId)
+      );
+      const removedTokenIds = [...previousTokenIds].filter((tokenId) => !nextTokenIds.has(tokenId));
+      if (removedTokenIds.length > 0) {
+        const removedTokens = resolvedChatReferenceTokens.filter((token) => removedTokenIds.includes(token.id));
+        removedTokens.forEach((token) => {
+          if (token.source === 'canvas' && token.canvasItemId) {
+            dismissedCanvasReferenceIdsRef.current.add(token.canvasItemId);
+          }
+        });
+        setChatReferenceTokens((tokens) => tokens.filter((token) => !removedTokenIds.includes(token.id)));
+      }
     }
     chatComposerSegmentsRef.current = nextSegments;
     const editorText = getChatComposerPlainText(nextSegments);
     latestChatInputRef.current = editorText;
-    if (skillMenuTrigger === 'slash') {
-      if (!editorText.startsWith('/') || activeSkill || resolvedChatReferenceTokens.length > 0) {
-        closeSkillMenu(false);
-      } else {
-        setSkillMenuQuery(editorText.slice(1));
-        setSkillMenuActiveIndex(0);
-      }
-    } else if (
-      editorText === '/'
-      && previousEditorText.length === 0
-      && !activeSkill
-      && resolvedChatReferenceTokens.length === 0
-    ) {
-      closeChatComposerPopovers();
-      setSkillMenuTrigger('slash');
-      setSkillMenuQuery('');
-      setSkillMenuActiveIndex(0);
-      setShowSkillsMenu(true);
-    }
+    syncSlashSkillMenu(editorText, startedAt);
     syncChatComposerControls(editorText);
-    syncEditorHeight();
-    recordChatInputPerformance(performance.now() - startedAt);
+    const inputWorkMs = performance.now() - startedAt;
+    recordChatInputPerformance(inputWorkMs);
+    if (canvasPerformanceEnabledRef.current) {
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        console.info('[chat-input-perf]', {
+          kind: isChatInputComposingRef.current ? 'ime-input' : 'input-first-paint',
+          fastPath: !hasStructuredTokens,
+          inputWorkMs,
+          inputToFirstPaintMs: performance.now() - startedAt,
+        });
+      }));
+    }
   };
 
   const handleChatCompositionStart = () => {
     isChatInputComposingRef.current = true;
+    chatCompositionStartedAtRef.current = performance.now();
   };
 
   const handleChatCompositionEnd = () => {
@@ -9166,6 +9451,14 @@ export default function AIWorkspace() {
       lastSyncedChatInputRevisionRef.current = chatInputSyncRevision;
     }
     rememberChatEditorCaretOffset();
+    if (canvasPerformanceEnabledRef.current) {
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        console.info('[chat-input-perf]', {
+          kind: 'ime-composition',
+          compositionToFirstPaintMs: performance.now() - chatCompositionStartedAtRef.current,
+        });
+      }));
+    }
   };
 
   const handleSelectedTextCardPanelInputChange = useCallback(
@@ -9354,19 +9647,28 @@ export default function AIWorkspace() {
     if (e.nativeEvent.isComposing || isChatInputComposingRef.current) return;
 
     if (showSkillsMenu && skillMenuTrigger === 'slash') {
+      const latestQuery = skillMenuQueryRef.current.trim().toLocaleLowerCase();
+      const latestFilteredQuickActions = latestQuery
+        ? quickActions.filter((action) => action.searchText.includes(latestQuery))
+        : quickActions;
       if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
         e.preventDefault();
-        if (filteredQuickActions.length > 0) {
+        if (latestFilteredQuickActions.length > 0) {
           const direction = e.key === 'ArrowDown' ? 1 : -1;
-          setSkillMenuActiveIndex((current) => (
-            (current + direction + filteredQuickActions.length) % filteredQuickActions.length
-          ));
+          const nextIndex = (
+            skillMenuActiveIndexRef.current + direction + latestFilteredQuickActions.length
+          ) % latestFilteredQuickActions.length;
+          skillMenuActiveIndexRef.current = nextIndex;
+          skillMenuKeyboardNavigationRef.current = true;
+          React.startTransition(() => {
+            setSkillMenuActiveIndex(nextIndex);
+          });
         }
         return;
       }
       if (e.key === 'Enter' || e.key === 'Tab') {
         e.preventDefault();
-        const selectedAction = filteredQuickActions[skillMenuActiveIndex];
+        const selectedAction = latestFilteredQuickActions[skillMenuActiveIndexRef.current];
         if (selectedAction) handleQuickSkillSelect(selectedAction, 'slash_menu');
         return;
       }
@@ -10290,7 +10592,16 @@ export default function AIWorkspace() {
 
     visualViewportRef.current = nextViewport;
     sceneTarget.setViewportTransform(nextViewport.x, nextViewport.y, nextViewport.scale);
-    syncSelectedCanvasOverlayPositions(nextViewport);
+    const selectedItem = selectedIdRef.current ? itemByIdRef.current.get(selectedIdRef.current) : null;
+    if (
+      selectedItem && (
+        isImageAssetItem(selectedItem) ||
+        isImageCardItem(selectedItem) ||
+        (selectedItem.type === 'text' && selectedItem.textVariant === 'card')
+      )
+    ) {
+      syncSelectedCanvasOverlayPositions(nextViewport);
+    }
     markCanvasInteractionVisualFrame('viewport');
   }, [getSceneTarget, markCanvasInteractionVisualFrame, syncSelectedCanvasOverlayPositions]);
 
@@ -10359,6 +10670,18 @@ export default function AIWorkspace() {
 
   useEffect(() => {
     canvasPerformanceEnabledRef.current = isCanvasPerformanceEnabled();
+    if (!canvasPerformanceEnabledRef.current || typeof PerformanceObserver === 'undefined') return;
+    if (!PerformanceObserver.supportedEntryTypes.includes('longtask')) return;
+    const observer = new PerformanceObserver((list) => {
+      list.getEntries().forEach((entry) => {
+        console.info('[canvas-longtask-perf]', JSON.stringify({
+          startTime: entry.startTime,
+          duration: entry.duration,
+        }));
+      });
+    });
+    observer.observe({ entryTypes: ['longtask'] });
+    return () => observer.disconnect();
   }, []);
 
   const clearCanvasViewportPreview = useCallback(() => {
@@ -10384,6 +10707,77 @@ export default function AIWorkspace() {
     });
     if (!defer) flushPendingCanvasCommit('viewport-immediate');
   }, [flushPendingCanvasCommit, stageCanvasCommit, syncSessionLiveState]);
+
+  const flushCanvasWheelPreview = useCallback(() => {
+    const burst = wheelBurstPerfRef.current;
+    const nextViewport = burst?.pendingViewport;
+    if (!burst || !nextViewport) return;
+    if (wheelPreviewFrameRef.current !== null) {
+      cancelAnimationFrame(wheelPreviewFrameRef.current);
+      wheelPreviewFrameRef.current = null;
+    }
+    burst.pendingViewport = null;
+    previewCanvasViewport(nextViewport);
+    burst.firstPreviewAt ??= performance.now();
+    if (!canvasPerformanceEnabledRef.current || burst.frameId !== null) return;
+    const sampleFrame = (frameAt: number) => {
+      const currentBurst = wheelBurstPerfRef.current;
+      if (!currentBurst || currentBurst.token !== burst.token) return;
+      if (currentBurst.lastFrameAt !== null) {
+        currentBurst.frameGaps.push(frameAt - currentBurst.lastFrameAt);
+      }
+      currentBurst.lastFrameAt = frameAt;
+      currentBurst.frameId = requestAnimationFrame(sampleFrame);
+    };
+    burst.frameId = requestAnimationFrame(sampleFrame);
+  }, [previewCanvasViewport]);
+
+  const flushCanvasWheelBurst = useCallback(() => {
+    if (wheelBurstCommitTimerRef.current !== null) {
+      clearTimeout(wheelBurstCommitTimerRef.current);
+      wheelBurstCommitTimerRef.current = null;
+    }
+    const burst = wheelBurstPerfRef.current;
+    if (!burst) return;
+    if (burst.token !== interactionCommitTokenRef.current) {
+      if (wheelPreviewFrameRef.current !== null) {
+        cancelAnimationFrame(wheelPreviewFrameRef.current);
+        wheelPreviewFrameRef.current = null;
+      }
+      if (burst.frameId !== null) cancelAnimationFrame(burst.frameId);
+      wheelBurstPerfRef.current = null;
+      return;
+    }
+    flushCanvasWheelPreview();
+    wheelBurstPerfRef.current = null;
+    if (burst.frameId !== null) cancelAnimationFrame(burst.frameId);
+    const commitStartedAt = performance.now();
+    if (canvasPerformanceEnabledRef.current) {
+      console.info('[canvas-wheel-perf]', JSON.stringify({
+        kind: 'preview',
+        eventCount: burst.eventCount,
+        eventToFirstPreviewMs:
+          burst.firstPreviewAt === null ? null : burst.firstPreviewAt - burst.startedAt,
+        frameGapP95: burst.frameGaps.length === 0
+          ? 0
+          : [...burst.frameGaps].sort((left, right) => left - right)[Math.min(
+            burst.frameGaps.length - 1,
+            Math.floor(burst.frameGaps.length * 0.95)
+          )],
+        frameGapMax: Math.max(0, ...burst.frameGaps),
+      }));
+    }
+    stageVisualViewportCommit(visualViewportRef.current, true, burst.token);
+    if (canvasPerformanceEnabledRef.current) {
+      console.info('[canvas-wheel-perf]', JSON.stringify({
+        kind: 'commit-scheduled',
+        eventCount: burst.eventCount,
+        burstToCommitScheduledMs: performance.now() - burst.startedAt,
+        commitScheduleWorkMs: performance.now() - commitStartedAt,
+        persistenceScheduled: Boolean(currentSessionIdRef.current),
+      }));
+    }
+  }, [flushCanvasWheelPreview, stageVisualViewportCommit]);
 
   const stageViewportIdleCommit = useCallback((
     nextViewport: ViewportState,
@@ -10411,6 +10805,7 @@ export default function AIWorkspace() {
   const handoffCanvasViewportMotion = useCallback((
     mode: 'pan' | 'wheel' | 'programmatic'
   ) => {
+    if (mode !== 'wheel') flushCanvasWheelBurst();
     interruptCanvasCommitForInteraction(mode);
     pendingViewportIdleCommitTokenRef.current = null;
     viewportTweenRef.current?.cancel();
@@ -10420,7 +10815,7 @@ export default function AIWorkspace() {
     setCanvasPanVisualState(false);
     const token = ++interactionCommitTokenRef.current;
     return token;
-  }, [interruptCanvasCommitForInteraction, setCanvasPanVisualState]);
+  }, [flushCanvasWheelBurst, interruptCanvasCommitForInteraction, setCanvasPanVisualState]);
 
   const cancelViewportAnimation = useCallback((stageCurrentViewport = true) => {
     cancelPendingCanvasCommitSchedule();
@@ -11209,6 +11604,7 @@ export default function AIWorkspace() {
 
   useEffect(() => {
     const flushCanvasSessionBoundary = (reason: string) => {
+      flushCanvasWheelBurst();
       cancelInteraction('window-blur');
       flushPendingCanvasCommit(reason);
     };
@@ -11228,7 +11624,7 @@ export default function AIWorkspace() {
       window.removeEventListener('pagehide', handlePageHide, true);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
-  }, [cancelInteraction, flushPendingCanvasCommit]);
+  }, [cancelInteraction, flushCanvasWheelBurst, flushPendingCanvasCommit]);
 
   const beginPendingItemDrag = React.useCallback(
     ({
@@ -11901,16 +12297,47 @@ export default function AIWorkspace() {
     );
     if (normalizedDeltaY === 0) return;
 
-    const token = handoffCanvasViewportMotion('wheel');
-    const nextViewport = applyDirectZoom(
+    const existingBurst = wheelBurstPerfRef.current;
+    const token = existingBurst?.token ?? handoffCanvasViewportMotion('wheel');
+    if (!existingBurst) {
+      wheelBurstPerfRef.current = {
+        token,
+        startedAt: performance.now(),
+        eventCount: 0,
+        firstPreviewAt: null,
+        pendingViewport: null,
+        lastFrameAt: null,
+        frameGaps: [],
+        frameId: null,
+      };
+    }
+    const wheelBurst = wheelBurstPerfRef.current!;
+    wheelBurst.eventCount += 1;
+    wheelBurst.pendingViewport = applyDirectZoom(
       visualViewportRef.current,
       normalizedDeltaY,
       anchor
     );
-    previewCanvasViewport(nextViewport);
-    syncSessionLiveState({ viewport: nextViewport });
-    stageCanvasCommit({ viewport: nextViewport, viewportToken: token, saveSession: true });
-  }, [handoffCanvasViewportMotion, hasActivePointerSession, previewCanvasViewport, stageCanvasCommit, syncSessionLiveState]);
+    viewportRef.current = wheelBurst.pendingViewport;
+    sessionLiveStateRef.current.viewport = wheelBurst.pendingViewport;
+    if (wheelPreviewFrameRef.current === null) {
+      wheelPreviewFrameRef.current = requestAnimationFrame(() => {
+        wheelPreviewFrameRef.current = null;
+        flushCanvasWheelPreview();
+      });
+    }
+    if (wheelBurstCommitTimerRef.current !== null) clearTimeout(wheelBurstCommitTimerRef.current);
+    wheelBurstCommitTimerRef.current = setTimeout(() => {
+      flushCanvasWheelBurst();
+    }, CANVAS_WHEEL_BURST_END_MS);
+  }, [flushCanvasWheelBurst, flushCanvasWheelPreview, handoffCanvasViewportMotion, hasActivePointerSession]);
+
+  useEffect(() => () => {
+    if (wheelBurstCommitTimerRef.current !== null) clearTimeout(wheelBurstCommitTimerRef.current);
+    if (wheelPreviewFrameRef.current !== null) cancelAnimationFrame(wheelPreviewFrameRef.current);
+    const pendingWheelSampleFrameId = wheelBurstPerfRef.current?.frameId;
+    if (pendingWheelSampleFrameId != null) cancelAnimationFrame(pendingWheelSampleFrameId);
+  }, []);
 
   const handleConnectionPointerDown = useCallback(
     (e: React.PointerEvent<SVGPathElement>, connectionId: string) => {
@@ -14836,10 +15263,18 @@ export default function AIWorkspace() {
     source: SkillSelectSource
   ) => {
     if (source === 'slash_menu') {
-      setChatInput('');
+      const slashInput = parseSlashSkillInput(latestChatInputRef.current);
+      if (slashInput) setChatInput(slashInput.body);
       closeSkillMenu(false);
     }
     const selectedSkill = { id: action.id, label: action.label };
+    if (canvasPerformanceEnabledRef.current) {
+      pendingSkillSelectionPaintRef.current = {
+        source,
+        skillId: action.id,
+        startedAt: performance.now(),
+      };
+    }
     setActiveSkillForCurrentTopic(selectedSkill);
     if (source === 'center_quick_action') {
       setHideWelcomeByCenterSkillPick(true);
@@ -15384,18 +15819,20 @@ export default function AIWorkspace() {
     }
     if (!currentSessionId) return;
 
-    setSessions((prev) => prev.map((session) => {
-      if (session.id !== currentSessionId || !session.topics || !session.activeTopicId) return session;
-      return {
-        ...session,
-        updatedAt: Date.now(),
-        topics: session.topics.map((topic) =>
-          topic.id === session.activeTopicId
-            ? { ...topic, activeSkill: skill, activeSkillExplicit: Boolean(skill) }
-            : topic
-        ),
-      };
-    }));
+    React.startTransition(() => {
+      setSessions((prev) => prev.map((session) => {
+        if (session.id !== currentSessionId || !session.topics || !session.activeTopicId) return session;
+        return {
+          ...session,
+          updatedAt: Date.now(),
+          topics: session.topics.map((topic) =>
+            topic.id === session.activeTopicId
+              ? { ...topic, activeSkill: skill, activeSkillExplicit: Boolean(skill) }
+              : topic
+          ),
+        };
+      }));
+    });
   };
 
   const createNewTopic = () => {
@@ -15707,31 +16144,15 @@ export default function AIWorkspace() {
   const openProviderSettingsModal = useCallback(() => {
     setShowHistoryPanel(false);
     setShowGeneratedImageHistoryPanel(false);
-    setShowProviderSettingsModal(true);
-    void loadProviderSettings();
-  }, [loadProviderSettings]);
+    providerSettingsModalGateRef.current?.open();
+  }, []);
 
   useEffect(() => {
     void loadProviderSettings();
   }, [loadProviderSettings]);
 
   const closeProviderSettingsModal = useCallback(() => {
-    setShowProviderSettingsModal(false);
-    setProviderSettingsApiKey('');
-    setProviderSettingsImageApiKeys(normalizeProviderSettingsImageApiKeyRows());
-    setProviderSettingsError(null);
-    setProviderSettingsLoading(false);
-    setProviderSettingsSaving(false);
-    setProviderSettingsTesting(false);
-    setProviderSettingsTestResult(null);
-    setProviderSettingsFetchedModels(null);
-    setProviderSettingsModelPickerOpen(false);
-    setProviderSettingsModelPickerCategory('all');
-    setProviderSettingsModelPickerSearch('');
-    setProviderSettingsSelectedFetchedModels({});
-    setProviderSettingsFetchedModelCategoryById({});
-    setProviderSettingsEditableProviderIds([]);
-    setIsProviderSettingsApiKeyVisible(false);
+    providerSettingsModalGateRef.current?.close();
   }, []);
 
   const handleProviderSettingsProviderChange = useCallback((nextProviderId: ProviderSettingsProviderId) => {
@@ -15808,14 +16229,22 @@ export default function AIWorkspace() {
     if (providerId === 'comfly') return;
 
     const remainingProviders = providerSettingsProviders.filter((provider) => provider.id !== providerId);
+    const nextPrimaryProviderId =
+      remainingProviders.find((provider) => provider.enabled !== false && provider.primary)?.id ||
+      remainingProviders.find((provider) => provider.enabled !== false)?.id ||
+      null;
+    const normalizedRemainingProviders = remainingProviders.map((provider) => ({
+      ...provider,
+      primary: provider.id === nextPrimaryProviderId,
+    }));
     const deletedProviderIndex = providerSettingsProviders.findIndex((provider) => provider.id === providerId);
     const nextSelectedProvider =
-      remainingProviders[Math.min(deletedProviderIndex, remainingProviders.length - 1)] ||
-      remainingProviders[remainingProviders.length - 1] ||
+      normalizedRemainingProviders[Math.min(deletedProviderIndex, normalizedRemainingProviders.length - 1)] ||
+      normalizedRemainingProviders[normalizedRemainingProviders.length - 1] ||
       null;
     const providerDeletionFallbacks = resolveProviderDeletionFallbacks({
       deletedProviderId: providerId,
-      remainingProviders,
+      remainingProviders: normalizedRemainingProviders,
       textCardProviderById,
       imageCardProviderById,
       imageCardSizeById,
@@ -15831,7 +16260,7 @@ export default function AIWorkspace() {
       getProviderLabel: getProviderSettingsProviderLabel,
     });
 
-    setProviderSettingsProviders((prev) => prev.filter((provider) => provider.id !== providerId));
+    setProviderSettingsProviders(normalizedRemainingProviders);
     setProviderSettingsEditableProviderIds((prev) => prev.filter((id) => id !== providerId));
     setProviderSettingsSelectedProviderId(nextSelectedProvider?.id || 'comfly');
     setProviderSettingsApiKey(nextSelectedProvider?.apiKey || '');
@@ -16004,7 +16433,7 @@ export default function AIWorkspace() {
       }
 
       applyProviderSettingsResponse(data);
-      setShowProviderSettingsModal(false);
+      closeProviderSettingsModal();
       showImageToolbarNoticeWithTimeout('供应商配置已保存', 2200);
     } catch (error) {
       setProviderSettingsError(error instanceof Error ? error.message : '保存供应商配置失败');
@@ -16013,6 +16442,7 @@ export default function AIWorkspace() {
     }
   }, [
     applyProviderSettingsResponse,
+    closeProviderSettingsModal,
     providerSettingsApiKey,
     providerSettingsImageApiKeys,
     providerSettingsProviders,
@@ -16348,7 +16778,7 @@ export default function AIWorkspace() {
 
   const handleLeftRailItemClick = useCallback((itemId: (typeof LEFT_RAIL_ITEMS)[number]['id']) => {
     if (itemId === 'history') {
-      setShowProviderSettingsModal(false);
+      closeProviderSettingsModal();
       setShowGeneratedImageHistoryPanel((prev) => !prev);
       return;
     }
@@ -16358,7 +16788,7 @@ export default function AIWorkspace() {
     if (itemId === 'settings') {
       openProviderSettingsModal();
     }
-  }, [openProviderSettingsModal]);
+  }, [closeProviderSettingsModal, openProviderSettingsModal]);
 
   const handlePendingConnectionMenuAction = useCallback(
     (optionId: (typeof CONNECTION_MENU_OPTIONS)[number]['id']) => {
@@ -17175,9 +17605,7 @@ export default function AIWorkspace() {
                     return <WorkspaceThemeToggle key={item.id} theme={theme} onToggle={toggleTheme} />;
                   }
 
-                  const isActive =
-                    (item.id === 'history' && showGeneratedImageHistoryPanel) ||
-                    (item.id === 'settings' && showProviderSettingsModal);
+                  const isActive = item.id === 'history' && showGeneratedImageHistoryPanel;
 
                   return (
                     <button
@@ -17188,6 +17616,7 @@ export default function AIWorkspace() {
                         handleLeftRailItemClick(item.id);
                       }}
                       className={`workspace-rail-item ${isActive ? 'is-active' : ''}`}
+                      data-provider-settings-trigger={item.id === 'settings' ? 'true' : undefined}
                       title={item.label}
                       aria-label={item.label}
                     >
@@ -17770,10 +18199,36 @@ export default function AIWorkspace() {
           document.body
         )}
 
-      {typeof document !== 'undefined' &&
-        showProviderSettingsModal &&
-        createPortal(
-          <div className="fixed inset-0 z-[230] flex items-center justify-center p-4">
+      <ProviderSettingsModalGate
+        ref={providerSettingsModalGateRef}
+        openRef={providerSettingsModalOpenRef}
+        renderRevision={providerSettingsRenderRevision}
+        render={() => typeof document !== 'undefined' ? createPortal(
+          <>
+            <div
+              data-provider-settings-opening-shell="true"
+              data-gsap-motion-exclude="true"
+              aria-hidden="true"
+              className="fixed inset-0 z-[230] flex items-center justify-center p-4"
+            >
+              <button
+                type="button"
+                className="absolute inset-0 bg-black/40"
+                data-gsap-no-interaction="true"
+                tabIndex={-1}
+                aria-label="关闭供应商配置"
+                onClick={closeProviderSettingsModal}
+              />
+              <div className="workspace-popover-panel relative z-[1] flex h-[220px] w-full max-w-[920px] flex-col items-center justify-center gap-4 rounded-[28px]">
+                <div className="h-5 w-5 animate-spin rounded-full border-2 border-[var(--workspace-border-strong)] border-t-[var(--workspace-text-primary)]" />
+                <div className="text-[15px] font-semibold">供应商配置</div>
+              </div>
+            </div>
+            <div
+              data-provider-settings-modal="true"
+              data-gsap-motion-exclude="true"
+              className="fixed inset-0 z-[230] flex items-center justify-center p-4"
+            >
             <button
               type="button"
               className="absolute inset-0 bg-black/40"
@@ -17831,6 +18286,23 @@ export default function AIWorkspace() {
                                 isSelected ? 'is-selected' : ''
                               }`}
                             >
+                              <input
+                                type="radio"
+                                name="primary-provider"
+                                checked={provider.primary}
+                                disabled={provider.enabled === false}
+                                onChange={() => {
+                                  setProviderSettingsProviders((prev) =>
+                                    prev.map((candidate) => ({
+                                      ...candidate,
+                                      primary: candidate.id === provider.id,
+                                    }))
+                                  );
+                                  setProviderSettingsError(null);
+                                }}
+                                className="mt-0.5 h-4 w-4 shrink-0 accent-[var(--workspace-text-primary)]"
+                                aria-label={`设为主供应商 ${provider.name || provider.id}`}
+                              />
                               <button
                                 type="button"
                                 className="min-w-0 flex-1 text-left"
@@ -18315,20 +18787,6 @@ export default function AIWorkspace() {
                           )}
                           <button
                             type="button"
-                            className="rounded-full border border-[var(--workspace-border)] px-3 py-1.5 text-[12px] font-medium text-[var(--workspace-text-muted)]  hover:bg-[var(--workspace-control-hover)] hover:text-[var(--workspace-text-primary)]"
-                            onClick={() => {
-                              setProviderSettingsProviders((prev) =>
-                                prev.map((provider) => ({
-                                  ...provider,
-                                  primary: provider.id === selectedProviderSettings.id,
-                                }))
-                              );
-                            }}
-                          >
-                            设为主供应商
-                          </button>
-                          <button
-                            type="button"
                             className="rounded-full border border-[var(--workspace-border)] px-3 py-1.5 text-[12px] font-medium text-[var(--workspace-text-muted)]  hover:bg-[var(--workspace-control-hover)] hover:text-[var(--workspace-text-primary)] disabled:cursor-not-allowed disabled:opacity-50"
                             onClick={() => {
                               void handleProviderSettingsTestConnection();
@@ -18491,9 +18949,11 @@ export default function AIWorkspace() {
                 </button>
               </div>
             </div>
-          </div>,
+            </div>
+          </>,
           document.body
-        )}
+        ) : null}
+      />
 
       {(modelSelectionNotice || imageToolbarNotice) && (
         <div
@@ -19402,8 +19862,7 @@ export default function AIWorkspace() {
                       rememberChatEditorCaretOffset();
                       setChatInputFocused(false);
                     }}
-                    className="panel-scrollbar w-full overflow-y-auto bg-transparent text-sm leading-5 outline-none whitespace-pre-wrap break-words"
-                    style={{ minHeight: '72px', maxHeight: '240px', height: `${chatInputHeightRef.current}px` }}
+                    className="workspace-chat-editor panel-scrollbar w-full bg-transparent text-sm leading-5 outline-none whitespace-pre-wrap break-words"
                   />
                   <span
                     ref={chatComposerPlaceholderRef}
@@ -19562,6 +20021,7 @@ export default function AIWorkspace() {
                     {showSkillsMenu && (
                       <div
                         id="skill-menu-listbox"
+                        data-gsap-motion-exclude="true"
                         className="workspace-menu-panel absolute bottom-full left-0 z-20 mb-2 w-[min(320px,calc(100vw-2rem))] rounded-2xl p-1.5"
                         role="listbox"
                         aria-label="选择 Skill"
@@ -19573,21 +20033,29 @@ export default function AIWorkspace() {
                         <div className="panel-scrollbar max-h-[280px] overflow-y-auto">
                         {filteredQuickActions.map((action, index) => {
                           const isActive = activeSkill?.id === action.id;
-                          const isHighlighted = skillMenuTrigger === 'slash'
-                            ? skillMenuActiveIndex === index
-                            : isActive;
+                          const isHighlighted = skillMenuActiveIndex === index;
                           return (
                             <button
                               id={`skill-option-${action.id}`}
                               key={action.id}
+                              data-skill-menu-index={index}
                               type="button"
                               role="option"
                               aria-selected={isHighlighted}
                               onMouseDown={(event) => {
                                 if (skillMenuTrigger === 'slash') event.preventDefault();
                               }}
-                              onMouseEnter={() => {
-                                if (skillMenuTrigger === 'slash') setSkillMenuActiveIndex(index);
+                              onMouseEnter={(event) => {
+                                const previousIndex = skillMenuActiveIndexRef.current;
+                                if (previousIndex === index) return;
+                                const previousOption = event.currentTarget.parentElement?.querySelector<HTMLElement>(
+                                  `[data-skill-menu-index="${previousIndex}"]`
+                                );
+                                previousOption?.classList.remove('is-selected');
+                                previousOption?.setAttribute('aria-selected', 'false');
+                                skillMenuActiveIndexRef.current = index;
+                                event.currentTarget.classList.add('is-selected');
+                                event.currentTarget.setAttribute('aria-selected', 'true');
                               }}
                               onClick={() => {
                                 const source = skillMenuTrigger === 'slash' ? 'slash_menu' : 'bottom_skill_bar';
@@ -19631,6 +20099,14 @@ export default function AIWorkspace() {
                         const nextOpen = !showSkillsMenu || skillMenuTrigger !== 'button';
                         closeChatComposerPopovers();
                         if (nextOpen) {
+                          if (canvasPerformanceEnabledRef.current) {
+                            pendingSkillMenuPaintRef.current = {
+                              kind: 'open',
+                              startedAt: performance.now(),
+                            };
+                          }
+                          skillMenuQueryRef.current = '';
+                          skillMenuActiveIndexRef.current = 0;
                           setSkillMenuTrigger('button');
                           setSkillMenuQuery('');
                           setSkillMenuActiveIndex(0);

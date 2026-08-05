@@ -103,7 +103,8 @@ const appendPerformanceSample = (samples: number[], value: number) => {
 export const isCanvasPerformanceEnabled = () => {
   if (process.env.NODE_ENV === 'production' || typeof window === 'undefined') return false;
   try {
-    return window.localStorage.getItem(PERFORMANCE_STORAGE_KEY) === '1';
+    return window.localStorage.getItem(PERFORMANCE_STORAGE_KEY) === '1'
+      || new URLSearchParams(window.location.search).has('canvasPerf');
   } catch {
     return false;
   }

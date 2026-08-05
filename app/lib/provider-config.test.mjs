@@ -430,6 +430,61 @@ test('updateProviderRegistry normalizes protocol modes, endpoint overrides, mode
   }
 });
 
+test('updateProviderRegistry moves primary selection to the first enabled provider', async () => {
+  const runtimeDir = await mkdtemp(path.join(os.tmpdir(), 'provider-registry-enabled-primary-'));
+
+  try {
+    const result = await updateProviderRegistry(
+      [
+        {
+          id: 'disabled-primary',
+          name: 'Disabled Primary',
+          baseUrl: 'https://disabled.example.com/v1',
+          enabled: false,
+          primary: true,
+        },
+        {
+          id: 'enabled-fallback',
+          name: 'Enabled Fallback',
+          baseUrl: 'https://enabled.example.com/v1',
+          enabled: true,
+          primary: false,
+        },
+      ],
+      { runtimeDir }
+    );
+
+    assert.equal(getPrimaryProvider(result.providers).id, 'enabled-fallback');
+    assert.equal(getProviderById(result.providers, 'disabled-primary').primary, false);
+  } finally {
+    await rm(runtimeDir, { recursive: true, force: true });
+  }
+});
+
+test('updateProviderRegistry rejects registries without an enabled provider', async () => {
+  const runtimeDir = await mkdtemp(path.join(os.tmpdir(), 'provider-registry-all-disabled-'));
+
+  try {
+    await assert.rejects(
+      () => updateProviderRegistry(
+        [
+          {
+            id: 'disabled',
+            name: 'Disabled',
+            baseUrl: 'https://disabled.example.com/v1',
+            enabled: false,
+            primary: true,
+          },
+        ],
+        { runtimeDir }
+      ),
+      /At least one provider must be enabled/
+    );
+  } finally {
+    await rm(runtimeDir, { recursive: true, force: true });
+  }
+});
+
 test('updateProviderConfig rejects invalid base urls', async () => {
   const runtimeDir = await mkdtemp(path.join(os.tmpdir(), 'provider-config-invalid-'));
 

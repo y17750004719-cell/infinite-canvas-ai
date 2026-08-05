@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 const pageSource = fs.readFileSync(fileURLToPath(new URL('./page.tsx', import.meta.url)), 'utf8');
+const globalStylesSource = fs.readFileSync(fileURLToPath(new URL('./globals.css', import.meta.url)), 'utf8');
 
 const sourceBetween = (source, start, end) => source.slice(
   source.indexOf(start),
@@ -28,6 +29,110 @@ test('chat typing stays outside the workspace React state hot path', () => {
   );
   assert.equal(pasteSource.includes('setChatInput(editorText);'), false);
   assert.equal(pasteSource.includes('latestChatInputRef.current = editorText;'), true);
+});
+
+test('chat input uses native contenteditable sizing without layout reads in the input handler', () => {
+  const inputSource = sourceBetween(
+    pageSource,
+    'const handleChatEditorInput =',
+    'const handleChatCompositionStart ='
+  );
+  const editorMarkup = sourceBetween(
+    pageSource,
+    'ref={chatInputEditorRef}',
+    '<span\n                    ref={chatComposerPlaceholderRef}'
+  );
+
+  assert.equal(inputSource.includes('scrollHeight'), false);
+  assert.equal(inputSource.includes('syncEditorHeight()'), false);
+  assert.match(editorMarkup, /className="[^"]*workspace-chat-editor/);
+  assert.match(globalStylesSource, /\.workspace-chat-editor\s*\{[\s\S]{0,160}min-height:\s*72px/);
+  assert.match(globalStylesSource, /\.workspace-chat-editor\s*\{[\s\S]{0,160}max-height:\s*240px/);
+  assert.match(globalStylesSource, /\.workspace-chat-editor\s*\{[\s\S]{0,160}overflow-y:\s*auto/);
+  assert.doesNotMatch(editorMarkup, /style=\{\{[^}]*height/);
+});
+
+test('plain chat text bypasses structured composer parsing while token edits keep the structured path', () => {
+  const inputSource = sourceBetween(
+    pageSource,
+    'const handleChatEditorInput =',
+    'const handleChatCompositionStart ='
+  );
+  assert.match(pageSource, /const getPlainContentEditableText = \(root: HTMLElement\)/);
+  assert.match(inputSource, /parseChatEditorSegments\(editor\)/);
+  assert.match(inputSource, /getPlainContentEditableText\(editor\)/);
+  assert.match(
+    inputSource,
+    /(?:activeSkill|resolvedChatReferenceTokens\.length)[\s\S]{0,240}\?[\s\S]{0,160}parseChatEditorSegments\(editor\)[\s\S]{0,160}getPlainContentEditableText\(editor\)/
+  );
+});
+
+test('skill picker filters precomputed searchable text', () => {
+  const filteringSource = sourceBetween(
+    pageSource,
+    'const filteredQuickActions = React.useMemo',
+    'const [imageAspectRatio'
+  );
+
+  assert.match(pageSource, /interface SkillMenuAction\s*\{[\s\S]{0,180}searchText:\s*string/);
+  assert.match(pageSource, /searchText:\s*`[^\n]*(?:id|label|description)/);
+  assert.match(filteringSource, /action\.searchText\.includes\(query\)/);
+  assert.doesNotMatch(filteringSource, /action\.(?:id|label|description)[\s\S]{0,120}toLocaleLowerCase/);
+});
+
+test('skill picker scrolls active options only after keyboard navigation', () => {
+  const scrollCallIndex = pageSource.indexOf("document.getElementById(`skill-option-${activeAction.id}`)");
+  const scrollingSource = pageSource.slice(
+    pageSource.lastIndexOf('useEffect(() => {', scrollCallIndex),
+    pageSource.indexOf('useGSAP(', scrollCallIndex)
+  );
+
+  assert.match(scrollingSource, /keyboard/i);
+  assert.match(scrollingSource, /scrollIntoView\(\{ block: 'nearest' \}\)/);
+});
+
+test('skill keyboard selection reads synchronous query and index refs', () => {
+  const keyDownSource = sourceBetween(
+    pageSource,
+    'const handleChatEditorKeyDown =',
+    'const removeChatReferenceToken ='
+  );
+
+  assert.match(pageSource, /const skillMenuQueryRef = useRef\(''\)/);
+  assert.match(pageSource, /const skillMenuActiveIndexRef = useRef\(0\)/);
+  assert.match(keyDownSource, /latestQuery = skillMenuQueryRef\.current/);
+  assert.match(keyDownSource, /skillMenuActiveIndexRef\.current = nextIndex/);
+  assert.match(keyDownSource, /latestFilteredQuickActions\[skillMenuActiveIndexRef\.current\]/);
+});
+
+test('skill pointer hover updates highlight synchronously', () => {
+  const listStart = pageSource.indexOf('{filteredQuickActions.map((action, index) => {');
+  const hoverStart = pageSource.indexOf('onMouseEnter={(event) => {', listStart);
+  const hoverEnd = pageSource.indexOf('onClick={() => {', hoverStart);
+  const hoverSource = pageSource.slice(hoverStart, hoverEnd);
+
+  assert.match(hoverSource, /skillMenuActiveIndexRef\.current = index/);
+  assert.match(hoverSource, /classList\.remove\('is-selected'\)/);
+  assert.match(hoverSource, /classList\.add\('is-selected'\)/);
+  assert.match(hoverSource, /setAttribute\('aria-selected', 'false'\)/);
+  assert.match(hoverSource, /setAttribute\('aria-selected', 'true'\)/);
+  assert.doesNotMatch(hoverSource, /setSkillMenuActiveIndex/);
+  assert.doesNotMatch(hoverSource, /startTransition/);
+  assert.doesNotMatch(hoverSource, /skillMenuKeyboardNavigationRef/);
+  assert.doesNotMatch(hoverSource, /skillMenuTrigger === 'slash'/);
+  assert.match(pageSource, /const isHighlighted = skillMenuActiveIndex === index/);
+  assert.match(pageSource, /id="skill-menu-listbox"\s*data-gsap-motion-exclude="true"/);
+});
+
+test('skill selection continues updating the active topic', () => {
+  const topicUpdateSource = sourceBetween(
+    pageSource,
+    'const setActiveSkillForCurrentTopic =',
+    'const createNewTopic ='
+  );
+
+  assert.match(topicUpdateSource, /topic\.id === session\.activeTopicId/);
+  assert.match(topicUpdateSource, /activeSkill:\s*skill/);
 });
 
 test('chat editor protects IME composition from external DOM synchronization', () => {

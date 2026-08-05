@@ -374,7 +374,8 @@ test('switching generation mode closes both model selector popovers', () => {
 
 test('chat composer uses the taller reference layout and ordered single-row controls', () => {
   assert.match(source, /workspace-chat-input[^\n]*min-h-\[148px\]/);
-  assert.match(source, /minHeight:\s*'72px'/);
+  assert.match(source, /className="workspace-chat-editor/);
+  assert.match(globalStyles, /\.workspace-chat-editor\s*\{[\s\S]{0,160}min-height:\s*72px/);
   const orderedControls = ['more', 'skills', 'mode', 'reasoning', 'models', 'send'];
   const indexes = orderedControls.map(controlIndex);
   assert.ok(indexes.every((index) => index >= 0));
@@ -406,8 +407,27 @@ test('Skill tokens reuse reference token styling, stay first, and support explic
   assert.match(source.slice(sentSkillIndex, sentContentIndex), /workspace-reference-token workspace-skill-token/);
 });
 
-test('slash opens the searchable Skill menu only from an empty composer', () => {
-  assert.match(source, /editorText === '\/'[\s\S]{0,180}previousEditorText\.length === 0[\s\S]{0,180}!activeSkill[\s\S]{0,180}resolvedChatReferenceTokens\.length === 0/);
+test('slash opens the complete Skill menu from the first text character and preserves the body', () => {
+  const closeSkillMenuSource = source.slice(
+    source.indexOf('const closeSkillMenu = useCallback'),
+    source.indexOf('const isCaretAtEditorStart =')
+  );
+  const slashMenuSyncSource = source.slice(
+    source.indexOf('const syncSlashSkillMenu ='),
+    source.indexOf('const isCaretAtEditorStart =')
+  );
+  const slashSelectSource = source.slice(
+    source.indexOf('const handleQuickSkillSelect ='),
+    source.indexOf('const buildCurrentSessionSnapshot =')
+  );
+  assert.match(source, /const parseSlashSkillInput = \(value: string\)[\s\S]{0,180}value\.startsWith\('\/'\)[\s\S]{0,180}value\.replace\(\/\^\\\/\\s\*\/, ''\)/);
+  assert.match(slashMenuSyncSource, /parseSlashSkillInput\(value\)/);
+  assert.match(slashMenuSyncSource, /skillMenuTrigger !== 'slash'/);
+  assert.match(slashMenuSyncSource, /skillMenuQueryRef\.current = ''/);
+  assert.match(slashMenuSyncSource, /setSkillMenuQuery\(''\)/);
+  assert.doesNotMatch(slashMenuSyncSource, /slashInput\.query/);
+  assert.doesNotMatch(slashMenuSyncSource, /previousEditorText|!activeSkill|resolvedChatReferenceTokens\.length/);
+  assert.match(source, /syncSlashSkillMenu\(editorText, startedAt\)/);
   assert.match(source, /setSkillMenuTrigger\('slash'\)/);
   assert.match(source, /`\$\{action\.id\} \$\{action\.label\} \$\{action\.description\}`/);
   assert.match(source, /description: skill\.description \|\| ''/);
@@ -415,7 +435,10 @@ test('slash opens the searchable Skill menu only from an empty composer', () => 
   assert.match(source, /skill-option-\$\{activeAction\.id\}[\s\S]{0,120}scrollIntoView\(\{ block: 'nearest' \}\)/);
   assert.match(source, /e\.key === 'Enter' \|\| e\.key === 'Tab'/);
   assert.match(source, /e\.key === 'Escape'[\s\S]{0,160}closeSkillMenu\(\)/);
-  assert.match(source, /shouldDiscardQuery[\s\S]{0,220}latestChatInputRef\.current\.startsWith\('\/'\)[\s\S]{0,240}setChatInput\(''\)/);
+  assert.match(closeSkillMenuSource, /parseSlashSkillInput\(latestChatInputRef\.current\)/);
+  assert.match(closeSkillMenuSource, /if \(slashInput\) setChatInput\(slashInput\.body\)/);
+  assert.match(slashSelectSource, /parseSlashSkillInput\(latestChatInputRef\.current\)/);
+  assert.match(slashSelectSource, /if \(slashInput\) setChatInput\(slashInput\.body\)/);
   assert.match(source, /未找到匹配的 Skill/);
 });
 

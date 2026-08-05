@@ -448,7 +448,7 @@ test('provider settings sidebar shows a delete action for non-Comfly providers a
   assert.equal(pageSource.includes('{isDeletable && ('), true);
   assert.equal(pageSource.includes('aria-label={`删除供应商 ${provider.name || provider.id}`}' ), true);
   assert.equal(pageSource.includes("if (providerId === 'comfly') return;"), true);
-  assert.equal(pageSource.includes('setProviderSettingsProviders((prev) => prev.filter((provider) => provider.id !== providerId));'), true);
+  assert.equal(pageSource.includes('setProviderSettingsProviders(normalizedRemainingProviders);'), true);
   assert.equal(pageSource.includes('setProviderSettingsEditableProviderIds((prev) => prev.filter((id) => id !== providerId));'), true);
 });
 
@@ -487,7 +487,7 @@ test('provider delete rewrites image card provider model and size through existi
   assert.equal(deleteBlock.includes('const remainingProviders = providerSettingsProviders.filter((provider) => provider.id !== providerId);'), true);
   assert.equal(deleteBlock.includes('const providerDeletionFallbacks = resolveProviderDeletionFallbacks({'), true);
   assert.equal(deleteBlock.includes('deletedProviderId: providerId,'), true);
-  assert.equal(deleteBlock.includes('remainingProviders,'), true);
+  assert.equal(deleteBlock.includes('remainingProviders: normalizedRemainingProviders,'), true);
   assert.equal(deleteBlock.includes('providerImageOptionProfiles,'), true);
   assert.equal(deleteBlock.includes('setImageCardProviderById((prev) => {'), true);
   assert.equal(deleteBlock.includes('providerDeletionFallbacks.imageProviderByItemId[itemId]'), true);
@@ -760,7 +760,7 @@ test('image toolbar export downloads the current image source through the export
 
 test('image toolbar positioning avoids a full-viewport fixed compositor layer', () => {
   const toolbarPortalStart = pageSource.indexOf('selectedImageToolbarTarget &&');
-  const toolbarPortalEnd = pageSource.indexOf('showProviderSettingsModal &&', toolbarPortalStart);
+  const toolbarPortalEnd = pageSource.indexOf('<ProviderSettingsModalGate', toolbarPortalStart);
   const toolbarPortalSource = pageSource.slice(toolbarPortalStart, toolbarPortalEnd);
 
   assert.notEqual(toolbarPortalStart, -1);

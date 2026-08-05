@@ -301,10 +301,18 @@ function cloneProvider(provider) {
 
 function ensureSinglePrimary(providers) {
   const nextProviders = providers.map((provider) => cloneProvider(provider));
-  const primaryCandidates = nextProviders
-    .map((provider, index) => (provider.primary ? index : -1))
+  const enabledIndexes = nextProviders
+    .map((provider, index) => (provider.enabled !== false ? index : -1))
     .filter((index) => index >= 0);
-  const winnerIndex = primaryCandidates.length > 0 ? primaryCandidates[primaryCandidates.length - 1] : 0;
+  if (enabledIndexes.length === 0) {
+    throw new ProviderConfigError('At least one provider must be enabled');
+  }
+  const primaryCandidates = nextProviders
+    .map((provider, index) => (provider.enabled !== false && provider.primary ? index : -1))
+    .filter((index) => index >= 0);
+  const winnerIndex = primaryCandidates.length > 0
+    ? primaryCandidates[primaryCandidates.length - 1]
+    : enabledIndexes[0];
 
   return nextProviders.map((provider, index) => ({
     ...provider,

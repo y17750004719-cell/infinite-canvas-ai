@@ -36,7 +36,8 @@ const INTERACTIVE_SELECTOR = [
 ].join(',');
 
 const LOOP_SELECTOR = '.gsap-spin,.gsap-pulse,.gsap-bounce';
-const CANVAS_MOTION_EXCLUSION_SELECTOR = '[data-canvas="true"],[data-canvas-overlay-root="true"]';
+const CANVAS_MOTION_EXCLUSION_SELECTOR =
+  '[data-canvas="true"],[data-canvas-overlay-root="true"],[data-gsap-motion-exclude="true"]';
 
 function isCanvasMotionTarget(element: Element) {
   return Boolean(element.closest(CANVAS_MOTION_EXCLUSION_SELECTOR));

@@ -4,6 +4,10 @@ import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
 
 const pageSource = fs.readFileSync(fileURLToPath(new URL('./page.tsx', import.meta.url)), 'utf8');
+const globalStylesSource = fs.readFileSync(
+  fileURLToPath(new URL('./globals.css', import.meta.url)),
+  'utf8'
+);
 const controllerSource = fs.readFileSync(
   fileURLToPath(new URL('./hooks/useCanvasInteractionController.ts', import.meta.url)),
   'utf8'
@@ -73,21 +77,81 @@ test('cancelled pan restores its starting viewport instead of committing partial
   assert.equal(cancelPanSource.includes('stageCanvasPanViewportCommit({ ...visualViewportRef.current }'), false);
 });
 
-test('wheel zoom applies the Infinite-Canvas step immediately', () => {
+test('wheel zoom coalesces previews by frame and commits only after the burst settles', () => {
   const wheelSource = sourceBetween(
     pageSource,
     'const handleNativeCanvasWheel = useCallback',
     'const handleConnectionPointerDown = useCallback'
   );
-  assert.equal(wheelSource.includes('applyDirectZoom('), true);
-  assert.equal(wheelSource.includes('previewCanvasViewport(nextViewport);'), true);
+  const previewFlushSource = sourceBetween(
+    pageSource,
+    'const flushCanvasWheelPreview = useCallback',
+    'const flushCanvasWheelBurst = useCallback'
+  );
+  const flushSource = sourceBetween(
+    pageSource,
+    'const flushCanvasWheelBurst = useCallback',
+    'const stageViewportIdleCommit = useCallback'
+  );
+  const stageViewportSource = sourceBetween(
+    pageSource,
+    'const stageVisualViewportCommit = useCallback',
+    'const flushCanvasWheelBurst = useCallback'
+  );
+  const handoffSource = sourceBetween(
+    pageSource,
+    'const handoffCanvasViewportMotion = useCallback',
+    'const cancelViewportAnimation = useCallback'
+  );
+
+  assert.match(
+    wheelSource,
+    /wheelBurst\.pendingViewport = applyDirectZoom\(\s*visualViewportRef\.current,/
+  );
+  assert.equal(wheelSource.includes('previewCanvasViewport(nextViewport);'), false);
+  assert.equal(wheelSource.includes('requestAnimationFrame(() => {'), true);
+  assert.equal(wheelSource.includes('flushCanvasWheelPreview();'), true);
+  assert.equal(previewFlushSource.includes('previewCanvasViewport(nextViewport);'), true);
+  assert.equal(wheelSource.includes('viewportRef.current = wheelBurst.pendingViewport;'), true);
+  assert.equal(wheelSource.includes('sessionLiveStateRef.current.viewport = wheelBurst.pendingViewport;'), true);
   assert.equal(wheelSource.includes('if (hasActivePointerSession()) return;'), true);
-  assert.equal(wheelSource.includes('stageCanvasCommit({ viewport: nextViewport'), true);
+  assert.equal(wheelSource.includes('syncSessionLiveState('), false);
+  assert.equal(wheelSource.includes('stageCanvasCommit('), false);
+  assert.match(wheelSource, /setTimeout\(\(\) => \{\s*flushCanvasWheelBurst\(\);/);
+  assert.match(flushSource, /clearTimeout\(wheelBurstCommitTimerRef\.current\)/);
+  assert.match(flushSource, /wheelBurstCommitTimerRef\.current = null/);
+  assert.equal(flushSource.includes('flushCanvasWheelPreview();'), true);
+  assert.match(flushSource, /wheelBurstPerfRef\.current = null/);
+  assert.match(flushSource, /stageVisualViewportCommit\(visualViewportRef\.current, true, burst\.token\)/);
+  assert.equal((flushSource.match(/stageVisualViewportCommit\(/g) || []).length, 1);
+  assert.equal((stageViewportSource.match(/syncSessionLiveState\(/g) || []).length, 1);
+  assert.equal((stageViewportSource.match(/stageCanvasCommit\(/g) || []).length, 1);
+  assert.match(stageViewportSource, /saveSession:\s*true/);
+  assert.equal((stageViewportSource.match(/flushPendingCanvasCommit\(/g) || []).length, 1);
+  assert.match(handoffSource, /if \(mode !== 'wheel'\) flushCanvasWheelBurst\(\);/);
+  assert.ok(
+    handoffSource.indexOf("if (mode !== 'wheel') flushCanvasWheelBurst();") <
+      handoffSource.indexOf('interruptCanvasCommitForInteraction(mode);')
+  );
   assert.equal(wheelSource.includes('gsap.to('), false);
   assert.equal(pageSource.includes('gsap.ticker.add(flushCanvasWheelFrame)'), false);
   assert.equal(pageSource.includes('dampCanvasViewport('), false);
   assert.equal(directSource.includes('zoomInFactor = 1.08'), true);
   assert.equal(directSource.includes('zoomOutFactor = 0.92'), true);
+});
+
+test('session switches cancel an unsettled wheel burst after the live viewport ref is captured', () => {
+  const resetSource = sourceBetween(
+    pageSource,
+    'const resetPendingCanvasInteractionCommits = useCallback',
+    'const setRegionSelections = useCallback'
+  );
+
+  assert.equal(resetSource.includes('clearTimeout(wheelBurstCommitTimerRef.current);'), true);
+  assert.equal(resetSource.includes('wheelBurstCommitTimerRef.current = null;'), true);
+  assert.equal(resetSource.includes('cancelAnimationFrame(wheelPreviewFrameRef.current);'), true);
+  assert.equal(resetSource.includes('if (pendingWheelSampleFrameId != null) cancelAnimationFrame(pendingWheelSampleFrameId);'), true);
+  assert.equal(resetSource.includes('wheelBurstPerfRef.current = null;'), true);
 });
 
 test('item dragging mutates registered DOM shells and only affected connection paths', () => {
@@ -495,13 +559,27 @@ test('one canvas world owns viewport transforms and screen overlays stay outside
     'const previewCanvasViewport = useCallback',
     'const previewCanvasPanMotion = useCallback'
   );
+  const viewportClipIndex = pageSource.indexOf('data-canvas-viewport-clip="true"');
   const worldIndex = pageSource.indexOf('data-canvas-world="true"');
   const screenOverlayIndex = pageSource.indexOf('data-canvas-screen-overlay="true"');
   const marqueeIndex = pageSource.indexOf('ref={marqueeElementRef}');
 
+  assert.notEqual(viewportClipIndex, -1);
   assert.notEqual(worldIndex, -1);
+  assert.ok(viewportClipIndex < worldIndex);
   assert.ok(worldIndex < screenOverlayIndex);
   assert.ok(screenOverlayIndex < marqueeIndex);
+  assert.match(
+    pageSource,
+    /data-canvas-viewport-clip="true"[\s\S]*data-canvas-world="true"[\s\S]*<\/div>\s*<\/div>\s*<div data-canvas-screen-overlay="true"/
+  );
+  assert.match(
+    globalStylesSource,
+    /\[data-canvas-viewport-clip="true"\] \{\s*contain: paint;\s*isolation: isolate;\s*\}/
+  );
+  assert.doesNotMatch(globalStylesSource, /\[data-canvas="true"\] \{\s*contain: paint;/);
+  assert.doesNotMatch(globalStylesSource, /\[data-canvas-scene="true"\] \{[^}]*contain: paint;/);
+  assert.match(globalStylesSource, /\[data-canvas-scene="true"\] \{[^}]*will-change: transform;/);
   assert.equal(viewportPreviewSource.includes('sceneTarget.setViewportTransform('), true);
   assert.equal(connectionsSource.includes('viewport:'), false);
   assert.equal(portsSource.includes('viewport:'), false);
@@ -522,7 +600,7 @@ test('canvas overlays and the canvas subtree are excluded from global GSAP motio
     fileURLToPath(new URL('./components/GsapMotionController.tsx', import.meta.url)),
     'utf8'
   );
-  assert.equal(motionSource.includes("'[data-canvas=\"true\"],[data-canvas-overlay-root=\"true\"]'"), true);
+  assert.equal(motionSource.includes('[data-canvas="true"],[data-canvas-overlay-root="true"]'), true);
   assert.equal(pageSource.includes('data-canvas-overlay-root="true"'), true);
 });
 
