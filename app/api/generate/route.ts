@@ -1,9 +1,9 @@
 import { NextRequest, NextResponse } from "next/server";
 import { chat, chatStream, ImageGenerationError, runImageTask, shouldUseExactImageSizeApi, shouldUseImageEditsApi } from "../../lib/api-client";
 import fs from "node:fs";
-import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { createStoredImageName, parseImageDataUrl } from "../../lib/api-security.mjs";
+import { writeImageFileWithCanvasLods } from "../../lib/canvas-image-lod-server.mjs";
 import { getImageDimensionsFromBuffer } from "../../lib/image-metadata.mjs";
 import { buildRuntimeAssetUrl, LOCAL_ASSET_ALLOWED_EXTENSIONS, resolveLocalAssetPath } from "../../lib/local-assets.mjs";
 import { getImageModelCapability, normalizeImageModelCapabilityId, supportsImageModelExactSize } from "../../lib/image-model-capabilities.mjs";
@@ -98,8 +98,12 @@ async function saveImageToLocal(imageUrl: string): Promise<{
     const filepath = path.join(GENERATED_UPLOADS_DIR, filename);
     const dimensions = getImageDimensionsFromBuffer(parsed.buffer);
 
-    await mkdir(GENERATED_UPLOADS_DIR, { recursive: true });
-    await writeFile(filepath, parsed.buffer);
+    await writeImageFileWithCanvasLods({
+      filePath: filepath,
+      relativeAssetPath: `uploads/generated/${filename}`,
+      buffer: parsed.buffer,
+      runtimeDir: RUNTIME_DIR,
+    });
 
     debugLog("Stored generated image locally", {
       status: 200,
@@ -158,8 +162,12 @@ async function saveImageToLocal(imageUrl: string): Promise<{
     const filepath = path.join(GENERATED_UPLOADS_DIR, filename);
     const dimensions = getImageDimensionsFromBuffer(buffer);
 
-    await mkdir(GENERATED_UPLOADS_DIR, { recursive: true });
-    await writeFile(filepath, buffer);
+    await writeImageFileWithCanvasLods({
+      filePath: filepath,
+      relativeAssetPath: `uploads/generated/${filename}`,
+      buffer,
+      runtimeDir: RUNTIME_DIR,
+    });
 
     debugLog("Stored generated image locally", {
       status: response.status,

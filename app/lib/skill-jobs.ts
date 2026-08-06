@@ -1,6 +1,7 @@
 import fs from "fs";
 import path from "path";
 import { runImageTask } from "./api-client";
+import { writeImageFileWithCanvasLods } from "./canvas-image-lod-server.mjs";
 import { buildRuntimeAssetUrl, LOCAL_ASSET_ALLOWED_EXTENSIONS, resolveLocalAssetDataUrl } from "./local-assets.mjs";
 import { createLogger, serializeError } from "./logger";
 import { readProviderRegistry } from "./provider-config.mjs";
@@ -442,10 +443,6 @@ async function saveImageToLocal(imageUrl: string, key: string): Promise<{ filena
   const outputDir = path.join(process.cwd(), "runtime", "uploads", "generated");
   const filepath = path.join(outputDir, filename);
 
-  if (!fs.existsSync(outputDir)) {
-    fs.mkdirSync(outputDir, { recursive: true });
-  }
-
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 120000);
   const response = await fetch(imageUrl, { signal: controller.signal });
@@ -456,7 +453,11 @@ async function saveImageToLocal(imageUrl: string, key: string): Promise<{ filena
   }
 
   const buffer = await response.arrayBuffer();
-  fs.writeFileSync(filepath, Buffer.from(buffer));
+  await writeImageFileWithCanvasLods({
+    filePath: filepath,
+    relativeAssetPath: `uploads/generated/${filename}`,
+    buffer: Buffer.from(buffer),
+  });
 
   return { filename, localUrl: buildRuntimeAssetUrl(`uploads/generated/${filename}`) };
 }

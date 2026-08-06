@@ -18,7 +18,7 @@ const appSourceFilesWithoutShadows = [
 ];
 
 test('image card floating menus are not rendered inside the pending connection menu block', () => {
-  const pendingMenuStart = pageSource.indexOf('{pendingConnectionMenu && (');
+  const pendingMenuStart = pageSource.indexOf('ref={connectionCreateMenuRef}');
   const pendingMenuEnd = pageSource.indexOf('{portaledSelectedTextCardPanel}');
 
   assert.notEqual(pendingMenuStart, -1);
@@ -79,7 +79,7 @@ test('canvas image preview metadata retries local asset loading before falling b
 });
 
 test('image card content images fill the card content area with object-cover', () => {
-  const imageCardContentStart = pageSource.indexOf("{imageCardVisualState === 'content' && item.src && isImageActive && (");
+  const imageCardContentStart = pageSource.indexOf("{imageCardVisualState === 'content' && item.src && imageDisplaySrc && persistentImageSrc && imageDisplayResource && (");
   const imageCardContentEnd = pageSource.indexOf('{item.type === \'shape\' &&', imageCardContentStart);
 
   assert.notEqual(imageCardContentStart, -1);
@@ -102,7 +102,7 @@ test('canvas text and image cards render a compact generation duration badge in 
 test('image card header renders image dimensions to the left of the generation duration chip', () => {
   const imageCardBlockStart = pageSource.indexOf('{isImageCard && (');
   const imageCardBlockEnd = pageSource.indexOf('{item.type === \'shape\' &&', imageCardBlockStart);
-  const imageCardContentStart = pageSource.indexOf("{imageCardVisualState === 'content' && item.src && isImageActive && (", imageCardBlockStart);
+  const imageCardContentStart = pageSource.indexOf("{imageCardVisualState === 'content' && item.src && imageDisplaySrc && persistentImageSrc && imageDisplayResource && (", imageCardBlockStart);
   const imageCardContentEnd = pageSource.indexOf('{item.type === \'shape\' &&', imageCardContentStart);
 
   assert.notEqual(imageCardBlockStart, -1);
@@ -1022,13 +1022,45 @@ test('canvas viewport no longer keeps a legacy in-canvas image card floating pan
   assert.equal(pageSource.includes('left: selectedImageCardPanelLeft + selectedImageCardCountPopoverOffset.left * viewport.scale,'), false);
 });
 
-test('pending connection create menu scales with viewport zoom instead of staying at a fixed screen size', () => {
-  assert.equal(pageSource.includes('const scaledConnectionMenuWidth = connectionMenuWidth * viewport.scale;'), true);
-  assert.equal(pageSource.includes('const scaledConnectionMenuHeight = connectionMenuHeight * viewport.scale;'), true);
-  assert.equal(pageSource.includes('left: pendingMenuLeft,'), true);
-  assert.equal(pageSource.includes('top: pendingMenuTop,'), true);
-  assert.equal(pageSource.includes('transform: `scale(${viewport.scale})`,'), true);
+test('pending connection create menu stays mounted and opens without top-level React state', () => {
+  assert.equal(pageSource.includes('ref={connectionCreateMenuRef}'), true);
+  assert.equal(pageSource.includes('data-connection-create-menu="true"'), true);
+  assert.equal(pageSource.includes('inert\n            aria-hidden="true"'), true);
+  assert.equal(pageSource.includes("visibility: 'hidden'"), true);
+  assert.equal(pageSource.includes("pointerEvents: 'none'"), true);
+  assert.equal(pageSource.includes('menu.style.transform = `scale(${scale})`;'), true);
+  assert.equal(pageSource.includes("menu.removeAttribute('inert');"), true);
+  assert.equal(pageSource.includes("menu.toggleAttribute('inert', true);"), true);
+  assert.equal(pageSource.includes("menu.setAttribute('aria-hidden', 'true');"), true);
   assert.equal(pageSource.includes("transformOrigin: 'top left',"), true);
+  assert.equal(pageSource.includes('useState<PendingConnectionMenu'), false);
+  assert.equal(pageSource.includes('useState<FrozenPreviewConnection'), false);
+  assert.equal(pageSource.includes('setPendingConnectionMenu('), false);
+  assert.equal(pageSource.includes('setFrozenPreviewConnection('), false);
+});
+
+test('canvas images use committed zoom-based resource sizes without remounting on LOD changes', () => {
+  assert.equal(pageSource.includes('React.useDeferredValue(viewport.scale)'), false);
+  assert.equal(pageSource.includes('canvasImageScale={viewport.scale}'), true);
+  assert.equal(pageSource.includes('getCanvasImageDisplayResource({'), true);
+  assert.equal(pageSource.includes('getCanvasImageLodUrl(item.src, imageDisplayResource.resourceWidth)'), true);
+  assert.equal(pageSource.includes('getCanvasImageLodUrl(item.src, CANVAS_IMAGE_RESOURCE_WIDTHS[0])'), true);
+  assert.equal(pageSource.includes('canvasLod='), false);
+  assert.equal(pageSource.match(/\s+unoptimized\n/g)?.length >= 2, true);
+  assert.equal(pageSource.includes('key={`${item.src}:${imageDisplayResource.resourceWidth}`}'), false);
+  assert.equal(pageSource.includes('sizes={`${imageDisplayResource.displayWidth}px`}'), true);
+  assert.equal(pageSource.includes('(max-width: 1600px)'), false);
+  assert.equal(pageSource.includes('const [visibleChatMessageLimit, setVisibleChatMessageLimit] = useState(20);'), true);
+  assert.equal(pageSource.includes('setVisibleChatMessageLimit(20);'), true);
+  assert.equal(pageSource.includes('setVisibleChatMessageLimit((current) => current + 20)'), true);
+});
+
+test('local canvas images keep a low-resolution thumbnail mounted outside the active working set', () => {
+  assert.equal(pageSource.match(/data-canvas-persistent-thumbnail="true"/g)?.length, 2);
+  assert.equal(pageSource.match(/data-canvas-active-image="true"/g)?.length, 2);
+  assert.equal(pageSource.match(/sizes=\{`\$\{CANVAS_IMAGE_RESOURCE_WIDTHS\[0\]\}px`\}/g)?.length, 2);
+  assert.equal(pageSource.match(/loading="eager"/g)?.length >= 2, true);
+  assert.equal(pageSource.includes('!hasPersistentCanvasThumbnail && !isImageActive'), true);
 });
 
 test('image nodes are not excluded from corner-resize handles or resize interaction logic', () => {
@@ -1333,7 +1365,7 @@ test('page snapshots and transition persistence read from a live session state r
 
 test('page guards connection cleanup while a switched canvas session is hydrating', () => {
   const applyResolvedStateStart = pageSource.indexOf('const applyResolvedSessionState = useCallback((resolvedState: any) => {');
-  const applyResolvedStateEnd = pageSource.indexOf('  }, [flushPendingCanvasCommit, resetPendingCanvasInteractionCommits, syncSessionLiveState]);', applyResolvedStateStart);
+  const applyResolvedStateEnd = pageSource.indexOf('  }, [clearPendingConnectionMenu, flushPendingCanvasCommit, resetPendingCanvasInteractionCommits, syncSessionLiveState]);', applyResolvedStateStart);
 
   assert.notEqual(applyResolvedStateStart, -1);
   assert.notEqual(applyResolvedStateEnd, -1);
@@ -1345,8 +1377,9 @@ test('page guards connection cleanup while a switched canvas session is hydratin
   assert.equal(applyResolvedStateBlock.includes('isHydratingSessionRef.current = true;'), true);
   assert.equal(applyResolvedStateBlock.includes('setSelectedConnectionIds([]);'), true);
   assert.equal(applyResolvedStateBlock.includes('clearConnectionSnapTargetVisualRef.current();'), true);
-  assert.equal(applyResolvedStateBlock.includes('setPendingConnectionMenu(null);'), true);
-  assert.equal(applyResolvedStateBlock.includes('setFrozenPreviewConnection(null);'), true);
+  assert.equal(applyResolvedStateBlock.includes('clearPendingConnectionMenu();'), true);
+  assert.equal(applyResolvedStateBlock.includes('setPendingConnectionMenu(null);'), false);
+  assert.equal(applyResolvedStateBlock.includes('setFrozenPreviewConnection(null);'), false);
   assert.equal(applyResolvedStateBlock.includes('connectionSessionRef.current = null;'), true);
   assert.equal(pageSource.includes('if (isHydratingSessionRef.current) {'), true);
   assert.equal(pageSource.includes('isHydratingSessionRef.current = false;'), true);

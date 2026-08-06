@@ -2,6 +2,10 @@ const safeNumber = (value, fallback = 0) => (
   Number.isFinite(value) ? Number(value) : fallback
 );
 
+export const CANVAS_IMAGE_RESOURCE_WIDTHS = [96, 256, 640, 1080, 1600];
+const LOCAL_ASSET_ROUTE_PREFIX = '/api/local-assets/';
+const CANVAS_IMAGE_LOD_DIRECTORY = '.canvas-lod';
+
 const intersects = (item, bounds) => {
   const left = safeNumber(item?.x);
   const top = safeNumber(item?.y);
@@ -50,4 +54,56 @@ export function getCanvasImageWorkingSetIds(options = {}) {
   };
 
   return imageItems.filter((item) => intersects(item, bounds)).map((item) => item.id);
+}
+
+/**
+ * @param {{ width?: number, scale?: number }} options
+ */
+export function getCanvasImageDisplayResource(options = {}) {
+  const width = Math.max(1, safeNumber(options.width, 1));
+  const scale = Math.max(0.0001, safeNumber(options.scale, 1));
+  const displayWidth = Math.max(1, Math.round(width * scale));
+  const resourceWidth = CANVAS_IMAGE_RESOURCE_WIDTHS.find((candidate) => candidate >= displayWidth)
+    ?? CANVAS_IMAGE_RESOURCE_WIDTHS.at(-1);
+
+  return { displayWidth, resourceWidth };
+}
+
+export function getCanvasImageLodRelativePath(src, resourceWidth) {
+  if (typeof src !== 'string' || !CANVAS_IMAGE_RESOURCE_WIDTHS.includes(resourceWidth)) {
+    return null;
+  }
+
+  const pathname = src.split(/[?#]/, 1)[0];
+  if (!pathname.startsWith(`${LOCAL_ASSET_ROUTE_PREFIX}uploads/`)) {
+    return null;
+  }
+
+  const originalRelativePath = pathname.slice(LOCAL_ASSET_ROUTE_PREFIX.length);
+  const originalUploadPath = originalRelativePath.slice('uploads/'.length);
+  if (!originalUploadPath || originalUploadPath.startsWith(`${CANVAS_IMAGE_LOD_DIRECTORY}/`)) {
+    return null;
+  }
+
+  return `uploads/${CANVAS_IMAGE_LOD_DIRECTORY}/${originalUploadPath}/w${resourceWidth}.webp`;
+}
+
+export function getCanvasImageLodUrl(src, resourceWidth) {
+  const relativePath = getCanvasImageLodRelativePath(src, resourceWidth);
+  return relativePath ? `${LOCAL_ASSET_ROUTE_PREFIX}${relativePath}` : src;
+}
+
+export function parseCanvasImageLodRelativePath(relativePath) {
+  if (typeof relativePath !== 'string') return null;
+
+  const match = relativePath.match(/^uploads\/\.canvas-lod\/(.+)\/w(\d+)\.webp$/);
+  if (!match) return null;
+
+  const resourceWidth = Number(match[2]);
+  if (!CANVAS_IMAGE_RESOURCE_WIDTHS.includes(resourceWidth)) return null;
+
+  return {
+    originalRelativePath: `uploads/${match[1]}`,
+    resourceWidth,
+  };
 }

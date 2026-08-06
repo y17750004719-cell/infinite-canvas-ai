@@ -5,7 +5,7 @@ import { fileURLToPath } from 'node:url';
 
 const routePath = fileURLToPath(new URL('./api/local-assets/[...assetPath]/route.ts', import.meta.url));
 
-test('local-assets route exists and serves runtime images with no-store headers', () => {
+test('local-assets route exists and serves immutable private runtime images', () => {
   assert.equal(fs.existsSync(routePath), true);
 
   const routeSource = fs.readFileSync(routePath, 'utf8');
@@ -13,7 +13,10 @@ test('local-assets route exists and serves runtime images with no-store headers'
   assert.equal(routeSource.includes('params: Promise<{ assetPath?: string[] }>'), true);
   assert.equal(routeSource.includes('const { assetPath } = await params;'), true);
   assert.equal(routeSource.includes('resolveLocalAssetPathFromRouteSegments'), true);
-  assert.equal(routeSource.includes("'Cache-Control': 'no-store'"), true);
+  assert.equal(routeSource.includes('ensureCanvasImageLodFile'), true);
+  assert.equal(routeSource.includes("if (!fileStat?.isFile()) {\n    const ensuredLod = await ensureCanvasImageLodFile"), true);
+  assert.equal(routeSource.includes("'Cache-Control': 'private, max-age=31536000, immutable'"), true);
+  assert.equal(routeSource.includes("isFallback ? NO_STORE_HEADERS : IMMUTABLE_ASSET_HEADERS"), true);
   assert.equal(routeSource.includes("'Content-Type': contentType"), true);
 });
 

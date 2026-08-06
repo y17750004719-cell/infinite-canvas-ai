@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
 import { createStoredImageName } from '../../../lib/api-security.mjs';
+import { writeImageFileWithCanvasLods } from '../../../lib/canvas-image-lod-server.mjs';
 import { buildRuntimeAssetUrl } from '../../../lib/local-assets.mjs';
 import {
   createDownloadFailureDiagnostics,
@@ -279,9 +279,12 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    await mkdir(GENERATED_UPLOADS_DIR, { recursive: true });
     const filename = createStoredImageName(resultFile.extension);
-    await writeFile(path.join(GENERATED_UPLOADS_DIR, filename), resultFile.buffer);
+    await writeImageFileWithCanvasLods({
+      filePath: path.join(GENERATED_UPLOADS_DIR, filename),
+      relativeAssetPath: `uploads/generated/${filename}`,
+      buffer: resultFile.buffer,
+    });
 
     const dimensions = getImageDimensionsFromBuffer(resultFile.buffer);
 

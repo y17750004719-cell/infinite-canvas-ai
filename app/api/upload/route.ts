@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { createStoredImageName, parseImageDataUrl } from '../../lib/api-security.mjs';
+import { writeImageFileWithCanvasLods } from '../../lib/canvas-image-lod-server.mjs';
 import { buildRuntimeAssetUrl } from '../../lib/local-assets.mjs';
 import { createLogger, createRequestId, serializeError } from '../../lib/logger';
 
@@ -36,12 +36,14 @@ export async function POST(request: NextRequest) {
     });
 
     const uploadsDir = path.join(process.cwd(), 'runtime', 'uploads');
-    await mkdir(uploadsDir, { recursive: true });
-
     const newFileName = createStoredImageName(parsedImage.extension);
     const filePath = path.join(uploadsDir, newFileName);
 
-    await writeFile(filePath, parsedImage.buffer);
+    await writeImageFileWithCanvasLods({
+      filePath,
+      relativeAssetPath: `uploads/${newFileName}`,
+      buffer: parsedImage.buffer,
+    });
 
     const url = buildRuntimeAssetUrl(`uploads/${newFileName}`);
 

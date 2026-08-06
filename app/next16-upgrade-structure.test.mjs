@@ -40,6 +40,10 @@ test('Next config no longer carries wildcard image access or a webpack-only canv
   assert.equal(nextConfigSource.includes("'/*': ['next.config.js']"), true);
 });
 
+test('Next Image uses WebP for faster canvas image transforms', () => {
+  assert.equal(nextConfigSource.includes("formats: ['image/webp']"), true);
+});
+
 test('ESLint uses the Next.js flat core-web-vitals configuration', () => {
   assert.equal(eslintConfigSource.includes("eslint-config-next/core-web-vitals"), true);
   assert.equal(eslintConfigSource.includes('...nextVitals'), true);

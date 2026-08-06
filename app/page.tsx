@@ -84,7 +84,12 @@ import {
   resolveCanvasMarqueeSelection,
   resolveCanvasPointerGesture,
 } from './lib/canvas-interaction.mjs';
-import { getCanvasImageWorkingSetIds } from './lib/canvas-image-working-set.mjs';
+import {
+  CANVAS_IMAGE_RESOURCE_WIDTHS,
+  getCanvasImageDisplayResource,
+  getCanvasImageLodUrl,
+  getCanvasImageWorkingSetIds,
+} from './lib/canvas-image-working-set.mjs';
 import {
   createInitialAgentRunProgress,
   createAgentProgressEventRouter,
@@ -201,12 +206,14 @@ const CANVAS_WHEEL_BURST_END_MS = 150;
 const CANVAS_IMAGE_WORKING_SET_ENTER_SCREENS = 1;
 const CANVAS_IMAGE_WORKING_SET_RETAIN_SCREENS = 1.5;
 const CANVAS_IMAGE_WORKING_SET_RELEASE_MS = 500;
+const CONNECTION_CREATE_MENU_WIDTH = 360;
+const CONNECTION_CREATE_MENU_HEIGHT = 292;
+const CONNECTION_CREATE_MENU_PADDING = 24;
 const CHAT_PANEL_GSAP_OPEN_DURATION = 0.28;
 const CHAT_PANEL_GSAP_CLOSE_DURATION = 0.23;
 const CHAT_PANEL_GSAP_EASE = 'power3.out';
 const PROMPT_PIPELINE_AGENT_ENABLED = process.env.NEXT_PUBLIC_PROMPT_PIPELINE_AGENT_ENABLED !== '0';
 const GENERATED_IMAGE_HISTORY_PLACEHOLDER_PATTERN = /\[(?:Generated image[^\]]*omitted from chat history|聊天记录中省略了代理生成的图像)\]/gi;
-const canOptimizeCanvasImage = (src: string) => src.startsWith('/api/local-assets/');
 
 function useStableEvent<TArgs extends unknown[], TResult>(
   handler: (...args: TArgs) => TResult
@@ -319,8 +326,6 @@ interface SessionCanvasHistoryState {
   past: CanvasHistoryEntry[];
   future: CanvasHistoryEntry[];
 }
-
-type ConnectionMode = 'idle' | 'armed' | 'dragging';
 
 interface ConnectionSession {
   mode: 'dragging';
@@ -2756,17 +2761,13 @@ const CanvasConnectionsLayer = memo(function CanvasConnectionsLayer({
 const CanvasConnectionPreviewLayer = memo(function CanvasConnectionPreviewLayer({
   canvasSize,
   theme,
-  connectionMode,
   connectionPreviewPathRef,
-  frozenPreviewConnection,
-  buildConnectionPath,
+  frozenConnectionPathRef,
 }: {
   canvasSize: CanvasSize;
   theme: typeof DARK_THEME;
-  connectionMode: ConnectionMode;
   connectionPreviewPathRef: React.RefObject<SVGPathElement | null>;
-  frozenPreviewConnection: FrozenPreviewConnection | null;
-  buildConnectionPath: (from: { x: number; y: number }, to: { x: number; y: number }) => string;
+  frozenConnectionPathRef: React.RefObject<SVGPathElement | null>;
 }) {
   return (
     <svg
@@ -2786,19 +2787,19 @@ const CanvasConnectionPreviewLayer = memo(function CanvasConnectionPreviewLayer(
         strokeWidth={3.5}
         strokeLinecap="round"
         pointerEvents="none"
-        visibility={connectionMode === 'dragging' ? 'visible' : 'hidden'}
+        visibility="hidden"
       />
-      {frozenPreviewConnection && (
-        <path
-          d={buildConnectionPath(frozenPreviewConnection.from, frozenPreviewConnection.to)}
-          fill="none"
-          stroke={theme.canvasLine}
-          strokeOpacity="0.5"
-          strokeWidth={3.5}
-          strokeLinecap="round"
-          pointerEvents="none"
-        />
-      )}
+      <path
+        ref={frozenConnectionPathRef}
+        data-canvas-frozen-connection-preview="true"
+        fill="none"
+        stroke={theme.canvasLine}
+        strokeOpacity="0.5"
+        strokeWidth={3.5}
+        strokeLinecap="round"
+        pointerEvents="none"
+        visibility="hidden"
+      />
     </svg>
   );
 });
@@ -2808,7 +2809,6 @@ const CanvasPortsLayer = memo(function CanvasPortsLayer({
   hoveredCanvasItemId,
   hoveredInputPortItemId,
   hoveredOutputPortItemId,
-  connectionFromItemId,
   onInputPortEnter,
   onInputPortLeave,
   onOutputPortEnter,
@@ -2820,7 +2820,6 @@ const CanvasPortsLayer = memo(function CanvasPortsLayer({
   hoveredCanvasItemId: string | null;
   hoveredInputPortItemId: string | null;
   hoveredOutputPortItemId: string | null;
-  connectionFromItemId: string | null;
   onInputPortEnter: (itemId: string) => void;
   onInputPortLeave: (itemId: string) => void;
   onOutputPortEnter: (itemId: string) => void;
@@ -2849,10 +2848,9 @@ const CanvasPortsLayer = memo(function CanvasPortsLayer({
       const isHoveredItem = hoveredCanvasItemId === itemId;
       const isHoveredInputPort = hoveredInputPortItemId === itemId;
       const isHoveredOutputPort = hoveredOutputPortItemId === itemId;
-      const isConnectionSource = connectionFromItemId === itemId;
       const isNearPort = isHoveredInputPort || isHoveredOutputPort;
       const visible = acceptsIncomingConnection && (side === 'out'
-        ? isHoveredItem || isNearPort || isConnectionSource
+        ? isHoveredItem || isNearPort
         : isHoveredItem || isNearPort);
       const key = `${itemId}:${side}`;
       const previous = portVisibilityRef.current.get(key);
@@ -2863,7 +2861,6 @@ const CanvasPortsLayer = memo(function CanvasPortsLayer({
       element.style.pointerEvents = side === 'out' && visible ? 'auto' : 'none';
     });
   }, [
-    connectionFromItemId,
     hoveredCanvasItemId,
     hoveredInputPortItemId,
     hoveredOutputPortItemId,
@@ -2995,6 +2992,7 @@ const CanvasNodesContent = memo(function CanvasNodesContent({
   activeCanvasTextGenerations,
   activeCanvasImageGenerations,
   activeCanvasImageIds,
+  canvasImageScale,
   editingTextCardId,
   editingTextCardTextareaRef,
   onImageCardOutputSelect,
@@ -3017,6 +3015,7 @@ const CanvasNodesContent = memo(function CanvasNodesContent({
   activeCanvasTextGenerations: Record<string, { status: 'running'; startedAt: number }>;
   activeCanvasImageGenerations: Record<string, { status: 'running'; startedAt: number; total: number; completed: number; failed: number }>;
   activeCanvasImageIds: Set<string>;
+  canvasImageScale: number;
   editingTextCardId: string | null;
   editingTextCardTextareaRef: React.RefObject<HTMLTextAreaElement | null>;
   onImageCardOutputSelect: (itemId: string, outputIndex: number) => void;
@@ -3043,6 +3042,7 @@ const CanvasNodesContent = memo(function CanvasNodesContent({
     activeCanvasTextGenerations,
     activeCanvasImageGenerations,
     activeCanvasImageIds,
+    canvasImageScale,
     editingTextCardId,
     editingTextCardTextareaRef,
     onImageCardOutputSelect,
@@ -3078,7 +3078,8 @@ const CanvasNodesContent = memo(function CanvasNodesContent({
         if (cached?.item === item) return cached.element;
         const isTextCard = item.type === 'text' && item.textVariant === 'card';
         const isImageCard = isImageCardItem(item);
-        const isImageActive = !isImageCard && !isImageAssetItem(item)
+        const isImageAsset = isImageAssetItem(item);
+        const isImageActive = !isImageCard && !isImageAsset
           ? true
           : activeCanvasImageGenerationItemIds.has(item.id) ||
             activeCanvasImageIds.has(item.id);
@@ -3104,6 +3105,23 @@ const CanvasNodesContent = memo(function CanvasNodesContent({
         const imageOutputCount = Array.isArray(item.imageOutputs) ? item.imageOutputs.length : 0;
         const activeImageOutputIndex = Number.isFinite(item.activeImageOutputIndex) ? item.activeImageOutputIndex ?? 0 : 0;
         const currentImageOutput = isImageCard ? getCurrentImageCardOutput(item) : null;
+        const imageDisplayResource = isImageAsset || isImageCard
+          ? getCanvasImageDisplayResource({
+              width: isImageCard
+                ? Math.max(1, item.width - TEXT_CARD_FRAME_INSET_X * 2)
+                : item.width,
+              scale: canvasImageScale,
+            })
+          : null;
+        const imageDisplaySrc = item.src && imageDisplayResource
+          ? getCanvasImageLodUrl(item.src, imageDisplayResource.resourceWidth)
+          : item.src;
+        const persistentImageSrc = item.src
+          ? getCanvasImageLodUrl(item.src, CANVAS_IMAGE_RESOURCE_WIDTHS[0])
+          : null;
+        const hasPersistentCanvasThumbnail = Boolean(
+          item.src && persistentImageSrc && persistentImageSrc !== item.src
+        );
         const activeGenerationStartedAt = isTextCard
           ? activeCanvasTextGenerations[item.id]?.startedAt
           : isImageCard
@@ -3155,14 +3173,14 @@ const CanvasNodesContent = memo(function CanvasNodesContent({
                   onDoubleClick={() => onItemDoubleClick(item.id)}
                   onPointerDown={(e) => onItemPointerDown(e, item.id)}
                 >
-            {isImageAssetItem(item) && item.src && isImageActive && (
+            {isImageAsset && persistentImageSrc && hasPersistentCanvasThumbnail && (
               <Image
-                src={item.src}
+                data-canvas-persistent-thumbnail="true"
+                src={persistentImageSrc}
                 alt=""
                 fill
-                unoptimized={!canOptimizeCanvasImage(item.src)}
-                quality={72}
-                sizes={`(max-width: 1600px) ${Math.min(1600, Math.max(1, Math.round(item.width)))}px, 1600px`}
+                unoptimized
+                sizes={`${CANVAS_IMAGE_RESOURCE_WIDTHS[0]}px`}
                 loading="lazy"
                 decoding="async"
                 className="h-full w-full object-contain pointer-events-none"
@@ -3170,7 +3188,23 @@ const CanvasNodesContent = memo(function CanvasNodesContent({
                 draggable={false}
               />
             )}
-            {isImageAssetItem(item) && item.src && !isImageActive && (
+            {isImageAsset && item.src && imageDisplaySrc && isImageActive && imageDisplayResource &&
+              (!hasPersistentCanvasThumbnail || imageDisplaySrc !== persistentImageSrc) && (
+              <Image
+                data-canvas-active-image="true"
+                src={imageDisplaySrc}
+                alt=""
+                fill
+                unoptimized
+                sizes={`${imageDisplayResource.displayWidth}px`}
+                loading="eager"
+                decoding="async"
+                className="h-full w-full object-contain pointer-events-none"
+                style={{ borderRadius: `${itemCornerRadius}px`, contain: 'layout paint style' }}
+                draggable={false}
+              />
+            )}
+            {isImageAsset && item.src && !hasPersistentCanvasThumbnail && !isImageActive && (
               <div
                 data-canvas-image-shell="true"
                 className="h-full w-full bg-black/10"
@@ -3246,66 +3280,82 @@ const CanvasNodesContent = memo(function CanvasNodesContent({
                         </span>
                       </div>
                     )}
-                    {imageCardVisualState === 'content' && item.src && isImageActive && (() => {
-                      return (
-                        <div className="relative h-full w-full overflow-hidden bg-black/20">
+                    {imageCardVisualState === 'content' && item.src && imageDisplaySrc && persistentImageSrc && imageDisplayResource && (
+                      <div className="relative h-full w-full overflow-hidden bg-black/20">
+                        {hasPersistentCanvasThumbnail && (
                           <Image
-                            src={item.src}
+                            data-canvas-persistent-thumbnail="true"
+                            src={persistentImageSrc}
                             alt=""
                             fill
-                            unoptimized={!canOptimizeCanvasImage(item.src)}
-                            quality={72}
-                            sizes={`(max-width: 1600px) ${Math.min(1600, Math.max(1, Math.round(item.width - TEXT_CARD_FRAME_INSET_X * 2)))}px, 1600px`}
+                            unoptimized
+                            sizes={`${CANVAS_IMAGE_RESOURCE_WIDTHS[0]}px`}
                             loading="lazy"
                             decoding="async"
                             className="object-cover pointer-events-none"
                             style={{ contain: 'layout paint style' }}
                             draggable={false}
                           />
-                          {imageOutputCount > 1 && (
-                            <div className="absolute inset-x-3 bottom-3 flex items-center justify-between gap-3">
-                              <button
-                                type="button"
-                                onPointerDown={(e) => {
-                                  e.stopPropagation();
-                                }}
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  onImageCardOutputSelect(item.id, activeImageOutputIndex - 1);
-                                }}
-                                className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-black/55 text-zinc-100  hover:bg-black/70"
-                                aria-label="查看上一张"
-                              >
-                                <ArrowLeft size={15} />
-                              </button>
-                              <div className="rounded-full border border-white/10 bg-black/55 px-3 py-1 text-[12px] font-medium text-zinc-100">
-                                {activeImageOutputIndex + 1} / {imageOutputCount}
-                              </div>
-                              <button
-                                type="button"
-                                onPointerDown={(e) => {
-                                  e.stopPropagation();
-                                }}
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  onImageCardOutputSelect(item.id, activeImageOutputIndex + 1);
-                                }}
-                                className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-black/55 text-zinc-100  hover:bg-black/70"
-                                aria-label="查看下一张"
-                              >
-                                <ArrowLeft size={15} className="rotate-180" />
-                              </button>
-                            </div>
+                        )}
+                        {isImageActive &&
+                          (!hasPersistentCanvasThumbnail || imageDisplaySrc !== persistentImageSrc) && (
+                            <Image
+                              data-canvas-active-image="true"
+                              src={imageDisplaySrc}
+                              alt=""
+                              fill
+                              unoptimized
+                              sizes={`${imageDisplayResource.displayWidth}px`}
+                              loading="eager"
+                              decoding="async"
+                              className="object-cover pointer-events-none"
+                              style={{ contain: 'layout paint style' }}
+                              draggable={false}
+                            />
                           )}
-                        </div>
-                      );
-                    })()}
-                    {imageCardVisualState === 'content' && item.src && !isImageActive && (
-                      <div
-                        data-canvas-image-shell="true"
-                        className="h-full w-full bg-black/20"
-                        style={{ contain: 'layout paint style' }}
-                      />
+                        {!hasPersistentCanvasThumbnail && !isImageActive && (
+                          <div
+                            data-canvas-image-shell="true"
+                            className="h-full w-full bg-black/20"
+                            style={{ contain: 'layout paint style' }}
+                          />
+                        )}
+                        {imageOutputCount > 1 && isImageActive && (
+                          <div className="absolute inset-x-3 bottom-3 flex items-center justify-between gap-3">
+                            <button
+                              type="button"
+                              onPointerDown={(e) => {
+                                e.stopPropagation();
+                              }}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onImageCardOutputSelect(item.id, activeImageOutputIndex - 1);
+                              }}
+                              className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-black/55 text-zinc-100  hover:bg-black/70"
+                              aria-label="查看上一张"
+                            >
+                              <ArrowLeft size={15} />
+                            </button>
+                            <div className="rounded-full border border-white/10 bg-black/55 px-3 py-1 text-[12px] font-medium text-zinc-100">
+                              {activeImageOutputIndex + 1} / {imageOutputCount}
+                            </div>
+                            <button
+                              type="button"
+                              onPointerDown={(e) => {
+                                e.stopPropagation();
+                              }}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onImageCardOutputSelect(item.id, activeImageOutputIndex + 1);
+                              }}
+                              className="inline-flex h-9 w-9 items-center justify-center rounded-full border border-white/10 bg-black/55 text-zinc-100  hover:bg-black/70"
+                              aria-label="查看下一张"
+                            >
+                              <ArrowLeft size={15} className="rotate-180" />
+                            </button>
+                          </div>
+                        )}
+                      </div>
                     )}
                   </div>
                 </div>
@@ -3765,10 +3815,6 @@ const CanvasViewport = memo(function CanvasViewport({
   hoveredCanvasItemId,
   hoveredInputPortItemId,
   hoveredOutputPortItemId,
-  connectionMode,
-  connectionFromItemId,
-  frozenPreviewConnection,
-  pendingConnectionMenu,
   multiSelectionBounds,
   marqueeElementRef,
   marqueePathRef,
@@ -3779,6 +3825,8 @@ const CanvasViewport = memo(function CanvasViewport({
   getSelectionGroupRef,
   getConnectionPathRef,
   connectionPreviewPathRef,
+  frozenConnectionPathRef,
+  connectionCreateMenuRef,
   getViewportOverlayRef,
   onPointerDown,
   onPointerMove,
@@ -3812,6 +3860,7 @@ const CanvasViewport = memo(function CanvasViewport({
   activeCanvasTextGenerations,
   activeCanvasImageGenerations,
   activeCanvasImageIds,
+  canvasImageScale,
   selectedTextPanelModel,
   textPanelModelOptions,
   selectedTextCardProviderLabel,
@@ -3913,10 +3962,6 @@ const CanvasViewport = memo(function CanvasViewport({
   hoveredCanvasItemId: string | null;
   hoveredInputPortItemId: string | null;
   hoveredOutputPortItemId: string | null;
-  connectionMode: ConnectionMode;
-  connectionFromItemId: string | null;
-  frozenPreviewConnection: FrozenPreviewConnection | null;
-  pendingConnectionMenu: PendingConnectionMenu | null;
   multiSelectionBounds: { left: number; top: number; width: number; height: number } | null;
   marqueeElementRef: (element: SVGSVGElement | null) => void;
   marqueePathRef: (element: SVGPathElement | null) => void;
@@ -3927,6 +3972,8 @@ const CanvasViewport = memo(function CanvasViewport({
   getSelectionGroupRef: (element: HTMLDivElement | null) => void;
   getConnectionPathRef: (connectionId: string, role: string) => (element: SVGPathElement | null) => void;
   connectionPreviewPathRef: React.RefObject<SVGPathElement | null>;
+  frozenConnectionPathRef: React.RefObject<SVGPathElement | null>;
+  connectionCreateMenuRef: React.RefObject<HTMLDivElement | null>;
   getViewportOverlayRef: (key: string) => (element: HTMLElement | null) => void;
   onPointerDown: (e: React.PointerEvent<HTMLDivElement>) => void;
   onPointerMove: (e: React.PointerEvent<HTMLDivElement>) => void;
@@ -3963,6 +4010,7 @@ const CanvasViewport = memo(function CanvasViewport({
   activeCanvasTextGenerations: Record<string, { status: 'running'; startedAt: number }>;
   activeCanvasImageGenerations: Record<string, { status: 'running'; startedAt: number; total: number; completed: number; failed: number }>;
   activeCanvasImageIds: Set<string>;
+  canvasImageScale: number;
   selectedTextPanelModel: { id: string; label: string };
   textPanelModelOptions: Array<{ id: string; label: string }>;
   selectedTextCardProviderLabel: string;
@@ -4130,23 +4178,6 @@ const CanvasViewport = memo(function CanvasViewport({
       window.visualViewport?.removeEventListener('scroll', scheduleMetricsUpdate);
     };
   }, [canvasRef, onMetricsChange]);
-  const connectionMenuWidth = 360;
-  const connectionMenuHeight = 292;
-  const connectionMenuPadding = 24;
-  const scaledConnectionMenuWidth = connectionMenuWidth * viewport.scale;
-  const scaledConnectionMenuHeight = connectionMenuHeight * viewport.scale;
-  const pendingMenuLeft = pendingConnectionMenu
-    ? Math.min(
-        Math.max(pendingConnectionMenu.position.x + 18, connectionMenuPadding),
-        Math.max(connectionMenuPadding, canvasSize.width - scaledConnectionMenuWidth - connectionMenuPadding)
-      )
-    : 0;
-  const pendingMenuTop = pendingConnectionMenu
-    ? Math.min(
-        Math.max(pendingConnectionMenu.position.y - 40, connectionMenuPadding),
-        Math.max(connectionMenuPadding, canvasSize.height - scaledConnectionMenuHeight - connectionMenuPadding)
-      )
-    : 0;
   const selectedTextCardPanelFrameBounds = selectedTextCardPanelItem
     ? getTextCardFrameBounds(selectedTextCardPanelItem)
     : null;
@@ -5205,7 +5236,6 @@ const CanvasViewport = memo(function CanvasViewport({
           hoveredCanvasItemId={hoveredCanvasItemId}
           hoveredInputPortItemId={hoveredInputPortItemId}
           hoveredOutputPortItemId={hoveredOutputPortItemId}
-          connectionFromItemId={connectionFromItemId}
           onInputPortEnter={onInputPortEnter}
           onInputPortLeave={onInputPortLeave}
           onOutputPortEnter={onOutputPortEnter}
@@ -5224,6 +5254,7 @@ const CanvasViewport = memo(function CanvasViewport({
           activeCanvasTextGenerations={activeCanvasTextGenerations}
           activeCanvasImageGenerations={activeCanvasImageGenerations}
           activeCanvasImageIds={activeCanvasImageIds}
+          canvasImageScale={canvasImageScale}
           editingTextCardId={editingTextCardId}
           editingTextCardTextareaRef={editingTextCardTextareaRef}
           onImageCardOutputSelect={onImageCardOutputSelect}
@@ -5271,45 +5302,47 @@ const CanvasViewport = memo(function CanvasViewport({
         <CanvasConnectionPreviewLayer
           canvasSize={canvasSize}
           theme={themePalette}
-          connectionMode={connectionMode}
           connectionPreviewPathRef={connectionPreviewPathRef}
-          frozenPreviewConnection={frozenPreviewConnection}
-          buildConnectionPath={buildConnectionPath}
+          frozenConnectionPathRef={frozenConnectionPathRef}
         />
-        {pendingConnectionMenu && (
-          <div className="pointer-events-none absolute inset-0 z-[110]">
-            <div
-              data-connection-create-menu="true"
-              className="workspace-menu-panel pointer-events-auto absolute overflow-hidden rounded-[26px]"
-              style={{
-                left: pendingMenuLeft,
-                top: pendingMenuTop,
-                width: 320,
-                minHeight: 198,
-                transform: `scale(${viewport.scale})`,
-                transformOrigin: 'top left',
-              }}
-              onPointerDown={onPendingMenuPointerDown}
-            >
-              <div className="p-3.5">
-                <div className="mb-2.5 px-1 text-xs font-medium tracking-[-0.01em] text-zinc-500/80">
-                  引用该节点生成
-                </div>
-                <div className="space-y-1.5">
-                  {CONNECTION_MENU_OPTIONS.map((option) => (
-                    <CanvasActionMenuItem
-                      key={option.id}
-                      title={option.title}
-                      description={option.description}
-                      Icon={option.icon}
-                      onClick={() => onPendingMenuAction(option.id)}
-                    />
-                  ))}
-                </div>
+        <div className="pointer-events-none absolute inset-0 z-[110]">
+          <div
+            ref={connectionCreateMenuRef}
+            data-connection-create-menu="true"
+            inert
+            aria-hidden="true"
+            className="workspace-menu-panel pointer-events-auto absolute overflow-hidden rounded-[26px]"
+            style={{
+              left: 0,
+              top: 0,
+              width: 320,
+              minHeight: 198,
+              opacity: 0,
+              visibility: 'hidden',
+              pointerEvents: 'none',
+              transform: 'scale(1)',
+              transformOrigin: 'top left',
+            }}
+            onPointerDown={onPendingMenuPointerDown}
+          >
+            <div className="p-3.5">
+              <div className="mb-2.5 px-1 text-xs font-medium tracking-[-0.01em] text-zinc-500/80">
+                引用该节点生成
+              </div>
+              <div className="space-y-1.5">
+                {CONNECTION_MENU_OPTIONS.map((option) => (
+                  <CanvasActionMenuItem
+                    key={option.id}
+                    title={option.title}
+                    description={option.description}
+                    Icon={option.icon}
+                    onClick={() => onPendingMenuAction(option.id)}
+                  />
+                ))}
               </div>
             </div>
           </div>
-        )}
+        </div>
         <svg
           ref={marqueeElementRef}
           aria-hidden="true"
@@ -5950,11 +5983,6 @@ export default function AIWorkspace() {
   const [hoveredCanvasItemId, setHoveredCanvasItemId] = useState<string | null>(null);
   const [hoveredInputPortItemId, setHoveredInputPortItemId] = useState<string | null>(null);
   const [hoveredOutputPortItemId, setHoveredOutputPortItemId] = useState<string | null>(null);
-  const [connectionMode, setConnectionMode] = useState<ConnectionMode>('idle');
-  const [connectionFromItemId, setConnectionFromItemId] = useState<string | null>(null);
-  const [connectionPointerId, setConnectionPointerId] = useState<number | null>(null);
-  const [frozenPreviewConnection, setFrozenPreviewConnection] = useState<FrozenPreviewConnection | null>(null);
-  const [pendingConnectionMenu, setPendingConnectionMenu] = useState<PendingConnectionMenu | null>(null);
   const [activeCanvasImageIds, setActiveCanvasImageIds] = useState<Set<string>>(() => new Set());
   const [viewport, setViewportState] = useState({ x: 0, y: 0, scale: 1 });
   const canvasInteractionPhaseRef = useRef<CanvasInteractionPhase>('idle');
@@ -5994,6 +6022,24 @@ export default function AIWorkspace() {
   const itemByIdRef = useRef(new Map<string, CanvasItem>());
   const renderedItemsByIdRef = useRef(new Map<string, CanvasItem>());
   const connectionPreviewPathRef = useRef<SVGPathElement | null>(null);
+  const frozenConnectionPathRef = useRef<SVGPathElement | null>(null);
+  const connectionCreateMenuRef = useRef<HTMLDivElement | null>(null);
+  const pendingConnectionMenuRef = useRef<PendingConnectionMenu | null>(null);
+  const clearPendingConnectionMenu = useCallback(() => {
+    pendingConnectionMenuRef.current = null;
+    const frozenPath = frozenConnectionPathRef.current;
+    if (frozenPath) {
+      frozenPath.removeAttribute('d');
+      frozenPath.style.visibility = 'hidden';
+    }
+    const menu = connectionCreateMenuRef.current;
+    if (!menu) return;
+    menu.style.opacity = '0';
+    menu.style.visibility = 'hidden';
+    menu.style.pointerEvents = 'none';
+    menu.toggleAttribute('inert', true);
+    menu.setAttribute('aria-hidden', 'true');
+  }, []);
   const activeCanvasImageIdsRef = useRef(new Set<string>());
   const canvasImageReleaseTimersRef = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const pendingCanvasCommitRef = useRef<CanvasCommitBuffer | null>(null);
@@ -6075,7 +6121,7 @@ export default function AIWorkspace() {
   
   const [chatInputSyncRevision, setChatInputSyncRevision] = useState(0);
   const [chatMessages, setChatMessagesState] = useState<ChatMessage[]>([]);
-  const [visibleChatMessageLimit, setVisibleChatMessageLimit] = useState(80);
+  const [visibleChatMessageLimit, setVisibleChatMessageLimit] = useState(20);
   const attemptedLegacyChatReferenceMigrationsRef = useRef(new Set<string>());
   const attemptedLegacyCanvasImageMigrationsRef = useRef(new Set<string>());
   const [activeAgentRunMarker, setActiveAgentRunMarker] = useState<ProjectSession['activeAgentRun']>(undefined);
@@ -7901,11 +7947,7 @@ export default function AIWorkspace() {
     setHoveredCanvasItemId(null);
     setHoveredInputPortItemId(null);
     setHoveredOutputPortItemId(null);
-    setConnectionMode('idle');
-    setConnectionFromItemId(null);
-    setConnectionPointerId(null);
-    setFrozenPreviewConnection(null);
-    setPendingConnectionMenu(null);
+    clearPendingConnectionMenu();
     setActiveCanvasImageIds(new Set());
     activeCanvasImageIdsRef.current = new Set();
     canvasImageReleaseTimersRef.current.forEach((timer) => clearTimeout(timer));
@@ -7921,6 +7963,7 @@ export default function AIWorkspace() {
     pendingCanvasHistorySnapshotRef.current = null;
     clearConnectionInteractionStateRef.current();
   }, [
+    clearPendingConnectionMenu,
     setConnections,
     setImageCardAspectRatioById,
     setImageCardCountById,
@@ -10116,10 +10159,45 @@ export default function AIWorkspace() {
     return `M ${from.x} ${from.y} C ${c1x} ${from.y}, ${c2x} ${to.y}, ${to.x} ${to.y}`;
   }, []);
 
-  const clearPendingConnectionMenu = useCallback(() => {
-    setPendingConnectionMenu(null);
-    setFrozenPreviewConnection(null);
-  }, []);
+  const showPendingConnectionMenu = useCallback((
+    pendingMenu: PendingConnectionMenu,
+    frozenConnection: FrozenPreviewConnection
+  ) => {
+    pendingConnectionMenuRef.current = pendingMenu;
+    const frozenPath = frozenConnectionPathRef.current;
+    if (frozenPath) {
+      frozenPath.setAttribute('d', buildConnectionPath(frozenConnection.from, frozenConnection.to));
+      frozenPath.style.visibility = 'visible';
+    }
+
+    const menu = connectionCreateMenuRef.current;
+    if (!menu) return;
+    const scale = visualViewportRef.current.scale;
+    const canvasWidth = canvasMetricsRef.current.width;
+    const canvasHeight = canvasMetricsRef.current.height;
+    const left = Math.min(
+      Math.max(pendingMenu.position.x + 18, CONNECTION_CREATE_MENU_PADDING),
+      Math.max(
+        CONNECTION_CREATE_MENU_PADDING,
+        canvasWidth - CONNECTION_CREATE_MENU_WIDTH * scale - CONNECTION_CREATE_MENU_PADDING
+      )
+    );
+    const top = Math.min(
+      Math.max(pendingMenu.position.y - 40, CONNECTION_CREATE_MENU_PADDING),
+      Math.max(
+        CONNECTION_CREATE_MENU_PADDING,
+        canvasHeight - CONNECTION_CREATE_MENU_HEIGHT * scale - CONNECTION_CREATE_MENU_PADDING
+      )
+    );
+    menu.style.left = `${left}px`;
+    menu.style.top = `${top}px`;
+    menu.style.transform = `scale(${scale})`;
+    menu.style.opacity = '1';
+    menu.style.visibility = 'visible';
+    menu.style.pointerEvents = 'auto';
+    menu.removeAttribute('inert');
+    menu.setAttribute('aria-hidden', 'false');
+  }, [buildConnectionPath]);
 
   const toCanvasPoint = useCallback((screenPoint: { x: number; y: number }) => {
     const activeViewport = visualViewportRef.current;
@@ -10496,9 +10574,6 @@ export default function AIWorkspace() {
       previewPath.removeAttribute('d');
       previewPath.style.visibility = 'hidden';
     }
-    setConnectionMode('idle');
-    setConnectionFromItemId(null);
-    setConnectionPointerId(null);
     connectionDragMovedRef.current = false;
     setCanvasConnectionHitTestingDisabled(false);
     updateCanvasInteractionPhase('idle');
@@ -10564,17 +10639,19 @@ export default function AIWorkspace() {
       }
     } else if (session && session.mode === 'dragging' && session.fromItemId && session.point) {
       if (itemByIdRef.current.has(session.fromItemId)) {
-        setFrozenPreviewConnection({
-          from: session.fromPoint,
-          to: session.point,
-        });
-        setPendingConnectionMenu({
-          fromItemId: session.fromItemId,
-          position: {
-            x: session.point.x,
-            y: session.point.y,
+        showPendingConnectionMenu(
+          {
+            fromItemId: session.fromItemId,
+            position: {
+              x: session.point.x,
+              y: session.point.y,
+            },
           },
-        });
+          {
+            from: session.fromPoint,
+            to: session.point,
+          }
+        );
       } else {
         clearPendingConnectionMenu();
       }
@@ -11733,7 +11810,7 @@ export default function AIWorkspace() {
           }
         },
         onEnd: (pointerX, pointerY) => {
-          if (pendingConnectionMenu || frozenPreviewConnection) clearPendingConnectionMenu();
+          if (pendingConnectionMenuRef.current) clearPendingConnectionMenu();
           if (!activated) {
             if (pendingCanvasSelectionGestureRef.current?.primaryId === primaryId) {
               finalizeCanvasSelectionGestureRef.current({
@@ -11766,10 +11843,8 @@ export default function AIWorkspace() {
       cancelViewportAnimation,
       clearPendingConnectionMenu,
       completeActiveItemDrag,
-      frozenPreviewConnection,
       hideCanvasSelectionOverlayGroups,
       interruptCanvasCommitForInteraction,
-      pendingConnectionMenu,
       prepareCanvasItemDragPreview,
       previewCanvasItemDrag,
       schedulePendingCanvasCommit,
@@ -11807,7 +11882,7 @@ export default function AIWorkspace() {
       if (!continuesPanSequence) panReactViewportCommitCountRef.current = 0;
       if (isPanningRef.current) cancelInteraction('viewport-handoff');
       const token = handoffCanvasViewportMotion('pan');
-      if (pendingConnectionMenu || frozenPreviewConnection) {
+      if (pendingConnectionMenuRef.current) {
         clearPendingConnectionMenu();
       }
       e.preventDefault();
@@ -11857,9 +11932,7 @@ export default function AIWorkspace() {
     [
       cancelInteraction,
       clearPendingConnectionMenu,
-      frozenPreviewConnection,
       handoffCanvasViewportMotion,
-      pendingConnectionMenu,
       previewCanvasPanMotion,
       setCanvasPanVisualState,
       completeActiveCanvasPan,
@@ -12955,7 +13028,7 @@ export default function AIWorkspace() {
     if (connectionSessionRef.current?.fromItemId && !validIds.has(connectionSessionRef.current.fromItemId)) {
       resetConnectionInteraction();
     }
-  }, [canvasItemMembershipKey, connectionPointerId, connections, resetConnectionInteraction, setConnections]);
+  }, [canvasItemMembershipKey, connections, resetConnectionInteraction, setConnections]);
 
   useEffect(() => {
     if (isHydratingSessionRef.current) {
@@ -15414,8 +15487,7 @@ export default function AIWorkspace() {
     setEditingTextCardId(null);
     setSelectedConnectionIds([]);
     clearConnectionSnapTargetVisualRef.current();
-    setPendingConnectionMenu(null);
-    setFrozenPreviewConnection(null);
+    clearPendingConnectionMenu();
     setTextCardPanelDraftsState(resolvedState.normalizedSession?.textCardPanelDrafts || {});
     setTextCardProviderByIdState(resolvedState.normalizedSession?.textCardProviderById || {});
     setTextCardModelByIdState(resolvedState.normalizedSession?.textCardModelById || {});
@@ -15434,7 +15506,7 @@ export default function AIWorkspace() {
     setShowProjectMenu(false);
     setShowHistoryPanel(false);
     connectionSessionRef.current = null;
-  }, [flushPendingCanvasCommit, resetPendingCanvasInteractionCommits, syncSessionLiveState]);
+  }, [clearPendingConnectionMenu, flushPendingCanvasCommit, resetPendingCanvasInteractionCommits, syncSessionLiveState]);
 
   const isHighFrequencyInteractionActive =
     isCornerResizingRef.current ||
@@ -15625,7 +15697,7 @@ export default function AIWorkspace() {
   }, [chatMessages, currentSessionId, setChatMessages]);
 
   useEffect(() => {
-    setVisibleChatMessageLimit(80);
+    setVisibleChatMessageLimit(20);
   }, [currentSessionId]);
 
   const hiddenChatMessageCount = Math.max(0, chatMessages.length - visibleChatMessageLimit);
@@ -16792,6 +16864,7 @@ export default function AIWorkspace() {
 
   const handlePendingConnectionMenuAction = useCallback(
     (optionId: (typeof CONNECTION_MENU_OPTIONS)[number]['id']) => {
+      const pendingConnectionMenu = pendingConnectionMenuRef.current;
       if (!pendingConnectionMenu) return;
 
       if (optionId !== 'text' && optionId !== 'image') {
@@ -16817,7 +16890,7 @@ export default function AIWorkspace() {
 
       clearPendingConnectionMenu();
     },
-    [pendingConnectionMenu, toCanvasPoint, createImageCardItemAtCanvasPoint, createTextItemAtCanvasPoint, clearPendingConnectionMenu, recordCurrentCanvasUndoSnapshot, setConnections]
+    [toCanvasPoint, createImageCardItemAtCanvasPoint, createTextItemAtCanvasPoint, clearPendingConnectionMenu, recordCurrentCanvasUndoSnapshot, setConnections]
   );
 
   const isEditableUndoRedoTarget = (target: EventTarget | null) => {
@@ -16998,7 +17071,7 @@ export default function AIWorkspace() {
           resetConnectionInteraction();
           return;
         }
-        if (pendingConnectionMenu) {
+        if (pendingConnectionMenuRef.current) {
           clearPendingConnectionMenu();
           return;
         }
@@ -17041,7 +17114,7 @@ export default function AIWorkspace() {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
     };
-  }, [selectedId, selectedIds, connectionPointerId, selectedConnectionIds, pendingConnectionMenu, applyViewportScale, clearPendingConnectionMenu, copySelectedCanvasItemsToClipboard, deleteItem, fitCanvasItemsToViewport, hasActiveNonEditableTextSelection, recordCurrentCanvasUndoSnapshot, redoCanvasEdit, resetConnectionInteraction, setConnections, setItems, tool, undoCanvasEdit]);
+  }, [selectedId, selectedIds, selectedConnectionIds, applyViewportScale, clearPendingConnectionMenu, copySelectedCanvasItemsToClipboard, deleteItem, fitCanvasItemsToViewport, hasActiveNonEditableTextSelection, recordCurrentCanvasUndoSnapshot, redoCanvasEdit, resetConnectionInteraction, setConnections, setItems, tool, undoCanvasEdit]);
 
   useEffect(() => {
     const handleWindowPaste = (e: ClipboardEvent) => {
@@ -17057,9 +17130,8 @@ export default function AIWorkspace() {
   }, [handleCanvasPaste]);
 
   useEffect(() => {
-    if (!pendingConnectionMenu) return;
-
     const handlePointerDownOutsideMenu = (e: PointerEvent) => {
+      if (!pendingConnectionMenuRef.current) return;
       const target = e.target as HTMLElement | null;
       if (target?.closest('[data-connection-create-menu="true"]')) return;
       clearPendingConnectionMenu();
@@ -17069,7 +17141,7 @@ export default function AIWorkspace() {
     return () => {
       document.removeEventListener('pointerdown', handlePointerDownOutsideMenu);
     };
-  }, [pendingConnectionMenu, clearPendingConnectionMenu]);
+  }, [clearPendingConnectionMenu]);
 
   useEffect(() => {
     const handlePointerDownOutside = (e: PointerEvent) => {
@@ -17811,10 +17883,6 @@ export default function AIWorkspace() {
         hoveredCanvasItemId={hoveredCanvasItemId}
         hoveredInputPortItemId={hoveredInputPortItemId}
         hoveredOutputPortItemId={hoveredOutputPortItemId}
-        connectionMode={connectionMode}
-        connectionFromItemId={connectionFromItemId}
-        frozenPreviewConnection={frozenPreviewConnection}
-        pendingConnectionMenu={pendingConnectionMenu}
         multiSelectionBounds={multiSelectionBounds}
         marqueeElementRef={setMarqueeElementRef}
         marqueePathRef={setMarqueePathRef}
@@ -17825,6 +17893,8 @@ export default function AIWorkspace() {
         getSelectionGroupRef={getSelectionGroupRef}
         getConnectionPathRef={getConnectionPathRef}
         connectionPreviewPathRef={connectionPreviewPathRef}
+        frozenConnectionPathRef={frozenConnectionPathRef}
+        connectionCreateMenuRef={connectionCreateMenuRef}
         getViewportOverlayRef={getViewportOverlayRef}
         onPointerDown={stableCanvasPointerDown}
         onPointerMove={stableCanvasPointerMove}
@@ -17858,6 +17928,7 @@ export default function AIWorkspace() {
         activeCanvasTextGenerations={activeCanvasTextGenerations}
         activeCanvasImageGenerations={activeCanvasImageGenerations}
         activeCanvasImageIds={activeCanvasImageIds}
+        canvasImageScale={viewport.scale}
         selectedTextPanelModel={selectedTextPanelModel}
         textPanelModelOptions={selectedTextCardProviderModelOptions}
         selectedTextCardProviderLabel={selectedTextCardProviderLabel}
@@ -19294,7 +19365,7 @@ export default function AIWorkspace() {
                     <button
                       type="button"
                       className="workspace-control-chip rounded-full px-3 py-1.5 text-[11px]"
-                      onClick={() => setVisibleChatMessageLimit((current) => current + 80)}
+                      onClick={() => setVisibleChatMessageLimit((current) => current + 20)}
                     >
                       加载更早的消息（剩余 {hiddenChatMessageCount} 条）
                     </button>
