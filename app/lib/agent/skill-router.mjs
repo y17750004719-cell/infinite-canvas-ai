@@ -1,56 +1,52 @@
-import { resolveAgentIntent } from './prompt-optimizer.mjs';
-
-const MAX_CANDIDATES = 5;
-const MIN_SKILL_CONFIDENCE = 0.55;
-
-function normalizeText(value) {
-  return typeof value === 'string' ? value.trim().toLowerCase() : '';
+function routerText(value) {
+  const source = Array.isArray(value)
+    ? value.filter((part) => part?.type === 'text').map((part) => part.text || '').join(' ')
+    : String(value || '');
+  return source.replace(/data:image\/[\w.+-]+;base64,[A-Za-z0-9+/=]+/gi, '[image omitted]').trim();
 }
 
-export function filterSkillCandidates(userMessage, manifests, limit = MAX_CANDIDATES) {
-  const text = normalizeText(userMessage);
-  if (!text) return [];
-  return (Array.isArray(manifests) ? manifests : [])
-    .filter((manifest) => manifest?.enabled !== false)
-    .map((manifest) => {
-      const hints = Array.isArray(manifest.triggerHints) ? manifest.triggerHints : [];
-      const hintScore = hints.reduce((score, hint) => {
-        const normalizedHint = normalizeText(hint);
-        return score + (normalizedHint && text.includes(normalizedHint) ? Math.max(2, normalizedHint.length) : 0);
-      }, 0);
-      const name = normalizeText(manifest.name);
-      const description = normalizeText(manifest.description);
-      const metadataScore = (name && text.includes(name) ? 4 : 0) +
-        text.split(/\s+/).reduce((score, token) => score + (token.length > 1 && description.includes(token) ? 1 : 0), 0);
-      return { manifest, score: hintScore + metadataScore };
-    })
-    .filter((entry) => entry.score > 0)
-    .sort((a, b) => b.score - a.score || a.manifest.id.localeCompare(b.manifest.id))
-    .slice(0, Math.max(1, Math.min(MAX_CANDIDATES, Number(limit) || MAX_CANDIDATES)))
-    .map(({ manifest }) => ({
-      id: manifest.id,
-      name: manifest.name,
-      description: manifest.description,
-      triggerHints: [...(manifest.triggerHints || [])],
-    }));
-}
-
-export function buildSkillRouterMessages({ userMessage, candidates, hasReferenceImages = false }) {
+export function buildSkillRouterMessages({
+  userMessage,
+  messages = [],
+  candidates,
+  activeSkillId = null,
+  hasReferenceImages = false,
+  referenceMetadata = [],
+  hasPendingConfirmation = false,
+}) {
   const system = [
     'You are the routing component for the Z Flow main agent.',
     'Return exactly one JSON object without Markdown, code fences, commentary, or extra keys.',
-    'Schema: {"version":1,"intent":"chat|image|skill_action","skillId":null,"confidence":0,"needsClarification":false,"clarificationQuestion":""}.',
-    'Choose skillId only from the supplied candidates. Use null when no candidate is appropriate.',
-    'Use image for a single image-generation request, skill_action for batch or workflow execution, and chat for conversation or analysis.',
-    'Set needsClarification only when different choices would materially change the result.',
+    'Schema: {"version":1,"route":"chat|vision_analysis|planner","skillId":null,"confidence":"high|medium|low","reason":""}.',
+    'This is routing only. Do not answer the user, create an image prompt, call a tool, or rewrite the request.',
+    'The route planner is required for image generation, image editing, batch output, exports, and Skill execution.',
+    'Use vision_analysis only for a request that asks to inspect or discuss supplied images without changing or exporting them.',
+    'Use chat for ordinary discussion, explanation, brainstorming, clarification, and non-visual analysis.',
+    'When a request might cause a side effect or the requested operation is materially ambiguous, choose planner so the Planner can clarify it.',
+    'For chat and vision_analysis, skillId must be null.',
+    'For planner, choose one exact enabled Skill id only when its manifest clearly matches. Otherwise use null. Low confidence must use null.',
+    'The supplied manualSkillId is an explicit user choice. For planner preserve it exactly; never replace it.',
+    'Images are intentionally not included in this request. Use only the declared reference roles and user text for routing; the Planner receives original images later.',
   ].join('\n');
   return [
     { role: 'system', content: system },
     {
       role: 'user',
       content: JSON.stringify({
-        userMessage: String(userMessage || '').trim(),
+        userMessage: routerText(userMessage),
+        messages: (Array.isArray(messages) ? messages : [])
+          .filter((message) => message?.role === 'user' || message?.role === 'assistant')
+          .slice(-8)
+          .map((message) => ({ role: message.role, content: routerText(message.content).slice(0, 2000) })),
+        manualSkillId: activeSkillId || null,
         hasReferenceImages: Boolean(hasReferenceImages),
+        referenceMetadata: (Array.isArray(referenceMetadata) ? referenceMetadata : []).map((reference) => ({
+          id: reference?.id,
+          label: reference?.label,
+          role: reference?.role,
+          source: reference?.source,
+        })),
+        hasPendingConfirmation: Boolean(hasPendingConfirmation),
         candidates: (Array.isArray(candidates) ? candidates : []).map(({ id, name, description, triggerHints }) => ({
           id,
           name,
@@ -62,27 +58,29 @@ export function buildSkillRouterMessages({ userMessage, candidates, hasReference
   ];
 }
 
-export function parseAgentRoutingDecision(raw, allowedSkillIds) {
+export function parseAgentRoutingDecision(raw, allowedSkillIds = []) {
   if (typeof raw !== 'string' || !raw.trim() || raw.includes('```')) return null;
   try {
     const value = JSON.parse(raw);
-    if (!value || value.version !== 1 || !['chat', 'image', 'skill_action'].includes(value.intent)) return null;
-    if (typeof value.confidence !== 'number' || value.confidence < 0 || value.confidence > 1) return null;
-    if (typeof value.needsClarification !== 'boolean') return null;
-    const allowed = new Set(Array.isArray(allowedSkillIds) ? allowedSkillIds : []);
-    if (value.skillId !== null && (typeof value.skillId !== 'string' || !allowed.has(value.skillId))) return null;
-    const clarificationQuestion = typeof value.clarificationQuestion === 'string'
-      ? value.clarificationQuestion.trim()
-      : '';
-    if (value.needsClarification && !clarificationQuestion) return null;
-    const skillId = value.confidence >= MIN_SKILL_CONFIDENCE ? value.skillId : null;
+    if (!value || value.version !== 1 || !['chat', 'vision_analysis', 'planner'].includes(value.route)) return null;
+    if (!['high', 'medium', 'low'].includes(value.confidence)) return null;
+    if (value.skillId !== null && typeof value.skillId !== 'string') return null;
+    if (typeof value.reason !== 'string') return null;
+    const allowedKeys = new Set(['version', 'route', 'skillId', 'confidence', 'reason']);
+    if (Object.keys(value).some((key) => !allowedKeys.has(key))) return null;
+    if (!Object.hasOwn(value, 'skillId')) return null;
+    const skillId = typeof value.skillId === 'string' ? value.skillId.trim() : null;
+    if (value.skillId !== null && !skillId) return null;
+    if (value.route !== 'planner' && skillId !== null) return null;
+    if (value.confidence === 'low' && skillId !== null) return null;
+    if (skillId && !new Set(allowedSkillIds).has(skillId)) return null;
     return {
       version: 1,
-      intent: value.intent === 'skill_action' && !skillId ? 'chat' : value.intent,
+      route: value.route,
+      intent: value.route === 'planner' ? 'image' : 'chat',
       skillId,
       confidence: value.confidence,
-      needsClarification: value.needsClarification,
-      ...(clarificationQuestion ? { clarificationQuestion } : {}),
+      reason: value.reason.trim().slice(0, 240),
     };
   } catch {
     return null;
@@ -91,52 +89,69 @@ export function parseAgentRoutingDecision(raw, allowedSkillIds) {
 
 export async function routeAgentRequest({
   userMessage,
+  messages = [],
   manifests,
   manualSkillId,
   hasReferenceImages = false,
+  referenceMetadata = [],
+  hasPendingConfirmation = false,
   routerModel,
   providerId,
   signal,
   chatFn,
 }) {
   const availableManifests = (Array.isArray(manifests) ? manifests : []).filter((manifest) => manifest?.enabled !== false);
-  const fallbackIntent = resolveAgentIntent(userMessage, hasReferenceImages);
-  if (manualSkillId) {
-    const manual = availableManifests.find((manifest) => manifest.id === manualSkillId);
-    if (!manual) throw new Error(`Unknown skill: ${manualSkillId}`);
-    return {
-      version: 1,
-      intent: 'chat',
-      skillId: manual.id,
-      confidence: 1,
-      needsClarification: false,
-      source: 'manual',
-    };
-  }
-
-  const candidates = filterSkillCandidates(userMessage, availableManifests);
+  const manual = manualSkillId
+    ? availableManifests.find((manifest) => manifest.id === manualSkillId)
+    : null;
+  if (manualSkillId && !manual) throw new Error(`Unknown skill: ${manualSkillId}`);
+  const candidates = availableManifests.map((manifest) => ({
+    id: manifest.id,
+    name: manifest.name,
+    description: manifest.description,
+    triggerHints: [...(manifest.triggerHints || [])],
+  }));
   const fallback = {
     version: 1,
-    intent: fallbackIntent === 'skill_action' ? 'chat' : fallbackIntent,
+    route: 'chat',
+    intent: 'chat',
     skillId: null,
-    confidence: 0,
+    confidence: 'low',
     needsClarification: false,
-    source: candidates.length > 0 ? 'auto' : 'none',
+    reason: 'router_unavailable',
+    source: 'router_failed',
   };
-  if (candidates.length === 0 || typeof chatFn !== 'function' || !routerModel) return fallback;
+  if (typeof chatFn !== 'function' || !routerModel) return fallback;
 
   try {
     const response = await chatFn({
       providerId,
       model: routerModel,
-      messages: buildSkillRouterMessages({ userMessage, candidates, hasReferenceImages }),
+      messages: buildSkillRouterMessages({
+        userMessage,
+        messages,
+        candidates,
+        activeSkillId: manualSkillId,
+        hasReferenceImages,
+        referenceMetadata,
+        hasPendingConfirmation,
+      }),
       signal,
     });
     const parsed = parseAgentRoutingDecision(
       response?.choices?.[0]?.message?.content || '',
       candidates.map((candidate) => candidate.id),
     );
-    return parsed ? { ...parsed, source: 'auto' } : fallback;
+    if (!parsed) return fallback;
+    if (manual) {
+      return {
+        ...parsed,
+        skillId: parsed.route === 'planner' ? manual.id : null,
+        needsClarification: false,
+        source: 'manual_locked',
+      };
+    }
+    return { ...parsed, needsClarification: false, source: 'model' };
   } catch {
     return fallback;
   }

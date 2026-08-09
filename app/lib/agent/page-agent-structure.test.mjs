@@ -81,7 +81,7 @@ test('agent clarification uses the shared editable decision popover', () => {
   assert.doesNotMatch(decisionPopoverSource, /aria-modal="true"/);
   assert.match(decisionPopoverSource, /自定义回答|custom\.label/);
   assert.match(source, /按当前信息开始制作/);
-  assert.match(source, /\['creative_direction', 'context_reference', 'image_operation', 'skill_selection'\]\.includes/);
+  assert.match(source, /\['creative_direction', 'context_reference', 'image_operation', 'skill_selection', 'planner_model_switch'\]\.includes/);
   assert.match(source, /retry:\s*true/);
   assert.match(source, /!options\?\.agentClarification/);
   assert.match(source, /agentClarificationResponsePayload/);
@@ -123,6 +123,11 @@ test('planner failures use one message owner and expose a disabled reanalysis ac
   assert.doesNotMatch(source, /规划模型连接中断，系统已自动重试/);
 });
 
+test('planner model switching reuses the decision popover without unsafe bypass actions', () => {
+  assert.match(source, /planner_model_switch/);
+  assert.match(source, /pendingAgentClarification\.request\.dimension !== 'planner_model_switch'/);
+});
+
 test('agent proposals and context entities persist and submit stable selections', () => {
   assert.match(source, /buildAgentContextEntities/);
   assert.match(source, /contextEntities,/);
@@ -133,7 +138,7 @@ test('agent proposals and context entities persist and submit stable selections'
   assert.match(source, /pendingAgentProposal\.options\.map/);
   assert.match(source, /selectedContextEntityIds:\s*\[option\.entityId\]/);
   assert.match(source, /已采用：/);
-  assert.match(source, /\['creative_direction', 'context_reference', 'image_operation', 'skill_selection'\]\.includes/);
+  assert.match(source, /\['creative_direction', 'context_reference', 'image_operation', 'skill_selection', 'planner_model_switch'\]\.includes/);
 });
 
 test('server-selected Skills annotate the sent message without repopulating the next draft', () => {

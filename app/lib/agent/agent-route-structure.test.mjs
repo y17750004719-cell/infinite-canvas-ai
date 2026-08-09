@@ -37,7 +37,7 @@ test('agent route exposes NDJSON orchestration events and reuses the generate ro
   assert.doesNotMatch(source, /fetch\(new URL\('\/api\/generate'/);
   assert.match(source, /generatePost/);
   assert.match(source, /executeAgentTool/);
-  assert.match(source, /routeAgentRequest/);
+  assert.match(source, /resolveMainAgentFrontDoor/);
   assert.match(source, /planAgentExecutionRequest/);
   assert.match(source, /executionPlanToImageDeliveryPlan/);
   assert.match(source, /decisionSource:\s*plannerResult\.source/);
@@ -263,16 +263,12 @@ test('agent route enforces run and tool limits', () => {
   assert.match(source, /clarificationSubmissionStore\.delete\(clarificationSubmissionKey\)/);
 });
 
-test('agent route validates router provider and model overrides as one registry pair', () => {
+test('main agent Front Door reuses the selected chat provider and model', () => {
   const source = fs.readFileSync(routePath, 'utf8');
-  assert.match(source, /const requestedRouterSelection = resolveProviderModelSelection\(\{/);
-  assert.match(source, /const resolvedRouterSelection = requestedRouterSelection\.reason === 'exact'/);
-  assert.match(source, /requestedProviderId:\s*process\.env\.AGENT_ROUTER_PROVIDER_ID/);
-  assert.match(source, /requestedModel:\s*process\.env\.AGENT_ROUTER_MODEL/);
-  assert.match(source, /routerModel:\s*resolvedRouterSelection\.model/);
-  assert.match(source, /providerId:\s*resolvedRouterSelection\.providerId/);
-  assert.doesNotMatch(source, /routerModel:\s*process\.env\.AGENT_ROUTER_MODEL\s*\|\|/);
-  assert.doesNotMatch(source, /providerId:\s*process\.env\.AGENT_ROUTER_PROVIDER_ID\s*\|\|/);
+  assert.match(source, /frontDoorResult = await resolveMainAgentFrontDoor\(\{/);
+  assert.match(source, /model:\s*resolvedChatSelection\.model/);
+  assert.match(source, /providerId:\s*resolvedChatSelection\.providerId/);
+  assert.doesNotMatch(source, /AGENT_ROUTER_PROVIDER_ID|AGENT_ROUTER_MODEL/);
 });
 
 test('agent image requests opt into supplier cancellation while legacy requests stay detached', () => {
@@ -386,6 +382,12 @@ test('unified planner is authoritative and survives clarification', () => {
   assert.match(source, /referenceContext:\s*runReferenceContext/);
   assert.match(source, /vision_unsupported/);
   assert.match(source, /vision_unavailable/);
+  assert.match(source, /planner_model_switch/);
+  assert.match(source, /listAlternativeProviderModelSelections/);
+  assert.match(source, /plannerCandidates/);
+  assert.match(source, /remainingCandidates\s*\n\s*\?\s*remainingCandidates\.filter/);
+  assert.match(source, /isPlannerModelSwitch \? activeClarificationState\.plannerCandidates/);
+  assert.match(source, /plannerSelection/);
   assert.match(source, /const isPlannerFailureRetry/);
   assert.match(source, /body\.clarificationResponse\.retryMode === 'replan'/);
   assert.match(source, /activeClarificationState\.plannerFailure\?\.retryMode === 'replan'/);
@@ -397,25 +399,23 @@ test('unified planner is authoritative and survives clarification', () => {
   assert.match(source, /activeClarificationState\.executionPlan = structuredClone\(executionPlan\)/);
 });
 
-test('authoritative planning resolves and locks one local Skill before any model call', () => {
+test('main agent Front Door selects a manifest before Image Planner loads full Skill content', () => {
   const source = fs.readFileSync(routePath, 'utf8');
-  const localSelectionIndex = source.indexOf('const explicitSkillDirective = isSkillSelectionResponse');
   const firstPlannerIndex = source.indexOf('const plannerResult = await planAgentExecutionRequest');
-  const legacyRouterIndex = source.indexOf('await routeAgentRequest({');
-  assert.ok(localSelectionIndex >= 0 && firstPlannerIndex > localSelectionIndex);
-  assert.ok(legacyRouterIndex > firstPlannerIndex);
-  assert.match(source, /hasDirectSkillExecutionIntent\(latestUserMessage\)[\s\S]*findDirectSkillMatches\(latestUserMessage, skillManifests\)/);
-  assert.match(source, /dimension: 'skill_selection'/);
-  assert.match(source, /directMatches\.slice\(0, 3\)|candidates\.slice\(0, 3\)/);
-  assert.match(source, /id: 'no_skill'/);
-  assert.match(source, /writeAgentDone\('skill_selection_required'\)/);
+  const frontDoorIndex = source.indexOf('frontDoorResult = await resolveMainAgentFrontDoor({');
+  assert.ok(frontDoorIndex >= 0 && firstPlannerIndex > frontDoorIndex);
+  assert.match(source, /messages:\s*body\.messages/);
+  assert.match(source, /referenceImages:\s*body\.referenceImages \|\| \[\]/);
+  assert.match(source, /referenceContext:\s*runtimeReferenceContext/);
+  assert.match(source, /frontDoorResult\.route === 'planner'/);
+  assert.match(source, /frontDoorResult\.skillId/);
   assert.match(source, /manifests: selectedSkill \? \[selectedSkill\] : \[\]/);
   assert.match(source, /lockedSkillId: selectedSkill\?\.id \|\| null/);
   assert.match(source, /skillContent,/);
-  assert.match(source, /await ensureSelectedSkillContent\(\)[\s\S]*const plannerResult/);
+  assert.match(source, /await ensureSelectedSkillContent\(\)/);
   assert.match(source, /isSkillSelectionClarification[\s\S]*const replanned = await planAgentExecutionRequest/);
-  assert.match(source, /method: skillSelectionMethod/);
-  assert.match(source, /skillContentLength: skillContent\.length/);
+  assert.doesNotMatch(source, /hasDirectSkillExecutionIntent\(latestUserMessage\)/);
+  assert.doesNotMatch(source, /findDirectSkillMatches\(latestUserMessage/);
 });
 
 test('authoritative image execution fails closed without a complete planner contract', () => {
@@ -440,22 +440,16 @@ test('image completion summaries and prompt traces follow generated asset delive
   assert.ok(directActionIndex >= 0 && directSummaryIndex > directActionIndex);
 });
 
-test('explicit multi-image requests preserve deterministic image skills while bypassing proposals', () => {
+test('authoritative routing does not use local Skill or batch semantic selection', () => {
   const source = fs.readFileSync(routePath, 'utf8');
   assert.match(source, /const explicitBatchImageRequest = !plannerAuthoritative && !body\.activeSkillId/);
-  assert.match(source, /conversationIntent\.intent === 'image'[\s\S]*\|\| isPotentialDesignExecutionRequest\(initialBriefSource\)/);
-  assert.match(source, /isPotentialDesignExecutionRequest\(initialBriefSource\)/);
-  assert.match(source, /isReferentialShorthand\(latestUserMessage\)/);
-  assert.match(source, /const deterministicImageSkill = !plannerAuthoritative && !body\.activeSkillId/);
-  assert.match(source, /manifest\.executionMode === 'image_pipeline'/);
-  assert.match(source, /source: 'deterministic_image_skill'/);
-  assert.match(source, /source: 'deterministic_batch'/);
+  assert.doesNotMatch(source, /const deterministicImageSkill/);
+  assert.doesNotMatch(source, /source: 'deterministic_image_skill'/);
+  assert.match(source, /frontDoorResult = await resolveMainAgentFrontDoor/);
+  assert.match(source, /frontDoorResult\.route === 'planner'/);
   assert.match(source, /contextResolutionSkipped/);
-  assert.match(source, /event: 'routing\.resolved'|routing\.resolved/);
-  const batchGate = source.indexOf('const explicitBatchImageRequest');
-  const contextResolution = source.indexOf('resolveContextReference({', batchGate);
-  const modelRouting = source.indexOf('await routeAgentRequest({', contextResolution);
-  assert.ok(batchGate >= 0 && contextResolution > batchGate && modelRouting > contextResolution);
+  assert.match(source, /frontdoor\.resolved/);
+  assert.doesNotMatch(source, /routeAgentRequest/);
 });
 
 test('authoritative image plans use their final generation prompt without prompt optimization', () => {

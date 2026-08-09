@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 
 import {
   buildSkillRouterMessages,
-  filterSkillCandidates,
   parseAgentRoutingDecision,
   routeAgentRequest,
 } from './skill-router.mjs';
@@ -35,15 +34,8 @@ const manifests = [
   })),
 ];
 
-test('candidate filtering returns at most five relevant manifest summaries', () => {
-  const candidates = filterSkillCandidates('为品牌设计一张海报', manifests);
-  assert.equal(candidates.length, 5);
-  assert.ok(candidates.every((item) => !('allowedTools' in item)));
-  assert.ok(candidates.some((item) => item.id === 'brand'));
-});
-
-test('router messages expose only candidate summaries and require strict JSON', () => {
-  const candidates = filterSkillCandidates('设计 logo', manifests);
+test('router messages expose every enabled manifest and require strict JSON', () => {
+  const candidates = manifests.map(({ id, name, description, triggerHints }) => ({ id, name, description, triggerHints }));
   const messages = buildSkillRouterMessages({
     userMessage: '设计 logo',
     candidates,
@@ -51,59 +43,42 @@ test('router messages expose only candidate summaries and require strict JSON', 
   });
   assert.equal(messages[0].role, 'system');
   assert.match(messages[0].content, /Return exactly one JSON object/);
+  assert.match(messages[0].content, /chat\|vision_analysis\|planner/);
   assert.match(messages[1].content, /Logo 与品牌/);
+  assert.match(messages[1].content, /额外技能 5/);
   assert.doesNotMatch(messages[1].content, /allowedTools/);
+  assert.doesNotMatch(messages[1].content, /image_url|data:image/);
 });
 
-test('routing parser rejects unknown skills and normalizes low-confidence choices', () => {
-  const known = parseAgentRoutingDecision(JSON.stringify({
+test('routing parser accepts only the fixed route decision structure', () => {
+  const decision = parseAgentRoutingDecision(JSON.stringify({
     version: 1,
-    intent: 'image',
+    route: 'planner',
     skillId: 'logo',
-    confidence: 0.9,
-    needsClarification: false,
+    confidence: 'high',
+    reason: 'Logo generation requires execution.',
   }), ['logo']);
-  assert.equal(known.skillId, 'logo');
+  assert.equal(decision.route, 'planner');
 
   assert.equal(parseAgentRoutingDecision(JSON.stringify({
     version: 1,
-    intent: 'chat',
+    route: 'chat',
     skillId: 'unknown',
-    confidence: 0.9,
-    needsClarification: false,
-  }), ['logo']), null);
+    confidence: 'high',
+    reason: '',
+  })), null);
 
   const lowConfidence = parseAgentRoutingDecision(JSON.stringify({
     version: 1,
-    intent: 'chat',
-    skillId: 'logo',
-    confidence: 0.2,
-    needsClarification: false,
-  }), ['logo']);
-  assert.equal(lowConfidence.skillId, null);
-
-  const missingWorkflowSkill = parseAgentRoutingDecision(JSON.stringify({
-    version: 1,
-    intent: 'skill_action',
+    route: 'chat',
     skillId: null,
-    confidence: 0.9,
-    needsClarification: false,
-  }), ['brand']);
-  assert.equal(missingWorkflowSkill.intent, 'chat');
-  assert.equal(missingWorkflowSkill.skillId, null);
-
-  const lowConfidenceWorkflow = parseAgentRoutingDecision(JSON.stringify({
-    version: 1,
-    intent: 'skill_action',
-    skillId: 'brand',
-    confidence: 0.2,
-    needsClarification: false,
-  }), ['brand']);
-  assert.equal(lowConfidenceWorkflow.intent, 'chat');
-  assert.equal(lowConfidenceWorkflow.skillId, null);
+    confidence: 'low',
+    reason: '',
+  }));
+  assert.equal(lowConfidence.confidence, 'low');
 });
 
-test('manual skill bypasses the router model and remains selected', async () => {
+test('manual skill still uses the router model and remains locked', async () => {
   let calls = 0;
   const result = await routeAgentRequest({
     userMessage: '随便聊聊',
@@ -111,32 +86,63 @@ test('manual skill bypasses the router model and remains selected', async () => 
     manualSkillId: 'logo',
     chatFn: async () => {
       calls += 1;
-      return null;
+      return { choices: [{ message: { content: JSON.stringify({
+        version: 1,
+        route: 'chat',
+        skillId: null,
+        confidence: 'high',
+        reason: 'Discussion only.',
+      }) } }] };
     },
+    routerModel: 'fast-router',
   });
-  assert.equal(calls, 0);
-  assert.equal(result.skillId, 'logo');
+  assert.equal(calls, 1);
   assert.equal(result.intent, 'chat');
-  assert.equal(result.source, 'manual');
+  assert.equal(result.source, 'manual_locked');
 });
 
-test('automatic router validates model JSON and falls back safely on failure', async () => {
+test('manual Skill overrides a different Router recommendation for Image Planner', async () => {
+  const result = await routeAgentRequest({
+    userMessage: '设计一个品牌标志',
+    manifests,
+    manualSkillId: 'logo',
+    routerModel: 'fast-router',
+    chatFn: async () => ({ choices: [{ message: { content: JSON.stringify({
+      version: 1,
+      route: 'planner',
+      skillId: 'brand',
+      confidence: 'high',
+      reason: 'Brand workflow.',
+    }) } }] }),
+  });
+  assert.equal(result.skillId, 'logo');
+  assert.equal(result.source, 'manual_locked');
+});
+
+test('automatic router validates route-only model JSON and fails closed to chat', async () => {
+  let request;
   const selected = await routeAgentRequest({
     userMessage: '帮我设计一个 logo',
     manifests,
     routerModel: 'fast-router',
-    chatFn: async () => ({
-      choices: [{ message: { content: JSON.stringify({
+    hasReferenceImages: true,
+    referenceMetadata: [{ id: 'ref-1', label: '参考图', role: 'reference', source: 'upload', src: 'data:image/png;base64,secret' }],
+    chatFn: async (value) => {
+      request = value;
+      return { choices: [{ message: { content: JSON.stringify({
         version: 1,
-        intent: 'image',
+        route: 'planner',
         skillId: 'logo',
-        confidence: 0.95,
-        needsClarification: false,
-      }) } }],
-    }),
+        confidence: 'high',
+        reason: 'Image generation requires planning.',
+      }) } }] };
+    },
   });
-  assert.equal(selected.skillId, 'logo');
-  assert.equal(selected.source, 'auto');
+  assert.equal(selected.route, 'planner');
+  assert.equal(selected.source, 'model');
+  assert.equal(request.tools, undefined);
+  assert.equal(request.toolChoice, undefined);
+  assert.doesNotMatch(JSON.stringify(request.messages), /data:image|secret/);
 
   const fallback = await routeAgentRequest({
     userMessage: '开始批量生成全部品牌物料',
@@ -145,5 +151,27 @@ test('automatic router validates model JSON and falls back safely on failure', a
     chatFn: async () => { throw new Error('router unavailable'); },
   });
   assert.equal(fallback.intent, 'chat');
-  assert.equal(fallback.skillId, null);
+  assert.equal(fallback.source, 'router_failed');
+});
+
+test('router strips embedded image payloads from text and history', () => {
+  const messages = buildSkillRouterMessages({
+    userMessage: [{ type: 'text', text: '分析这张图' }, { type: 'image_url', image_url: { url: 'data:image/png;base64,secret' } }],
+    messages: [{ role: 'user', content: '历史 data:image/png;base64,secret' }],
+    candidates: [],
+  });
+  assert.doesNotMatch(JSON.stringify(messages), /data:image|secret/);
+  assert.match(JSON.stringify(messages), /\[image omitted\]/);
+});
+
+test('vision analysis remains a route-only decision', () => {
+  const decision = parseAgentRoutingDecision(JSON.stringify({
+    version: 1,
+    route: 'vision_analysis',
+    skillId: null,
+    confidence: 'high',
+    reason: 'Inspect only.',
+  }));
+  assert.equal(decision.route, 'vision_analysis');
+  assert.equal(decision.confidence, 'high');
 });

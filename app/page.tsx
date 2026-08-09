@@ -518,6 +518,16 @@ interface AgentClarificationState {
     remainingCount: number;
     batchSize: number;
   };
+  plannerCandidates?: Array<{
+    id: string;
+    providerId: string;
+    providerName: string;
+    model: string;
+  }>;
+  plannerSelection?: {
+    providerId: string;
+    model: string;
+  };
   plannerFailure?: {
     reason: 'timeout' | 'transport' | 'invalid_reference' | 'invalid_context' | 'invalid_plan' | 'vision_unsupported' | 'vision_unavailable';
     retryMode: 'replan';
@@ -20051,11 +20061,12 @@ export default function AIWorkspace() {
               }}
               onClose={closeAgentClarificationModal}
               {...(!pendingAgentClarification.request.failed
-                && !['creative_direction', 'context_reference', 'image_operation', 'skill_selection'].includes(pendingAgentClarification.request.dimension)
+                && !['creative_direction', 'context_reference', 'image_operation', 'skill_selection', 'planner_model_switch'].includes(pendingAgentClarification.request.dimension)
                 ? { skipLabel: '按当前信息开始制作', onSkip: () => submitAgentClarification(true) }
                 : {})}
               {...(!pendingAgentClarification.request.failed
                 && pendingAgentClarification.request.dimension !== 'skill_selection'
+                && pendingAgentClarification.request.dimension !== 'planner_model_switch'
                 ? {
                     custom: {
                       label: '自定义回答',

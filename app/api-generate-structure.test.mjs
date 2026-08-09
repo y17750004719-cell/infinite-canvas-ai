@@ -58,8 +58,9 @@ test('generate route accepts request-level provider routing fields and forwards 
   assert.equal(routeSource.includes('chatProviderId: typeof chatProviderId === "string" ? chatProviderId : null,'), true);
 });
 
-test('generate route rejects raw Skills on image requests while preserving chat Skill injection', () => {
-  assert.equal(routeSource.includes('resolved.intent === "image" && skill'), true);
+test('generate route rejects raw Skills on image requests while allowing the internal Image Planner bridge', () => {
+  assert.equal(routeSource.includes('resolved.intent === "image"'), true);
+  assert.equal(routeSource.includes('x-z-flow-image-planner'), true);
   assert.equal(routeSource.includes('code: "image_skill_requires_planner"'), true);
   assert.equal(routeSource.includes('resolved.intent === "chat" && skill'), true);
 });

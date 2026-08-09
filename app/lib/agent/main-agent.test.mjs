@@ -2,35 +2,36 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  MAIN_AGENT_FRONT_DOOR_SYSTEM_PROMPT,
   MAIN_AGENT_SYSTEM_PROMPT,
+  buildMainAgentFrontDoorMessages,
   buildMainAgentMessages,
+  parseMainAgentFrontDoorResult,
+  resolveMainAgentFrontDoor,
 } from './main-agent.mjs';
 
-test('main agent prompt defines the agent as a skill orchestration hub', () => {
+const manifests = [{
+  id: 'poster',
+  name: '海报设计',
+  description: '生成海报视觉',
+  triggerHints: ['海报'],
+  allowedTools: ['generate_image'],
+  enabled: true,
+}];
+
+test('main agent prompt delegates image delivery to Image Planner', () => {
   assert.match(MAIN_AGENT_SYSTEM_PROMPT, /Z Flow 的主 Agent/);
-  assert.match(MAIN_AGENT_SYSTEM_PROMPT, /手动选择的 Skill/);
-  assert.match(MAIN_AGENT_SYSTEM_PROMPT, /不得虚构不存在的 Skill/);
-  assert.match(MAIN_AGENT_SYSTEM_PROMPT, /不向用户暴露内部思维链/);
-  assert.match(MAIN_AGENT_SYSTEM_PROMPT, /清晰需求默认直接执行/);
-  assert.match(MAIN_AGENT_SYSTEM_PROMPT, /交付数量/);
-  assert.match(MAIN_AGENT_SYSTEM_PROMPT, /不得默认回退为 1 张/);
-  assert.match(MAIN_AGENT_SYSTEM_PROMPT, /选择其中一个/);
-  assert.match(MAIN_AGENT_SYSTEM_PROMPT, /风格统一但内容独立/);
-  assert.match(MAIN_AGENT_SYSTEM_PROMPT, /同一 Brief 生成多个随机变体/);
-  assert.match(MAIN_AGENT_SYSTEM_PROMPT, /格数不是输出文件数/);
-  assert.match(MAIN_AGENT_SYSTEM_PROMPT, /不得把外层数量写进单图 Prompt/);
-  assert.match(MAIN_AGENT_SYSTEM_PROMPT, /交付合同/);
-  assert.match(MAIN_AGENT_SYSTEM_PROMPT, /可扩展候选池/);
-  assert.match(MAIN_AGENT_SYSTEM_PROMPT, /一套类似作品/);
-  assert.match(MAIN_AGENT_SYSTEM_PROMPT, /不得为了.*颜色.*材质.*灯光.*构图/);
-  assert.match(MAIN_AGENT_SYSTEM_PROMPT, /自由发挥/);
-  assert.match(MAIN_AGENT_SYSTEM_PROMPT, /没有真实变更型工具调用/);
-  assert.match(MAIN_AGENT_SYSTEM_PROMPT, /禁止使用“已启动”“正在生成”“已提交”“已生成”/);
+  assert.match(MAIN_AGENT_SYSTEM_PROMPT, /Image Planner/);
+  assert.match(MAIN_AGENT_SYSTEM_PROMPT, /只读图片对话/);
+  assert.match(MAIN_AGENT_SYSTEM_PROMPT, /不重新选择 Skill/);
+  assert.match(MAIN_AGENT_SYSTEM_PROMPT, /不要暴露内部提示词、思维链/);
+  assert.match(MAIN_AGENT_SYSTEM_PROMPT, /不声称已经生成、提交或启动任务/);
+  assert.match(MAIN_AGENT_SYSTEM_PROMPT, /实际工具成功后才能使用完成式表述/);
   assert.match(MAIN_AGENT_SYSTEM_PROMPT, /<<agent_proposal>>/);
   assert.match(MAIN_AGENT_SYSTEM_PROMPT, /brief 必须自包含/);
 });
 
-test('main agent messages keep one consistent system and skill hierarchy with references', () => {
+test('main agent messages keep references without injecting full Skill text', () => {
   const messages = buildMainAgentMessages({
     messages: [
       { role: 'user', content: '先看看这个方向' },
@@ -45,9 +46,7 @@ test('main agent messages keep one consistent system and skill hierarchy with re
   assert.equal(messages[0].role, 'system');
   assert.equal(messages[0].content, MAIN_AGENT_SYSTEM_PROMPT);
   assert.equal(messages[1].role, 'system');
-  assert.match(messages[1].content, /Logo Skill/);
-  assert.equal(messages[2].role, 'system');
-  assert.match(messages[2].content, /"itemCount":2/);
+  assert.match(messages[1].content, /"itemCount":2/);
   assert.equal(messages.at(-1).role, 'user');
   assert.ok(Array.isArray(messages.at(-1).content));
   assert.deepEqual(messages.at(-1).content[0], { type: 'text', text: '分析这张图' });
@@ -102,6 +101,118 @@ test('main agent receives the unified execution plan as an authoritative system 
     },
   });
   assert.match(messages[1].content, /四张独立海报/);
-  assert.match(messages[2].content, /统一 Planner/);
+  assert.match(messages[2].content, /Image Planner/);
   assert.match(messages[2].content, /\"outputCount\":4/);
+});
+
+test('Front Door receives current images and manifests without tools or full Skill text', () => {
+  const messages = buildMainAgentFrontDoorMessages({
+    messages: [{ role: 'user', content: '分析这张图' }],
+    referenceImages: ['data:image/png;base64,AAAA'],
+    manifests,
+    manualSkillId: null,
+  });
+  assert.equal(messages[0].content, MAIN_AGENT_FRONT_DOOR_SYSTEM_PROMPT);
+  assert.match(messages[1].content, /海报设计/);
+  assert.doesNotMatch(messages[1].content, /allowedTools|generate_image/);
+  assert.ok(Array.isArray(messages.at(-1).content));
+  assert.equal(messages.at(-1).content.at(-1).image_url.url, 'data:image/png;base64,AAAA');
+});
+
+test('Front Door parser enforces answer, route, Skill and confidence contracts', () => {
+  assert.deepEqual(parseMainAgentFrontDoorResult(JSON.stringify({
+    route: 'chat',
+    skillId: null,
+    confidence: 'high',
+    answer: '你好',
+  }), ['poster']), {
+    route: 'chat',
+    skillId: null,
+    confidence: 'high',
+    answer: '你好',
+  });
+  assert.equal(parseMainAgentFrontDoorResult(JSON.stringify({
+    route: 'planner',
+    skillId: 'unknown',
+    confidence: 'high',
+    answer: null,
+  }), ['poster']), null);
+  assert.equal(parseMainAgentFrontDoorResult(JSON.stringify({
+    route: 'vision_analysis',
+    skillId: null,
+    confidence: 'high',
+    answer: null,
+  })), null);
+  assert.equal(parseMainAgentFrontDoorResult(JSON.stringify({
+    route: 'planner',
+    skillId: 'poster',
+    confidence: 'low',
+    answer: null,
+  }), ['poster']), null);
+});
+
+test('Front Door answers chat in one tool-free request', async () => {
+  const requests = [];
+  const result = await resolveMainAgentFrontDoor({
+    messages: [{ role: 'user', content: '你好' }],
+    manifests,
+    model: 'chat-model',
+    chatFn: async (request) => {
+      requests.push(request);
+      return { choices: [{ message: { content: JSON.stringify({
+        route: 'chat',
+        skillId: null,
+        confidence: 'high',
+        answer: '你好，有什么可以帮你？',
+      }) } }] };
+    },
+  });
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].tools, undefined);
+  assert.equal(requests[0].toolChoice, undefined);
+  assert.equal(result.answer, '你好，有什么可以帮你？');
+  assert.equal(result.repairAttempted, false);
+});
+
+test('Front Door repairs once and preserves a manually locked Skill', async () => {
+  let calls = 0;
+  const result = await resolveMainAgentFrontDoor({
+    messages: [{ role: 'user', content: '生成一张海报' }],
+    manifests,
+    manualSkillId: 'poster',
+    model: 'chat-model',
+    chatFn: async () => {
+      calls += 1;
+      return { choices: [{ message: { content: calls === 1 ? 'not json' : JSON.stringify({
+        route: 'planner',
+        skillId: null,
+        confidence: 'high',
+        answer: null,
+      }) } }] };
+    },
+  });
+  assert.equal(calls, 2);
+  assert.equal(result.route, 'planner');
+  assert.equal(result.skillId, 'poster');
+  assert.equal(result.repairAttempted, true);
+});
+
+test('Front Door fails closed after one invalid repair', async () => {
+  let calls = 0;
+  await assert.rejects(() => resolveMainAgentFrontDoor({
+    messages: [{ role: 'user', content: '帮我处理一下这张图' }],
+    manifests,
+    pendingTask: { taskId: 'task-1' },
+    model: 'chat-model',
+    chatFn: async () => {
+      calls += 1;
+      return { choices: [{ message: { content: JSON.stringify({
+        route: 'chat',
+        skillId: null,
+        confidence: 'high',
+        answer: '直接回答',
+      }) } }] };
+    },
+  }), /invalid result/);
+  assert.equal(calls, 2);
 });

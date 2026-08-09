@@ -7,16 +7,14 @@ import {
   resolveImageDeliveryPlan,
 } from '../../lib/agent/prompt-optimizer.mjs';
 import {
-  findDirectSkillMatches,
-  hasDirectSkillExecutionIntent,
   listSkillManifests,
   loadSkillContent,
   resolveExplicitSkillDirective,
-  selectSkillForPrompt,
-  shouldInjectActiveSkill,
 } from '../../lib/agent/skill-registry.mjs';
-import { buildMainAgentMessages } from '../../lib/agent/main-agent.mjs';
-import { routeAgentRequest } from '../../lib/agent/skill-router.mjs';
+import {
+  buildMainAgentMessages,
+  resolveMainAgentFrontDoor,
+} from '../../lib/agent/main-agent.mjs';
 import {
   buildAgentTaskContract,
   executionPlanToBrief,
@@ -51,7 +49,10 @@ import {
 } from '../../lib/agent/tool-registry.mjs';
 import { createSkillJob, getSkillJob, toJobSummary } from '../../lib/skill-jobs';
 import { readProviderRegistry } from '../../lib/provider-config.mjs';
-import { resolveProviderModelSelection } from '../../lib/provider-model-selection.mjs';
+import {
+  listAlternativeProviderModelSelections,
+  resolveProviderModelSelection,
+} from '../../lib/provider-model-selection.mjs';
 import { createLogger } from '../../lib/logger';
 import { buildProviderImageOptionProfiles } from '../../lib/image-provider-option-profiles.mjs';
 import {
@@ -84,6 +85,7 @@ import type {
   AgentExecutionPlan,
   AgentImageTask,
   AgentPlanPresentation,
+  AgentPlannerModelCandidate,
   AgentPlannerSourceDetail,
   AgentTaskContract,
 } from '../../lib/agent/execution-planner.types';
@@ -164,32 +166,42 @@ function createImageOperationClarificationRequest(taskId: string): AgentClarific
   };
 }
 
-function createSkillSelectionClarificationRequest(
+function createPlannerModelSwitchClarification(
   taskId: string,
-  candidates: Array<{ id: string; name: string; description?: string }>,
-): AgentClarificationRequest {
-  return {
+  providers: Awaited<ReturnType<typeof readProviderRegistry>>['providers'],
+  currentProviderId: string | undefined,
+  currentModel: string,
+  remainingCandidates?: AgentPlannerModelCandidate[],
+) {
+  const plannerCandidates = remainingCandidates
+    ? remainingCandidates.filter((candidate) => (
+        candidate.providerId !== currentProviderId || candidate.model !== currentModel
+      )).slice(0, 3)
+    : listAlternativeProviderModelSelections({
+        providers,
+        currentProviderId,
+        currentModel,
+        limit: 3,
+      }).map((candidate, index) => ({ ...candidate, id: `planner-model-${index + 1}` }));
+  if (plannerCandidates.length === 0) return null;
+  const currentProvider = providers.find((provider) => provider.id === currentProviderId);
+  const currentLabel = [currentProvider?.name || currentProviderId, currentModel].filter(Boolean).join(' / ');
+  const question = `${currentLabel || '当前分析模型'} 不支持图片输入。请选择另一个模型重新分析。`;
+  const request: AgentClarificationRequest = {
     id: randomUUID(),
     taskId,
-    question: '这个请求同时匹配多个 Skill，请选择要使用哪一个。',
-    dimension: 'skill_selection',
-    options: [
-      ...candidates.slice(0, 3).map((candidate) => ({
-        id: candidate.id,
-        label: candidate.name,
-        answer: `使用 ${candidate.name}（${candidate.id}）处理当前任务。`,
-        ...(candidate.description ? { description: candidate.description } : {}),
-      })),
-      {
-        id: 'no_skill',
-        label: '不使用 Skill',
-        answer: '不使用 Skill，按普通模式处理当前任务。',
-        description: '不注入任何 Skill 正文，由普通 Planner 理解需求。',
-      },
-    ],
+    question,
+    dimension: 'planner_model_switch',
+    options: plannerCandidates.map((candidate) => ({
+      id: candidate.id,
+      label: `${candidate.providerName} / ${candidate.model}`,
+      answer: `使用 ${candidate.providerName} 的 ${candidate.model} 重新分析当前图片。`,
+      description: '确认后才会把当前图片发送给该供应商。',
+    })),
     allowCustom: true,
     allowProceed: true,
   };
+  return { request, plannerCandidates };
 }
 
 type AgentImagePromptCompilation = {
@@ -278,7 +290,7 @@ type ConfirmationRecord = {
 type AgentImageCountSource = 'clarification' | 'prompt' | 'interface' | 'default' | 'batch';
 type AgentImageBatchMode = 'series' | 'variants' | 'composite';
 type ImageDeliveryPlan = ReturnType<typeof resolveImageDeliveryPlan>;
-type SkillSelectionMethod = 'manual_ui' | 'manual_text' | 'local_direct' | 'user_choice' | 'none';
+type SkillSelectionMethod = 'manual_ui' | 'manual_text' | 'model' | 'user_choice' | 'none';
 
 type AgentImageGenerationItem = {
   id: string;
@@ -952,17 +964,6 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : 'Invalid skill' }, { status: 400 });
   }
-  const deterministicImageSkill = !plannerAuthoritative && !body.activeSkillId
-    && (
-      conversationIntent.intent === 'image'
-      || isPotentialDesignExecutionRequest(initialBriefSource)
-    )
-    ? selectSkillForPrompt(
-        initialBriefSource,
-        skillManifests.filter((manifest) => manifest.executionMode === 'image_pipeline'),
-      )
-    : null;
-
   const providers = (await readProviderRegistry()).providers;
   const providerImageOptionProfiles = buildProviderImageOptionProfiles(providers);
   const requestedInterfaceImageCount = normalizeAgentImageCount(body.imageOptions?.count);
@@ -976,15 +977,6 @@ export async function POST(request: NextRequest) {
   if (!resolvedChatSelection.model || !resolvedChatSelection.providerId) {
     return NextResponse.json({ error: 'No enabled chat provider and model are configured' }, { status: 400 });
   }
-  const requestedRouterSelection = resolveProviderModelSelection({
-    providers,
-    purpose: 'chat',
-    requestedProviderId: process.env.AGENT_ROUTER_PROVIDER_ID || resolvedChatSelection.providerId || undefined,
-    requestedModel: process.env.AGENT_ROUTER_MODEL || resolvedChatSelection.model,
-  });
-  const resolvedRouterSelection = requestedRouterSelection.reason === 'exact'
-    ? requestedRouterSelection
-    : resolvedChatSelection;
   const configuredPlannerProviderId = process.env.AGENT_PLANNER_PROVIDER_ID?.trim() || '';
   const configuredPlannerModel = process.env.AGENT_PLANNER_MODEL?.trim() || '';
   if (Boolean(configuredPlannerProviderId) !== Boolean(configuredPlannerModel)) {
@@ -1074,6 +1066,7 @@ export async function POST(request: NextRequest) {
       let executionPlanSource: 'model' | 'fallback' | null = executionPlan ? 'model' : null;
       let executionPlanSourceDetail: AgentPlannerSourceDetail | null = executionPlan ? 'tool_call' : null;
       let executionKind: AgentExecutionPlan['execution']['kind'] | null = executionPlan?.execution.kind || null;
+      let frontDoorResult: Awaited<ReturnType<typeof resolveMainAgentFrontDoor>> | null = null;
       let promptCompilation: AgentImagePromptCompilation | undefined;
       let taskExecutionReservation: ReturnType<typeof reserveTaskExecution> | null = null;
       let completedTaskIdentities: AgentPendingAssetIdentity[] = [];
@@ -1407,10 +1400,14 @@ export async function POST(request: NextRequest) {
           runTask: async (requestBody: Record<string, unknown>) => {
             const generationRequest = new NextRequest(new URL('/api/generate', request.url), {
               method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
+              headers: {
+                'Content-Type': 'application/json',
+                'x-z-flow-image-planner': '1',
+              },
               signal: runSignal,
               body: JSON.stringify({
                 ...requestBody,
+                skill: selectedSkill?.id || null,
                 cancelWithRequest: true,
               }),
             });
@@ -2169,10 +2166,7 @@ export async function POST(request: NextRequest) {
           const activeUiSkill = body.activeSkillId
             ? skillManifests.find((manifest) => manifest.id === body.activeSkillId) || null
             : null;
-          if (activeUiSkill && (
-            isPotentialDesignExecutionRequest(latestUserMessage)
-            || shouldInjectActiveSkill(latestUserMessage, activeUiSkill)
-          )) {
+          if (activeUiSkill) {
             selectedSkill = activeUiSkill;
             skillSource = 'manual';
             skillSelectionMethod = 'manual_ui';
@@ -2186,79 +2180,127 @@ export async function POST(request: NextRequest) {
             }
             skillSource = selectedSkill ? activeClarificationState.skillSource || 'manual' : null;
             skillSelectionMethod = selectedSkill
-              ? activeClarificationState.skillSource === 'auto' ? 'local_direct' : 'manual_ui'
+              ? activeClarificationState.skillSource === 'auto' ? 'model' : 'manual_ui'
               : 'none';
             skillCandidateIds = selectedSkill ? [selectedSkill.id] : [];
           } else {
             selectedSkill = null;
             skillSource = null;
-            const directMatches = hasDirectSkillExecutionIntent(latestUserMessage)
-              ? findDirectSkillMatches(latestUserMessage, skillManifests)
-              : [];
-            skillCandidateIds = directMatches.map((entry) => entry.manifest.id);
-            if (directMatches.length > 1) {
-              const taskId = randomUUID();
-              const clarificationRequest = createSkillSelectionClarificationRequest(
-                taskId,
-                directMatches.map((entry) => entry.manifest),
-              );
-              writeEvent(controller, { type: 'routing_start' });
-              writeProgress({ stepId: 'routing', phase: 'routing', status: 'completed', label: '需要选择 Skill' });
-              writeProgress({ stepId: 'clarification', phase: 'waiting_input', status: 'waiting', label: '等待选择 Skill' });
-              const checkpoint = progressTracker.snapshot();
-              writeEvent(controller, {
-                type: 'clarification_required',
-                message: clarificationRequest.question,
-                request: clarificationRequest,
-                state: {
-                  taskId,
-                  operationId: checkpoint.operationId,
-                  skillSource: null,
-                  lastSequence: checkpoint.lastSequence,
-                  intent: directMatches.every((entry) => entry.manifest.executionMode === 'image_pipeline') ? 'image' : 'skill_action',
-                  originalRequest: latestUserMessage,
-                  workingBrief: latestUserMessage,
-                  askedDimensions: [],
-                  answers: [],
-                  referenceImages: executionReferenceImages,
-                  ...(runReferenceContext ? { referenceContext: structuredClone(runReferenceContext) } : {}),
-                },
-              });
-              writeAgentDone('skill_selection_required');
-              void contextLogger.info('skill.selection_required', 'Multiple local Skill candidates require user selection', {
-                method: 'none',
-                candidateIds: skillCandidateIds,
-                fullSkillInjected: false,
-                skillContentLength: 0,
-                mutationBlocked: true,
-              });
-              return;
-            }
-            if (directMatches.length === 1) {
-              selectedSkill = directMatches[0].manifest;
-              skillSource = 'auto';
-              skillSelectionMethod = 'local_direct';
-            } else {
-              skillSelectionMethod = 'none';
-            }
+            skillCandidateIds = [];
+            skillSelectionMethod = 'none';
           }
         }
 
-        await ensureSelectedSkillContent();
         if (activeSkillChange !== undefined) {
           writeEvent(controller, { type: 'active_skill_changed', skill: activeSkillChange });
         }
-        void contextLogger.info('skill.selection', 'Agent Skill selection resolved locally before planning', {
+        void contextLogger.info('skill.selection_input', 'Explicit Skill state prepared for Main Agent Front Door', {
           method: skillSelectionMethod,
           selectedSkillId: selectedSkill?.id || null,
           candidateIds: skillCandidateIds,
           fullSkillInjected: Boolean(selectedSkill && skillContent),
           skillContentLength: skillContent.length,
         });
+        writeProgress({ stepId: 'routing', phase: 'routing', status: 'active', label: '正在理解并路由请求' });
+        writeEvent(controller, { type: 'routing_start' });
+        const frontDoorStartedAt = Date.now();
+        try {
+          frontDoorResult = await resolveMainAgentFrontDoor({
+            messages: body.messages,
+            referenceImages: body.referenceImages || [],
+            referenceContext: runtimeReferenceContext,
+            manifests: skillManifests,
+            manualSkillId: skillSource === 'manual' ? selectedSkill?.id || null : null,
+            pendingTask: activeClarificationState ? {
+              taskId: activeClarificationState.taskId,
+              intent: activeClarificationState.intent,
+              skillId: activeClarificationState.skillId || null,
+              clarificationDimension: body.clarificationRequest?.dimension || null,
+              hasExecutionPlan: Boolean(executionPlan),
+            } : null,
+            model: resolvedChatSelection.model,
+            providerId: resolvedChatSelection.providerId || undefined,
+            signal: runSignal,
+            chatFn: chat,
+          });
+        } catch (error) {
+          void contextLogger.warn('frontdoor.failed', 'Main Agent Front Door failed closed', {
+            durationMs: Date.now() - frontDoorStartedAt,
+            providerId: resolvedChatSelection.providerId || null,
+            model: resolvedChatSelection.model,
+            referenceCount: runtimeReferenceContext?.references.length || body.referenceImages?.length || 0,
+            error: error instanceof Error ? error.message : String(error),
+            repairAttempted: error instanceof Error && 'repairAttempted' in error
+              ? Boolean((error as Error & { repairAttempted?: boolean }).repairAttempted)
+              : null,
+            mutationBlocked: true,
+          });
+          throw error;
+        }
+        void contextLogger.info('frontdoor.resolved', 'Main Agent Front Door resolved the request', {
+          durationMs: Date.now() - frontDoorStartedAt,
+          route: frontDoorResult.route,
+          confidence: frontDoorResult.confidence,
+          reason: frontDoorResult.reason || null,
+          skillId: frontDoorResult.skillId,
+          repairAttempted: frontDoorResult.repairAttempted || false,
+          referenceCount: runtimeReferenceContext?.references.length || body.referenceImages?.length || 0,
+          toolsExposed: false,
+        });
+        if (activeClarificationState && selectedSkill && frontDoorResult.route === 'planner') {
+          frontDoorResult.skillId = selectedSkill.id;
+        }
+        if (
+          !selectedSkill
+          && frontDoorResult.route === 'planner'
+          && frontDoorResult.skillId
+        ) {
+          selectedSkill = skillManifests.find((manifest) => manifest.id === frontDoorResult.skillId) || null;
+          if (!selectedSkill) {
+            throw new Error('Main Agent Front Door selected a Skill that is no longer enabled');
+          }
+          skillSource = 'auto';
+          skillSelectionMethod = 'model';
+          skillCandidateIds = [selectedSkill.id];
+          await ensureSelectedSkillContent();
+        }
+        if (frontDoorResult.route === 'planner' && selectedSkill) {
+          await ensureSelectedSkillContent();
+        }
+        void contextLogger.info('skill.selection', 'Front Door and explicit Skill selection resolved for Image Planner', {
+          method: skillSelectionMethod,
+          selectedSkillId: selectedSkill?.id || null,
+          candidateIds: skillCandidateIds,
+          fullSkillInjected: Boolean(selectedSkill && skillContent),
+          skillContentLength: skillContent.length,
+        });
+        if (frontDoorResult.route !== 'planner') {
+          intent = 'chat';
+          const frontDoorProposal = parseAgentProposalBlock(frontDoorResult.answer || '');
+          const safeFrontDoorAnswer = sanitizeAgentResponseContent(frontDoorProposal.cleanContent, false);
+          writeProgress({ stepId: 'routing', phase: 'routing', status: 'completed', label: '请求路由完成' });
+          writeEvent(controller, { type: 'intent_resolved', intent });
+          writeProgress({ stepId: 'composing', phase: 'responding', status: 'active', label: '正在组织回复' });
+          if (frontDoorProposal.proposal) {
+            writeEvent(controller, { type: 'proposal_presented', proposal: frontDoorProposal.proposal });
+          }
+          if (safeFrontDoorAnswer) {
+            writeEvent(controller, {
+              type: 'assistant_delta',
+              delta: safeFrontDoorAnswer,
+              channel: 'content',
+              model: resolvedChatSelection.model,
+            });
+          }
+          writeProgress({ stepId: 'composing', phase: 'responding', status: 'completed', label: '回复已完成' });
+          writeAgentDone('completed');
+          return;
+        }
         if (
           !body.clarificationResponse
           && (!activeClarificationState || legacyExecutionPlanDetected)
           && plannerAuthoritative
+          && frontDoorResult.route === 'planner'
         ) {
           const plannerStartedAt = Date.now();
           const plannerHasVisualReferences = Boolean(runReferenceContext?.references.length);
@@ -2270,6 +2312,11 @@ export async function POST(request: NextRequest) {
               ? activeClarificationState?.workingBrief || activeClarificationState?.originalRequest || latestUserMessage
               : latestUserMessage,
             messages: body.messages,
+            frontDoorDecision: {
+              route: 'planner',
+              skillId: frontDoorResult.skillId,
+              confidence: frontDoorResult.confidence,
+            },
             manifests: selectedSkill ? [selectedSkill] : [],
             contextEntities,
             selectedContextEntityIds,
@@ -2300,7 +2347,7 @@ export async function POST(request: NextRequest) {
           }
           if (plannerShadowMode) {
             const shadowPlan = plannerResult.plan;
-            void contextLogger.info('planner.shadow', 'Unified planner shadow result', {
+            void contextLogger.info('planner.shadow', 'Image Planner shadow result', {
               durationMs: Date.now() - plannerStartedAt,
               providerId: plannerProviderId || null,
               model: plannerModel,
@@ -2333,14 +2380,14 @@ export async function POST(request: NextRequest) {
               } : null,
               legacy: {
                 intent: conversationIntent.intent,
-                skillId: deterministicImageSkill?.id || null,
+                skillId: null,
                 deliveryMode: initialDeliveryPlan.mode,
                 outputCount: initialDeliveryPlan.outputCount,
                 contextStatus: initialContextResolution.status,
               },
               disagreements: {
                 intent: shadowPlan ? (shadowPlan.intent === 'analysis' ? 'chat' : shadowPlan.intent) !== conversationIntent.intent : null,
-                skill: shadowPlan ? (shadowPlan.skillId || null) !== (deterministicImageSkill?.id || null) : null,
+                skill: shadowPlan ? Boolean(shadowPlan.skillId) : null,
                 deliveryMode: shadowPlan ? (shadowPlan.delivery.mode === 'single' ? 'variants' : shadowPlan.delivery.mode) !== initialDeliveryPlan.mode : null,
                 outputCount: shadowPlan ? shadowPlan.delivery.outputCount !== initialDeliveryPlan.outputCount : null,
               },
@@ -2385,6 +2432,15 @@ export async function POST(request: NextRequest) {
                 return;
               }
               const plannerFailureReason = plannerResult.failureReason || 'invalid_plan';
+              const failedTaskId = randomUUID();
+              const plannerModelSwitch = plannerFailureReason === 'vision_unsupported'
+                ? createPlannerModelSwitchClarification(
+                    failedTaskId,
+                    providers,
+                    plannerProviderId,
+                    plannerModel,
+                  )
+                : null;
               const plannerFailureMessage = plannerFailureReason === 'timeout'
                 ? 'Agent 分析超时，未生成有效执行计划。请重新分析。'
                 : plannerFailureReason === 'transport'
@@ -2398,7 +2454,7 @@ export async function POST(request: NextRequest) {
                     : plannerFailureReason === 'vision_unavailable'
                       ? '引用图片无法读取，请重新选择图片后分析。'
                   : 'Agent 未能生成完整的执行计划，请重新分析。';
-              void contextLogger.warn('planner.failed', 'Unified planner failed closed before execution', {
+              void contextLogger.warn('planner.failed', 'Image Planner failed closed before execution', {
                 durationMs: Date.now() - plannerStartedAt,
                 providerId: plannerProviderId || null,
                 model: plannerModel,
@@ -2418,8 +2474,38 @@ export async function POST(request: NextRequest) {
                 visualEvidenceCount: runReferenceContext?.evidenceImages?.length || 0,
                 mutationBlocked: true,
               });
+              if (plannerModelSwitch) {
+                writeProgress({ stepId: 'routing', phase: 'waiting_input', status: 'waiting', label: '等待选择支持图片输入的分析模型' });
+                const switchCheckpoint = progressTracker.snapshot();
+                writeEvent(controller, {
+                  type: 'clarification_required',
+                  message: plannerModelSwitch.request.question,
+                  request: plannerModelSwitch.request,
+                  state: {
+                    taskId: failedTaskId,
+                    operationId: switchCheckpoint.operationId,
+                    skillSource,
+                    lastSequence: switchCheckpoint.lastSequence,
+                    intent: 'image',
+                    ...(selectedSkill ? { skillId: selectedSkill.id } : {}),
+                    originalRequest: latestUserMessage,
+                    workingBrief: latestUserMessage,
+                    askedDimensions: [],
+                    answers: [],
+                    referenceImages: executionReferenceImages,
+                    ...(runReferenceContext ? { referenceContext: structuredClone(runReferenceContext) } : {}),
+                    plannerCandidates: plannerModelSwitch.plannerCandidates,
+                    plannerFailure: {
+                      reason: plannerFailureReason,
+                      retryMode: 'replan',
+                      failedAt: Date.now(),
+                    },
+                  },
+                });
+                writeAgentDone('clarification_required');
+                return;
+              }
               writeProgress({ stepId: 'routing', phase: 'planning', status: 'failed', label: '需求规划失败，已停止执行' });
-              const failedTaskId = randomUUID();
               const failedRequest: AgentClarificationRequest = {
                 id: randomUUID(),
                 taskId: failedTaskId,
@@ -2498,7 +2584,7 @@ export async function POST(request: NextRequest) {
                   entityIds: referenced.map((entity) => entity.id),
                 }
               : { status: 'none', detected: false, confidence: 'none', candidates: [], entityIds: [] };
-            void contextLogger.info('planner.resolved', 'Unified agent execution plan resolved', {
+            void contextLogger.info('planner.resolved', 'Image Planner execution plan resolved', {
               durationMs: Date.now() - plannerStartedAt,
               providerId: plannerProviderId || null,
               model: plannerModel,
@@ -2677,14 +2763,37 @@ export async function POST(request: NextRequest) {
             return;
           }
         }
-        writeProgress({ stepId: 'routing', phase: 'routing', status: 'active', label: '正在理解并路由请求' });
-        writeEvent(controller, { type: 'routing_start' });
         let routingDecision = null;
         if (body.clarificationResponse && activeClarificationState && body.clarificationRequest) {
           const retryClarification = body.clarificationResponse.retry === true;
           const isPlannerFailureRequest = body.clarificationRequest.dimension === 'planner_failure';
           const isImageOperationClarification = body.clarificationRequest.dimension === 'image_operation';
           const isSkillSelectionClarification = body.clarificationRequest.dimension === 'skill_selection';
+          const isPlannerModelSwitch = body.clarificationRequest.dimension === 'planner_model_switch';
+          const selectedPlannerCandidate = isPlannerModelSwitch
+            ? activeClarificationState.plannerCandidates?.find((candidate) => (
+                candidate.id === body.clarificationResponse?.selectedOptionId
+              ))
+            : undefined;
+          const selectedPlannerResolution = selectedPlannerCandidate
+            ? resolveProviderModelSelection({
+                providers,
+                purpose: 'chat',
+                requestedProviderId: selectedPlannerCandidate.providerId,
+                requestedModel: selectedPlannerCandidate.model,
+              })
+            : null;
+          if (
+            isPlannerModelSwitch
+            && (
+              !selectedPlannerCandidate
+              || selectedPlannerResolution?.reason !== 'exact'
+              || selectedPlannerResolution.providerId !== selectedPlannerCandidate.providerId
+              || selectedPlannerResolution.model !== selectedPlannerCandidate.model
+            )
+          ) {
+            throw new Error('Planner model selection is no longer an enabled provider and model pair');
+          }
           const isPlannerFailureRetry = isPlannerFailureRequest
             && retryClarification
             && body.clarificationResponse.retryMode === 'replan'
@@ -2710,27 +2819,40 @@ export async function POST(request: NextRequest) {
             body.clarificationRequest,
             body.clarificationResponse,
           );
-          executionBrief = isPlannerFailureRetry
+          if (selectedPlannerResolution?.providerId && selectedPlannerResolution.model) {
+            activeClarificationState.plannerSelection = {
+              providerId: selectedPlannerResolution.providerId,
+              model: selectedPlannerResolution.model,
+            };
+          }
+          executionBrief = isPlannerFailureRetry || isPlannerModelSwitch
             ? activeClarificationState.originalRequest
             : activeClarificationState.workingBrief || activeClarificationState.originalRequest;
           executionReferenceImages = [...(activeClarificationState.referenceImages || executionReferenceImages)];
           const shouldReplan = plannerAuthoritative
             && (
               isPlannerFailureRetry
+              || isPlannerModelSwitch
               || isImageOperationClarification
               || isSkillSelectionClarification
               || legacyExecutionPlanDetected
               || activeClarificationState.executionPlan?.needsClarification === true
             );
           if (shouldReplan) {
+            await ensureSelectedSkillContent();
             const plannerStartedAt = Date.now();
             const plannerHasVisualReferences = Boolean(runReferenceContext?.references.length);
-            const plannerSelection = explicitPlannerSelection || resolvedChatSelection;
+            const plannerSelection = activeClarificationState.plannerSelection || explicitPlannerSelection || resolvedChatSelection;
             const plannerModel = plannerSelection.model;
             const plannerProviderId = plannerSelection.providerId || undefined;
             const replanned = await planAgentExecutionRequest({
               userMessage: executionBrief,
               messages: body.messages,
+              frontDoorDecision: frontDoorResult ? {
+                route: 'planner',
+                skillId: frontDoorResult.skillId,
+                confidence: frontDoorResult.confidence,
+              } : null,
               manifests: selectedSkill ? [selectedSkill] : [],
               contextEntities,
               selectedContextEntityIds,
@@ -2808,6 +2930,48 @@ export async function POST(request: NextRequest) {
                     : failureReason === 'invalid_context'
                       ? 'Agent 混淆了图片引用和画布上下文，已停止执行。请重新分析。'
                       : 'Agent 未能生成完整的执行计划，请重新分析。';
+              const replannedModelSwitch = failureReason === 'vision_unsupported'
+                ? createPlannerModelSwitchClarification(
+                    activeClarificationState.taskId,
+                    providers,
+                    plannerProviderId,
+                    plannerModel,
+                    isPlannerModelSwitch ? activeClarificationState.plannerCandidates : undefined,
+                  )
+                : null;
+              if (replannedModelSwitch) {
+                writeProgress({ stepId: 'clarification', phase: 'waiting_input', status: 'waiting', label: '等待选择支持图片输入的分析模型' });
+                const switchCheckpoint = progressTracker.snapshot();
+                writeEvent(controller, {
+                  type: 'clarification_required',
+                  message: replannedModelSwitch.request.question,
+                  request: replannedModelSwitch.request,
+                  state: {
+                    ...activeClarificationState,
+                    operationId: switchCheckpoint.operationId,
+                    skillSource,
+                    lastSequence: switchCheckpoint.lastSequence,
+                    executionPlan: undefined,
+                    referenceImages: [...executionReferenceImages],
+                    ...(runReferenceContext ? { referenceContext: structuredClone(runReferenceContext) } : {}),
+                    plannerCandidates: replannedModelSwitch.plannerCandidates,
+                    plannerFailure: {
+                      reason: failureReason,
+                      retryMode: 'replan',
+                      failedAt: Date.now(),
+                    },
+                  },
+                });
+                writeAgentDone('clarification_required');
+                void contextLogger.warn('planner.clarification_model_switch', 'Planner needs user-approved visual model switch', {
+                  durationMs: Date.now() - plannerStartedAt,
+                  providerId: plannerProviderId || null,
+                  model: plannerModel,
+                  candidates: replannedModelSwitch.plannerCandidates,
+                  mutationBlocked: true,
+                });
+                return;
+              }
               writeProgress({ stepId: 'clarification', phase: 'planning', status: 'failed', label: '补充信息规划失败' });
               const failedRequest: AgentClarificationRequest = {
                 id: randomUUID(),
@@ -2984,14 +3148,14 @@ export async function POST(request: NextRequest) {
                 clarificationQuestion: executionPlan.clarification?.question,
                 source: executionPlanSource || 'fallback',
               }
-            : deterministicImageSkill
+            : frontDoorResult
             ? {
                 version: 1,
                 intent: 'image' as const,
-                skillId: deterministicImageSkill.id,
-                confidence: 1,
+                skillId: frontDoorResult.skillId,
+                confidence: frontDoorResult.confidence === 'high' ? 1 : frontDoorResult.confidence === 'medium' ? 0.7 : 0.4,
                 needsClarification: false,
-                source: 'deterministic_image_skill',
+                source: 'frontdoor',
               }
             : explicitBatchImageRequest
             ? {
@@ -3002,20 +3166,11 @@ export async function POST(request: NextRequest) {
                 needsClarification: false,
                 source: 'deterministic_batch',
               }
-            : await routeAgentRequest({
-                userMessage: latestUserMessage,
-                manifests: skillManifests,
-                manualSkillId: body.activeSkillId,
-                hasReferenceImages: Boolean(body.referenceImages?.length),
-                routerModel: resolvedRouterSelection.model,
-                providerId: resolvedRouterSelection.providerId || undefined,
-                signal: runSignal,
-                chatFn: chat,
-              });
-          selectedSkill = routingDecision.skillId
-            ? skillManifests.find((manifest) => manifest.id === routingDecision.skillId) || null
             : null;
-          skillSource = selectedSkill ? (body.activeSkillId ? 'manual' : 'auto') : null;
+          if (!selectedSkill && executionPlan?.skillId) {
+            selectedSkill = skillManifests.find((manifest) => manifest.id === executionPlan.skillId) || null;
+            skillSource = selectedSkill ? 'auto' : null;
+          }
           const resolvedContextIntent = contextResolution.status === 'resolved'
             ? contextResolution.candidates[0]?.intent
             : null;
@@ -3050,7 +3205,7 @@ export async function POST(request: NextRequest) {
         if (!plannerAuthoritative && !executionPlan && intent === 'chat' && selectedSkillExecutionRequest) {
           intent = 'skill_action';
         }
-        void contextLogger.info('routing.resolved', 'Agent routing decision resolved', {
+        void contextLogger.info('planner.resolved', 'Image Planner route and execution intent resolved', {
           decisionSource: executionPlanSource || routingDecision?.source || null,
           skillSelectionMethod,
           skillCandidateIds,
@@ -3059,7 +3214,7 @@ export async function POST(request: NextRequest) {
           sourceDetail: executionPlanSourceDetail,
           plannerConfidence: executionPlan?.confidence || null,
           conversationIntent: conversationIntent.intent,
-          routerIntent: routingDecision?.intent || null,
+          frontDoorRoute: frontDoorResult?.route || null,
           finalIntent: intent,
           selectedSkillId: selectedSkill?.id || null,
           explicitBatchImageRequest,
@@ -3098,7 +3253,7 @@ export async function POST(request: NextRequest) {
           return;
         }
 
-        await ensureSelectedSkillContent();
+        // Full Skill instructions belong to Image Planner; Main Agent receives the validated plan only.
         const shouldResolveImageCount = intent === 'image'
           || Boolean(selectedSkill?.allowedTools?.includes('generate_image'));
         if (shouldResolveImageCount) {
@@ -3305,8 +3460,8 @@ export async function POST(request: NextRequest) {
             referenceImageCount: executionReferenceImages.length,
             state: clarificationState,
             requireCreativeDirectionConfirmation: conversationIntent.needsDirectionConfirmation,
-            providerId: resolvedRouterSelection.providerId || undefined,
-            model: resolvedRouterSelection.model,
+            providerId: resolvedChatSelection.providerId || undefined,
+            model: resolvedChatSelection.model,
             signal: runSignal,
             chatFn: chat,
           });
@@ -3672,7 +3827,6 @@ export async function POST(request: NextRequest) {
         turns += 1;
         const chatMessages = buildMainAgentMessages({
           messages: body.messages,
-          skillContent,
           canvasContext: body.canvasContext,
           referenceImages: executionReferenceImages,
           referenceContext: runReferenceContext,
@@ -3723,7 +3877,11 @@ export async function POST(request: NextRequest) {
             } : {}),
           };
         });
-        if (modelTools.length > 0) {
+        // Only Planner routes may expose mutation/read tools to the main loop.
+        // Chat and visual analysis remain explicitly tool-free, even when a
+        // Skill is selected for context injection.
+        const routeAllowsTools = Boolean(executionPlan) || frontDoorResult?.route === 'planner';
+        if (routeAllowsTools && modelTools.length > 0) {
           const rawToolResults = new Map<string, unknown>();
           writeProgress({ stepId: 'composing', phase: 'planning', status: 'active', label: '正在规划下一步操作' });
           const loopResult = await runZFlowAgentBrain({

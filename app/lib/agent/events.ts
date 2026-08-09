@@ -1,5 +1,10 @@
 import type { AgentContextEntity, AgentProposal } from './context-reference.types';
-import type { AgentExecutionPlan, AgentTaskContract } from './execution-planner.types';
+import type {
+  AgentExecutionPlan,
+  AgentPlannerModelCandidate,
+  AgentPlannerModelSelection,
+  AgentTaskContract,
+} from './execution-planner.types';
 
 export type AgentIntent = 'chat' | 'image' | 'skill_action';
 
@@ -112,6 +117,8 @@ export type AgentClarificationState = {
     batchSize: number;
   };
   executionPlan?: AgentExecutionPlan;
+  plannerCandidates?: AgentPlannerModelCandidate[];
+  plannerSelection?: AgentPlannerModelSelection;
   plannerFailure?: {
     reason: AgentPlannerFailureReason;
     retryMode: 'replan';

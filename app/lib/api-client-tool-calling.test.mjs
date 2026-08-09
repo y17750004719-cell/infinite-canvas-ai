@@ -17,6 +17,7 @@ test('chat request and response types expose normalized tool calling', () => {
 test('openai compatible chat forwards tools and tool choice', () => {
   assert.match(source, /tools: request\.tools/);
   assert.match(source, /tool_choice: request\.toolChoice \|\| "auto"/);
+  assert.match(source, /strict\?: boolean/);
 });
 
 test('gemini chat maps function declarations calls and responses', () => {
@@ -28,4 +29,16 @@ test('gemini chat maps function declarations calls and responses', () => {
   assert.match(source, /mode: 'ANY'/);
   assert.match(source, /allowedFunctionNames: \[toolChoice\.function\.name\]/);
   assert.match(source, /resolveGeminiFunctionCallingConfig\(request\.toolChoice\)/);
+});
+
+test('Gemini chat drops empty messages and OpenAI compatibility retries only a missing flat tool choice', () => {
+  assert.match(source, /if \(parts\.length === 0\) continue;/);
+  assert.match(source, /function needsFlatToolChoiceRetry/);
+  assert.match(source, /normalized\.includes\('tool_choice\.name'\).*normalized\.includes\('missing'\)/s);
+  assert.match(source, /tool_choice: \{ name: toolChoice\.function\.name \}/);
+});
+
+test('strict tool rejection surfaces a Planner capability error', () => {
+  assert.match(source, /strictToolSchemaError/);
+  assert.match(source, /does not support strict structured tool output/);
 });

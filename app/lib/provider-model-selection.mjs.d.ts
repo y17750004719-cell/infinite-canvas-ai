@@ -10,6 +10,7 @@ export type ProviderModelSelectionReason =
 
 export interface ProviderModelSelectionProvider {
   id?: string;
+  name?: string;
   enabled?: boolean;
   primary?: boolean;
   chatModels?: string[];
@@ -22,6 +23,19 @@ export interface ProviderModelSelection {
   fallback: boolean;
   reason: ProviderModelSelectionReason;
 }
+
+export interface AlternativeProviderModelSelection {
+  providerId: string;
+  providerName: string;
+  model: string;
+}
+
+export function listAlternativeProviderModelSelections(options?: {
+  providers?: ProviderModelSelectionProvider[];
+  currentProviderId?: string;
+  currentModel?: string;
+  limit?: number;
+}): AlternativeProviderModelSelection[];
 
 export function resolveProviderModelSelection(options?: {
   providers?: ProviderModelSelectionProvider[];

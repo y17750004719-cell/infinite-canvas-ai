@@ -495,7 +495,11 @@ export async function POST(request: NextRequest) {
     const latestRawUserMessage = [...userMessageTexts].reverse()[0] || "";
     const resolved = resolveIntent(intent, latestRawUserMessage, hasReferenceImages);
 
-    if (resolved.intent === "image" && skill) {
+    if (
+      resolved.intent === "image"
+      && skill
+      && request.headers.get("x-z-flow-image-planner") !== "1"
+    ) {
       await logResponse(400, { mode: "image", reason: "image_skill_requires_planner", skill });
       return NextResponse.json(
         {

@@ -58,6 +58,24 @@ test('planner context keeps only confirmed region references and parented region
   assert.deepEqual(payload.referenceContext.evidenceImages, [{ id: 'crop', referenceId: 'confirmed', kind: 'region_crop' }]);
 });
 
+test('planner receives the validated Front Door decision without replacing the original request', () => {
+  const payload = JSON.parse(buildAgentExecutionPlannerMessages({
+    userMessage: '原始用户请求',
+    messages: [{ role: 'user', content: '原始用户请求' }],
+    frontDoorDecision: {
+      route: 'planner',
+      skillId: 'magazine-poster',
+      confidence: 'high',
+    },
+  })[1].content);
+  assert.equal(payload.userMessage, '原始用户请求');
+  assert.deepEqual(payload.frontDoorDecision, {
+    route: 'planner',
+    skillId: 'magazine-poster',
+    confidence: 'high',
+  });
+});
+
 const manifests = [{
   id: 'magazine-poster',
   name: 'Magazine Poster',
@@ -173,12 +191,18 @@ function toolResponse(value, content = '') {
           type: 'function',
           function: {
             name: 'submit_agent_execution_plan',
-            arguments: JSON.stringify({ plan: value }),
+            arguments: JSON.stringify(value),
           },
         }],
       },
     }],
   };
+}
+
+function legacyToolResponse(value) {
+  const response = toolResponse(value);
+  response.choices[0].message.tool_calls[0].function.arguments = JSON.stringify({ plan: value });
+  return response;
 }
 
 function visualContext(referenceIds, targetReferenceId = null, confidence = null) {
@@ -226,7 +250,9 @@ test('planner prompt requires the structured tool and separates collage style fr
   assert.doesNotMatch(messages[1].content, /generationContract/);
   assert.match(messages[1].content, /"promptStyle":"json-text"/);
   assert.equal(AGENT_EXECUTION_PLAN_TOOL.function.name, 'submit_agent_execution_plan');
-  assert.deepEqual(AGENT_EXECUTION_PLAN_TOOL.function.parameters.required, ['plan']);
+  assert.equal(AGENT_EXECUTION_PLAN_TOOL.function.strict, true);
+  assert.equal(AGENT_EXECUTION_PLAN_TOOL.function.parameters.required.includes('version'), true);
+  assert.equal(AGENT_EXECUTION_PLAN_TOOL.function.parameters.properties.plan, undefined);
 });
 
 test('planner injects only the locked skill body and validates the lock exactly', async () => {
@@ -240,6 +266,8 @@ test('planner injects only the locked skill body and validates the lock exactly'
   });
   assert.equal(messages.length, 3);
   assert.match(messages[0].content, /locked skillId to magazine-poster/i);
+  assert.match(messages[0].content, /"skillId":"magazine-poster"/);
+  assert.match(messages[0].content, /"promptFormat":"json-text"/);
   assert.match(messages[1].content, new RegExp(marker));
   assert.doesNotMatch(messages[2].content, new RegExp(marker));
 
@@ -251,10 +279,25 @@ test('planner injects only the locked skill body and validates the lock exactly'
   });
   assert.ok(accepted.plan);
 
-  const rejected = validateAgentExecutionPlan(plan({ skillId: null }), {
+  const omitted = validateAgentExecutionPlan(plan({ skillId: null }), {
     allowedSkillIds: ['magazine-poster'],
     skillToolsById: { 'magazine-poster': ['generate_image'] },
     skillPromptStylesById: { 'magazine-poster': 'json-text' },
+    lockedSkillId: 'magazine-poster',
+  });
+  assert.equal(omitted.plan.skillId, 'magazine-poster');
+  assert.ok(omitted.normalizedFields.includes('skillId'));
+
+  const rejected = validateAgentExecutionPlan(plan({ skillId: 'other-skill' }), {
+    allowedSkillIds: ['magazine-poster', 'other-skill'],
+    skillToolsById: {
+      'magazine-poster': ['generate_image'],
+      'other-skill': ['generate_image'],
+    },
+    skillPromptStylesById: {
+      'magazine-poster': 'json-text',
+      'other-skill': 'text',
+    },
     lockedSkillId: 'magazine-poster',
   });
   assert.equal(rejected.plan, null);
@@ -282,7 +325,27 @@ test('planner injects only the locked skill body and validates the lock exactly'
   assert.match(capturedMessages[1].content, new RegExp(marker));
 });
 
+test('planner restores a locked skill when the model omits skillId', async () => {
+  const planned = await planAgentExecutionRequest({
+    userMessage: '生成一张杂志封面',
+    messages: [{ role: 'user', content: '生成一张杂志封面' }],
+    manifests,
+    activeSkillId: 'magazine-poster',
+    lockedSkillId: 'magazine-poster',
+    model: 'mimo-v2.5',
+    providerId: 'xiaomi',
+    chatFn: async () => toolResponse(plan({ skillId: undefined })),
+  });
+  assert.equal(planned.plan.skillId, 'magazine-poster');
+  assert.ok(planned.normalizedFields.includes('skillId'));
+});
+
 test('planner locked to no skill rejects model-invented skills', () => {
+  const noSkillSchema = buildAgentExecutionPlanTool({ lockedSkillId: null })
+    .function.parameters;
+  assert.equal(noSkillSchema.properties.skillId, undefined);
+  assert.equal(noSkillSchema.required.includes('skillId'), false);
+
   const result = validateAgentExecutionPlan(plan(), {
     allowedSkillIds: [],
     lockedSkillId: null,
@@ -290,6 +353,13 @@ test('planner locked to no skill rejects model-invented skills', () => {
   assert.equal(result.plan, null);
   assert.ok(result.validationErrors.some((entry) => entry.code === 'unknown_skill'));
   assert.ok(result.validationErrors.some((entry) => entry.code === 'locked_skill_conflict'));
+});
+
+test('planner tool schema requires the exact Router-selected Skill id', () => {
+  const schema = buildAgentExecutionPlanTool({ lockedSkillId: 'magazine-poster' })
+    .function.parameters;
+  assert.equal(schema.required.includes('skillId'), true);
+  assert.deepEqual(schema.properties.skillId.enum, ['magazine-poster']);
 });
 
 test('planner prompt requires explicit empty arrays and includes a valid complete image generation example', () => {
@@ -405,7 +475,7 @@ test('planner receives sanitized inline reference context and is the sole semant
 });
 
 test('planner tool schema is Gemini-compatible while runtime validation enforces version 4', () => {
-  const versionSchema = AGENT_EXECUTION_PLAN_TOOL.function.parameters.properties.plan.properties.version;
+  const versionSchema = AGENT_EXECUTION_PLAN_TOOL.function.parameters.properties.version;
   assert.equal(versionSchema.type, 'integer');
   assert.equal(versionSchema.enum, undefined);
   assert.match(versionSchema.description, /must be 4/i);
@@ -503,12 +573,14 @@ test('planner tool schema keeps image references and context entities in separat
       composerSegments: [{ type: 'reference', referenceId: 'token:bottle' }],
     },
   });
-  const schema = tool.function.parameters.properties.plan;
+  const schema = tool.function.parameters;
   assert.deepEqual(schema.properties.contextReferences.items.enum, ['canvas:scene']);
   assert.deepEqual(schema.properties.visualContext.properties.references.items.properties.referenceId.enum, ['token:bottle']);
   assert.deepEqual(schema.properties.imageTask.properties.targetReferenceId.enum, ['token:bottle']);
   assert.deepEqual(schema.properties.imageTask.properties.supportingReferenceIds.items.enum, ['token:bottle']);
-  assert.deepEqual(tool.function.parameters.required, ['plan']);
+  assert.equal(schema.required.includes('visualContext'), true);
+  assert.equal(tool.function.strict, true);
+  assert.equal(tool.function.parameters.properties.plan, undefined);
 
   const noContextTool = buildAgentExecutionPlanTool({
     referenceContext: {
@@ -516,7 +588,10 @@ test('planner tool schema keeps image references and context entities in separat
       composerSegments: [],
     },
   });
-  assert.equal(noContextTool.function.parameters.properties.plan.properties.contextReferences.maxItems, 0);
+  assert.equal(noContextTool.function.parameters.properties.contextReferences.maxItems, 0);
+
+  const noReferenceSchema = buildAgentExecutionPlanTool().function.parameters;
+  assert.equal(noReferenceSchema.required.includes('visualContext'), false);
 });
 
 test('planner parses a four-poster collage-style request as a standalone series', () => {
@@ -790,20 +865,50 @@ test('planner leaves ambiguous or unknown reference roles fail-closed', () => {
   assert.ok(!unknownSource.normalizedFields.includes('imageTask.supportingReferenceIds'));
 });
 
-test('planner prompt includes complete reference generation and edit examples', () => {
+test('planner prompt includes one request-matched reference example with real ids', () => {
   const messages = buildAgentExecutionPlannerMessages({
     userMessage: '参考这张图生成一张新图',
     messages: [{ role: 'user', content: '参考这张图生成一张新图' }],
     referenceContext: {
-      references: [{ id: 'reference-1', src: 'https://example.test/reference.png', label: 'Reference', source: 'upload', role: 'reference' }],
-      composerSegments: [{ type: 'reference', referenceId: 'reference-1' }],
+      references: [{ id: 'token:actual-reference', src: 'https://example.test/reference.png', label: 'Reference', source: 'upload', role: 'reference' }],
+      composerSegments: [{ type: 'reference', referenceId: 'token:actual-reference' }],
     },
   });
   const systemPrompt = messages[0].content;
   assert.match(systemPrompt, /Complete reference-based generation JSON example/);
+  assert.doesNotMatch(systemPrompt, /Complete single-image generation JSON example/);
+  assert.doesNotMatch(systemPrompt, /Complete image edit JSON example/);
+  assert.match(systemPrompt, /visualContext is mandatory/);
+  assert.match(systemPrompt, /imageTask and generation never substitute for visualContext/);
+  assert.match(systemPrompt, /"sourceReferenceId":"token:actual-reference"/);
+  assert.doesNotMatch(systemPrompt, /"referenceId":"reference-1"/);
+  assert.match(systemPrompt, /required top-level fields are present/);
+  assert.match(systemPrompt, /never wrap them inside a plan object/);
+  assert.match(systemPrompt, /visualContext\.references must contain exactly 1 entries/);
+
+  const examplePrefix = 'Complete reference-based generation JSON example: ';
+  const exampleLine = systemPrompt.split('\n').find((line) => line.startsWith(examplePrefix));
+  const example = JSON.parse(exampleLine.slice(examplePrefix.length));
+  const validated = validateAgentExecutionPlan(example, {
+    allowedSkillIds: manifests.map((manifest) => manifest.id),
+    skillToolsById: Object.fromEntries(manifests.map((manifest) => [manifest.id, manifest.allowedTools])),
+    referenceIds: ['token:actual-reference'],
+  });
+  assert.ok(validated.plan);
+});
+
+test('planner prompt uses only the edit example for an explicit edit target', () => {
+  const systemPrompt = buildAgentExecutionPlannerMessages({
+    userMessage: '把主体换成狗',
+    referenceContext: {
+      references: [{ id: 'canvas:target', src: 'https://example.test/target.png', label: 'Target', source: 'canvas', role: 'edit_target' }],
+      composerSegments: [{ type: 'reference', referenceId: 'canvas:target' }],
+    },
+  })[0].content;
   assert.match(systemPrompt, /Complete image edit JSON example/);
-  assert.match(systemPrompt, /"sourceReferenceId":"reference-1"/);
-  assert.match(systemPrompt, /"targetReferenceId":"reference-1"/);
+  assert.match(systemPrompt, /"targetReferenceId":"canvas:target"/);
+  assert.doesNotMatch(systemPrompt, /Complete single-image generation JSON example/);
+  assert.doesNotMatch(systemPrompt, /Complete reference-based generation JSON example/);
 });
 
 test('image-bearing plans require complete grounded visual context and reject ambiguous edit execution', () => {
@@ -875,9 +980,114 @@ test('visual context rejects unknown and duplicate reference ids', () => {
   assert.ok(duplicateResult.validationErrors.some((entry) => entry.code === 'duplicate_reference'));
 
   const unknown = visualContext(['evidence-preview']);
-  const unknownResult = validateAgentExecutionPlan(plan({ visualContext: unknown }), options);
+  const unknownResult = validateAgentExecutionPlan(plan({ visualContext: unknown }), {
+    ...options,
+    referenceIds: ['known', 'other'],
+  });
   assert.equal(unknownResult.plan, null);
   assert.ok(unknownResult.validationErrors.some((entry) => entry.code === 'unknown_reference'));
+});
+
+test('single supplied reference safely repairs one model-authored reference alias', () => {
+  const actualReferenceId = 'canvas-reference:item-1';
+  const wrongReferenceId = 'item-1';
+  const result = validateAgentExecutionPlan(plan({
+    imageTask: {
+      ...plan().imageTask,
+      sourceReferenceId: wrongReferenceId,
+      supportingReferenceIds: [wrongReferenceId],
+    },
+    visualContext: visualContext([wrongReferenceId]),
+  }), {
+    allowedSkillIds: ['magazine-poster'],
+    skillToolsById: { 'magazine-poster': ['generate_image'] },
+    skillPromptStylesById: { 'magazine-poster': 'json-text' },
+    referenceIds: [actualReferenceId],
+  });
+
+  assert.ok(result.plan);
+  assert.equal(result.plan.visualContext.references[0].referenceId, actualReferenceId);
+  assert.equal(result.plan.imageTask.sourceReferenceId, actualReferenceId);
+  assert.deepEqual(result.plan.imageTask.supportingReferenceIds, [actualReferenceId]);
+  assert.ok(result.normalizedFields.includes('visualContext.references[0].referenceId'));
+  assert.ok(result.normalizedFields.includes('imageTask.sourceReferenceId'));
+  assert.ok(result.normalizedFields.includes('imageTask.supportingReferenceIds[0]'));
+});
+
+test('multiple supplied references never guess a model-authored reference alias', () => {
+  const result = validateAgentExecutionPlan(plan({
+    imageTask: {
+      ...plan().imageTask,
+      sourceReferenceId: 'item-1',
+      supportingReferenceIds: ['item-1'],
+    },
+    visualContext: visualContext(['item-1']),
+  }), {
+    allowedSkillIds: ['magazine-poster'],
+    skillToolsById: { 'magazine-poster': ['generate_image'] },
+    skillPromptStylesById: { 'magazine-poster': 'json-text' },
+    referenceIds: ['canvas-reference:item-1', 'canvas-reference:item-2'],
+  });
+
+  assert.equal(result.plan, null);
+  assert.ok(result.validationErrors.some((entry) => entry.code === 'unknown_reference'));
+});
+
+test('duplicate supplied reference ids fail closed instead of enabling single-image repair', () => {
+  const result = validateAgentExecutionPlan(plan({
+    visualContext: visualContext(['item-1']),
+  }), {
+    allowedSkillIds: ['magazine-poster'],
+    skillToolsById: { 'magazine-poster': ['generate_image'] },
+    skillPromptStylesById: { 'magazine-poster': 'json-text' },
+    referenceIds: ['canvas-reference:item-1', 'canvas-reference:item-1'],
+  });
+
+  assert.equal(result.plan, null);
+  assert.ok(result.validationErrors.some((entry) => entry.code === 'duplicate_reference'));
+  assert.ok(result.validationErrors.some((entry) => entry.code === 'unknown_reference'));
+});
+
+test('visual reference ids are removed from context references without hiding unknown context ids', () => {
+  const imageReferenceId = 'canvas-reference:item-1';
+  const repaired = validateAgentExecutionPlan(plan({
+    contextReferences: ['context:selection', imageReferenceId],
+    visualContext: visualContext([imageReferenceId]),
+  }), {
+    allowedSkillIds: ['magazine-poster'],
+    skillToolsById: { 'magazine-poster': ['generate_image'] },
+    skillPromptStylesById: { 'magazine-poster': 'json-text' },
+    contextEntityIds: ['context:selection'],
+    referenceIds: [imageReferenceId],
+  });
+
+  assert.ok(repaired.plan);
+  assert.deepEqual(repaired.plan.contextReferences, ['context:selection']);
+  assert.ok(repaired.normalizedFields.includes('contextReferences[1]'));
+
+  const invalid = validateAgentExecutionPlan(plan({
+    contextReferences: ['missing-context'],
+  }), {
+    allowedSkillIds: ['magazine-poster'],
+    skillToolsById: { 'magazine-poster': ['generate_image'] },
+    contextEntityIds: ['context:selection'],
+  });
+  assert.equal(invalid.plan, null);
+  assert.ok(invalid.validationErrors.some((entry) => entry.code === 'unknown_context'));
+});
+
+test('non-executable analysis ignores an extraneous generation contract', () => {
+  const result = validateAgentExecutionPlan(plan({
+    intent: 'analysis',
+    skillId: null,
+    imageTask: undefined,
+    presentation: undefined,
+    execution: { kind: 'none', requiresConfirmation: false, tool: null },
+  }), {});
+
+  assert.ok(result.plan);
+  assert.equal(result.plan.generation, null);
+  assert.ok(result.normalizedFields.includes('generation'));
 });
 
 test('executable image plans without imageTask or presentation fail closed', () => {
@@ -923,7 +1133,8 @@ test('image plans require supplier-ready generation prompts with skill-compatibl
     execution: { kind: 'none', requiresConfirmation: false, tool: null },
   }), options);
   assert.equal(nonImage.plan, null);
-  assert.ok(nonImage.validationErrors.some((entry) => entry.path === 'generation' && entry.code === 'intent_mismatch'));
+  assert.ok(nonImage.normalizedFields.includes('generation'));
+  assert.ok(nonImage.validationErrors.some((entry) => entry.path === 'imageTask' && entry.code === 'intent_mismatch'));
 
   const indirectImage = validateAgentExecutionPlan(plan({
     execution: { kind: 'agent_loop', requiresConfirmation: false, tool: 'generate_image' },
@@ -1208,6 +1419,19 @@ test('planner rejects one invalid structured draft without a repair request', as
   assert.ok(result.normalizedFields.includes('execution.tool'));
 });
 
+test('planner still reads the legacy wrapped tool response without advertising it', async () => {
+  const result = await planAgentExecutionRequest({
+    userMessage: 'Generate one poster',
+    messages: [{ role: 'user', content: 'Generate one poster' }],
+    manifests,
+    model: 'planner-model',
+    providerId: 'provider',
+    chatFn: async () => legacyToolResponse(plan()),
+  });
+  assert.ok(result.plan);
+  assert.equal(result.plan.version, 4);
+});
+
 test('planner never retries a transport interruption', async () => {
   let calls = 0;
   const result = await planAgentExecutionRequest({
@@ -1278,6 +1502,20 @@ test('planner classifies unsupported and unreadable multimodal inputs without pr
   assert.equal(unsupported.plan, null);
   assert.equal(unsupported.failureReason, 'vision_unsupported');
 
+  const noEndpoint = await planAgentExecutionRequest({
+    userMessage: '分析这张图',
+    messages: [{ role: 'user', content: '分析这张图' }],
+    manifests,
+    referenceContext,
+    model: 'mimo-v2.5-pro',
+    providerId: 'xiaomi',
+    chatFn: async () => {
+      throw new Error('No endpoints found that support image input');
+    },
+  });
+  assert.equal(noEndpoint.plan, null);
+  assert.equal(noEndpoint.failureReason, 'vision_unsupported');
+
   let unreadableCalls = 0;
   const unreadable = await planAgentExecutionRequest({
     userMessage: '分析这张图',
@@ -1294,6 +1532,69 @@ test('planner classifies unsupported and unreadable multimodal inputs without pr
   assert.equal(unreadableCalls, 1);
   assert.equal(unreadable.plan, null);
   assert.equal(unreadable.failureReason, 'vision_unavailable');
+});
+
+test('planner falls back to visual intake before text-only tool planning when vision tool calls are unsupported', async () => {
+  const image = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+  const draft = plan({
+    visualContext: visualContext(['ref-1']),
+    imageTask: {
+      ...plan().imageTask,
+      sourceReferenceId: 'ref-1',
+      supportingReferenceIds: ['ref-1'],
+    },
+  });
+  const calls = [];
+  const result = await planAgentExecutionRequest({
+    userMessage: '参考这张图生成新的海报',
+    messages: [{ role: 'user', content: '参考这张图生成新的海报' }],
+    manifests,
+    referenceContext: {
+      references: [{
+        id: 'ref-1',
+        src: image,
+        plannerPreviewSrc: image,
+        label: '参考图',
+        source: 'upload',
+        role: 'reference',
+      }],
+      composerSegments: [{ type: 'reference', referenceId: 'ref-1' }],
+    },
+    model: 'planner-model',
+    providerId: 'provider',
+    chatFn: async (request) => {
+      calls.push(request);
+      if (calls.length === 1) {
+        throw new Error('This model does not support image input with tools');
+      }
+      if (calls.length === 2) {
+        assert.equal(request.tools, undefined);
+        assert.equal(request.toolChoice, undefined);
+        assert.match(JSON.stringify(request.messages), /ref-1/);
+        return {
+          choices: [{ message: { content: JSON.stringify({
+            version: 1,
+            references: [{
+              referenceId: 'ref-1',
+              description: 'A simple editorial reference image.',
+              salientSubjects: ['editorial poster'],
+              visibleText: [],
+            }],
+          }) } }],
+        };
+      }
+      assert.equal(calls.length, 3);
+      assert.equal(request.toolChoice.function.name, 'submit_agent_execution_plan');
+      assert.equal(request.messages.some((message) => Array.isArray(message.content)), false);
+      assert.match(JSON.stringify(request.messages), /visualSummary/);
+      return toolResponse(draft);
+    },
+  });
+
+  assert.ok(result.plan);
+  assert.equal(result.visualToolFallback, true);
+  assert.equal(result.attempts, 3);
+  assert.equal(calls.length, 3);
 });
 
 test('planner does not call the model for an already-aborted request', async () => {
@@ -1372,7 +1673,7 @@ test('planner fails closed after one invalid attempt without local semantic fall
 });
 
 test('planner distinguishes unknown canvas context ids from unknown image reference ids', async () => {
-  const unknownContextPlan = plan({ contextReferences: ['token:image'] });
+  const unknownContextPlan = plan({ contextReferences: ['missing-context'] });
   const invalidContext = await planAgentExecutionRequest({
     userMessage: '生成海报',
     messages: [{ role: 'user', content: '生成海报' }],

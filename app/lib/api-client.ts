@@ -1794,6 +1794,7 @@ export interface ChatToolDefinition {
   function: {
     name: string;
     description?: string;
+    strict?: boolean;
     parameters?: Record<string, unknown>;
   };
 }
@@ -1963,6 +1964,7 @@ async function convertChatMessagesToGeminiRequest(
           parts.push({ functionCall: { name: toolCall.function.name, args } });
         }
       }
+      if (parts.length === 0) continue;
       contents.push({
         role: msg.role === "assistant" ? ("model" as const) : ("user" as const),
         parts,
@@ -2025,6 +2027,39 @@ function resolveGeminiFunctionCallingConfig(toolChoice?: ChatToolChoice): {
     };
   }
   return { mode: 'AUTO' };
+}
+
+function flatToolChoiceRetryBody(
+  requestBody: Record<string, unknown>,
+  toolChoice?: ChatToolChoice,
+): Record<string, unknown> | null {
+  if (!toolChoice || typeof toolChoice !== 'object') return null;
+  return {
+    ...requestBody,
+    tool_choice: { name: toolChoice.function.name },
+  };
+}
+
+function needsFlatToolChoiceRetry(errorText: string, toolChoice?: ChatToolChoice): boolean {
+  if (!toolChoice || typeof toolChoice !== 'object') return false;
+  const normalized = errorText.toLowerCase();
+  return normalized.includes('tool_choice.name') && normalized.includes('missing');
+}
+
+function strictToolSchemaError(errorText: string, tools?: ChatToolDefinition[]): string | null {
+  if (!tools?.some((tool) => tool.function.strict === true)) return null;
+  const normalized = errorText.toLowerCase();
+  const rejectsStrict = normalized.includes('strict') && [
+    'unsupported',
+    'not supported',
+    'unknown',
+    'unrecognized',
+    'not permitted',
+    'invalid',
+  ].some((marker) => normalized.includes(marker));
+  return rejectsStrict
+    ? 'The current Planner model does not support strict structured tool output.'
+    : null;
 }
 
 export async function chat(
@@ -2103,7 +2138,7 @@ export async function chat(
             : {}),
         };
 
-    const response = await fetch(endpoint, {
+    let response = await fetch(endpoint, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -2114,11 +2149,39 @@ export async function chat(
     });
 
     if (!response.ok) {
-      const error = await response.json().catch(() => ({}));
-      throw new ImageGenerationError(
-        error.error?.message || `API request failed with status ${response.status}`,
-        response.status
-      );
+      let errorText = await response.text();
+      const retryBody = !isGeminiModel && needsFlatToolChoiceRetry(errorText, request.toolChoice)
+        ? flatToolChoiceRetryBody(requestBody as Record<string, unknown>, request.toolChoice)
+        : null;
+      if (retryBody) {
+        response = await fetch(endpoint, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...headers,
+          },
+          body: JSON.stringify(retryBody),
+          signal: request.signal,
+        });
+        if (response.ok) {
+          basicLog("[SUPPLIER][COMPAT_RETRY]", {
+            endpoint,
+            mode: "chat",
+            compatibility: "flat_tool_choice",
+          });
+        } else {
+          errorText = await response.text();
+        }
+      }
+      if (!response.ok) {
+        const error = parseErrorPayload(errorText);
+        throw new ImageGenerationError(
+          strictToolSchemaError(errorText, request.tools) ||
+            (error.error as { message?: string } | undefined)?.message ||
+            `API request failed with status ${response.status}: ${errorText}`,
+          response.status
+        );
+      }
     }
 
     basicLog("[SUPPLIER][RES]", {
@@ -2264,18 +2327,44 @@ export async function* chatStream(
     });
 
     if (!response.ok) {
-      const errorText = await response.text();
-      debugError("Supplier chat stream error:", {
-        status: response.status,
-        model,
-        raw: errorText,
-      });
-      const error = parseErrorPayload(errorText);
-      throw new ImageGenerationError(
-        (error.error as { message?: string } | undefined)?.message ||
-          `API request failed with status ${response.status}: ${errorText}`,
-        response.status
-      );
+      let errorText = await response.text();
+      const retryBody = !isGeminiModel && needsFlatToolChoiceRetry(errorText, request.toolChoice)
+        ? flatToolChoiceRetryBody(requestBody as Record<string, unknown>, request.toolChoice)
+        : null;
+      if (retryBody) {
+        response = await fetch(endpoint, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            ...headers,
+          },
+          body: JSON.stringify(retryBody),
+          signal: request.signal,
+        });
+        if (response.ok) {
+          basicLog("[SUPPLIER][COMPAT_RETRY]", {
+            endpoint,
+            mode: "chat_stream",
+            compatibility: "flat_tool_choice",
+          });
+        } else {
+          errorText = await response.text();
+        }
+      }
+      if (!response.ok) {
+        debugError("Supplier chat stream error:", {
+          status: response.status,
+          model,
+          raw: errorText,
+        });
+        const error = parseErrorPayload(errorText);
+        throw new ImageGenerationError(
+          strictToolSchemaError(errorText, request.tools) ||
+            (error.error as { message?: string } | undefined)?.message ||
+            `API request failed with status ${response.status}: ${errorText}`,
+          response.status
+        );
+      }
     }
 
     basicLog("[SUPPLIER][RES]", {

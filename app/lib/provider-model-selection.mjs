@@ -9,6 +9,43 @@ function getPurposeModels(provider, purpose) {
     : [];
 }
 
+/**
+ * @param {{
+ *   providers?: Array<{ id?: string, name?: string, enabled?: boolean, primary?: boolean, chatModels?: string[] }>,
+ *   currentProviderId?: string,
+ *   currentModel?: string,
+ *   limit?: number,
+ * }} [options]
+ */
+export function listAlternativeProviderModelSelections({
+  providers,
+  currentProviderId,
+  currentModel,
+  limit = 3,
+} = {}) {
+  const providerId = normalizeText(currentProviderId);
+  const model = normalizeText(currentModel);
+  const maxResults = Math.min(4, Math.max(1, Number(limit) || 3));
+  const enabledProviders = (Array.isArray(providers) ? providers : [])
+    .filter((provider) => provider && provider.enabled !== false)
+    .map((provider, index) => ({ provider, index }))
+    .sort((left, right) => Number(Boolean(right.provider.primary)) - Number(Boolean(left.provider.primary)) || left.index - right.index)
+    .map(({ provider }) => provider);
+  const results = [];
+  for (const provider of enabledProviders) {
+    for (const candidateModel of getPurposeModels(provider, 'chat')) {
+      if (normalizeText(provider.id) === providerId && candidateModel === model) continue;
+      results.push({
+        providerId: normalizeText(provider.id),
+        providerName: normalizeText(provider.name) || normalizeText(provider.id),
+        model: candidateModel,
+      });
+      if (results.length >= maxResults) return results;
+    }
+  }
+  return results;
+}
+
 export function resolveProviderModelSelection({
   providers,
   purpose,

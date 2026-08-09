@@ -95,6 +95,11 @@ export interface AgentExecutionPlannerInput extends Record<string, unknown> {
   referenceContext?: AgentPlannerReferenceContext | null;
   lockedSkillId?: string | null;
   skillContent?: string;
+  frontDoorDecision?: {
+    route: 'planner';
+    skillId: string | null;
+    confidence: 'high' | 'medium' | 'low';
+  } | null;
 }
 
 export interface AgentExecutionPlanValidationOptions extends Record<string, unknown> {
@@ -212,4 +217,14 @@ export interface AgentPlannerResolution {
   diagnostics: AgentPlannerAttemptDiagnostic[];
   failureReason?: AgentPlannerFailureReason;
   usage?: unknown;
+}
+
+export interface AgentPlannerModelSelection {
+  providerId: string;
+  model: string;
+}
+
+export interface AgentPlannerModelCandidate extends AgentPlannerModelSelection {
+  id: string;
+  providerName: string;
 }
