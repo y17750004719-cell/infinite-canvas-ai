@@ -139,10 +139,7 @@ test('provider settings modal keeps api keys in the field with controlled maskin
   assert.equal(pageSource.includes('setProviderSettingsImageApiKeys'), true);
   assert.equal(pageSource.includes('handleProviderSettingsAddImageApiKey'), true);
   assert.equal(pageSource.includes('handleProviderSettingsRemoveImageApiKey'), true);
-  assert.equal(
-    pageSource.includes("apiKey: provider.id === providerSettingsSelectedProviderId ? providerSettingsApiKey : provider.apiKey,"),
-    true
-  );
+  assert.equal(pageSource.includes("const apiKey = provider.id === providerSettingsSelectedProviderId ? providerSettingsApiKey : provider.apiKey;"), true);
   assert.equal(
     pageSource.includes('persistProviderSettingsImageApiKeys(providerSettingsImageApiKeys)'),
     true
@@ -177,19 +174,42 @@ test('provider settings modal uses categorized fetched model selection instead o
   assert.equal(pageSource.includes('handleProviderSettingsRemoveModel'), true);
   assert.equal(pageSource.includes('handleProviderSettingsFetchModels'), true);
   assert.equal(pageSource.includes('handleProviderSettingsApplyFetchedModels'), true);
-  assert.equal(pageSource.includes("['all', 'image', 'chat']"), true);
+  assert.equal(pageSource.includes("['all', 'image', 'chat', 'voice']"), true);
   assert.equal(pageSource.includes('全部'), true);
   assert.equal(pageSource.includes('图片'), true);
   assert.equal(pageSource.includes('聊天'), true);
+  assert.equal(pageSource.includes('语音'), true);
   assert.equal(pageSource.includes('placeholder="搜索模型"'), true);
   assert.equal(pageSource.includes('provider-model-chip'), false);
   assert.equal(pageSource.includes('移除图片模型'), true);
   assert.equal(pageSource.includes('移除聊天模型'), true);
+  assert.equal(pageSource.includes('移除语音模型'), true);
   assert.equal(pageSource.includes('panel-scrollbar h-[86px] overflow-y-auto rounded-[16px] border border-[var(--workspace-border)]'), false);
   assert.equal(pageSource.includes('panel-scrollbar h-[156px] overflow-y-auto rounded-[16px] border border-[var(--workspace-border)]'), true);
   assert.equal(pageSource.includes('providerModelsFromText'), false);
   assert.equal(pageSource.includes('value={providerModelsToText(selectedProviderSettings.imageModels)}'), false);
   assert.equal(pageSource.includes('value={providerModelsToText(selectedProviderSettings.chatModels)}'), false);
+});
+
+test('provider settings gives Xiaomi its fixed OAuth card and keeps it out of the normal provider list', () => {
+  assert.equal(pageSource.includes('Xiaomi OAuth'), true);
+  assert.equal(pageSource.includes('小米浏览器授权'), true);
+  assert.equal(pageSource.includes("providerSettingsProviders.filter((provider) => provider.id !== 'xiaomi')"), true);
+  assert.equal(pageSource.includes('handleXiaomiBrowserLogin'), true);
+  assert.equal(pageSource.includes('xiaomiManualSettingsOpen'), true);
+  assert.equal(pageSource.includes('手动 API Key 回退'), true);
+  assert.equal(pageSource.includes("enabled: provider.id === 'xiaomi' ? nextApiKey.trim().length > 0 : provider.enabled,"), true);
+  assert.equal(pageSource.includes("enabled: provider.id === 'xiaomi' && provider.authType === 'api-key' ? apiKey.trim().length > 0 : provider.enabled,"), true);
+  assert.equal(pageSource.includes("new URLSearchParams(window.location.search).get('u')"), true);
+  assert.equal(pageSource.includes("/api/settings/providers/xiaomi/oauth/callback?u="), true);
+});
+
+test('Xiaomi OAuth reload selects its own saved credential instead of the primary provider key', () => {
+  assert.equal(pageSource.includes("await loadProviderSettings('xiaomi');"), true);
+  assert.equal(
+    pageSource.includes('const applyProviderSettingsResponse = useCallback((data: ProviderSettingsResponse, preferredProviderId = \'\') => {'),
+    true
+  );
 });
 
 test('provider settings model rows expose per-model protocol overrides', () => {

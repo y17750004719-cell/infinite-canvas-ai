@@ -51,6 +51,7 @@ function failedModelProbeResult(
     allModels: [],
     imageModels: [],
     chatModels: [],
+    voiceModels: [],
     imageRequestMode,
   };
 }
@@ -127,6 +128,7 @@ export async function POST(request: NextRequest) {
         allModels: [],
         imageModels: [],
         chatModels: [],
+        voiceModels: [],
         imageRequestMode: 'openai',
       },
       { status: 500 }

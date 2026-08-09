@@ -926,6 +926,7 @@ const resolveChatMessageInlineContent = (message: ChatMessage): ResolvedChatMess
 type ProviderSettingsProviderId = string;
 type ProviderSettingsSource = 'runtime' | 'env';
 type ProviderProtocol = 'openai' | 'gemini';
+type ProviderAuthType = 'api-key' | 'xiaomi-browser';
 type ProviderImageRequestMode = 'openai' | 'openai-json';
 type ProviderImageApiKeyScope = 'all' | 'gemini' | 'gpt';
 
@@ -963,8 +964,11 @@ interface ProviderSettingsItem {
   primary: boolean;
   imageModels: string[];
   chatModels: string[];
+  voiceModels: string[];
   modelProtocols: Record<string, ProviderProtocol>;
   apiKey: string;
+  authType: ProviderAuthType;
+  accountId?: string;
   imageApiKeys: ProviderSettingsImageApiKey[];
   hasApiKey: boolean;
   maskedApiKey: string;
@@ -983,6 +987,7 @@ interface ProviderConnectionTestResult {
   modelCount: number;
   imageModels: string[];
   chatModels: string[];
+  voiceModels: string[];
   imageRequestMode: ProviderImageRequestMode;
 }
 
@@ -991,7 +996,7 @@ interface ProviderFetchedModelsResult extends ProviderConnectionTestResult {
   modelSources?: Record<string, string[]>;
 }
 
-type ProviderSettingsModelPickerCategory = 'all' | 'image' | 'chat';
+type ProviderSettingsModelPickerCategory = 'all' | 'image' | 'chat' | 'voice';
 
 interface WorkspaceModelOption {
   id: string;
@@ -1174,6 +1179,7 @@ const PROVIDER_SETTINGS_PRESET_OPTIONS = [
   { id: 'comfly', name: 'Comfly', baseUrl: 'https://ai.comfly.org/v1', protocol: 'openai', imageRequestMode: 'openai' },
   { id: 'gpt-best', name: 'GPT-Best', baseUrl: 'https://gpt-best.cn', protocol: 'openai', imageRequestMode: 'openai' },
   { id: 'custom', name: '自定义', baseUrl: 'https://api.openai.com/v1', protocol: 'openai', imageRequestMode: 'openai' },
+  { id: 'xiaomi', name: 'Xiaomi', baseUrl: 'https://api.xiaomimimo.com/v1', protocol: 'openai', imageRequestMode: 'openai' },
 ] as const;
 
 const getProviderSettingsProviderLabel = (providerId: ProviderSettingsProviderId) =>
@@ -1195,11 +1201,12 @@ const PROVIDER_IMAGE_API_KEY_SCOPE_OPTIONS = [
   { id: 'gpt', label: 'OpenAI' },
 ] as const;
 
-const PROVIDER_SETTINGS_MODEL_PICKER_CATEGORIES = ['all', 'image', 'chat'] as const;
+const PROVIDER_SETTINGS_MODEL_PICKER_CATEGORIES = ['all', 'image', 'chat', 'voice'] as const;
 const PROVIDER_SETTINGS_MODEL_PICKER_LABELS: Record<ProviderSettingsModelPickerCategory, string> = {
   all: '全部',
   image: '图片',
   chat: '聊天',
+  voice: '语音',
 };
 const CANVAS_CHAT_PANEL_RESERVED_WIDTH = 500;
 
@@ -1223,8 +1230,8 @@ const normalizeProviderSettingsModelProtocols = (
 const getFetchedModelCategory = (
   modelId: string,
   fetchedModels: ProviderFetchedModelsResult | null,
-  categoryById: Record<string, 'image' | 'chat'>
-): 'image' | 'chat' => {
+  categoryById: Record<string, 'image' | 'chat' | 'voice'>
+): 'image' | 'chat' | 'voice' => {
   const normalizedModelId = modelId.trim();
   if (categoryById[normalizedModelId]) {
     return categoryById[normalizedModelId];
@@ -1232,6 +1239,7 @@ const getFetchedModelCategory = (
   if (fetchedModels?.imageModels.includes(normalizedModelId)) {
     return 'image';
   }
+  if (fetchedModels?.voiceModels.includes(normalizedModelId)) return 'voice';
   return 'chat';
 };
 
@@ -1271,8 +1279,11 @@ const createProviderSettingsDraftProvider = (providers: ProviderSettingsItem[]):
     primary: providers.length === 0,
     imageModels: [],
     chatModels: [],
+    voiceModels: [],
     modelProtocols: {},
     apiKey: '',
+    authType: 'api-key',
+    accountId: '',
     imageApiKeys: [],
     hasApiKey: false,
     maskedApiKey: '',
@@ -6499,8 +6510,13 @@ export default function AIWorkspace() {
   const [providerSettingsModelPickerSearch, setProviderSettingsModelPickerSearch] = useState('');
   const [providerSettingsSelectedFetchedModels, setProviderSettingsSelectedFetchedModels] = useState<Record<string, boolean>>({});
   const [providerSettingsFetchedModelCategoryById, setProviderSettingsFetchedModelCategoryById] =
-    useState<Record<string, 'image' | 'chat'>>({});
+    useState<Record<string, 'image' | 'chat' | 'voice'>>({});
   const [isProviderSettingsApiKeyVisible, setIsProviderSettingsApiKeyVisible] = useState(false);
+  const [xiaomiLoginState, setXiaomiLoginState] = useState('');
+  const [xiaomiLoginStatus, setXiaomiLoginStatus] = useState<'idle' | 'waiting' | 'success' | 'error'>('idle');
+  const [xiaomiManualCode, setXiaomiManualCode] = useState('');
+  const [xiaomiManualAuthorizeUrl, setXiaomiManualAuthorizeUrl] = useState('');
+  const [xiaomiManualSettingsOpen, setXiaomiManualSettingsOpen] = useState(false);
   const providerSettingsRenderRevision = [
     providerSettingsLoaded,
     providerSettingsLoading,
@@ -6510,6 +6526,7 @@ export default function AIWorkspace() {
     providerSettingsError || '',
     providerSettingsSelectedProviderId,
     providerSettingsProviders.length,
+    xiaomiLoginStatus,
   ].join(':');
   const [generatedImageHistoryBySession, setGeneratedImageHistoryBySessionState] = useState<Record<string, GeneratedImageHistoryEntry[]>>({});
   const [archiveGeneratedImageHistoryEntries, setArchiveGeneratedImageHistoryEntries] = useState<GeneratedImageHistoryEntry[]>([]);
@@ -16097,14 +16114,24 @@ export default function AIWorkspace() {
     }
   }, []);
 
-  const applyProviderSettingsResponse = useCallback((data: ProviderSettingsResponse) => {
-    const providers = Array.isArray(data.providers)
+  const applyProviderSettingsResponse = useCallback((data: ProviderSettingsResponse, preferredProviderId = '') => {
+    const loadedProviders = Array.isArray(data.providers)
       ? data.providers.map((provider) => ({
           ...provider,
-          modelProtocols: normalizeProviderSettingsModelProtocols(provider.modelProtocols),
+      modelProtocols: normalizeProviderSettingsModelProtocols(provider.modelProtocols),
         }))
       : [];
+    const providers = loadedProviders.some((provider) => provider.id === 'xiaomi') ? loadedProviders : [
+      ...loadedProviders,
+      {
+        id: 'xiaomi', name: 'Xiaomi', baseUrl: 'https://api.xiaomimimo.com/v1', protocol: 'openai' as const, imageRequestMode: 'openai' as const,
+        imageGenerationEndpoint: '', imageEditEndpoint: '', enabled: false, primary: false, imageModels: [], chatModels: [],
+        modelProtocols: {}, apiKey: '', authType: 'api-key' as const, accountId: '', imageApiKeys: [], hasApiKey: false, voiceModels: [],
+        maskedApiKey: '', source: 'runtime' as const,
+      },
+    ];
     const nextSelectedProviderId =
+      providers.find((provider) => provider.id === preferredProviderId)?.id ||
       providers.find((provider) => provider.primary)?.id ||
       providers[0]?.id ||
       'comfly';
@@ -16122,6 +16149,7 @@ export default function AIWorkspace() {
   const selectedProviderSettings = providerSettingsProviders.find(
     (provider) => provider.id === providerSettingsSelectedProviderId
   ) || providerSettingsProviders[0] || null;
+  const xiaomiProviderSettings = providerSettingsProviders.find((provider) => provider.id === 'xiaomi') || null;
   const isSelectedProviderSettingsIdEditable = selectedProviderSettings
     ? providerSettingsEditableProviderIds.includes(selectedProviderSettings.id)
     : false;
@@ -16154,7 +16182,7 @@ export default function AIWorkspace() {
     providerSettingsModelPickerSearch,
   ]);
   const providerSettingsFetchedModelTotals = React.useMemo(() => {
-    const totals = { all: 0, image: 0, chat: 0 };
+    const totals = { all: 0, image: 0, chat: 0, voice: 0 };
     for (const modelId of uniqueModelIds(providerSettingsFetchedModels?.allModels || [])) {
       const category = getFetchedModelCategory(modelId, providerSettingsFetchedModels, providerSettingsFetchedModelCategoryById);
       totals.all += 1;
@@ -16163,7 +16191,7 @@ export default function AIWorkspace() {
     return totals;
   }, [providerSettingsFetchedModelCategoryById, providerSettingsFetchedModels]);
   const providerSettingsSelectedFetchedModelTotals = React.useMemo(() => {
-    const totals = { all: 0, image: 0, chat: 0 };
+    const totals = { all: 0, image: 0, chat: 0, voice: 0 };
     for (const [modelId, isSelected] of Object.entries(providerSettingsSelectedFetchedModels)) {
       if (!isSelected) continue;
       const category = getFetchedModelCategory(modelId, providerSettingsFetchedModels, providerSettingsFetchedModelCategoryById);
@@ -16175,9 +16203,10 @@ export default function AIWorkspace() {
   const providerSettingsSelectedModelRows = React.useMemo(() => ({
     image: uniqueModelIds(selectedProviderSettings?.imageModels || []).map((modelId) => ({ id: modelId, category: 'image' as const })),
     chat: uniqueModelIds(selectedProviderSettings?.chatModels || []).map((modelId) => ({ id: modelId, category: 'chat' as const })),
+    voice: uniqueModelIds(selectedProviderSettings?.voiceModels || []).map((modelId) => ({ id: modelId, category: 'voice' as const })),
   }), [selectedProviderSettings]);
 
-  const loadProviderSettings = useCallback(async () => {
+  const loadProviderSettings = useCallback(async (preferredProviderId = '') => {
     const requestId = providerSettingsLoadRequestIdRef.current + 1;
     providerSettingsLoadRequestIdRef.current = requestId;
     setProviderSettingsLoading(true);
@@ -16199,7 +16228,7 @@ export default function AIWorkspace() {
       if (providerSettingsLoadRequestIdRef.current !== requestId) {
         return;
       }
-      applyProviderSettingsResponse(data);
+      applyProviderSettingsResponse(data, preferredProviderId);
       setProviderSettingsLoaded(true);
     } catch (error) {
       if (providerSettingsLoadRequestIdRef.current !== requestId) {
@@ -16221,6 +16250,81 @@ export default function AIWorkspace() {
 
   useEffect(() => {
     void loadProviderSettings();
+  }, [loadProviderSettings]);
+
+  useEffect(() => {
+    const code = new URLSearchParams(window.location.search).get('u');
+    if (!code) return;
+    void fetch(`/api/settings/providers/xiaomi/oauth/callback?u=${encodeURIComponent(code)}`, { cache: 'no-store' })
+      .finally(() => window.close());
+  }, []);
+
+  useEffect(() => {
+    if (!xiaomiLoginState || xiaomiLoginStatus !== 'waiting') return;
+    const timer = window.setInterval(() => {
+      void (async () => {
+        const response = await fetch(`/api/settings/providers/xiaomi/oauth/status?state=${encodeURIComponent(xiaomiLoginState)}`, { cache: 'no-store' });
+        const data = await response.json().catch(() => null) as { status?: string; selectedModel?: string; modelProbeError?: string; error?: string } | null;
+        if (data?.status !== 'success') {
+          if (data?.status === 'expired' || data?.status === 'invalid' || data?.status === 'failed') {
+            setXiaomiLoginStatus('error');
+            setProviderSettingsError(data.status === 'expired' ? '小米登录已超时，请重新开始。' : data.status === 'failed' ? data.error || '小米登录失败。' : '小米登录状态无效。');
+          }
+          return;
+        }
+        window.clearInterval(timer);
+        await loadProviderSettings('xiaomi');
+        setXiaomiLoginStatus('success');
+        if (data.selectedModel) {
+          setChatProviderId('xiaomi');
+          setChatModelId(data.selectedModel);
+        }
+        showImageToolbarNoticeWithTimeout(data.modelProbeError ? '小米账号已连接，模型刷新失败' : '小米账号已连接', 2200);
+      })().catch((error) => {
+        setXiaomiLoginStatus('error');
+        setProviderSettingsError(error instanceof Error ? error.message : '检查小米登录状态失败');
+      });
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [loadProviderSettings, setChatModelId, setChatProviderId, showImageToolbarNoticeWithTimeout, xiaomiLoginState, xiaomiLoginStatus]);
+
+  const handleXiaomiBrowserLogin = useCallback(async () => {
+    setProviderSettingsError(null);
+    const response = await fetch('/api/settings/providers/xiaomi/oauth/authorize', { method: 'POST' });
+    const data = await response.json().catch(() => null) as { state?: string; authorizeUrl?: string; manualAuthorizeUrl?: string; error?: string } | null;
+    if (!response.ok || !data?.state || !data.authorizeUrl) throw new Error(data?.error || '无法开始小米登录');
+    setXiaomiLoginState(data.state);
+    setXiaomiManualAuthorizeUrl(data.manualAuthorizeUrl || '');
+    setXiaomiManualCode('');
+    setXiaomiLoginStatus('waiting');
+    window.open(data.authorizeUrl, '_blank', 'noopener,noreferrer');
+  }, []);
+
+  const handleXiaomiManualCode = useCallback(async () => {
+    if (!xiaomiLoginState || !xiaomiManualCode.trim()) return;
+    const response = await fetch('/api/settings/providers/xiaomi/oauth/callback', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ state: xiaomiLoginState, code: xiaomiManualCode }),
+    });
+    const data = await response.json().catch(() => null) as { selectedModel?: string; modelProbeError?: string; error?: string } | null;
+    if (!response.ok) throw new Error(data?.error || '小米 Code 无效');
+    await loadProviderSettings('xiaomi');
+    setXiaomiLoginStatus('success');
+    if (data?.selectedModel) {
+      setChatProviderId('xiaomi');
+      setChatModelId(data.selectedModel);
+    }
+    if (data?.modelProbeError) showImageToolbarNoticeWithTimeout('小米账号已连接，模型刷新失败', 2200);
+  }, [loadProviderSettings, setChatModelId, setChatProviderId, showImageToolbarNoticeWithTimeout, xiaomiLoginState, xiaomiManualCode]);
+
+  const handleXiaomiLogout = useCallback(async () => {
+    const response = await fetch('/api/settings/providers/xiaomi/oauth', { method: 'DELETE' });
+    if (!response.ok) throw new Error('退出小米登录失败');
+    await loadProviderSettings();
+    setXiaomiLoginState('');
+    setXiaomiLoginStatus('idle');
+    setXiaomiManualCode('');
+    setXiaomiManualAuthorizeUrl('');
   }, [loadProviderSettings]);
 
   const closeProviderSettingsModal = useCallback(() => {
@@ -16468,24 +16572,30 @@ export default function AIWorkspace() {
     setProviderSettingsError(null);
 
     try {
-      const nextProviders = providerSettingsProviders.map((provider) => ({
-        id: provider.id,
-        name: provider.name,
-        baseUrl: provider.baseUrl,
-        protocol: provider.protocol,
-        imageRequestMode: provider.imageRequestMode,
-        imageGenerationEndpoint: provider.imageGenerationEndpoint,
-        imageEditEndpoint: provider.imageEditEndpoint,
-        enabled: provider.enabled,
-        primary: provider.primary,
-        imageModels: provider.imageModels,
-        chatModels: provider.chatModels,
-        modelProtocols: provider.modelProtocols,
-        apiKey: provider.id === providerSettingsSelectedProviderId ? providerSettingsApiKey : provider.apiKey,
-        imageApiKeys: provider.id === providerSettingsSelectedProviderId
-          ? persistProviderSettingsImageApiKeys(providerSettingsImageApiKeys)
-          : provider.imageApiKeys,
-      }));
+      const nextProviders = providerSettingsProviders.map((provider) => {
+        const apiKey = provider.id === providerSettingsSelectedProviderId ? providerSettingsApiKey : provider.apiKey;
+        return {
+          id: provider.id,
+          name: provider.name,
+          baseUrl: provider.baseUrl,
+          protocol: provider.protocol,
+          imageRequestMode: provider.imageRequestMode,
+          imageGenerationEndpoint: provider.imageGenerationEndpoint,
+          imageEditEndpoint: provider.imageEditEndpoint,
+          enabled: provider.id === 'xiaomi' && provider.authType === 'api-key' ? apiKey.trim().length > 0 : provider.enabled,
+          primary: provider.primary,
+          imageModels: provider.imageModels,
+          chatModels: provider.chatModels,
+          voiceModels: provider.voiceModels,
+          modelProtocols: provider.modelProtocols,
+          apiKey,
+          authType: provider.authType,
+          accountId: provider.accountId,
+          imageApiKeys: provider.id === providerSettingsSelectedProviderId
+            ? persistProviderSettingsImageApiKeys(providerSettingsImageApiKeys)
+            : provider.imageApiKeys,
+        };
+      });
       const response = await fetch('/api/settings/providers', {
         method: 'PUT',
         headers: {
@@ -16533,6 +16643,7 @@ export default function AIWorkspace() {
         modelCount: 0,
         imageModels: [],
         chatModels: [],
+        voiceModels: [],
         imageRequestMode: selectedProviderSettings.imageRequestMode,
       });
       return;
@@ -16594,6 +16705,7 @@ export default function AIWorkspace() {
         modelCount: 0,
         imageModels: [],
         chatModels: [],
+        voiceModels: [],
         imageRequestMode: selectedProviderSettings.imageRequestMode,
       });
       return;
@@ -16632,23 +16744,29 @@ export default function AIWorkspace() {
 
       const imageModels = uniqueModelIds(data.imageModels);
       const chatModels = uniqueModelIds(data.chatModels);
+      const voiceModels = uniqueModelIds(data.voiceModels);
       const configuredImageModels = uniqueModelIds(selectedProviderSettings.imageModels);
       const configuredChatModels = uniqueModelIds(selectedProviderSettings.chatModels);
+      const configuredVoiceModels = uniqueModelIds(selectedProviderSettings.voiceModels);
       const allModels = uniqueModelIds([
         ...data.allModels,
         ...configuredImageModels,
         ...configuredChatModels,
+        ...configuredVoiceModels,
+        ...voiceModels,
       ]);
-      const categoryById = allModels.reduce<Record<string, 'image' | 'chat'>>((result, modelId) => {
+      const categoryById = allModels.reduce<Record<string, 'image' | 'chat' | 'voice'>>((result, modelId) => {
         if (configuredImageModels.includes(modelId) || imageModels.includes(modelId)) {
           result[modelId] = 'image';
+        } else if (configuredVoiceModels.includes(modelId) || voiceModels.includes(modelId)) {
+          result[modelId] = 'voice';
         } else {
           result[modelId] = 'chat';
         }
         return result;
       }, {});
       const selectedById = allModels.reduce<Record<string, boolean>>((result, modelId) => {
-        result[modelId] = configuredImageModels.includes(modelId) || configuredChatModels.includes(modelId);
+        result[modelId] = configuredImageModels.includes(modelId) || configuredChatModels.includes(modelId) || configuredVoiceModels.includes(modelId);
         return result;
       }, {});
 
@@ -16657,6 +16775,7 @@ export default function AIWorkspace() {
         allModels,
         imageModels,
         chatModels,
+        voiceModels,
       });
       setProviderSettingsFetchedModelCategoryById(categoryById);
       setProviderSettingsSelectedFetchedModels(selectedById);
@@ -16670,6 +16789,7 @@ export default function AIWorkspace() {
         modelCount: allModels.length,
         imageModels,
         chatModels,
+        voiceModels,
         imageRequestMode: data.imageRequestMode,
       });
       updateSelectedProviderSettings((provider) => ({
@@ -16689,6 +16809,7 @@ export default function AIWorkspace() {
         modelCount: 0,
         imageModels: [],
         chatModels: [],
+        voiceModels: [],
         imageRequestMode: selectedProviderSettings.imageRequestMode,
       });
     } finally {
@@ -16707,24 +16828,30 @@ export default function AIWorkspace() {
     const nextChatModels = selectedModels.filter(
       (modelId) => getFetchedModelCategory(modelId, providerSettingsFetchedModels, providerSettingsFetchedModelCategoryById) === 'chat'
     );
+    const nextVoiceModels = selectedModels.filter(
+      (modelId) => getFetchedModelCategory(modelId, providerSettingsFetchedModels, providerSettingsFetchedModelCategoryById) === 'voice'
+    );
 
     updateSelectedProviderSettings((provider) => ({
       ...provider,
       imageModels: nextImageModels,
       chatModels: nextChatModels,
+      voiceModels: nextVoiceModels,
       modelProtocols: normalizeProviderSettingsModelProtocols(provider.modelProtocols, [
         ...nextImageModels,
         ...nextChatModels,
+        ...nextVoiceModels,
       ]),
     }));
     setProviderSettingsModelPickerOpen(false);
     setProviderSettingsTestResult({
       ok: true,
       status: 200,
-      message: `已应用选择：图片 ${nextImageModels.length} 个，聊天 ${nextChatModels.length} 个；点击保存后写入本地`,
-      modelCount: nextImageModels.length + nextChatModels.length,
+      message: `已应用选择：图片 ${nextImageModels.length} 个，聊天 ${nextChatModels.length} 个，语音 ${nextVoiceModels.length} 个；点击保存后写入本地`,
+      modelCount: nextImageModels.length + nextChatModels.length + nextVoiceModels.length,
       imageModels: nextImageModels,
       chatModels: nextChatModels,
+      voiceModels: nextVoiceModels,
       imageRequestMode: selectedProviderSettings.imageRequestMode,
     });
   }, [
@@ -16735,11 +16862,12 @@ export default function AIWorkspace() {
     updateSelectedProviderSettings,
   ]);
 
-  const handleProviderSettingsRemoveModel = useCallback((category: 'image' | 'chat', modelId: string) => {
+  const handleProviderSettingsRemoveModel = useCallback((category: 'image' | 'chat' | 'voice', modelId: string) => {
     updateSelectedProviderSettings((provider) => ({
       ...provider,
       imageModels: category === 'image' ? provider.imageModels.filter((id) => id !== modelId) : provider.imageModels,
       chatModels: category === 'chat' ? provider.chatModels.filter((id) => id !== modelId) : provider.chatModels,
+      voiceModels: category === 'voice' ? provider.voiceModels.filter((id) => id !== modelId) : provider.voiceModels,
       modelProtocols: Object.fromEntries(
         Object.entries(provider.modelProtocols).filter(([protocolModelId]) => protocolModelId !== modelId)
       ) as Record<string, ProviderProtocol>,
@@ -18346,7 +18474,7 @@ export default function AIWorkspace() {
                     <div className="flex min-h-0 flex-col gap-2">
                       <div className="workspace-text-muted text-[11px] font-medium uppercase tracking-[0.18em]">Providers</div>
                       <div className="workspace-menu-panel panel-scrollbar min-h-0 flex-1 overflow-y-auto rounded-[18px] p-1.5">
-                        {providerSettingsProviders.map((provider) => {
+                        {providerSettingsProviders.filter((provider) => provider.id !== 'xiaomi').map((provider) => {
                           const isSelected = provider.id === selectedProviderSettings.id;
                           const isDeletable = provider.id !== 'comfly';
 
@@ -18404,10 +18532,27 @@ export default function AIWorkspace() {
                       >
                         增加供应商
                       </button>
+                      {xiaomiProviderSettings && (
+                        <button
+                          type="button"
+                          className={`workspace-menu-item mt-1 flex w-full items-center justify-between gap-3 rounded-[14px] border px-3 py-3 text-left ${selectedProviderSettings.id === 'xiaomi' ? 'is-selected border-[var(--workspace-border-strong)]' : 'border-[var(--workspace-border)]'}`}
+                          onClick={() => handleProviderSettingsProviderChange('xiaomi')}
+                        >
+                          <span className="min-w-0">
+                            <span className="block text-[13px] font-semibold tracking-[-0.02em]">Xiaomi OAuth</span>
+                            <span className="workspace-text-muted mt-1 block truncate text-[11px]">
+                              {xiaomiProviderSettings.authType === 'xiaomi-browser' && xiaomiProviderSettings.hasApiKey
+                                ? `已连接${xiaomiProviderSettings.accountId ? ` · ${xiaomiProviderSettings.accountId}` : ''}`
+                                : '小米浏览器授权'}
+                            </span>
+                          </span>
+                          <span className={`h-2 w-2 shrink-0 rounded-full ${xiaomiProviderSettings.enabled && xiaomiProviderSettings.hasApiKey ? 'bg-emerald-500' : 'bg-[var(--workspace-border-strong)]'}`} aria-hidden="true" />
+                        </button>
+                      )}
                     </div>
 
                     <div className="panel-scrollbar min-h-0 space-y-4 overflow-y-auto pr-1">
-                      <div className="grid gap-3 sm:grid-cols-2">
+                      {selectedProviderSettings.id !== 'xiaomi' && <div className="grid gap-3 sm:grid-cols-2">
                         <label className="block">
                           <div className="mb-2 text-[12px] font-medium">名称</div>
                           <input
@@ -18446,7 +18591,47 @@ export default function AIWorkspace() {
                             }`}
                           />
                         </label>
-                      </div>
+                      </div>}
+
+                      {selectedProviderSettings.id === 'xiaomi' && (
+                        <div className="border-y border-[var(--workspace-border)] py-3">
+                          <div className="flex flex-wrap items-center justify-between gap-3">
+                            <div>
+                              <div className="text-[12px] font-medium">小米平台</div>
+                              <div className="workspace-text-muted mt-1 text-[11px]">
+                                {selectedProviderSettings.authType === 'xiaomi-browser' && selectedProviderSettings.hasApiKey
+                                  ? `已通过浏览器连接${selectedProviderSettings.accountId ? ` · ${selectedProviderSettings.accountId}` : ''}`
+                                  : xiaomiLoginStatus === 'waiting' ? '等待浏览器授权…' : '可使用浏览器登录或手动 API Key'}
+                              </div>
+                            </div>
+                            {selectedProviderSettings.authType === 'xiaomi-browser' && selectedProviderSettings.hasApiKey ? (
+                              <button type="button" className="rounded-full border border-[var(--workspace-border)] px-3 py-1.5 text-[12px] font-medium text-[var(--workspace-text-muted)] hover:bg-[var(--workspace-control-hover)]" onClick={() => { void handleXiaomiLogout().catch((error) => setProviderSettingsError(error instanceof Error ? error.message : '退出小米登录失败')); }}>
+                                退出登录
+                              </button>
+                            ) : (
+                              <button type="button" className="rounded-full bg-[var(--workspace-inverse-bg)] px-3 py-1.5 text-[12px] font-medium text-[var(--workspace-inverse-fg)] disabled:opacity-50" disabled={xiaomiLoginStatus === 'waiting'} onClick={() => { void handleXiaomiBrowserLogin().catch((error) => setProviderSettingsError(error instanceof Error ? error.message : '无法开始小米登录')); }}>
+                                浏览器登录
+                              </button>
+                            )}
+                          </div>
+                          {xiaomiLoginStatus === 'waiting' && (
+                            <div className="mt-3 flex gap-2">
+                              {xiaomiManualAuthorizeUrl && <button type="button" className="workspace-text-muted text-[12px] underline underline-offset-4" onClick={() => window.open(xiaomiManualAuthorizeUrl, '_blank', 'noopener,noreferrer')}>打开手动授权</button>}
+                              <input value={xiaomiManualCode} onChange={(event) => setXiaomiManualCode(event.target.value)} placeholder="粘贴授权 Code" className="min-w-0 flex-1 rounded-xl border border-[var(--workspace-border)] bg-[var(--workspace-surface-soft)] px-3 py-1.5 text-[12px] outline-none" />
+                              <button type="button" className="rounded-xl border border-[var(--workspace-border)] px-3 py-1.5 text-[12px]" onClick={() => { void handleXiaomiManualCode().catch((error) => setProviderSettingsError(error instanceof Error ? error.message : '小米 Code 无效')); }}>确认</button>
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      <details
+                        className="space-y-4"
+                        open={selectedProviderSettings.id !== 'xiaomi' || xiaomiManualSettingsOpen}
+                        onToggle={(event) => setXiaomiManualSettingsOpen((event.currentTarget as HTMLDetailsElement).open)}
+                      >
+                        <summary className={`${selectedProviderSettings.id === 'xiaomi' ? 'cursor-pointer' : 'hidden'} list-none text-[12px] font-medium text-[var(--workspace-text-primary)]`}>
+                          {selectedProviderSettings.id === 'xiaomi' ? '手动 API Key 回退' : '连接设置'}
+                        </summary>
 
                       <label className="block">
                         <div className="mb-2 text-[12px] font-medium">Base URL</div>
@@ -18582,6 +18767,9 @@ export default function AIWorkspace() {
                               updateSelectedProviderSettings((provider) => ({
                                 ...provider,
                                 apiKey: nextApiKey,
+                                enabled: provider.id === 'xiaomi' ? nextApiKey.trim().length > 0 : provider.enabled,
+                                authType: 'api-key',
+                                accountId: '',
                                 hasApiKey: nextApiKey.trim().length > 0,
                                 maskedApiKey: maskProviderSettingsApiKeyForDisplay(nextApiKey),
                               }));
@@ -18708,6 +18896,8 @@ export default function AIWorkspace() {
                         </button>
                       </div>
 
+                      </details>
+
                       <div className="rounded-2xl border border-[var(--workspace-border)] bg-[var(--workspace-surface-soft)] p-4">
                         <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
                           <div>
@@ -18728,7 +18918,7 @@ export default function AIWorkspace() {
                           </button>
                         </div>
 
-                        <div className="grid gap-3 sm:grid-cols-2">
+                        <div className="space-y-3">
                           <div className="rounded-[18px] border border-[var(--workspace-border)] bg-[var(--workspace-surface-elevated)] p-3">
                             <div className="mb-2 flex items-center justify-between gap-2">
                               <div className="text-[12px] font-medium">图片模型</div>
@@ -18831,6 +19021,50 @@ export default function AIWorkspace() {
                               )}
                             </div>
                           </div>
+                          <div className="rounded-[18px] border border-[var(--workspace-border)] bg-[var(--workspace-surface-elevated)] p-3">
+                            <div className="mb-2 flex items-center justify-between gap-2">
+                              <div className="text-[12px] font-medium">语音模型</div>
+                              <div className="workspace-text-muted text-[11px]">{selectedProviderSettings.voiceModels.length} 个</div>
+                            </div>
+                            <div className="panel-scrollbar h-[156px] overflow-y-auto rounded-[16px] border border-[var(--workspace-border)]">
+                              {providerSettingsSelectedModelRows.voice.length > 0 ? (
+                                providerSettingsSelectedModelRows.voice.map((model) => (
+                                  <div key={`voice-${model.id}`} className="flex items-center justify-between gap-3 border-b border-[var(--workspace-border)] px-3 py-2.5 last:border-b-0">
+                                    <div className="min-w-0">
+                                      <div className="truncate text-[13px] font-medium text-[var(--workspace-text-primary)]">{model.id}</div>
+                                      <div className="workspace-text-muted mt-0.5 text-[11px]">语音模型</div>
+                                    </div>
+                                    <div className="flex shrink-0 items-center gap-2">
+                                      <select
+                                        className="h-7 rounded-full border border-[var(--workspace-border)] bg-[var(--workspace-surface)] px-2 text-[11px] text-[var(--workspace-text-primary)] outline-none hover:border-[var(--workspace-text-muted)] focus:border-[var(--workspace-accent)]"
+                                        value={selectedProviderSettings.modelProtocols?.[model.id] || ''}
+                                        onChange={(event) => handleProviderSettingsModelProtocolChange(model.id, event.target.value as ProviderProtocol | '')}
+                                        aria-label={`语音模型协议 ${model.id}`}
+                                      >
+                                        <option value="">默认</option>
+                                        {PROVIDER_PROTOCOL_OPTIONS.map((protocol) => (
+                                          <option key={`voice-${model.id}-${protocol.id}`} value={protocol.id}>
+                                            {protocol.id === 'openai' ? 'OpenAI' : protocol.label}
+                                          </option>
+                                        ))}
+                                      </select>
+                                      <button
+                                        type="button"
+                                        className="workspace-text-muted inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full hover:bg-[var(--workspace-control-hover)] hover:text-red-500"
+                                        onClick={() => handleProviderSettingsRemoveModel('voice', model.id)}
+                                        aria-label={`移除语音模型 ${model.id}`}
+                                        title={`移除语音模型 ${model.id}`}
+                                      >
+                                        <Trash2 size={13} />
+                                      </button>
+                                    </div>
+                                  </div>
+                                ))
+                              ) : (
+                                <div className="workspace-text-muted flex h-full items-center justify-center px-3 text-[12px]">尚未选择语音模型</div>
+                              )}
+                            </div>
+                          </div>
                         </div>
                       </div>
 
@@ -18906,7 +19140,7 @@ export default function AIWorkspace() {
                         <div>
                           <div className="text-[13px] font-semibold text-[var(--workspace-text-primary)]">模型选择</div>
                           <div className="workspace-text-muted mt-1 text-[11px]">
-                            已选图片 {providerSettingsSelectedFetchedModelTotals.image} 个，聊天 {providerSettingsSelectedFetchedModelTotals.chat} 个
+                            已选图片 {providerSettingsSelectedFetchedModelTotals.image} 个，聊天 {providerSettingsSelectedFetchedModelTotals.chat} 个，语音 {providerSettingsSelectedFetchedModelTotals.voice} 个
                           </div>
                         </div>
                         <button
@@ -18954,28 +19188,37 @@ export default function AIWorkspace() {
                           providerSettingsFetchedModelRows.map((model) => {
                             const isSelected = !!providerSettingsSelectedFetchedModels[model.id];
                             return (
-                              <button
+                              <div
                                 key={model.id}
-                                type="button"
                                 className={`workspace-menu-item flex w-full items-center justify-between gap-3 border-b border-[var(--workspace-border)] px-3 py-2.5 text-left last:border-b-0 ${isSelected ? 'is-selected' : ''}`}
-                                onClick={() => {
-                                  setProviderSettingsSelectedFetchedModels((prev) => ({
-                                    ...prev,
-                                    [model.id]: !prev[model.id],
-                                  }));
-                                }}
                               >
-                                <div className="min-w-0">
-                                  <div className="truncate text-[13px] font-medium text-[var(--workspace-text-primary)]">{model.id}</div>
-                                  <div className="workspace-text-muted mt-0.5 text-[11px]">
-                                    {model.category === 'image' ? '图片模型' : '聊天模型'}
-                                    {model.sources.length > 0 ? ` · 来源：${model.sources.join('、')}` : ''}
+                                <button
+                                  type="button"
+                                  className="flex min-w-0 flex-1 items-center justify-between gap-3 text-left"
+                                  onClick={() => setProviderSettingsSelectedFetchedModels((prev) => ({ ...prev, [model.id]: !prev[model.id] }))}
+                                >
+                                  <div className="min-w-0">
+                                    <div className="truncate text-[13px] font-medium text-[var(--workspace-text-primary)]">{model.id}</div>
+                                    <div className="workspace-text-muted mt-0.5 text-[11px]">
+                                      {model.category === 'image' ? '图片模型' : model.category === 'voice' ? '语音模型' : '聊天模型'}
+                                      {model.sources.length > 0 ? ` · 来源：${model.sources.join('、')}` : ''}
+                                    </div>
                                   </div>
-                                </div>
-                                <span className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full border ${isSelected ? 'border-[var(--workspace-border-strong)] bg-[var(--workspace-control-active)]' : 'border-[var(--workspace-border)]'}`}>
-                                  {isSelected && <Check size={13} />}
-                                </span>
-                              </button>
+                                  <span className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full border ${isSelected ? 'border-[var(--workspace-border-strong)] bg-[var(--workspace-control-active)]' : 'border-[var(--workspace-border)]'}`}>
+                                    {isSelected && <Check size={13} />}
+                                  </span>
+                                </button>
+                                <select
+                                  value={model.category}
+                                  onChange={(event) => setProviderSettingsFetchedModelCategoryById((prev) => ({ ...prev, [model.id]: event.target.value as 'image' | 'chat' | 'voice' }))}
+                                  className="h-8 shrink-0 rounded-full border border-[var(--workspace-border)] bg-[var(--workspace-surface)] px-2 text-[11px] text-[var(--workspace-text-primary)] outline-none"
+                                  aria-label={`模型分类 ${model.id}`}
+                                >
+                                  <option value="image">图片</option>
+                                  <option value="chat">聊天</option>
+                                  <option value="voice">语音</option>
+                                </select>
+                              </div>
                             );
                           })
                         ) : (

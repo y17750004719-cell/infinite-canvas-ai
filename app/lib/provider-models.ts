@@ -9,6 +9,7 @@ export interface ProviderModelProbeResult {
   allModels: string[];
   imageModels: string[];
   chatModels: string[];
+  voiceModels: string[];
   imageRequestMode: ProviderImageRequestMode;
   modelSources?: Record<string, string[]>;
   failedSources?: string[];
@@ -95,6 +96,25 @@ function collectModelCapabilityHints(value: unknown, result: string[] = []): str
   return result;
 }
 
+function modelSupportsVoiceFromMetadata(model: unknown): boolean | null {
+  if (!model || typeof model !== 'object') return null;
+  const source = model as Record<string, unknown>;
+  const hints = collectModelCapabilityHints([
+    source.output_modalities,
+    source.outputModalities,
+    source.capabilities,
+    source.type,
+    source.mode,
+    source.task,
+  ]);
+  if (hints.length === 0) return null;
+  const voicePatterns = [
+    /(^|[\W_])(tts|text-to-speech|speech|voice|audio)([\W_]|$)/,
+    /(^|[\W_])audio[_-]output([\W_]|$)/,
+  ];
+  return voicePatterns.some((pattern) => hints.some((hint) => !hint.endsWith(':false') && pattern.test(hint))) ? true : null;
+}
+
 function modelSupportsImageFromMetadata(model: unknown): boolean | null {
   if (!model || typeof model !== 'object') {
     return null;
@@ -149,7 +169,8 @@ function modelSupportsImageFromMetadata(model: unknown): boolean | null {
   return sawTextOnlyHint ? false : null;
 }
 
-export function classifyModel(modelId: string, model?: unknown): 'image' | 'chat' {
+export function classifyModel(modelId: string, model?: unknown): 'image' | 'chat' | 'voice' {
+  if (modelSupportsVoiceFromMetadata(model) === true) return 'voice';
   const metadataClassification = modelSupportsImageFromMetadata(model);
   if (metadataClassification === true) {
     return 'image';
@@ -159,6 +180,9 @@ export function classifyModel(modelId: string, model?: unknown): 'image' | 'chat
   }
 
   const lower = modelId.toLowerCase();
+  if (/(^|[-_])(tts|speech|voice|audio)([-_]|$)/.test(lower) || lower.includes('text-to-speech')) {
+    return 'voice';
+  }
   if (
     lower.includes('image') ||
     lower.includes('imagen') ||
@@ -183,7 +207,7 @@ export function classifyModel(modelId: string, model?: unknown): 'image' | 'chat
 export function parseProviderModels(
   payload: unknown,
   protocol: ProviderModelProtocol
-): { imageModels: string[]; chatModels: string[]; allModels: string[] } {
+): { imageModels: string[]; chatModels: string[]; voiceModels: string[]; allModels: string[] } {
   const rawItems =
     payload && typeof payload === 'object' && Array.isArray((payload as { data?: unknown }).data)
       ? (payload as { data: unknown[] }).data
@@ -212,7 +236,7 @@ export function parseProviderModels(
     })
     .filter((entry) => entry.id);
 
-  const categoryByModelId = new Map<string, 'image' | 'chat'>();
+  const categoryByModelId = new Map<string, 'image' | 'chat' | 'voice'>();
   for (const entry of parsedModels) {
     if (categoryByModelId.has(entry.id)) continue;
     categoryByModelId.set(entry.id, classifyModel(entry.id, entry.model));
@@ -221,7 +245,8 @@ export function parseProviderModels(
   const allModels = Array.from(categoryByModelId.keys()).sort();
   const imageModels = allModels.filter((modelId) => categoryByModelId.get(modelId) === 'image');
   const chatModels = allModels.filter((modelId) => categoryByModelId.get(modelId) === 'chat');
-  return { imageModels, chatModels, allModels };
+  const voiceModels = allModels.filter((modelId) => categoryByModelId.get(modelId) === 'voice');
+  return { imageModels, chatModels, voiceModels, allModels };
 }
 
 function uniqueSortedModelIds(values: string[]): string[] {
@@ -252,6 +277,7 @@ export function mergeProviderModelProbeResults(
       allModels: [],
       imageModels: [],
       chatModels: [],
+      voiceModels: [],
       imageRequestMode,
       modelSources: {},
       failedSources,
@@ -260,6 +286,7 @@ export function mergeProviderModelProbeResults(
 
   const allModelIds = new Set<string>();
   const imageModelIds = new Set<string>();
+  const voiceModelIds = new Set<string>();
   const modelSources: Record<string, string[]> = {};
 
   for (const { label, result } of successfulResults) {
@@ -267,6 +294,7 @@ export function mergeProviderModelProbeResults(
       ...result.allModels,
       ...result.imageModels,
       ...result.chatModels,
+      ...(result.voiceModels || []),
     ]);
     for (const modelId of sourceModelIds) {
       allModelIds.add(modelId);
@@ -280,11 +308,15 @@ export function mergeProviderModelProbeResults(
         imageModelIds.add(modelId.trim());
       }
     }
+    for (const modelId of result.voiceModels || []) {
+      if (modelId.trim()) voiceModelIds.add(modelId.trim());
+    }
   }
 
   const allModels = uniqueSortedModelIds(Array.from(allModelIds));
-  const imageModels = allModels.filter((modelId) => imageModelIds.has(modelId));
-  const chatModels = allModels.filter((modelId) => !imageModelIds.has(modelId));
+  const voiceModels = allModels.filter((modelId) => voiceModelIds.has(modelId));
+  const imageModels = allModels.filter((modelId) => !voiceModelIds.has(modelId) && imageModelIds.has(modelId));
+  const chatModels = allModels.filter((modelId) => !imageModelIds.has(modelId) && !voiceModelIds.has(modelId));
   const failedMessage = failedSources.length ? `；${failedSources.length} 个来源失败：${failedSources.join('、')}` : '';
 
   return {
@@ -295,6 +327,7 @@ export function mergeProviderModelProbeResults(
     allModels,
     imageModels,
     chatModels,
+    voiceModels,
     imageRequestMode,
     modelSources,
     failedSources,
@@ -329,6 +362,7 @@ export async function fetchProviderModels({
       allModels: [],
       imageModels: [],
       chatModels: [],
+      voiceModels: [],
       imageRequestMode,
     };
   }
@@ -342,6 +376,7 @@ export async function fetchProviderModels({
     allModels: models.allModels,
     imageModels: models.imageModels,
     chatModels: models.chatModels,
+    voiceModels: models.voiceModels,
     imageRequestMode,
   };
 }

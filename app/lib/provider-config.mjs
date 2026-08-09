@@ -5,6 +5,7 @@ const DEFAULT_PROVIDER_ID = 'comfly';
 const DEFAULT_PROVIDER_UPDATED_AT = new Date(0).toISOString();
 const PROVIDER_ID_RE = /^[A-Za-z0-9_-]{2,40}$/;
 const SUPPORTED_PROVIDER_PROTOCOLS = new Set(['openai', 'gemini']);
+const SUPPORTED_PROVIDER_AUTH_TYPES = new Set(['api-key', 'xiaomi-browser']);
 const SUPPORTED_IMAGE_REQUEST_MODES = new Set(['openai', 'openai-json']);
 const SUPPORTED_IMAGE_API_KEY_SCOPES = new Set(['all', 'gemini', 'gpt']);
 const PROVIDER_PRESET_TEMPLATES = {
@@ -26,6 +27,13 @@ const PROVIDER_PRESET_TEMPLATES = {
     id: 'custom',
     name: '自定义',
     baseUrl: 'https://api.openai.com/v1',
+    protocol: 'openai',
+    imageRequestMode: 'openai',
+  },
+  xiaomi: {
+    id: 'xiaomi',
+    name: 'Xiaomi',
+    baseUrl: 'https://api.xiaomimimo.com/v1',
     protocol: 'openai',
     imageRequestMode: 'openai',
   },
@@ -150,6 +158,12 @@ function normalizeApiKey(value) {
   return normalizeText(value);
 }
 
+function normalizeAuthType(value, providerId) {
+  const raw = normalizeText(value).toLowerCase();
+  if (SUPPORTED_PROVIDER_AUTH_TYPES.has(raw)) return raw;
+  return 'api-key';
+}
+
 function normalizeImageApiKeyScope(value) {
   const raw = normalizeText(value).toLowerCase();
   return SUPPORTED_IMAGE_API_KEY_SCOPES.has(raw) ? raw : 'all';
@@ -205,6 +219,11 @@ function normalizeModelList(values) {
   return deduped;
 }
 
+function isVoiceModelId(modelId) {
+  const normalized = normalizeText(modelId).toLowerCase();
+  return /(^|[-_])(tts|speech|voice|audio)([-_]|$)/.test(normalized) || normalized.includes('text-to-speech');
+}
+
 function normalizeModelProtocols(values) {
   if (!values || typeof values !== 'object' || Array.isArray(values)) {
     return {};
@@ -243,8 +262,11 @@ function buildProviderTemplate(providerId) {
     primary: providerId === DEFAULT_PROVIDER_ID,
     imageModels: [],
     chatModels: [],
+    voiceModels: [],
     modelProtocols: {},
     apiKey: '',
+    authType: 'api-key',
+    accountId: '',
     imageApiKeys: [],
     updatedAt: DEFAULT_PROVIDER_UPDATED_AT,
   };
@@ -264,6 +286,15 @@ function normalizeProvider(input, { fallbackApiKey = '', fallbackPrimary = false
   const imageRequestMode = normalizeImageRequestMode(input.imageRequestMode || input.image_request_mode);
   const updatedAt = normalizeText(input.updatedAt) || new Date().toISOString();
 
+  const imageModels = normalizeModelList(input.imageModels || input.image_models);
+  const configuredChatModels = normalizeModelList(input.chatModels || input.chat_models);
+  const configuredVoiceModels = normalizeModelList(input.voiceModels || input.voice_models);
+  const migratedVoiceModels = id === 'xiaomi'
+    ? configuredChatModels.filter((modelId) => isVoiceModelId(modelId))
+    : [];
+  const voiceModels = normalizeModelList([...configuredVoiceModels, ...migratedVoiceModels]);
+  const voiceModelSet = new Set(voiceModels);
+
   return {
     id,
     name: normalizeProviderName(input.name, id),
@@ -280,10 +311,13 @@ function normalizeProvider(input, { fallbackApiKey = '', fallbackPrimary = false
     ),
     enabled: normalizeBoolean(input.enabled, true),
     primary: normalizeBoolean(input.primary, fallbackPrimary),
-    imageModels: normalizeModelList(input.imageModels || input.image_models),
-    chatModels: normalizeModelList(input.chatModels || input.chat_models),
+    imageModels,
+    chatModels: configuredChatModels.filter((modelId) => !voiceModelSet.has(modelId)),
+    voiceModels,
     modelProtocols: normalizeModelProtocols(input.modelProtocols || input.model_protocols),
     apiKey: normalizeApiKey(input.apiKey || fallbackApiKey),
+    authType: normalizeAuthType(input.authType || input.auth_type, id),
+    accountId: normalizeText(input.accountId || input.account_id),
     imageApiKeys: normalizeImageApiKeys(input),
     updatedAt,
   };
@@ -294,6 +328,7 @@ function cloneProvider(provider) {
     ...provider,
     imageModels: [...provider.imageModels],
     chatModels: [...provider.chatModels],
+    voiceModels: [...provider.voiceModels],
     modelProtocols: { ...provider.modelProtocols },
     imageApiKeys: [...provider.imageApiKeys],
   };
@@ -321,7 +356,7 @@ function ensureSinglePrimary(providers) {
 }
 
 function createDefaultProvidersFromEnv(env = process.env) {
-  const providers = ['comfly'].map((providerId) => buildProviderTemplate(providerId));
+  const providers = ['comfly', 'xiaomi'].map((providerId) => buildProviderTemplate(providerId));
   const comflyBaseUrl = normalizeText(env.COMFLY_API_URL);
   const gptBestBaseUrl = normalizeText(env.GPT_BEST_BASE_URL);
   const inferredPrimaryId = inferProviderId(comflyBaseUrl || gptBestBaseUrl || PROVIDER_PRESET_TEMPLATES.comfly.baseUrl);
@@ -335,6 +370,7 @@ function createDefaultProvidersFromEnv(env = process.env) {
       nextProvider.baseUrl = normalizeBaseUrl(gptBestBaseUrl);
     }
     nextProvider.apiKey = normalizeApiKey(env[providerKeyEnv(provider.id)]);
+    if (provider.id === 'xiaomi') nextProvider.enabled = false;
     nextProvider.primary = provider.id === inferredPrimaryId;
     return nextProvider;
   });
@@ -401,6 +437,8 @@ function buildPrimaryProviderConfig(provider) {
     providerId: provider.id,
     baseUrl: provider.baseUrl,
     apiKey: provider.apiKey,
+    authType: provider.authType,
+    accountId: provider.accountId,
     updatedAt: provider.updatedAt,
   };
 }
@@ -418,8 +456,11 @@ function toProviderView(provider, source) {
     primary: provider.primary,
     imageModels: [...provider.imageModels],
     chatModels: [...provider.chatModels],
+    voiceModels: [...provider.voiceModels],
     modelProtocols: { ...provider.modelProtocols },
     apiKey: provider.apiKey,
+    authType: provider.authType,
+    accountId: provider.accountId,
     imageApiKeys: provider.imageApiKeys.map((row) => ({
       id: row.id,
       apiKey: row.apiKey,
@@ -566,8 +607,11 @@ export async function updateProviderRegistry(
       primary: provider.primary,
       imageModels: provider.imageModels,
       chatModels: provider.chatModels,
+      voiceModels: provider.voiceModels,
       modelProtocols: provider.modelProtocols,
       apiKey: provider.apiKey,
+      authType: provider.authType,
+      accountId: provider.accountId,
       imageApiKeys: provider.imageApiKeys,
       updatedAt: provider.updatedAt,
     })), null, 2)}\n`,

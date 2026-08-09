@@ -16,7 +16,7 @@ import {
   updateProviderRegistry,
 } from './provider-config.mjs';
 
-test('readProviderRegistry falls back to the Comfly env template only', async () => {
+test('readProviderRegistry falls back to Comfly plus the disabled Xiaomi login entry', async () => {
   const runtimeDir = await mkdtemp(path.join(os.tmpdir(), 'provider-registry-read-'));
 
   try {
@@ -31,10 +31,11 @@ test('readProviderRegistry falls back to the Comfly env template only', async ()
     assert.equal(result.source, 'env');
     assert.deepEqual(
       result.providers.map((provider) => provider.id),
-      ['comfly']
+      ['comfly', 'xiaomi']
     );
     assert.equal(getPrimaryProvider(result.providers).id, 'comfly');
     assert.equal(getPrimaryProvider(result.providers).apiKey, 'env-test-key');
+    assert.equal(result.providers.find((provider) => provider.id === 'xiaomi').enabled, false);
   } finally {
     await rm(runtimeDir, { recursive: true, force: true });
   }
@@ -169,6 +170,30 @@ test('readProviderRegistry keeps old provider configs compatible with blank imag
     const result = await readProviderRegistry({ runtimeDir, env: {} });
     assert.equal(result.providers[0].apiKey, 'main-secret');
     assert.deepEqual(result.providers[0].imageApiKeys, []);
+  } finally {
+    await rm(runtimeDir, { recursive: true, force: true });
+  }
+});
+
+test('readProviderRegistry migrates obvious Xiaomi TTS models from chatModels', async () => {
+  const runtimeDir = await mkdtemp(path.join(os.tmpdir(), 'provider-registry-xiaomi-voice-'));
+
+  try {
+    await writeFile(path.join(runtimeDir, 'api-providers.json'), JSON.stringify([
+      {
+        id: 'comfly', baseUrl: 'https://ai.comfly.org/v1', enabled: true, primary: true, apiKey: 'main',
+        imageModels: [], chatModels: [],
+      },
+      {
+        id: 'xiaomi', baseUrl: 'https://api.xiaomimimo.com/v1', enabled: false, primary: false, apiKey: 'mimo',
+        imageModels: [], chatModels: ['mimo-v2.5-pro', 'mimo-tts-v1'],
+      },
+    ]), 'utf8');
+
+    const result = await readProviderRegistry({ runtimeDir, env: {} });
+    const xiaomi = result.providers.find((provider) => provider.id === 'xiaomi');
+    assert.deepEqual(xiaomi.chatModels, ['mimo-v2.5-pro']);
+    assert.deepEqual(xiaomi.voiceModels, ['mimo-tts-v1']);
   } finally {
     await rm(runtimeDir, { recursive: true, force: true });
   }

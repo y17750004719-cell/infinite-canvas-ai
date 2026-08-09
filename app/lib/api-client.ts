@@ -365,6 +365,7 @@ async function getProviderTransport({
     : {
         Accept: "application/json",
         Authorization: bearerAuthorizationHeader(apiKey),
+        ...(provider.id === "xiaomi" ? { "X-Mimo-Source": "mimocode-cli" } : {}),
       };
   const chatBaseUrl = protocol === "gemini"
     ? providerTargets.geminiBaseUrl

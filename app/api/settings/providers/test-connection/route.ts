@@ -46,6 +46,7 @@ export async function POST(request: NextRequest) {
       modelCount: models.modelCount,
       imageModels: models.imageModels,
       chatModels: models.chatModels,
+      voiceModels: models.voiceModels,
       imageRequestMode: models.imageRequestMode,
     });
   } catch (error) {
@@ -57,6 +58,7 @@ export async function POST(request: NextRequest) {
       modelCount: 0,
       imageModels: [],
       chatModels: [],
+      voiceModels: [],
       imageRequestMode: 'openai',
     });
   }

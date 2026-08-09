@@ -31,6 +31,9 @@ test('classifyModel prefers upstream capability fields over model id keywords', 
     }),
     'chat'
   );
+  assert.equal(classifyModel('custom-audio-model', { output_modalities: ['audio'] }), 'voice');
+  assert.equal(classifyModel('custom-chat-v2', { capabilities: { audio: false, text_generation: true } }), 'chat');
+  assert.equal(classifyModel('mimo-tts-v1'), 'voice');
 });
 
 test('parseProviderModels classifies provider objects with capability metadata as image models', () => {
@@ -48,6 +51,19 @@ test('parseProviderModels classifies provider objects with capability metadata a
   assert.deepEqual(result.allModels, ['custom-renderer-v1', 'flux/schnell', 'gpt-4.1-mini']);
   assert.deepEqual(result.imageModels, ['custom-renderer-v1', 'flux/schnell']);
   assert.deepEqual(result.chatModels, ['gpt-4.1-mini']);
+  assert.deepEqual(result.voiceModels, []);
+});
+
+test('parseProviderModels keeps TTS models out of chat models', () => {
+  const result = parseProviderModels({
+    data: [
+      { id: 'mimo-v2.5-pro', modalities: ['text'] },
+      { id: 'mimo-tts-v1', capabilities: { text_to_speech: true } },
+    ],
+  }, 'openai');
+
+  assert.deepEqual(result.chatModels, ['mimo-v2.5-pro']);
+  assert.deepEqual(result.voiceModels, ['mimo-tts-v1']);
 });
 
 test('mergeProviderModelProbeResults combines successful model sources', () => {
@@ -127,4 +143,14 @@ test('mergeProviderModelProbeResults succeeds when at least one source works', (
   assert.deepEqual(result.modelSources, {
     'flux/dev': ['生图 API'],
   });
+});
+
+test('mergeProviderModelProbeResults assigns conflicting models to one category', () => {
+  const result = mergeProviderModelProbeResults([
+    { label: 'image', result: { ok: true, status: 200, message: 'ok', modelCount: 1, allModels: ['same'], imageModels: ['same'], chatModels: [], voiceModels: [], imageRequestMode: 'openai' } },
+    { label: 'voice', result: { ok: true, status: 200, message: 'ok', modelCount: 1, allModels: ['same'], imageModels: [], chatModels: [], voiceModels: ['same'], imageRequestMode: 'openai' } },
+  ]);
+  assert.deepEqual(result.imageModels, []);
+  assert.deepEqual(result.voiceModels, ['same']);
+  assert.deepEqual(result.chatModels, []);
 });

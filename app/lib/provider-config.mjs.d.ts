@@ -1,5 +1,6 @@
 export type ProviderConfigSource = 'runtime' | 'env';
 export type ProviderProtocol = 'openai' | 'gemini';
+export type ProviderAuthType = 'api-key' | 'xiaomi-browser';
 export type ImageRequestMode = 'openai' | 'openai-json';
 export type ProviderImageApiKeyScope = 'all' | 'gemini' | 'gpt';
 
@@ -26,8 +27,11 @@ export interface WorkspaceApiProvider {
   primary: boolean;
   imageModels: string[];
   chatModels: string[];
+  voiceModels: string[];
   modelProtocols: Record<string, ProviderProtocol>;
   apiKey: string;
+  authType: ProviderAuthType;
+  accountId?: string;
   imageApiKeys: ProviderImageApiKey[];
   updatedAt: string;
 }
@@ -73,8 +77,11 @@ export interface ProviderRegistryViewProvider {
   primary: boolean;
   imageModels: string[];
   chatModels: string[];
+  voiceModels: string[];
   modelProtocols: Record<string, ProviderProtocol>;
   apiKey: string;
+  authType: ProviderAuthType;
+  accountId?: string;
   imageApiKeys: ProviderImageApiKeyView[];
   hasApiKey: boolean;
   maskedApiKey: string;
