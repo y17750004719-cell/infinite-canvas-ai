@@ -9,43 +9,9 @@ export type MainAgentMessage = {
 };
 
 export const MAIN_AGENT_SYSTEM_PROMPT: string;
-export const MAIN_AGENT_FRONT_DOOR_SYSTEM_PROMPT: string;
-
-export type MainAgentFrontDoorResult = {
-  route: 'chat' | 'vision_analysis' | 'planner';
-  skillId: string | null;
-  confidence: 'high' | 'medium' | 'low';
-  answer: string | null;
-  reason?: string;
-  repairAttempted?: boolean;
-};
-
-export function buildMainAgentFrontDoorMessages(input?: {
-  messages?: Array<{ role: 'user' | 'assistant'; content: string }>;
-  referenceImages?: string[];
-  referenceContext?: AgentPlannerReferenceContext;
-  manifests?: Array<Record<string, unknown>>;
-  manualSkillId?: string | null;
-  pendingTask?: Record<string, unknown> | null;
-}): MainAgentMessage[];
-
-export function parseMainAgentFrontDoorResult(
-  raw: string,
-  allowedSkillIds?: string[],
-): MainAgentFrontDoorResult | null;
-
-export function resolveMainAgentFrontDoor(input?: {
-  messages?: Array<{ role: 'user' | 'assistant'; content: string }>;
-  referenceImages?: string[];
-  referenceContext?: AgentPlannerReferenceContext;
-  manifests?: Array<Record<string, unknown>>;
-  manualSkillId?: string | null;
-  pendingTask?: Record<string, unknown> | null;
-  providerId?: string;
-  model?: string;
-  signal?: AbortSignal;
-  chatFn?: (request: Record<string, unknown>) => Promise<Record<string, unknown>>;
-}): Promise<MainAgentFrontDoorResult>;
+export const MAIN_AGENT_LOOP_SYSTEM_PROMPT: string;
+export const FAILED_TASK_RECOVERY_SYSTEM_PROMPT: string;
+export function buildFailedTaskRecoveryMessages(input?: Record<string, unknown>): MainAgentMessage[];
 
 export function buildMainAgentMessages(input?: {
   messages?: Array<{ role: 'user' | 'assistant'; content: string }>;
@@ -54,4 +20,17 @@ export function buildMainAgentMessages(input?: {
   referenceContext?: AgentPlannerReferenceContext;
   resolvedBrief?: string;
   executionPlan?: Record<string, unknown>;
+}): MainAgentMessage[];
+
+export function buildMainAgentLoopMessages(input?: {
+  messages?: Array<{ role: 'user' | 'assistant'; content: string }>;
+  referenceImages?: string[];
+  referenceContext?: AgentPlannerReferenceContext;
+  manifests?: Array<Record<string, unknown>>;
+  manualSkillId?: string | null;
+  pendingTask?: Record<string, unknown> | null;
+  recentFailedTask?: Record<string, unknown> | null;
+  memory?: Record<string, unknown> | null;
+  contextEntities?: Array<Record<string, unknown>>;
+  canvasContext?: Record<string, unknown> | null;
 }): MainAgentMessage[];

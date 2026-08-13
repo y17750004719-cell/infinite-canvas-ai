@@ -169,21 +169,10 @@ function modelSupportsImageFromMetadata(model: unknown): boolean | null {
   return sawTextOnlyHint ? false : null;
 }
 
-export function classifyModel(modelId: string, model?: unknown): 'image' | 'chat' | 'voice' {
-  if (modelSupportsVoiceFromMetadata(model) === true) return 'voice';
-  const metadataClassification = modelSupportsImageFromMetadata(model);
-  if (metadataClassification === true) {
-    return 'image';
-  }
-  if (metadataClassification === false) {
-    return 'chat';
-  }
-
+export function isKnownImageModelId(modelId: string): boolean {
   const lower = modelId.toLowerCase();
-  if (/(^|[-_])(tts|speech|voice|audio)([-_]|$)/.test(lower) || lower.includes('text-to-speech')) {
-    return 'voice';
-  }
-  if (
+  return (
+    /(^|[\/:_-])nano[-_]?banana(?=$|[\/:_-])/.test(lower) ||
     lower.includes('image') ||
     lower.includes('imagen') ||
     lower.includes('dall-e') ||
@@ -198,8 +187,25 @@ export function classifyModel(modelId: string, model?: unknown): 'image' | 'chat
     lower.includes('-i2i') ||
     lower.includes('stable-diffusion') ||
     lower.startsWith('sd3')
-  ) {
+  );
+}
+
+export function classifyModel(modelId: string, model?: unknown): 'image' | 'chat' | 'voice' {
+  if (modelSupportsVoiceFromMetadata(model) === true) return 'voice';
+  const metadataClassification = modelSupportsImageFromMetadata(model);
+  if (metadataClassification === true) {
     return 'image';
+  }
+  if (isKnownImageModelId(modelId)) {
+    return 'image';
+  }
+  if (metadataClassification === false) {
+    return 'chat';
+  }
+
+  const lower = modelId.toLowerCase();
+  if (/(^|[-_])(tts|speech|voice|audio)([-_]|$)/.test(lower) || lower.includes('text-to-speech')) {
+    return 'voice';
   }
   return 'chat';
 }

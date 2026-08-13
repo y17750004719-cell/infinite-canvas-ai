@@ -220,6 +220,18 @@ function visualContext(referenceIds, targetReferenceId = null, confidence = null
   };
 }
 
+function visualSummary(referenceIds) {
+  return {
+    version: 1,
+    references: referenceIds.map((referenceId) => ({
+      referenceId,
+      description: `Visible evidence for ${referenceId}`,
+      salientSubjects: ['visible subject'],
+      visibleText: [],
+    })),
+  };
+}
+
 function assertStringEnums(value, path = '$') {
   if (Array.isArray(value)) {
     value.forEach((entry, index) => assertStringEnums(entry, `${path}[${index}]`));
@@ -243,11 +255,10 @@ test('planner prompt requires the structured tool and separates collage style fr
   assert.match(messages[0].content, /collage, hand-cut collage.*visual style or content/i);
   assert.match(messages[0].content, /composite only when each output file/i);
   assert.match(messages[0].content, /compile.*skill.*once/i);
-  assert.match(messages[0].content, /do not copy.*workflow.*quality gate/i);
   assert.doesNotMatch(messages[0].content, /mustChange and imageTask\.mustPreserve requirement verbatim/i);
   assert.match(messages[0].content, /only analysis request/i);
-  assert.doesNotMatch(messages[1].content, /planningGuidance/);
-  assert.doesNotMatch(messages[1].content, /generationContract/);
+  assert.match(messages[1].content, /planningGuidance/);
+  assert.match(messages[1].content, /generationContract/);
   assert.match(messages[1].content, /"promptStyle":"json-text"/);
   assert.equal(AGENT_EXECUTION_PLAN_TOOL.function.name, 'submit_agent_execution_plan');
   assert.equal(AGENT_EXECUTION_PLAN_TOOL.function.strict, true);
@@ -255,7 +266,7 @@ test('planner prompt requires the structured tool and separates collage style fr
   assert.equal(AGENT_EXECUTION_PLAN_TOOL.function.parameters.properties.plan, undefined);
 });
 
-test('planner injects only the locked skill body and validates the lock exactly', async () => {
+test('planner injects only the locked compact skill manifest and validates the lock exactly', async () => {
   const marker = 'FULL_SKILL_BODY_SENTINEL';
   const messages = buildAgentExecutionPlannerMessages({
     userMessage: '生成一张杂志封面',
@@ -264,12 +275,12 @@ test('planner injects only the locked skill body and validates the lock exactly'
     lockedSkillId: 'magazine-poster',
     skillContent: marker,
   });
-  assert.equal(messages.length, 3);
+  assert.equal(messages.length, 2);
   assert.match(messages[0].content, /locked skillId to magazine-poster/i);
   assert.match(messages[0].content, /"skillId":"magazine-poster"/);
   assert.match(messages[0].content, /"promptFormat":"json-text"/);
-  assert.match(messages[1].content, new RegExp(marker));
-  assert.doesNotMatch(messages[2].content, new RegExp(marker));
+  assert.doesNotMatch(messages[1].content, new RegExp(marker));
+  assert.match(messages[1].content, /generationContract/);
 
   const accepted = validateAgentExecutionPlan(plan(), {
     allowedSkillIds: ['magazine-poster'],
@@ -322,7 +333,8 @@ test('planner injects only the locked skill body and validates the lock exactly'
   });
   assert.equal(calls, 1);
   assert.ok(planned.plan);
-  assert.match(capturedMessages[1].content, new RegExp(marker));
+  assert.doesNotMatch(capturedMessages[1].content, new RegExp(marker));
+  assert.match(capturedMessages[1].content, /generationContract/);
 });
 
 test('planner restores a locked skill when the model omits skillId', async () => {
@@ -440,10 +452,8 @@ test('planner receives sanitized inline reference context and is the sole semant
   });
   assert.match(messages[0].content, /only component that decides whether the user wants chat, analysis, a new image, or an edit/i);
   assert.match(messages[0].content, /runtime will not infer intent from keywords or regular expressions/i);
-  assert.ok(Array.isArray(messages[1].content));
-  const structuredPart = messages[1].content[0];
-  assert.equal(structuredPart.type, 'text');
-  const payload = JSON.parse(structuredPart.text.split('\n').slice(1).join('\n'));
+  assert.equal(typeof messages[1].content, 'string');
+  const payload = JSON.parse(messages[1].content);
   assert.deepEqual(payload.referenceContext, {
     references: [{
       id: 'vogue-cover',
@@ -459,11 +469,8 @@ test('planner receives sanitized inline reference context and is the sole semant
       { type: 'text', text: ' 换成狗' },
     ],
   });
-  assert.doesNotMatch(structuredPart.text, /private\.example/);
-  assert.ok(messages[1].content.some((part) => part.type === 'image_url' && part.image_url.url === 'https://private.example/preview.png'));
-  assert.ok(!messages[1].content.some((part) => part.type === 'image_url' && part.image_url.url === 'https://private.example/original.png'));
-  const imageIndex = messages[1].content.findIndex((part) => part.type === 'image_url');
-  assert.match(messages[1].content[imageIndex - 1].text, /Reference ID: vogue-cover/);
+  assert.doesNotMatch(messages[1].content, /private\.example/);
+  assert.equal(Array.isArray(messages[1].content), false);
   assert.deepEqual(payload.canvasContext.selectedItems[0], {
     id: 'canvas-1',
     type: 'image',
@@ -786,6 +793,7 @@ test('planner repairs the duplicated generate reference role in one model reques
       references: [{ id: 'source-image', src: 'https://example.test/source.png', label: 'Source', source: 'upload', role: 'reference' }],
       composerSegments: [{ type: 'reference', referenceId: 'source-image' }],
     },
+    visualSummary: visualSummary(['source-image']),
     model: 'planner-model',
     providerId: 'provider',
     chatFn: async () => {
@@ -878,7 +886,7 @@ test('planner prompt includes one request-matched reference example with real id
   assert.match(systemPrompt, /Complete reference-based generation JSON example/);
   assert.doesNotMatch(systemPrompt, /Complete single-image generation JSON example/);
   assert.doesNotMatch(systemPrompt, /Complete image edit JSON example/);
-  assert.match(systemPrompt, /visualContext is mandatory/);
+  assert.match(systemPrompt, /visualSummary and visualContext are mandatory/);
   assert.match(systemPrompt, /imageTask and generation never substitute for visualContext/);
   assert.match(systemPrompt, /"sourceReferenceId":"token:actual-reference"/);
   assert.doesNotMatch(systemPrompt, /"referenceId":"reference-1"/);
@@ -1356,6 +1364,66 @@ test('required tool arguments win over compatibility text and preserve magazine-
   assert.equal(request.tools[0].function.name, 'submit_agent_execution_plan');
 });
 
+test('partial recovery accepts only the exact missing output count', async () => {
+  const original = plan();
+  const recoveryContext = {
+    mode: 'fill_missing',
+    completedAssetCount: 2,
+    taskSnapshot: {
+      contract: original,
+      activeVersions: [
+        { slotId: 'slot-1', versionId: 'version-1', referenceId: 'asset-1' },
+        { slotId: 'slot-2', versionId: 'version-2', referenceId: 'asset-2' },
+      ],
+    },
+  };
+  const missingDelivery = {
+    ...original.delivery,
+    outputCount: 2,
+    items: original.delivery.items.slice(2).map((item, index) => ({ ...item, index: index + 1 })),
+  };
+  const accepted = await planAgentExecutionRequest({
+    userMessage: 'Generate four posters',
+    messages: [{ role: 'user', content: 'Generate four posters' }],
+    manifests,
+    recoveryContext,
+    model: 'planner-model',
+    providerId: 'provider',
+    chatFn: async () => toolResponse(plan({ delivery: missingDelivery })),
+  });
+  assert.equal(accepted.plan.delivery.outputCount, 2);
+
+  const rejected = await planAgentExecutionRequest({
+    userMessage: 'Generate four posters',
+    messages: [{ role: 'user', content: 'Generate four posters' }],
+    manifests,
+    recoveryContext,
+    model: 'planner-model',
+    providerId: 'provider',
+    chatFn: async () => toolResponse(original),
+  });
+  assert.equal(rejected.plan, null);
+  assert.ok(rejected.validationErrors.some((entry) => entry.code === 'recovery_count_mismatch'));
+});
+
+test('full recovery preserves the original delivery count', async () => {
+  const original = plan();
+  const result = await planAgentExecutionRequest({
+    userMessage: 'Generate four posters',
+    messages: [{ role: 'user', content: 'Generate four posters' }],
+    manifests,
+    recoveryContext: {
+      mode: 'redo_all',
+      completedAssetCount: 2,
+      taskSnapshot: { contract: original, activeVersions: [] },
+    },
+    model: 'planner-model',
+    providerId: 'provider',
+    chatFn: async () => toolResponse(original),
+  });
+  assert.equal(result.plan.delivery.outputCount, 4);
+});
+
 test('model-authored edit intent survives request planning without local reinterpretation', async () => {
   const imageTask = {
     operation: 'edit',
@@ -1380,6 +1448,7 @@ test('model-authored edit intent survives request planning without local reinter
         { type: 'text', text: ' 换成狗' },
       ],
     },
+    visualSummary: visualSummary(['vogue-cover']),
     model: 'planner-model',
     providerId: 'provider',
     chatFn: async () => toolResponse(plan({
@@ -1534,7 +1603,7 @@ test('planner classifies unsupported and unreadable multimodal inputs without pr
   assert.equal(unreadable.failureReason, 'vision_unavailable');
 });
 
-test('planner falls back to visual intake before text-only tool planning when vision tool calls are unsupported', async () => {
+test('legacy image tasks acquire one visual summary before text-only tool planning', async () => {
   const image = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
   const draft = plan({
     visualContext: visualContext(['ref-1']),
@@ -1565,9 +1634,6 @@ test('planner falls back to visual intake before text-only tool planning when vi
     chatFn: async (request) => {
       calls.push(request);
       if (calls.length === 1) {
-        throw new Error('This model does not support image input with tools');
-      }
-      if (calls.length === 2) {
         assert.equal(request.tools, undefined);
         assert.equal(request.toolChoice, undefined);
         assert.match(JSON.stringify(request.messages), /ref-1/);
@@ -1583,7 +1649,7 @@ test('planner falls back to visual intake before text-only tool planning when vi
           }) } }],
         };
       }
-      assert.equal(calls.length, 3);
+      assert.equal(calls.length, 2);
       assert.equal(request.toolChoice.function.name, 'submit_agent_execution_plan');
       assert.equal(request.messages.some((message) => Array.isArray(message.content)), false);
       assert.match(JSON.stringify(request.messages), /visualSummary/);
@@ -1592,9 +1658,9 @@ test('planner falls back to visual intake before text-only tool planning when vi
   });
 
   assert.ok(result.plan);
-  assert.equal(result.visualToolFallback, true);
-  assert.equal(result.attempts, 3);
-  assert.equal(calls.length, 3);
+  assert.equal(result.attempts, 2);
+  assert.equal(result.repairAttempted, true);
+  assert.equal(calls.length, 2);
 });
 
 test('planner does not call the model for an already-aborted request', async () => {
@@ -1616,7 +1682,7 @@ test('planner does not call the model for an already-aborted request', async () 
   assert.equal(calls, 0);
 });
 
-test('planner does not retry a typed local reference image failure', async () => {
+test('legacy visual intake fails before Planner tool planning when a local image is unavailable', async () => {
   let calls = 0;
   const result = await planAgentExecutionRequest({
     userMessage: '分析这张图',
@@ -1683,6 +1749,7 @@ test('planner distinguishes unknown canvas context ids from unknown image refere
       references: [{ id: 'token:image', src: 'https://example.test/image.png', plannerPreviewSrc: 'https://example.test/image-preview.png', label: 'Image', source: 'upload', role: 'reference' }],
       composerSegments: [{ type: 'reference', referenceId: 'token:image' }],
     },
+    visualSummary: visualSummary(['token:image']),
     model: 'planner-model',
     providerId: 'provider',
     chatFn: async () => toolResponse(unknownContextPlan),

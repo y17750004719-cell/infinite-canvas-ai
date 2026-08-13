@@ -25,8 +25,8 @@ test('right chat defaults to agent and loads skills from the registry api', () =
   assert.match(source, /fetch\('\/api\/skills'/);
 });
 
-test('agent mode posts to the agent route and handles agent events', () => {
-  assert.match(source, /const usesAgentRequest = generationMode !== 'chat' \|\| hasRegionTarget/);
+test('all chat modes post to the Pi-backed agent route and handle agent events', () => {
+  assert.match(source, /const usesAgentRequest = true/);
   assert.match(source, /const resolvedRequestEndpoint = usesAgentRequest \? '\/api\/agent' : '\/api\/generate'/);
   assert.match(source, /routing_start/);
   assert.match(source, /clarification_required/);
@@ -41,12 +41,11 @@ test('agent mode posts to the agent route and handles agent events', () => {
 });
 
 test('direct image and canvas image requests use the Planner-backed agent route', () => {
-  const requestModeIndex = source.indexOf("const usesAgentRequest = generationMode !== 'chat'");
+  const requestModeIndex = source.indexOf('const usesAgentRequest = true');
   const requestEndpointIndex = source.indexOf("const resolvedRequestEndpoint = usesAgentRequest ? '/api/agent'", requestModeIndex);
   const canvasHandlerIndex = source.indexOf('const handleCanvasImageGenerate = useCallback');
   const canvasAgentIndex = source.indexOf("fetch('/api/agent'", canvasHandlerIndex);
   assert.ok(requestModeIndex >= 0 && requestEndpointIndex > requestModeIndex);
-  assert.match(source.slice(requestModeIndex, requestEndpointIndex), /generationMode !== 'chat'/);
   assert.ok(canvasHandlerIndex >= 0 && canvasAgentIndex > canvasHandlerIndex);
   assert.match(source, /consumeAgentImageResponse\(response\)/);
   assert.doesNotMatch(source, /fetch\('\/api\/skills\/jobs',\s*\{\s*method:\s*'POST'/);
@@ -81,11 +80,10 @@ test('agent clarification uses the shared editable decision popover', () => {
   assert.doesNotMatch(decisionPopoverSource, /aria-modal="true"/);
   assert.match(decisionPopoverSource, /自定义回答|custom\.label/);
   assert.match(source, /按当前信息开始制作/);
-  assert.match(source, /\['creative_direction', 'context_reference', 'image_operation', 'skill_selection', 'planner_model_switch'\]\.includes/);
+  assert.match(source, /\['creative_direction', 'context_reference', 'image_operation', 'skill_selection', 'planner_model_switch', 'recovery_scope'\]\.includes/);
   assert.match(source, /retry:\s*true/);
   assert.match(source, /!options\?\.agentClarification/);
   assert.match(source, /agentClarificationResponsePayload/);
-  assert.match(source, /agentClarification:\s*sourceMessage\.agentClarificationResponsePayload\.clarification/);
   assert.doesNotMatch(source, /agent-clarification[^\n]*shadow/);
 });
 
@@ -100,6 +98,23 @@ test('failed clarification submissions preserve their structured retry context',
   assert.match(source, /persistedReferenceContext/);
   assert.match(source, /referenceContext: currentReferenceContext/);
   assert.match(source, /persistedReferenceContext\?\.references/);
+});
+
+test('unified retry submits an exact recovery task and persists error checkpoints', () => {
+  assert.match(source, /recoveryTaskId\?: string/);
+  assert.match(source, /recoveryRecord\?: AgentRecoveryRecord/);
+  assert.match(source, /recoveryTaskId: recovery\.taskId/);
+  assert.match(source, /getLatestAgentRecoveryForTask\(chatMessages, clickedRecovery\.taskId\)/);
+  assert.match(source, /suppressUserMessage: true/);
+  assert.match(source, /event\.type === 'agent_task_checkpoint'/);
+  assert.match(source, /agentRecovery: event\.recoveryRecord/);
+  assert.match(source, /latestTaskSnapshot\?\.activeVersions\.length/);
+  assert.match(source, /resumeRoute: localDeliveryOnly \? 'local_delivery' : 'image_planner'/);
+  assert.match(source, /failedLocalDeliveryIds/);
+  const agentResponseStart = source.indexOf("const resolvedRequestEndpoint = usesAgentRequest ? '/api/agent'");
+  const agentStreamStart = source.indexOf("const contentType = response.headers.get('content-type')", agentResponseStart);
+  assert.ok(agentResponseStart >= 0 && agentStreamStart > agentResponseStart);
+  assert.doesNotMatch(source.slice(agentResponseStart, agentStreamStart), /errorMessage = errorText/);
 });
 
 test('region targets are snapshotted before composer cleanup and submitted from the frozen data', () => {
@@ -138,7 +153,7 @@ test('agent proposals and context entities persist and submit stable selections'
   assert.match(source, /pendingAgentProposal\.options\.map/);
   assert.match(source, /selectedContextEntityIds:\s*\[option\.entityId\]/);
   assert.match(source, /已采用：/);
-  assert.match(source, /\['creative_direction', 'context_reference', 'image_operation', 'skill_selection', 'planner_model_switch'\]\.includes/);
+  assert.match(source, /\['creative_direction', 'context_reference', 'image_operation', 'skill_selection', 'planner_model_switch', 'recovery_scope'\]\.includes/);
 });
 
 test('server-selected Skills annotate the sent message without repopulating the next draft', () => {
@@ -158,6 +173,11 @@ test('agent progress accumulates reached breadcrumbs without an assistant bubble
   assert.match(source, /agentProgressMode:\s*usesAgentRequest[\s\S]{0,120}generationMode === 'image' \? 'compact' : 'full'/);
   assert.match(source, /reduceAgentRunProgress/);
   assert.match(source, /event\.type === 'progress_update'/);
+  assert.match(source, /event\.type === 'agent_activity_delta'/);
+  assert.match(source, /event\.type === 'agent_activity_commit'/);
+  assert.match(source, /disposition === 'final'/);
+  assert.match(source, /consumePromotedFinalReplay/);
+  assert.match(source, /AgentFirstTokenWait/);
   assert.match(source, /createAgentProgressEventRouter/);
   assert.match(source, /routeAgentProgressEvent\(progressEventRouter, event\)/);
   assert.match(source, /event\.type === 'agent_done'/);
@@ -178,9 +198,12 @@ test('agent progress accumulates reached breadcrumbs without an assistant bubble
   assert.match(source, /status === 'active' \|\| status === 'running' \? '○'/);
   assert.match(source, /outcome === 'warning'/);
   assert.match(source, /outcome === 'failed'/);
-  assert.match(source, /\['completed', 'warning', 'failed'\]\.includes\(msg\.agentRunProgress\.outcome\)/);
+  assert.match(source, /\['completed', 'warning', 'failed', 'cancelled'\]\.includes\(msg\.agentRunProgress\.outcome\)/);
   assert.match(source, /isAgentProgressMessage\s*\?\s*'py-1'/);
   assert.match(source, /shouldShowAgentRunProgress\(msg\.agentRunProgress\)/);
+  assert.match(source, /const AgentProgressDetails = memo/);
+  assert.match(source, /useState\(outcome !== 'completed'\)/);
+  assert.match(source, /onToggle=\{\(event\) => setIsOpen\(event\.currentTarget\.open\)\}/);
   assert.doesNotMatch(source, /模型推理/);
   assert.doesNotMatch(source, /animate-pulse/);
   assert.doesNotMatch(globalStyles, /@keyframes/);

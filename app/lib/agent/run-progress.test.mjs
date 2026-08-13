@@ -24,20 +24,91 @@ const progress = (sequence, overrides = {}) => ({
   ...overrides,
 });
 
-test('creates an immediate understanding breadcrumb for a new agent run', () => {
+test('creates an empty, hidden timeline for a new agent run', () => {
   const state = createInitialAgentRunProgress('run-immediate');
 
   assert.equal(state.runId, 'run-immediate');
   assert.equal(state.operationId, 'run-immediate');
   assert.equal(state.intent, null);
   assert.equal(state.outcome, 'running');
-  assert.deepEqual(state.steps, [{
-    stepId: 'routing',
-    phase: 'routing',
+  assert.deepEqual(state.steps, []);
+  assert.equal(shouldShowAgentRunProgress(state), false);
+});
+
+test('streams provisional activity and keeps commentary commits in the timeline', () => {
+  let state = createInitialAgentRunProgress('run-activity');
+  state = reduceAgentRunProgress(state, {
+    type: 'agent_activity_delta',
+    activityId: 'activity-1',
+    delta: '正在检查',
+  });
+  state = reduceAgentRunProgress(state, {
+    type: 'agent_activity_delta',
+    activityId: 'activity-1',
+    delta: '画布内容',
+  });
+  state = reduceAgentRunProgress(state, {
+    type: 'agent_activity_commit',
+    activityId: 'activity-1',
+    disposition: 'commentary',
+  });
+
+  assert.deepEqual(state.steps[0], {
+    stepId: 'activity:activity-1',
+    activityId: 'activity-1',
+    kind: 'commentary',
+    phase: 'commentary',
+    status: 'completed',
+    commentary: '正在检查画布内容',
+    label: '正在检查画布内容',
+  });
+});
+
+test('removes a final activity so the page can promote it into message content once', () => {
+  let state = reduceAgentRunProgress(createInitialAgentRunProgress('run-final'), {
+    type: 'agent_activity_delta',
+    activityId: 'final-1',
+    delta: '最终回复',
+  });
+  state = reduceAgentRunProgress(state, {
+    type: 'agent_activity_commit',
+    activityId: 'final-1',
+    disposition: 'final',
+  });
+
+  assert.deepEqual(state.steps, []);
+  assert.equal(shouldShowAgentRunProgress(state), false);
+});
+
+test('marks user cancellation without misreporting an execution failure', () => {
+  let state = reduceAgentRunProgress(createInitialAgentRunProgress('run-cancelled'), progress(1, {
+    stepId: 'waiting-model',
+    phase: 'waiting',
     status: 'active',
-    label: '正在理解你的需求…',
-  }]);
-  assert.equal(shouldShowAgentRunProgress(state), true);
+    label: '正在等待模型响应',
+  }));
+  state = reduceAgentRunProgress(state, { type: 'agent_cancelled' });
+
+  assert.equal(state.agentDone, true);
+  assert.equal(state.outcome, 'cancelled');
+  assert.equal(state.steps[0].status, 'completed');
+  assert.equal(state.steps[0].label, '任务已终止');
+});
+
+test('bounds persisted activity to 24 entries and 1200 characters per entry', () => {
+  let state = createInitialAgentRunProgress('run-bounded');
+  for (let index = 0; index < 25; index += 1) {
+    state = reduceAgentRunProgress(state, {
+      type: 'agent_activity_delta',
+      activityId: `activity-${index}`,
+      delta: index === 24 ? 'x'.repeat(1300) : String(index),
+    });
+  }
+
+  assert.equal(state.steps.length, 24);
+  assert.equal(state.steps[0].activityId, 'activity-0');
+  assert.equal(state.steps[1].stepId, 'activity:truncated');
+  assert.equal(state.steps.at(-1).commentary.length, 1200);
 });
 
 test('deduplicates progress updates by sequence', () => {
@@ -263,6 +334,16 @@ test('agent errors terminalize the run for retry rendering', () => {
   assert.equal(state.steps.at(-1).status, 'failed');
 });
 
+test('agent errors remain visible even before any activity arrives', () => {
+  const state = reduceAgentRunProgress(createInitialAgentRunProgress('run-empty-error'), {
+    type: 'agent_error',
+  });
+
+  assert.equal(state.outcome, 'failed');
+  assert.equal(state.steps[0].status, 'failed');
+  assert.equal(shouldShowAgentRunProgress(state), true);
+});
+
 test('async skill job progress keeps the run waiting until every asset settles', () => {
   let state = createInitialAgentRunProgress('run-skill-job');
   state = reduceAgentRunProgress(state, { type: 'intent_resolved', intent: 'skill_action' });
@@ -298,7 +379,7 @@ test('a later assistant delta does not clear accumulated progress', () => {
   assert.equal(afterDelta.steps.length, 1);
 });
 
-test('ordinary chat preserves breadcrumbs and records its resolved intent', () => {
+test('completed ordinary chat hides commentary-only progress', () => {
   const routing = reduceAgentRunProgress(null, progress(1, {
     stepId: 'routing',
     phase: 'routing',
@@ -308,10 +389,26 @@ test('ordinary chat preserves breadcrumbs and records its resolved intent', () =
     type: 'intent_resolved',
     intent: 'chat',
   });
+  const completed = reduceAgentRunProgress(state, { type: 'agent_done' });
 
-  assert.equal(state.intent, 'chat');
-  assert.equal(state.steps.length, 1);
+  assert.equal(completed.intent, 'chat');
+  assert.equal(completed.steps.length, 1);
+  assert.equal(shouldShowAgentRunProgress(completed), false);
+});
+
+test('completed chat keeps a timeline when it used a tool', () => {
+  let state = reduceAgentRunProgress(null, progress(1, {
+    stepId: 'get_conversation_memory',
+    toolName: 'get_conversation_memory',
+    phase: 'reading',
+    status: 'completed',
+    label: 'get_conversation_memory',
+  }));
+  state = reduceAgentRunProgress(state, { type: 'intent_resolved', intent: 'chat' });
+  state = reduceAgentRunProgress(state, { type: 'agent_done' });
+
   assert.equal(shouldShowAgentRunProgress(state), true);
+  assert.equal(formatAgentProgressLabel(state.steps[0]), '🔎 读取对话记忆已完成');
 });
 
 test('buffers progress until an image intent is known and flushes it once', () => {

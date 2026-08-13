@@ -8,6 +8,56 @@ import type {
 
 export type AgentIntent = 'chat' | 'image' | 'skill_action';
 
+export type AgentConversationMemory = {
+  version: 1;
+  recentRawConversation: Array<{ role: 'user' | 'assistant'; content: string }>;
+  rollingSummary: string;
+  facts: string[];
+  preferences: string[];
+  activeTask: {
+    status: 'idle' | 'planning' | 'awaiting_confirmation' | 'executing' | 'completed' | 'failed';
+    summary: string;
+    taskId?: string;
+  } | null;
+  recentReferencedAssetIds: string[];
+  updatedAt: number;
+};
+
+export type AgentVisualSummary = {
+  version: 1;
+  references: Array<{
+    referenceId: string;
+    description: string;
+    salientSubjects: string[];
+    visibleText: string[];
+  }>;
+};
+
+export type AgentRecoveryRecord = {
+  version: 1;
+  taskId: string;
+  runId: string;
+  topicId: string;
+  sourceUserMessageId: string;
+  status: 'failed' | 'cancelled';
+  resumeRoute: 'main_agent' | 'image_planner' | 'local_delivery' | null;
+  intent: 'chat' | 'vision_analysis' | 'image' | 'skill_action' | null;
+  originalRequest: string;
+  failure: {
+    stage: string;
+    kind: 'cancelled' | 'timeout' | 'transport' | 'upstream_http' | 'protocol' | 'validation' | 'permission' | 'resource' | 'capability' | 'unknown';
+    message: string;
+    retryability: 'retryable' | 'requires_change' | 'unknown';
+  };
+  skillId: string | null;
+  contextEntityIds: string[];
+  visualReferenceIds: string[];
+  visualSummary?: AgentVisualSummary;
+  taskSnapshot?: AgentTaskSnapshot;
+  completedAssetCount: number;
+  createdAt: number;
+};
+
 export type AgentProgressStepId =
   | 'routing'
   | 'context_resolution'
@@ -67,13 +117,14 @@ export type AgentClarificationState = {
   operationId?: string;
   skillSource?: 'manual' | 'auto' | null;
   lastSequence?: number;
-  intent: 'image' | 'skill_action';
+  intent: 'chat' | 'image' | 'skill_action';
   skillId?: string;
   originalRequest: string;
   workingBrief: string;
   askedDimensions: string[];
   answers: Array<{ dimension: string; question: string; answer: string }>;
   referenceImages?: string[];
+  visualSummary?: AgentVisualSummary;
   referenceContext?: {
     references: Array<{
       id: string;
@@ -124,6 +175,24 @@ export type AgentClarificationState = {
     retryMode: 'replan';
     failedAt: number;
   };
+  recoveryRecord?: AgentRecoveryRecord;
+  recoveryMode?: 'fill_missing' | 'redo_all';
+  mainAgentLoop?: {
+    transcript: unknown[];
+    pendingCall: {
+      id: string;
+      name: string;
+      args: Record<string, unknown>;
+      batch?: Array<{ id: string; name: string; args: Record<string, unknown> }>;
+    };
+    budgets: {
+      turnsUsed: number;
+      toolCallsUsed: number;
+      budgetedToolCallsUsed: number;
+      mutationToolCallsUsed: number;
+    };
+    memoryPatches?: Record<string, unknown>[];
+  };
 };
 
 export type AgentClarificationRequest = {
@@ -132,8 +201,8 @@ export type AgentClarificationRequest = {
   question: string;
   dimension: string;
   options: AgentClarificationOption[];
-  allowCustom: true;
-  allowProceed: true;
+  allowCustom: boolean;
+  allowProceed: boolean;
   failed?: boolean;
 };
 
@@ -182,6 +251,15 @@ export type AgentTaskSnapshot = {
     batchId: string;
     slotId: string;
     versionId: string;
+    assetUrl?: string;
+    plannerPreviewSrc?: string;
+    naturalWidth?: number;
+    naturalHeight?: number;
+    model?: string;
+    itemId?: string;
+    index?: number;
+    label?: string;
+    promptTrace?: AgentPromptTrace;
   }>;
 };
 
@@ -198,6 +276,19 @@ export type AgentProgressUpdate = {
   label: string;
   toolCallId?: string;
   toolName?: string;
+};
+
+export type AgentActivityDelta = {
+  type: 'agent_activity_delta';
+  activityId: string;
+  delta: string;
+  model?: string;
+};
+
+export type AgentActivityCommit = {
+  type: 'agent_activity_commit';
+  activityId: string;
+  disposition: 'commentary' | 'final';
 };
 
 export type AgentEvent =
@@ -244,7 +335,10 @@ export type AgentEvent =
   | { type: 'tool_start'; toolCallId: string; toolName: string }
   | { type: 'tool_update'; toolCallId: string; message: string }
   | { type: 'tool_result'; toolCallId: string; result: unknown }
+  | AgentActivityDelta
+  | AgentActivityCommit
   | { type: 'assistant_delta'; delta: string; channel?: 'content' | 'reasoning'; model?: string }
+  | { type: 'agent_memory_updated'; memory: AgentConversationMemory }
   | { type: 'client_action'; action: AgentClientAction }
   | {
       type: 'agent_completion_summary';
@@ -257,6 +351,7 @@ export type AgentEvent =
       addedToCanvas: boolean;
     }
   | { type: 'confirmation_required'; request: { confirmationId: string; toolName: string; message: string } }
+  | { type: 'agent_task_checkpoint'; taskSnapshot: AgentTaskSnapshot }
   | { type: 'agent_done'; stopReason: string; taskSnapshot?: AgentTaskSnapshot }
   | {
       type: 'agent_error';
@@ -264,4 +359,5 @@ export type AgentEvent =
       message: string;
       reason?: AgentPlannerFailureReason;
       retryable?: boolean;
+      recoveryRecord?: AgentRecoveryRecord;
     };

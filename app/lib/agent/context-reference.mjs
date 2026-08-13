@@ -253,8 +253,30 @@ export function buildAgentContextEntities({
         createdAt,
       });
     }
+    const stableReferenceSources = new Set();
+    for (const [referenceIndex, reference] of (message.referenceContext?.references || []).entries()) {
+      const assetUrl = text(reference?.src);
+      if (!assetUrl) continue;
+      stableReferenceSources.add(assetUrl);
+      entities.push({
+        id: text(reference.id) || `reference-image:${message.id}:${referenceIndex + 1}`,
+        kind: 'reference_image',
+        intent: 'image',
+        label: text(reference.label) || `image${referenceIndex + 1}`,
+        index: referenceIndex + 1,
+        aliases: normalizeAliases(reference.aliases || [`image ${referenceIndex + 1}`, `参考图${referenceIndex + 1}`]),
+        summary: text(reference.description) || '用户提供的历史参考图片',
+        brief: `使用用户提供的参考图 ${text(reference.label) || `image${referenceIndex + 1}`}。`,
+        mustPreserve: [],
+        assetUrl,
+        referenceImageUrls: [assetUrl],
+        sourceMessageId: message.id,
+        createdAt,
+      });
+    }
     for (let referenceIndex = 0; referenceIndex < (message.referenceImages || []).length; referenceIndex += 1) {
       const assetUrl = message.referenceImages[referenceIndex];
+      if (stableReferenceSources.has(assetUrl)) continue;
       entities.push({
         id: `reference-image:${message.id}:${referenceIndex + 1}`,
         kind: 'reference_image',
@@ -326,6 +348,7 @@ export function buildAgentContextEntities({
   for (let index = 0; index < generatedImages.length; index += 1) {
     const image = generatedImages[index] || {};
     if (!image.src) continue;
+    const promptSummary = text(image.promptTrace?.finalPrompt || image.promptTrace?.sourcePrompt).slice(0, 240);
     entities.push({
       id: `history-image:${image.id || index + 1}`,
       kind: 'generated_image',
@@ -333,8 +356,10 @@ export function buildAgentContextEntities({
       label: `image ${index + 1}`,
       index: index + 1,
       aliases: [`image ${index + 1}`, `image${index + 1}`, `第${index + 1}张图`],
-      summary: '当前话题生成历史中的图片',
-      brief: `使用生成历史中的 image ${index + 1} 作为视觉参考。`,
+      summary: promptSummary ? `当前话题生成历史中的图片：${promptSummary}` : '当前话题生成历史中的图片',
+      brief: promptSummary
+        ? `使用生成历史中的 image ${index + 1} 作为视觉参考。原始生成摘要：${promptSummary}`
+        : `使用生成历史中的 image ${index + 1} 作为视觉参考。`,
       mustPreserve: [],
       assetUrl: image.src,
       referenceImageUrls: [image.src],
@@ -343,15 +368,6 @@ export function buildAgentContextEntities({
     });
   }
   return dedupeEntities(entities);
-}
-
-function latestGroup(entities) {
-  const proposalEntitiesList = entities.filter((entity) => entity.kind === 'proposal_option');
-  if (proposalEntitiesList.length === 0) return [];
-  const latest = proposalEntitiesList.reduce((current, entity) => (
-    Number(entity.createdAt) >= Number(current.createdAt) ? entity : current
-  ));
-  return proposalEntitiesList.filter((entity) => entity.groupId === latest.groupId);
 }
 
 function resolution(status, detected, candidates = [], confidence = 'none') {
@@ -379,70 +395,9 @@ export function resolveContextReference({ userMessage, entities = [], selectedEn
   const selected = available.filter((entity) => selectedEntityIds.includes(entity.id));
   if (selected.length === 1) return resolution('resolved', true, selected, 'high');
   if (selected.length > 1) return resolution('resolved', true, selected, 'high');
-  if (LITERAL_NUMBER_PATTERN.test(message)) return resolution('none', false);
-
-  const withoutRatios = message.replace(RATIO_PATTERN, ' ');
-  const normalizedMessage = withoutRatios.toLowerCase();
-  const referenceCore = normalizedMessage
-    .replace(/(?:生成|制作|执行|出图|图片|图像|封面|海报|请|帮我|给我|用|使用|按|按照|选择|选)/gi, ' ')
-    .replace(/[\s，,。.!！?？:：;；、()（）-]+/g, ' ')
-    .trim();
-  const exact = available.filter((entity) => [entity.label, ...(entity.aliases || [])]
-    .map((value) => text(value).toLowerCase())
-    .filter((value) => value.length >= 2)
-    .some((value) => normalizedMessage.includes(value) || (referenceCore.length >= 2 && value.includes(referenceCore))));
-  if (exact.length === 1) return resolution('resolved', true, exact, 'high');
-  if (exact.length > 1) return resolution('ambiguous', true, exact.slice(0, 4), 'medium');
-
-  const imageNumberMatch = withoutRatios.match(/(?:image\s*|第)([一二三四五六七八九十\d]+)(?:张图)?/i);
-  if (imageNumberMatch && /image|张图|图片|图像/i.test(withoutRatios)) {
-    const index = numberFromToken(imageNumberMatch[1]);
-    const images = available.filter((entity) => ['generated_image', 'reference_image'].includes(entity.kind) && entity.index === index);
-    if (images.length === 1) return resolution('resolved', true, images, 'high');
-    if (images.length > 1) return resolution('ambiguous', true, images.slice(0, 4), 'medium');
-    return resolution('missing', true);
-  }
-
-  const ordinalMatch = withoutRatios.match(/(?:vol\.?\s*|第|方案|选项|版本|按照|按|选择|选|用)\s*(?:方案|选项|版本)?\s*([一二三四五六七八九十\d]+)(?:个|项|版|张)?/i);
-  if (ordinalMatch) {
-    const index = numberFromToken(ordinalMatch[1]);
-    const matches = available.filter((entity) => entity.kind === 'proposal_option' && entity.index === index);
-    if (matches.length === 1) return resolution('resolved', true, matches, 'high');
-    if (matches.length > 1) return resolution('ambiguous', true, matches.slice(0, 4), 'medium');
-    return resolution('missing', true);
-  }
-
-  if (/上一张图|刚才那张|之前那张/i.test(withoutRatios)) {
-    const images = available.filter((entity) => ['generated_image', 'reference_image'].includes(entity.kind));
-    if (images.length === 0) return resolution('missing', true);
-    const latest = images.reduce((current, entity) => Number(entity.createdAt) >= Number(current.createdAt) ? entity : current);
-    return resolution('resolved', true, [latest], 'high');
-  }
-  if (/选中的|这张|这个对象|左边那个|右边那个/i.test(withoutRatios)) {
-    const canvas = available.filter((entity) => entity.kind === 'canvas_item' && entity.selected);
-    if (canvas.length === 1) return resolution('resolved', true, canvas, 'high');
-    if (canvas.length > 1 && /左边/i.test(withoutRatios)) {
-      return resolution('resolved', true, [canvas.reduce((current, entity) => entity.x < current.x ? entity : current)], 'high');
-    }
-    if (canvas.length > 1 && /右边/i.test(withoutRatios)) {
-      return resolution('resolved', true, [canvas.reduce((current, entity) => entity.x > current.x ? entity : current)], 'high');
-    }
-    return canvas.length > 1 ? resolution('ambiguous', true, canvas.slice(0, 4), 'medium') : resolution('missing', true);
-  }
-  if (/上一个|刚才那个|之前那个|这个方案|那个方案|按这个来|就按这个/i.test(withoutRatios)) {
-    const previouslyResolved = available.filter((entity) => Number(entity.lastResolvedAt) > 0);
-    if (previouslyResolved.length > 0) {
-      const latestResolvedAt = Math.max(...previouslyResolved.map((entity) => Number(entity.lastResolvedAt)));
-      const latestResolved = previouslyResolved.filter((entity) => Number(entity.lastResolvedAt) === latestResolvedAt);
-      if (latestResolved.length === 1) return resolution('resolved', true, latestResolved, 'high');
-      if (latestResolved.length > 1) return resolution('ambiguous', true, latestResolved.slice(0, 4), 'medium');
-    }
-    const group = latestGroup(available);
-    if (group.length === 1) return resolution('resolved', true, group, 'high');
-    if (group.length > 1) return resolution('ambiguous', true, group.slice(0, 4), 'medium');
-    return resolution('missing', true);
-  }
-  return REFERENCE_LANGUAGE_PATTERN.test(withoutRatios)
+  // Semantic matching belongs to Main Agent. Local code only validates a model
+  // or user supplied stable ID and must never silently choose a historical asset.
+  return isReferentialShorthand(message)
     ? resolution('missing', true)
     : resolution('none', false);
 }

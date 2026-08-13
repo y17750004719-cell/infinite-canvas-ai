@@ -31,12 +31,11 @@ test('parses and removes structured executable proposal blocks', () => {
   assert.equal(result.proposal?.options[2].entityId, 'covers:three');
 });
 
-test('resolves numbered label and alias references to one authoritative entity', () => {
+test('does not semantically resolve numbered labels or aliases without an explicit stable ID', () => {
   const entities = buildAgentContextEntities({ messages: [{ id: 'assistant-1', role: 'assistant', content: '请选择方向', agentProposal: proposal }] });
   for (const userMessage of ['按照3生成图片', 'Vol.3 出图', '先锋双犬生成', '用 The Dog Duo']) {
     const result = resolveContextReference({ userMessage, entities });
-    assert.equal(result.status, 'resolved', userMessage);
-    assert.equal(result.candidates[0].id, 'covers:three');
+    assert.notEqual(result.status, 'resolved', userMessage);
   }
 });
 
@@ -54,15 +53,14 @@ test('does not treat a complete multi-issue brief as an old proposal selection',
   assert.equal(resolveContextReference({ userMessage: message, entities }).status, 'none');
 });
 
-test('returns ambiguity when two proposal groups share the same ordinal', () => {
+test('keeps candidate selection out of local semantic routing', () => {
   const secondProposal = { ...proposal, id: 'posters', options: proposal.options.map((option) => ({ ...option, entityId: `posters:${option.id}` })) };
   const entities = buildAgentContextEntities({ messages: [
     { id: 'assistant-1', role: 'assistant', content: '', agentProposal: proposal },
     { id: 'assistant-2', role: 'assistant', content: '', agentProposal: secondProposal },
   ] });
   const result = resolveContextReference({ userMessage: '按照3生成图片', entities });
-  assert.equal(result.status, 'ambiguous');
-  assert.equal(result.candidates.length, 2);
+  assert.equal(result.status, 'missing');
 });
 
 test('extracts legacy markdown tables only when they are actionable proposals', () => {
@@ -75,23 +73,55 @@ test('extracts legacy markdown tables only when they are actionable proposals', 
   assert.equal(extractLegacyProposal({ id: 'knowledge', content: '| 年份 | 销量 |\n| 2024 | 10 |\n| 2025 | 12 |' }), null);
 });
 
-test('compiles selected context into an authoritative brief', () => {
+test('compiles explicitly selected stable context into an authoritative brief', () => {
   const entities = buildAgentContextEntities({ messages: [{ id: 'assistant-1', role: 'assistant', content: '', agentProposal: proposal }] });
-  const contextResolution = resolveContextReference({ userMessage: '按照3生成图片，背景改成红色', entities });
+  const contextResolution = resolveContextReference({
+    userMessage: '按照3生成图片，背景改成红色',
+    entities,
+    selectedEntityIds: ['covers:three'],
+  });
   const brief = compileExecutionBrief({ userMessage: '按照3生成图片，背景改成红色', contextResolution });
   assert.match(brief.plainText, /两只德牧或杜宾/);
   assert.match(brief.plainText, /背景改成红色/);
   assert.deepEqual(brief.mustPreserve, ['先锋双犬（The Dog Duo）', '两只德牧或杜宾', '解构主义宽肩西装']);
 });
 
-test('resolves generated images and selected canvas objects without using image binaries as text', () => {
+test('requires explicit stable IDs for generated images and selected canvas objects', () => {
   const entities = buildAgentContextEntities({
     messages: [{ id: 'image-message', role: 'assistant', content: '', imageUrl: '/image-8.png', imageName: 'image 8' }],
     canvasItems: [{ id: 'canvas-image', type: 'image', src: '/canvas.png', x: 20, y: 0 }],
     selectedItemIds: ['canvas-image'],
   });
-  assert.equal(resolveContextReference({ userMessage: '用 image 8 继续生成', entities }).candidates[0].assetUrl, '/image-8.png');
-  assert.equal(resolveContextReference({ userMessage: '参考选中的图片生成', entities }).candidates[0].assetUrl, '/canvas.png');
+  const generated = entities.find((entity) => entity.assetUrl === '/image-8.png');
+  const canvas = entities.find((entity) => entity.assetUrl === '/canvas.png');
+  assert.notEqual(resolveContextReference({ userMessage: '用 image 8 继续生成', entities }).status, 'resolved');
+  assert.notEqual(resolveContextReference({ userMessage: '参考选中的图片生成', entities }).status, 'resolved');
+  assert.equal(resolveContextReference({ userMessage: '继续生成', entities, selectedEntityIds: [generated.id] }).candidates[0].assetUrl, '/image-8.png');
+  assert.equal(resolveContextReference({ userMessage: '编辑', entities, selectedEntityIds: [canvas.id] }).candidates[0].assetUrl, '/canvas.png');
+});
+
+test('historical message reference contexts remain loadable by their stable IDs', () => {
+  const entities = buildAgentContextEntities({
+    messages: [{
+      id: 'user-with-reference',
+      role: 'user',
+      content: '参考这张图生成海报',
+      referenceContext: {
+        references: [{
+          id: 'upload:reference-1',
+          src: '/reference.png',
+          label: '产品参考图',
+          source: 'upload',
+          role: 'reference',
+        }],
+        composerSegments: [{ type: 'reference', referenceId: 'upload:reference-1' }],
+      },
+    }],
+  });
+
+  const reference = entities.find((entity) => entity.id === 'upload:reference-1');
+  assert.equal(reference?.assetUrl, '/reference.png');
+  assert.equal(reference?.sourceMessageId, 'user-with-reference');
 });
 
 test('treats deliberate multi-selection as explicit context instead of ambiguity', () => {
@@ -114,12 +144,11 @@ test('treats deliberate multi-selection as explicit context instead of ambiguity
   assert.deepEqual(result.entityIds, selectedEntityIds);
 });
 
-test('recency pronouns prefer the most recently resolved entity over an unresolved proposal group', () => {
+test('recency pronouns require Main Agent selection instead of using local history heuristics', () => {
   const entities = buildAgentContextEntities({ messages: [
     { id: 'proposal-message', role: 'assistant', content: '', agentProposal: proposal },
     { id: 'resolved-message', role: 'assistant', content: '', resolvedContext: { entityIds: ['covers:three'], labels: ['先锋双犬'], kind: 'proposal_option', confidence: 'high' } },
   ] });
   const result = resolveContextReference({ userMessage: '继续用上一个方案生成', entities });
-  assert.equal(result.status, 'resolved');
-  assert.equal(result.candidates[0].id, 'covers:three');
+  assert.equal(result.status, 'missing');
 });

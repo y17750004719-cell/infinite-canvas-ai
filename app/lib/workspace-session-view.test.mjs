@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { buildGeneratedImageHistorySortKey } from './generated-image-history.mjs';
+import { createAgentRecoveryRecord } from './agent/recovery.mjs';
 import * as workspaceSessionView from './workspace-session-view.mjs';
 import { createEmptySession } from './session-crud.mjs';
 import {
@@ -43,6 +44,8 @@ import {
   getSupportedImageCardSizeOptions,
   getImageToolResultSpawnPosition,
   getGenerationDurationDisplay,
+  getLatestAgentRecoveryForTask,
+  getRecentFailedAgentTask,
   getSelectedImageToolbarSource,
   getTextCardPanelPlaceholder,
   getImageCardQualitySummary,
@@ -81,6 +84,110 @@ import {
   shouldPreventScrollableRegionWheelDefault,
   getViewportCenteredOnBounds,
 } from './workspace-session-view.mjs';
+
+test('getRecentFailedAgentTask preserves the original request and failure stage for model-driven retry', () => {
+  const result = getRecentFailedAgentTask([
+    {
+      id: 'user-1',
+      role: 'user',
+      content: '生成一张极简杂志海报',
+      skill: { id: 'poster', label: '海报设计' },
+      referenceContext: {
+        references: [{ id: 'history-image:1', src: '/image.png', label: '参考图', source: 'history', role: 'reference' }],
+        composerSegments: [{ type: 'reference', referenceId: 'history-image:1' }],
+      },
+    },
+    {
+      id: 'assistant-1',
+      role: 'assistant',
+      content: '生成失败: supplier stream stalled',
+      taskStatus: 'failed',
+      agentRunProgress: {
+        runId: 'agent-run-1',
+        intent: 'image',
+        outcome: 'failed',
+        steps: [{ stepId: 'planner', phase: 'planning', status: 'failed', label: 'Image Planner 执行失败' }],
+      },
+    },
+  ]);
+
+  assert.deepEqual(result, {
+    version: 1,
+    taskId: 'agent-run-1',
+    runId: 'agent-run-1',
+    topicId: 'default',
+    sourceUserMessageId: 'user-1',
+    status: 'failed',
+    resumeRoute: 'image_planner',
+    intent: 'image',
+    originalRequest: '生成一张极简杂志海报',
+    failure: {
+      stage: 'planning',
+      kind: 'unknown',
+      message: '生成失败: supplier stream stalled',
+      retryability: 'unknown',
+    },
+    skillId: 'poster',
+    contextEntityIds: ['history-image:1'],
+    visualReferenceIds: ['history-image:1'],
+    completedAssetCount: 0,
+    createdAt: result.createdAt,
+  });
+});
+
+test('getLatestAgentRecoveryForTask returns the latest state for the exact task only', () => {
+  const recovery = (taskId, runId, completedAssetCount) => createAgentRecoveryRecord({
+    taskId,
+    runId,
+    topicId: 'topic-1',
+    sourceUserMessageId: `user-${taskId}`,
+    status: 'failed',
+    resumeRoute: 'image_planner',
+    intent: 'image',
+    originalRequest: `request-${taskId}`,
+    failureStage: 'image_pipeline',
+    failureMessage: `failed-${runId}`,
+    completedAssetCount,
+    taskSnapshot: { taskId, activeVersions: Array.from({ length: completedAssetCount }, (_, index) => ({ slotId: `${taskId}-${index}` })) },
+  });
+  const messages = [
+    { role: 'assistant', agentRecovery: recovery('task-a', 'run-a1', 0) },
+    { role: 'assistant', agentRecovery: recovery('task-a', 'run-a2', 1) },
+    { role: 'assistant', agentRecovery: recovery('task-b', 'run-b1', 0) },
+    { role: 'assistant', agentRecovery: recovery('task-a', 'run-a3', 2) },
+  ];
+  const latest = getLatestAgentRecoveryForTask(messages, 'task-a');
+  assert.equal(latest.runId, 'run-a3');
+  assert.equal(latest.completedAssetCount, 2);
+  assert.equal(latest.taskSnapshot.activeVersions.length, 2);
+  assert.equal(getLatestAgentRecoveryForTask(messages, 'task-b').runId, 'run-b1');
+  assert.equal(getLatestAgentRecoveryForTask(messages, 'missing'), null);
+});
+
+test('getLatestAgentRecoveryForTask stops at a later successful boundary for that task', () => {
+  const failed = createAgentRecoveryRecord({
+    taskId: 'task-a', runId: 'run-a1', topicId: 'topic-1', sourceUserMessageId: 'user-a',
+    status: 'failed', resumeRoute: 'main_agent', intent: 'chat', originalRequest: 'answer me',
+    failureStage: 'chat', failureMessage: 'failed',
+  });
+  assert.equal(getLatestAgentRecoveryForTask([
+    { role: 'assistant', agentRecovery: failed },
+    { role: 'assistant', taskSnapshot: { taskId: 'task-a' }, agentRunProgress: { outcome: 'completed' } },
+  ], 'task-a'), null);
+});
+
+test('a later completed task clears older recovery candidates', () => {
+  const failed = {
+    id: 'assistant-failed', role: 'assistant', content: 'failed', taskStatus: 'failed',
+    agentRunProgress: { runId: 'run-failed', intent: 'chat', outcome: 'failed', steps: [] },
+  };
+  const messages = [
+    { id: 'user-failed', role: 'user', content: 'old request' }, failed,
+    { id: 'user-ok', role: 'user', content: 'new request' },
+    { id: 'assistant-ok', role: 'assistant', content: 'done', agentRunProgress: { runId: 'run-ok', intent: 'chat', outcome: 'completed', steps: [] } },
+  ];
+  assert.equal(getRecentFailedAgentTask(messages), null);
+});
 
 test('getSessionConversationCount sums topic messages before falling back to legacy messages', () => {
   assert.equal(typeof workspaceSessionView.getSessionConversationCount, 'function');

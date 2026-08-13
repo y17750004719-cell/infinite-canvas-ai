@@ -1,5 +1,6 @@
 import path from 'node:path';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { classifyModel } from './provider-models.ts';
 
 const DEFAULT_PROVIDER_ID = 'comfly';
 const DEFAULT_PROVIDER_UPDATED_AT = new Date(0).toISOString();
@@ -286,9 +287,12 @@ function normalizeProvider(input, { fallbackApiKey = '', fallbackPrimary = false
   const imageRequestMode = normalizeImageRequestMode(input.imageRequestMode || input.image_request_mode);
   const updatedAt = normalizeText(input.updatedAt) || new Date().toISOString();
 
-  const imageModels = normalizeModelList(input.imageModels || input.image_models);
+  const configuredImageModels = normalizeModelList(input.imageModels || input.image_models);
   const configuredChatModels = normalizeModelList(input.chatModels || input.chat_models);
   const configuredVoiceModels = normalizeModelList(input.voiceModels || input.voice_models);
+  const migratedImageModels = configuredChatModels.filter((modelId) => classifyModel(modelId) === 'image');
+  const imageModels = normalizeModelList([...configuredImageModels, ...migratedImageModels]);
+  const imageModelSet = new Set(imageModels);
   const migratedVoiceModels = id === 'xiaomi'
     ? configuredChatModels.filter((modelId) => isVoiceModelId(modelId))
     : [];
@@ -312,7 +316,7 @@ function normalizeProvider(input, { fallbackApiKey = '', fallbackPrimary = false
     enabled: normalizeBoolean(input.enabled, true),
     primary: normalizeBoolean(input.primary, fallbackPrimary),
     imageModels,
-    chatModels: configuredChatModels.filter((modelId) => !voiceModelSet.has(modelId)),
+    chatModels: configuredChatModels.filter((modelId) => !imageModelSet.has(modelId) && !voiceModelSet.has(modelId)),
     voiceModels,
     modelProtocols: normalizeModelProtocols(input.modelProtocols || input.model_protocols),
     apiKey: normalizeApiKey(input.apiKey || fallbackApiKey),

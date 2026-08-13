@@ -199,6 +199,45 @@ test('readProviderRegistry migrates obvious Xiaomi TTS models from chatModels', 
   }
 });
 
+test('readProviderRegistry migrates nano-banana IDs to image models without renaming them', async () => {
+  const runtimeDir = await mkdtemp(path.join(os.tmpdir(), 'provider-registry-nano-banana-image-'));
+
+  try {
+    await writeFile(path.join(runtimeDir, 'api-providers.json'), JSON.stringify([
+      {
+        id: 'custom',
+        name: 'Custom',
+        baseUrl: 'https://supplier.example.com/v1',
+        protocol: 'openai',
+        enabled: true,
+        primary: true,
+        apiKey: 'secret',
+        imageModels: ['existing-image'],
+        chatModels: ['gpt-5.6', 'nano-banana-2-2k', 'nano-banana-2-4k'],
+        modelProtocols: {
+          'nano-banana-2-2k': 'gemini',
+          'nano-banana-2-4k': 'gemini',
+        },
+      },
+    ]), 'utf8');
+
+    const result = await readProviderRegistry({ runtimeDir, env: {} });
+    const provider = getProviderById(result.providers, 'custom');
+    assert.deepEqual(provider.imageModels, [
+      'existing-image',
+      'nano-banana-2-2k',
+      'nano-banana-2-4k',
+    ]);
+    assert.deepEqual(provider.chatModels, ['gpt-5.6']);
+    assert.deepEqual(provider.modelProtocols, {
+      'nano-banana-2-2k': 'gemini',
+      'nano-banana-2-4k': 'gemini',
+    });
+  } finally {
+    await rm(runtimeDir, { recursive: true, force: true });
+  }
+});
+
 test('readProviderConfig remains compatible with the primary provider view', async () => {
   const runtimeDir = await mkdtemp(path.join(os.tmpdir(), 'provider-config-default-'));
 

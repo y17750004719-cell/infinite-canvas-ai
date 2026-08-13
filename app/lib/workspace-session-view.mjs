@@ -17,6 +17,7 @@ import {
   normalizeProviderModelAspectRatioForSize,
   resolveProviderModelRequestedSize,
 } from './image-provider-option-profiles.mjs';
+import { createAgentRecoveryRecord, normalizeAgentRecoveryRecord } from './agent/recovery.mjs';
 
 const DEFAULT_VIEWPORT = { x: 0, y: 0, scale: 1 };
 export const CANVAS_TEXT_GENERATION_CONCURRENCY_LIMIT = 5;
@@ -114,6 +115,85 @@ export function getSessionConversationCount(session) {
   }
 
   return Array.isArray(session?.messages) ? session.messages.length : 0;
+}
+
+export function getRecentFailedAgentTask(messages) {
+  const entries = Array.isArray(messages) ? messages : [];
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const assistant = entries[index];
+    if (assistant?.role !== 'assistant') continue;
+    const progress = assistant.agentRunProgress;
+    const persisted = normalizeAgentRecoveryRecord(assistant.agentRecovery);
+    if (persisted) return persisted;
+    if (
+      assistant.agentConfirmation
+      || (assistant.agentClarification && assistant.agentClarification.request?.failed !== true)
+      || ['completed', 'waiting'].includes(progress?.outcome)
+    ) return null;
+    const cancelled = assistant.taskStatus === 'cancelled' || progress?.outcome === 'cancelled';
+    const failed = assistant.taskStatus === 'failed' || progress?.outcome === 'failed';
+    const partiallyFailed = progress?.outcome === 'warning' && Number(progress?.assets?.failed) > 0;
+    if (!cancelled && !failed && !partiallyFailed) continue;
+
+    const source = entries.slice(0, index).findLast((message) => message?.role === 'user');
+    if (!source) return null;
+    const clarificationState = source.agentClarificationResponsePayload?.clarification?.state;
+    const originalRequest = String(clarificationState?.originalRequest || source.content || '').trim().slice(0, 4000);
+    if (!originalRequest) return null;
+    const steps = Array.isArray(progress?.steps) ? progress.steps : [];
+    const failureStep = steps.findLast((step) => step?.status === 'failed') || steps.at(-1);
+    const referenceContext = clarificationState?.referenceContext || source.referenceContext;
+    const visualReferenceIds = Array.from(new Set(
+      (Array.isArray(referenceContext?.references) ? referenceContext.references : [])
+        .map((reference) => String(reference?.id || '').trim())
+        .filter(Boolean),
+    )).slice(0, 20);
+    const intent = ['chat', 'image', 'skill_action'].includes(progress?.intent)
+      ? progress.intent
+      : ['chat', 'image', 'skill_action'].includes(clarificationState?.intent)
+        ? clarificationState.intent
+        : null;
+
+    return createAgentRecoveryRecord({
+      taskId: assistant.taskSnapshot?.taskId || progress?.runId || assistant.id,
+      runId: progress?.runId || assistant.id,
+      topicId: assistant.taskSnapshot?.topicId || 'default',
+      sourceUserMessageId: source.id,
+      status: cancelled ? 'cancelled' : 'failed',
+      resumeRoute: String(failureStep?.phase || '') === 'local_delivery'
+        ? 'local_delivery'
+        : intent === 'image' || intent === 'skill_action'
+          ? 'image_planner'
+          : 'main_agent',
+      intent,
+      originalRequest,
+      failureStage: String(failureStep?.phase || 'unknown'),
+      failureMessage: String(assistant.content || failureStep?.label || '任务未完成'),
+      skillId: String(source.skill?.id || clarificationState?.skillId || '').trim() || null,
+      contextEntityIds: visualReferenceIds,
+      visualReferenceIds,
+      taskSnapshot: assistant.taskSnapshot,
+      completedAssetCount: assistant.taskSnapshot?.activeVersions?.length || progress?.assets?.succeeded || 0,
+    });
+  }
+  return null;
+}
+
+export function getLatestAgentRecoveryForTask(messages, taskId) {
+  const normalizedTaskId = typeof taskId === 'string' ? taskId.trim() : '';
+  if (!normalizedTaskId) return null;
+  const entries = Array.isArray(messages) ? messages : [];
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const assistant = entries[index];
+    if (assistant?.role !== 'assistant') continue;
+    if (
+      assistant.taskSnapshot?.taskId === normalizedTaskId
+      && ['completed', 'waiting'].includes(assistant.agentRunProgress?.outcome)
+    ) return null;
+    const recovery = normalizeAgentRecoveryRecord(assistant.agentRecovery);
+    if (recovery?.taskId === normalizedTaskId) return recovery;
+  }
+  return null;
 }
 
 export function resolveTextPanelChatModel(requestedModel, fallbackModel = getDefaultTextPanelModelOption()?.id) {

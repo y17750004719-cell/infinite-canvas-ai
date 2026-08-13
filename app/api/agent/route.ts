@@ -12,9 +12,16 @@ import {
   resolveExplicitSkillDirective,
 } from '../../lib/agent/skill-registry.mjs';
 import {
+  buildFailedTaskRecoveryMessages,
+  buildMainAgentLoopMessages,
   buildMainAgentMessages,
-  resolveMainAgentFrontDoor,
 } from '../../lib/agent/main-agent.mjs';
+import {
+  createAgentRecoveryRecord,
+  normalizeAgentRecoveryRecord,
+} from '../../lib/agent/recovery.mjs';
+import { normalizeAgentVisualSummary } from '../../lib/agent/visual-summary.mjs';
+import { normalizeAgentConversationMemory } from '../../lib/chat-message-persistence.mjs';
 import {
   buildAgentTaskContract,
   executionPlanToBrief,
@@ -96,13 +103,18 @@ import type {
   AgentProgressPhase,
   AgentProgressStatus,
   AgentProgressStepId,
+  AgentConversationMemory,
+  AgentPromptTrace,
+  AgentRecoveryRecord,
 } from '../../lib/agent/events';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-const MAX_AGENT_TURNS = 6;
-const MAX_TOOL_CALLS = 4;
+const MAX_AGENT_TURNS = 8;
+const MAX_TOOL_CALLS = 6;
+const MAX_MAIN_AGENT_TURNS = 12;
+const MAX_MAIN_AGENT_TOOL_CALLS = 12;
 const CONFIRMATION_TTL_MS = 10 * 60 * 1000;
 const encoder = new TextEncoder();
 
@@ -313,6 +325,15 @@ type AgentPendingAssetIdentity = {
   slotId: string;
   versionId: string;
   parentVersionId?: string;
+  assetUrl?: string;
+  plannerPreviewSrc?: string;
+  naturalWidth?: number;
+  naturalHeight?: number;
+  model?: string;
+  itemId?: string;
+  index?: number;
+  label?: string;
+  promptTrace?: AgentPromptTrace;
 };
 
 type AgentTaskSnapshot = {
@@ -322,7 +343,7 @@ type AgentTaskSnapshot = {
   contract: AgentTaskContract;
   editBaseVersionId?: string | null;
   latestBatchId?: string | null;
-  activeVersions: Array<Pick<AgentPendingAssetIdentity, 'referenceId' | 'batchId' | 'slotId' | 'versionId'>>;
+  activeVersions: AgentPendingAssetIdentity[];
 };
 
 type AgentRuntimeReferenceContext = {
@@ -567,12 +588,16 @@ function buildCanonicalAgentReferenceContext({
 type AgentRequestBody = {
   runId?: string;
   topicId?: string;
-  messages?: Array<{ role: 'user' | 'assistant'; content: string }>;
+  messages?: Array<{ id?: string; role: 'user' | 'assistant'; content: string }>;
+  sourceUserMessageId?: string;
+  recoveryTaskId?: string;
   activeSkillId?: string;
   referenceImages?: string[];
   referenceContext?: AgentRuntimeReferenceContext;
   contextEntities?: AgentContextEntity[];
   selectedContextEntityIds?: string[];
+  agentMemory?: AgentConversationMemory;
+  recentFailedTask?: AgentRecoveryRecord | Record<string, unknown>;
   executionBrief?: ExecutionBrief;
   canvasContext?: Record<string, unknown>;
   chatOptions?: {
@@ -609,6 +634,45 @@ function getLatestUserMessage(messages: AgentRequestBody['messages']) {
   return [...(messages || [])].reverse().find((message) => message.role === 'user')?.content?.trim() || '';
 }
 
+function normalizeRecentFailedTask(
+  value: AgentRequestBody['recentFailedTask'],
+  messages: AgentRequestBody['messages'],
+) {
+  if (!value || typeof value !== 'object') return null;
+  const normalized = normalizeAgentRecoveryRecord(value);
+  if (normalized) {
+    const sourceExists = (messages || []).some((message) => message.id === normalized.sourceUserMessageId)
+      || (messages || []).some((message) => message.role === 'user' && message.content.trim().slice(0, 4000) === normalized.originalRequest);
+    return sourceExists ? normalized : null;
+  }
+  const legacy = value as Record<string, unknown>;
+  const id = typeof legacy.id === 'string' ? legacy.id.trim().slice(0, 200) : '';
+  const originalRequest = typeof legacy.originalRequest === 'string'
+    ? legacy.originalRequest.trim().slice(0, 4000)
+    : '';
+  if (!id || !originalRequest || !['failed', 'cancelled'].includes(String(legacy.status || ''))) return null;
+  const matchesHistory = (messages || []).some((message) => (
+    message.role === 'user' && message.content.trim().slice(0, 4000) === originalRequest
+  ));
+  if (!matchesHistory) return null;
+  const source = (messages || []).findLast((message) => message.role === 'user' && message.content.trim().slice(0, 4000) === originalRequest);
+  return createAgentRecoveryRecord({
+    taskId: id,
+    runId: id,
+    topicId: 'default',
+    sourceUserMessageId: source?.id || `legacy-${id}`,
+    status: legacy.status === 'cancelled' ? 'cancelled' : 'failed',
+    resumeRoute: legacy.intent === 'image' || legacy.intent === 'skill_action' ? 'image_planner' : 'main_agent',
+    intent: ['chat', 'image', 'skill_action'].includes(String(legacy.intent || '')) ? legacy.intent : null,
+    originalRequest,
+    failureStage: typeof legacy.failureStage === 'string' ? legacy.failureStage : 'unknown',
+    failureMessage: typeof legacy.failureMessage === 'string' ? legacy.failureMessage : '任务未完成',
+    skillId: typeof legacy.skillId === 'string' ? legacy.skillId : null,
+    contextEntityIds: legacy.contextEntityIds,
+    visualReferenceIds: legacy.contextEntityIds,
+  });
+}
+
 const INTERNAL_IMAGE_PLACEHOLDER_PATTERN = /\[(?:Generated image[^\]]*omitted from chat history|聊天记录中省略了代理生成的图像)\]/gi;
 const UNBACKED_EXECUTION_CLAIM_PATTERN = /(?:(?:图片|图像|封面|海报|视觉稿|任务|素材)[^。！!\n]{0,18}(?:已(?:经)?|正在)[^。！!\n]{0,12}(?:启动|开始|提交|生成|制作|出图)|(?:已(?:经)?|现已|正在)[^。！!\n]{0,8}为(?:您|你)[^。！!\n]{0,12}(?:启动|开始|提交|生成|制作|出图)|已(?:经)?(?:启动|开始|提交)(?:生成|制作|出图))/i;
 
@@ -626,6 +690,41 @@ function sanitizeAgentResponseContent(content: string, hasMutationEvidence: bool
   }
   const proposal = cleaned.replace(UNBACKED_EXECUTION_CLAIM_PATTERN, '建议按以下方向生成');
   return `生成尚未实际启动。${proposal ? `\n\n${proposal}` : ''}\n\n请确认是否按当前方向开始生成，或补充你希望调整的主体与场景。`;
+}
+
+function mergeTopicMemory(
+  previous: AgentConversationMemory | undefined,
+  patch: Record<string, unknown> | undefined,
+  messages: AgentRequestBody['messages'],
+): AgentConversationMemory {
+  const current = normalizeAgentConversationMemory(previous) || {
+    version: 1 as const,
+    recentRawConversation: [],
+    rollingSummary: '',
+    facts: [],
+    preferences: [],
+    activeTask: null,
+    recentReferencedAssetIds: [],
+    updatedAt: Date.now(),
+  };
+  const candidate = patch && typeof patch === 'object' ? patch : {};
+  const newestUnique = (currentValues: string[], nextValues: unknown[], limit: number) => Array.from(new Set([
+    ...currentValues,
+    ...nextValues.filter((value): value is string => typeof value === 'string').map((value) => value.trim()).filter(Boolean),
+  ])).slice(-limit);
+  const merged = {
+    ...current,
+    ...(typeof candidate.rollingSummary === 'string' ? { rollingSummary: candidate.rollingSummary } : {}),
+    ...(Array.isArray(candidate.facts) ? { facts: newestUnique(current.facts, candidate.facts, 24) } : {}),
+    ...(Array.isArray(candidate.preferences) ? { preferences: newestUnique(current.preferences, candidate.preferences, 16) } : {}),
+    ...(Object.hasOwn(candidate, 'activeTask') ? { activeTask: candidate.activeTask } : {}),
+    ...(Array.isArray(candidate.recentReferencedAssetIds)
+      ? { recentReferencedAssetIds: newestUnique(current.recentReferencedAssetIds, candidate.recentReferencedAssetIds, 20) }
+      : {}),
+    recentRawConversation: (Array.isArray(messages) ? messages : []).slice(-20),
+    updatedAt: Date.now(),
+  };
+  return (normalizeAgentConversationMemory(merged) || current) as AgentConversationMemory;
 }
 
 function generatedAssetsFromResult(payload: any) {
@@ -690,6 +789,7 @@ function reserveTaskExecution(
   imageTask: AgentImageTask | undefined,
   outputCount: number,
   referenceContext?: AgentRuntimeReferenceContext,
+  existingTaskId?: string | null,
 ): {
   taskId: string;
   contractVersion: number;
@@ -700,7 +800,7 @@ function reserveTaskExecution(
   sourceVersionId: string | null;
   editBaseVersionId: string | null;
 } {
-  const taskId = randomUUID();
+  const taskId = existingTaskId || randomUUID();
   const contractVersion = 1;
   if (contract.execution.kind !== 'image_pipeline') {
     return {
@@ -902,7 +1002,26 @@ export async function POST(request: NextRequest) {
   const contextEntities = Array.isArray(body.contextEntities)
     ? body.contextEntities.filter((entity) => entity && typeof entity.id === 'string').slice(-200)
     : [];
-  const selectedContextEntityIds = Array.isArray(body.selectedContextEntityIds)
+  const knownContextEntityIds = new Set(contextEntities.map((entity) => entity.id));
+  const knownVisualReferenceIds = new Set([
+    ...knownContextEntityIds,
+    ...(runtimeReferenceContext?.references || []).map((reference) => reference.id),
+  ]);
+  const normalizedRecentFailedTask = normalizeRecentFailedTask(body.recentFailedTask, body.messages)
+    || normalizeAgentRecoveryRecord(body.clarificationState?.recoveryRecord);
+  const recentFailedTask = normalizedRecentFailedTask
+    && (normalizedRecentFailedTask.topicId === topicId || normalizedRecentFailedTask.topicId === 'default')
+    ? {
+        ...normalizedRecentFailedTask,
+        contextEntityIds: normalizedRecentFailedTask.contextEntityIds.filter((id) => knownContextEntityIds.has(id)),
+        visualReferenceIds: normalizedRecentFailedTask.visualReferenceIds.filter((id) => knownVisualReferenceIds.has(id)),
+      }
+    : null;
+  const requestedRecoveryTaskId = typeof body.recoveryTaskId === 'string' ? body.recoveryTaskId.trim().slice(0, 200) : '';
+  if (requestedRecoveryTaskId && requestedRecoveryTaskId !== recentFailedTask?.taskId) {
+    return NextResponse.json({ error: 'Recovery task is unknown, resolved, or belongs to another Topic' }, { status: 400 });
+  }
+  let selectedContextEntityIds = Array.isArray(body.selectedContextEntityIds)
     ? body.selectedContextEntityIds.filter((id): id is string => typeof id === 'string').slice(0, 64)
     : [];
   const initialBriefSource = conversationIntent.brief || latestUserMessage;
@@ -1002,9 +1121,8 @@ export async function POST(request: NextRequest) {
   }
   const plannerTimeoutMs = Math.min(1_800_000, Math.max(10_000, Number(process.env.AGENT_PLANNER_TIMEOUT_MS) || 1_800_000));
 
-  const timeoutMs = Math.min(1_800_000, Math.max(10_000, Number(process.env.AGENT_RUN_TIMEOUT_MS) || 1_800_000));
-  const timeoutSignal = AbortSignal.timeout(timeoutMs);
-  const runSignal = AbortSignal.any([request.signal, timeoutSignal]);
+  // Main Agent lifetime is bounded by provider completion, protocol budgets, or user cancellation.
+  const runSignal = request.signal;
   const stream = new ReadableStream({
     async start(controller) {
       let toolCalls = 0;
@@ -1032,6 +1150,9 @@ export async function POST(request: NextRequest) {
       if (executionReferenceImages.length === 0 && activeClarificationState?.referenceImages?.length) {
         executionReferenceImages = [...activeClarificationState.referenceImages];
       }
+      let stagedMainAgentMemoryPatches = Array.isArray(activeClarificationState?.mainAgentLoop?.memoryPatches)
+        ? structuredClone(activeClarificationState.mainAgentLoop.memoryPatches)
+        : [];
       let runReferenceContext = buildCanonicalAgentReferenceContext({
         referenceContext: runtimeReferenceContext || activeClarificationState?.referenceContext,
         referenceImages: executionReferenceImages,
@@ -1066,11 +1187,20 @@ export async function POST(request: NextRequest) {
       let executionPlanSource: 'model' | 'fallback' | null = executionPlan ? 'model' : null;
       let executionPlanSourceDetail: AgentPlannerSourceDetail | null = executionPlan ? 'tool_call' : null;
       let executionKind: AgentExecutionPlan['execution']['kind'] | null = executionPlan?.execution.kind || null;
-      let frontDoorResult: Awaited<ReturnType<typeof resolveMainAgentFrontDoor>> | null = null;
+      let frontDoorResult: {
+        route: 'chat' | 'vision_analysis' | 'planner';
+        skillId: string | null;
+        confidence: 'high' | 'medium' | 'low';
+      } | null = null;
       let promptCompilation: AgentImagePromptCompilation | undefined;
       let taskExecutionReservation: ReturnType<typeof reserveTaskExecution> | null = null;
       let completedTaskIdentities: AgentPendingAssetIdentity[] = [];
       let taskSnapshot: AgentTaskSnapshot | undefined;
+      let recoveryBaseRecord = recentFailedTask as AgentRecoveryRecord | null;
+      let plannerVisualSummary = activeClarificationState?.visualSummary || recoveryBaseRecord?.visualSummary || null;
+      let preserveRecoveryRecordOnFailure = Boolean(recoveryBaseRecord);
+      let recoveryTaskIdForExecution: string | null = null;
+      let recoveryMode: 'fill_missing' | 'redo_all' | null = null;
       const getTaskExecutionReservation = (runtime?: {
         kind: AgentExecutionPlan['execution']['kind'];
         tool: string;
@@ -1113,6 +1243,7 @@ export async function POST(request: NextRequest) {
           executionPlan?.imageTask || runtime?.imageTask,
           executionPlan?.delivery.outputCount || runtime?.outputCount || 1,
           runReferenceContext,
+          recoveryTaskIdForExecution,
         );
         const reservation = taskExecutionReservation;
         taskSnapshot = {
@@ -1124,6 +1255,7 @@ export async function POST(request: NextRequest) {
           editBaseVersionId: reservation.editBaseVersionId,
           activeVersions: [],
         };
+        writeEvent(controller, { type: 'agent_task_checkpoint', taskSnapshot: structuredClone(taskSnapshot) });
         return reservation;
       };
       const recordSucceededTaskIdentities = (identities: AgentPendingAssetIdentity[]) => {
@@ -1135,7 +1267,7 @@ export async function POST(request: NextRequest) {
           ...completedTaskIdentities.filter((identity) => !succeededSlots.has(identity.slotId)),
           ...identities,
         ];
-        activeVersions.push(...completedTaskIdentities.map(({ referenceId, batchId, slotId, versionId }) => ({ referenceId, batchId, slotId, versionId })));
+        activeVersions.push(...completedTaskIdentities.map((identity) => structuredClone(identity)));
         taskSnapshot = {
           topicId,
           taskId: reservation.taskId,
@@ -1145,12 +1277,93 @@ export async function POST(request: NextRequest) {
           latestBatchId: reservation.latestBatchId,
           activeVersions,
         };
+        writeEvent(controller, { type: 'agent_task_checkpoint', taskSnapshot: structuredClone(taskSnapshot) });
       };
       const writeAgentDone = (stopReason: string) => writeEvent(controller, {
         type: 'agent_done',
         stopReason,
         ...(taskSnapshot ? { taskSnapshot: structuredClone(taskSnapshot) } : {}),
       });
+      const sourceUserMessageId = typeof body.sourceUserMessageId === 'string' && body.sourceUserMessageId.trim()
+        ? body.sourceUserMessageId.trim().slice(0, 200)
+        : [...body.messages].reverse().find((message) => message.role === 'user')?.id || `user-${runId}`;
+      const buildRecoveryRecord = ({
+        stage,
+        message,
+        reason,
+        retryable,
+        status = 'failed',
+        resumeRoute,
+      }: {
+        stage: string;
+        message: string;
+        reason?: string;
+        retryable?: boolean;
+        status?: 'failed' | 'cancelled';
+        resumeRoute?: AgentRecoveryRecord['resumeRoute'];
+      }) => {
+        const previousSnapshot = recoveryBaseRecord?.taskSnapshot;
+        const nextSnapshot = taskSnapshot;
+        const recoverySnapshot = !nextSnapshot?.activeVersions.length && previousSnapshot
+          ? previousSnapshot
+          : recoveryMode === 'fill_missing' && previousSnapshot && nextSnapshot
+            ? {
+                ...nextSnapshot,
+                activeVersions: Array.from(new Map([
+                  ...previousSnapshot.activeVersions,
+                  ...nextSnapshot.activeVersions,
+                ].map((version) => [version.slotId || version.versionId, version])).values()),
+              }
+            : nextSnapshot || previousSnapshot;
+        return createAgentRecoveryRecord({
+        taskId: taskSnapshot?.taskId || recoveryBaseRecord?.taskId || runId,
+        runId,
+        topicId,
+        sourceUserMessageId: recoveryBaseRecord?.sourceUserMessageId || sourceUserMessageId,
+        status,
+        resumeRoute: resumeRoute === undefined
+          ? stage === 'local_delivery'
+            ? 'local_delivery'
+            : intent === 'image' || intent === 'skill_action' || frontDoorResult?.route === 'planner'
+              ? 'image_planner'
+              : recoveryBaseRecord?.resumeRoute || 'main_agent'
+          : resumeRoute,
+        intent: intent || recoveryBaseRecord?.intent,
+        originalRequest: recoveryBaseRecord?.originalRequest || activeClarificationState?.originalRequest || latestUserMessage,
+        failureStage: stage,
+        failureReason: reason,
+        failureMessage: message,
+        retryability: retryable === true ? 'retryable' : retryable === false ? 'requires_change' : undefined,
+        skillId: selectedSkill?.id || recoveryBaseRecord?.skillId || null,
+        contextEntityIds: selectedContextEntityIds.length > 0
+          ? selectedContextEntityIds
+          : recoveryBaseRecord?.contextEntityIds || [],
+        visualReferenceIds: runReferenceContext?.references.length
+          ? runReferenceContext.references.map((reference) => reference.id)
+          : recoveryBaseRecord?.visualReferenceIds || [],
+        visualSummary: plannerVisualSummary || recoveryBaseRecord?.visualSummary,
+        taskSnapshot: recoverySnapshot,
+        completedAssetCount: Math.max(
+          recoverySnapshot?.activeVersions.length || completedTaskIdentities.length,
+          recoveryBaseRecord?.completedAssetCount || 0,
+        ),
+        }) as AgentRecoveryRecord;
+      };
+      let topicMemory = normalizeAgentConversationMemory(body.agentMemory);
+      const updateTopicMemory = (patch: Record<string, unknown>) => {
+        topicMemory = mergeTopicMemory(topicMemory, patch, body.messages);
+        writeEvent(controller, { type: 'agent_memory_updated', memory: topicMemory });
+        return topicMemory;
+      };
+      const commitMainAgentMemory = (patch?: Record<string, unknown>) => {
+        for (const stagedPatch of stagedMainAgentMemoryPatches) {
+          topicMemory = mergeTopicMemory(topicMemory, stagedPatch, body.messages);
+        }
+        stagedMainAgentMemoryPatches = [];
+        if (patch) topicMemory = mergeTopicMemory(topicMemory, patch, body.messages);
+        if (topicMemory) writeEvent(controller, { type: 'agent_memory_updated', memory: topicMemory });
+        return topicMemory;
+      };
       const confirmationTaskIdentity = () => {
         const reservation = getTaskExecutionReservation();
         return reservation ? {
@@ -1178,7 +1391,7 @@ export async function POST(request: NextRequest) {
         toolName?: string;
       }) => progressTracker.update(input);
       const ensureSelectedSkillContent = async () => {
-        if (!selectedSkill || skillContent) return skillContent;
+        if (!selectedSkill || selectedSkill.executionMode === 'image_pipeline' || skillContent) return skillContent;
         writeProgress({ stepId: 'skill_loading', phase: 'loading', status: 'active', label: `正在加载 ${selectedSkill.name}` });
         skillContent = await loadSkillContent(selectedSkill.id);
         writeProgress({ stepId: 'skill_loading', phase: 'loading', status: 'completed', label: `${selectedSkill.name} 已加载` });
@@ -1203,6 +1416,46 @@ export async function POST(request: NextRequest) {
             stepId: 'canvas_context',
             phase: 'reading',
             labels: { active: '正在读取画布摘要', waiting: '等待读取画布', completed: '画布摘要读取完成', failed: '画布摘要读取失败' },
+          },
+          get_conversation_memory: {
+            stepId: 'tool',
+            phase: 'reading',
+            labels: { active: '正在读取对话记忆', waiting: '等待读取对话记忆', completed: '对话记忆读取完成', failed: '对话记忆读取失败' },
+          },
+          list_project_context: {
+            stepId: 'tool',
+            phase: 'reading',
+            labels: { active: '正在查看项目上下文', waiting: '等待项目上下文', completed: '项目上下文已读取', failed: '项目上下文读取失败' },
+          },
+          read_context_entity: {
+            stepId: 'tool',
+            phase: 'reading',
+            labels: { active: '正在读取上下文实体', waiting: '等待上下文实体', completed: '上下文实体已读取', failed: '上下文实体读取失败' },
+          },
+          load_visual_reference: {
+            stepId: 'tool',
+            phase: 'reading',
+            labels: { active: '正在加载视觉参考', waiting: '等待视觉参考', completed: '视觉参考已加载', failed: '视觉参考加载失败' },
+          },
+          update_conversation_memory: {
+            stepId: 'tool',
+            phase: 'executing',
+            labels: { active: '正在暂存对话记忆', waiting: '等待暂存对话记忆', completed: '对话记忆更新待提交', failed: '对话记忆更新失败' },
+          },
+          resolve_failed_task_recovery: {
+            stepId: 'routing',
+            phase: 'resuming',
+            labels: { active: '正在定位上次任务', waiting: '等待恢复任务', completed: '已定位上次任务', failed: '无法恢复上次任务' },
+          },
+          handoff_to_image_planner: {
+            stepId: 'tool',
+            phase: 'planning',
+            labels: { active: '正在交给 Image Planner', waiting: '等待 Image Planner', completed: '已交给 Image Planner', failed: 'Image Planner 交接失败' },
+          },
+          request_context_selection: {
+            stepId: 'tool',
+            phase: 'waiting_input',
+            labels: { active: '正在准备引用候选', waiting: '等待选择引用', completed: '引用候选已确认', failed: '引用候选准备失败' },
           },
           start_skill_job: {
             stepId: 'skill_job',
@@ -1429,7 +1682,18 @@ export async function POST(request: NextRequest) {
                     streamedSucceeded += 1;
                     const item = effectiveGenerationItems[requestIndex];
                     const identity = taskReservation?.identities[requestIndex];
-                    if (identity) recordSucceededTaskIdentities([identity]);
+                    if (identity) recordSucceededTaskIdentities([{
+                      ...identity,
+                      assetUrl: assets[0]?.src,
+                      plannerPreviewSrc: assets[0]?.src,
+                      naturalWidth: assets[0]?.naturalWidth,
+                      naturalHeight: assets[0]?.naturalHeight,
+                      model: resolvedImageSelection.model,
+                      itemId: item?.id,
+                      index: requestIndex,
+                      label: item?.label,
+                      promptTrace: promptTraceForRequest(requestIndex),
+                    }]);
                     writeEvent(controller, {
                       type: 'client_action',
                       action: {
@@ -1536,11 +1800,23 @@ export async function POST(request: NextRequest) {
           }))
         ));
         if (assets.length === 0) throw new Error('Image generation returned no usable assets');
-        recordSucceededTaskIdentities(usableTaskResults.flatMap(({ assets: requestAssets }, requestIndex) => (
-          requestAssets.length > 0 && taskReservation?.identities[requestIndex]
-            ? [taskReservation.identities[requestIndex]]
-            : []
-        )));
+        recordSucceededTaskIdentities(usableTaskResults.flatMap(({ assets: requestAssets }, requestIndex) => {
+          const identity = taskReservation?.identities[requestIndex];
+          const asset = requestAssets[0];
+          const item = effectiveGenerationItems[requestIndex];
+          return asset && identity ? [{
+            ...identity,
+            assetUrl: asset.src,
+            plannerPreviewSrc: asset.plannerPreviewSrc || asset.src,
+            naturalWidth: asset.naturalWidth,
+            naturalHeight: asset.naturalHeight,
+            model: resolvedImageSelection.model,
+            itemId: item?.id,
+            index: requestIndex,
+            label: item?.label,
+            promptTrace: asset.promptTrace,
+          }] : [];
+        }));
         const partialFailureMessage = buildCanvasImageGenerationFailureMessage({
           requestedCount: requests.length,
           completedCount: successfulPayloads.length,
@@ -1797,6 +2073,15 @@ export async function POST(request: NextRequest) {
             writeImageCompletionSummary(result);
           }
           writeToolProgress(confirmationRecord.toolName, 'completed', toolCallId);
+          updateTopicMemory({
+            activeTask: {
+              status: 'completed',
+              summary: confirmationRecord.presentation?.completionSummary
+                || `${confirmationRecord.toolName} completed.`,
+              ...(confirmationRecord.taskId ? { taskId: confirmationRecord.taskId } : {}),
+            },
+            recentReferencedAssetIds: confirmationRecord.executionBrief?.resolvedEntityIds || [],
+          });
           if (confirmationRecord.toolName === 'generate_image' && confirmationRecord.generationItems?.length) {
             const requestStats = (result as any)?.requestStats || {};
             const continuation = resolveAgentImageBatchContinuation({
@@ -2019,6 +2304,7 @@ export async function POST(request: NextRequest) {
                 type: 'agent_error',
                 stage: 'budget',
                 message: '工具调用预算已用尽，请缩小任务范围后重试',
+                recoveryRecord: buildRecoveryRecord({ stage: 'budget', message: '工具调用预算已用尽，请缩小任务范围后重试' }),
               });
               return;
             }
@@ -2194,108 +2480,673 @@ export async function POST(request: NextRequest) {
         if (activeSkillChange !== undefined) {
           writeEvent(controller, { type: 'active_skill_changed', skill: activeSkillChange });
         }
-        void contextLogger.info('skill.selection_input', 'Explicit Skill state prepared for Main Agent Front Door', {
+        void contextLogger.info('skill.selection_input', 'Explicit Skill state prepared for Main Agent Loop', {
           method: skillSelectionMethod,
           selectedSkillId: selectedSkill?.id || null,
           candidateIds: skillCandidateIds,
           fullSkillInjected: Boolean(selectedSkill && skillContent),
           skillContentLength: skillContent.length,
         });
-        writeProgress({ stepId: 'routing', phase: 'routing', status: 'active', label: '正在理解并路由请求' });
         writeEvent(controller, { type: 'routing_start' });
-        const frontDoorStartedAt = Date.now();
-        try {
-          frontDoorResult = await resolveMainAgentFrontDoor({
-            messages: body.messages,
-            referenceImages: body.referenceImages || [],
-            referenceContext: runtimeReferenceContext,
-            manifests: skillManifests,
-            manualSkillId: skillSource === 'manual' ? selectedSkill?.id || null : null,
-            pendingTask: activeClarificationState ? {
-              taskId: activeClarificationState.taskId,
-              intent: activeClarificationState.intent,
-              skillId: activeClarificationState.skillId || null,
-              clarificationDimension: body.clarificationRequest?.dimension || null,
-              hasExecutionPlan: Boolean(executionPlan),
-            } : null,
-            model: resolvedChatSelection.model,
-            providerId: resolvedChatSelection.providerId || undefined,
-            signal: runSignal,
-            chatFn: chat,
-          });
-        } catch (error) {
-          void contextLogger.warn('frontdoor.failed', 'Main Agent Front Door failed closed', {
-            durationMs: Date.now() - frontDoorStartedAt,
-            providerId: resolvedChatSelection.providerId || null,
-            model: resolvedChatSelection.model,
-            referenceCount: runtimeReferenceContext?.references.length || body.referenceImages?.length || 0,
-            error: error instanceof Error ? error.message : String(error),
-            repairAttempted: error instanceof Error && 'repairAttempted' in error
-              ? Boolean((error as Error & { repairAttempted?: boolean }).repairAttempted)
-              : null,
-            mutationBlocked: true,
-          });
-          throw error;
-        }
-        void contextLogger.info('frontdoor.resolved', 'Main Agent Front Door resolved the request', {
-          durationMs: Date.now() - frontDoorStartedAt,
-          route: frontDoorResult.route,
-          confidence: frontDoorResult.confidence,
-          reason: frontDoorResult.reason || null,
-          skillId: frontDoorResult.skillId,
-          repairAttempted: frontDoorResult.repairAttempted || false,
-          referenceCount: runtimeReferenceContext?.references.length || body.referenceImages?.length || 0,
-          toolsExposed: false,
-        });
-        if (activeClarificationState && selectedSkill && frontDoorResult.route === 'planner') {
-          frontDoorResult.skillId = selectedSkill.id;
-        }
-        if (
-          !selectedSkill
-          && frontDoorResult.route === 'planner'
-          && frontDoorResult.skillId
-        ) {
-          selectedSkill = skillManifests.find((manifest) => manifest.id === frontDoorResult.skillId) || null;
-          if (!selectedSkill) {
-            throw new Error('Main Agent Front Door selected a Skill that is no longer enabled');
+        const mainAgentStartedAt = Date.now();
+        const allowedSkillIds = new Set(skillManifests.map((manifest) => manifest.id));
+        const contextEntityById = new Map(contextEntities.map((entity) => [entity.id, entity]));
+        const runtimeReferenceById = new Map((runReferenceContext?.references || []).map((reference) => [reference.id, reference]));
+        const validateContextIds = (ids: unknown, source: 'context' | 'visual') => {
+          const values = Array.isArray(ids) ? ids.map((id) => String(id).trim()).filter(Boolean) : [];
+          for (const id of values) {
+            const valid = source === 'context'
+              ? contextEntityById.has(id)
+              : contextEntityById.has(id) || runtimeReferenceById.has(id);
+            if (!valid) throw new Error(`Unknown ${source} reference: ${id}`);
           }
-          skillSource = 'auto';
-          skillSelectionMethod = 'model';
-          skillCandidateIds = [selectedSkill.id];
-          await ensureSelectedSkillContent();
-        }
-        if (frontDoorResult.route === 'planner' && selectedSkill) {
-          await ensureSelectedSkillContent();
-        }
-        void contextLogger.info('skill.selection', 'Front Door and explicit Skill selection resolved for Image Planner', {
-          method: skillSelectionMethod,
-          selectedSkillId: selectedSkill?.id || null,
-          candidateIds: skillCandidateIds,
-          fullSkillInjected: Boolean(selectedSkill && skillContent),
-          skillContentLength: skillContent.length,
-        });
-        if (frontDoorResult.route !== 'planner') {
-          intent = 'chat';
-          const frontDoorProposal = parseAgentProposalBlock(frontDoorResult.answer || '');
-          const safeFrontDoorAnswer = sanitizeAgentResponseContent(frontDoorProposal.cleanContent, false);
-          writeProgress({ stepId: 'routing', phase: 'routing', status: 'completed', label: '请求路由完成' });
-          writeEvent(controller, { type: 'intent_resolved', intent });
-          writeProgress({ stepId: 'composing', phase: 'responding', status: 'active', label: '正在组织回复' });
-          if (frontDoorProposal.proposal) {
-            writeEvent(controller, { type: 'proposal_presented', proposal: frontDoorProposal.proposal });
+          return Array.from(new Set(values));
+        };
+        const cropMessagesToRecoverySource = (record: AgentRecoveryRecord) => {
+          const sourceIndex = body.messages.findIndex((message) => message.id === record.sourceUserMessageId);
+          const fallbackIndex = body.messages.findIndex((message) => (
+            message.role === 'user' && message.content.trim().slice(0, 4000) === record.originalRequest
+          ));
+          const endIndex = sourceIndex >= 0 ? sourceIndex : fallbackIndex;
+          const history = endIndex >= 0 ? body.messages.slice(0, endIndex + 1) : [];
+          if (history.at(-1)?.role === 'user' && history.at(-1)?.content.trim() === record.originalRequest) return history;
+          return [...history, { id: record.sourceUserMessageId, role: 'user' as const, content: record.originalRequest }];
+        };
+        let mainAgentInputMessages = body.messages;
+        let mainAgentReferenceImages = body.referenceImages || [];
+        let mainAgentReferenceContext = runtimeReferenceContext;
+        const initiallyAttachedVisualIds = new Set(
+          (mainAgentReferenceContext?.references || []).map((reference) => reference.id),
+        );
+        let plannerHistoryMessages = body.messages;
+        let forcedPlannerTerminal: Record<string, unknown> | null = null;
+
+        const validateRecoveryResolution = (record: AgentRecoveryRecord, args: Record<string, unknown>) => {
+          const decision = String(args.decision || '');
+          const confidence = String(args.confidence || '');
+          if (!['resume', 'continue_current_request', 'cannot_resume'].includes(decision)) {
+            throw new Error('Recovery gate returned an invalid decision');
           }
-          if (safeFrontDoorAnswer) {
+          if (!['high', 'medium', 'low'].includes(confidence)) throw new Error('Recovery gate returned invalid confidence');
+          const route = decision === 'resume' ? record.resumeRoute : null;
+          if (decision === 'resume' && !route) throw new Error('Saved task has no valid recovery route');
+          let skillId: string | null = null;
+          if (decision === 'resume' && skillSource === 'manual') {
+            skillId = selectedSkill?.id || null;
+          } else if (decision === 'resume' && record.skillId) {
+            skillId = record.skillId;
+          }
+          if (skillId && !allowedSkillIds.has(skillId)) throw new Error(`Recovery Skill is no longer enabled: ${skillId}`);
+          return {
+            terminate: true,
+            type: 'recovery_resolution',
+            taskId: record.taskId,
+            decision,
+            route,
+            skillId,
+            confidence,
+            modelResult: { accepted: true },
+            publicResult: { accepted: true },
+          };
+        };
+
+        const runRecoveryGate = async (record: AgentRecoveryRecord) => {
+          for (let attempt = 0; attempt < 2; attempt += 1) {
+            const recoveryRegistry = createAgentToolRegistry({
+              resolveFailedTaskRecovery: async (args: Record<string, unknown>) => validateRecoveryResolution(record, args),
+            });
+            const recoveryTools = getAgentModelTools(recoveryRegistry, ['resolve_failed_task_recovery']);
+            const result = await runZFlowAgentBrain({
+              messages: (buildFailedTaskRecoveryMessages as any)({
+                userMessage: latestUserMessage,
+                recoveryRecord: record,
+                manifests: skillManifests,
+                manualSkillId: skillSource === 'manual' ? selectedSkill?.id || null : null,
+                repair: attempt === 1,
+              }),
+              providerId: resolvedChatSelection.providerId!,
+              model: resolvedChatSelection.model!,
+              modelMetadata: providers.find((provider) => provider.id === resolvedChatSelection.providerId),
+              tools: recoveryTools,
+              toolChoice: { type: 'function', function: { name: 'resolve_failed_task_recovery' } },
+              maxTurns: 1,
+              maxToolCalls: 0,
+              signal: runSignal,
+              chatStream,
+              executeTool: (toolName, args, context) => executeAgentTool(recoveryRegistry, toolName, args, {
+                allowedTools: ['resolve_failed_task_recovery'],
+                confirmed: false,
+                toolCallId: context.toolCallId,
+              }),
+            });
+            if (result.terminal?.type === 'recovery_resolution') return result.terminal as Record<string, unknown>;
+          }
+          throw new Error('任务恢复判断未返回有效协议，已停止执行');
+        };
+
+        const recoveryRecord = recentFailedTask as AgentRecoveryRecord | null;
+        let recoveryResolution: Record<string, unknown> | null = null;
+        if (recoveryRecord && body.clarificationRequest?.dimension === 'recovery_scope' && body.clarificationResponse) {
+          const selectedMode = body.clarificationResponse.selectedOptionId;
+          if (!['fill_missing', 'redo_all'].includes(selectedMode || '')) throw new Error('Recovery scope selection is invalid');
+          recoveryMode = selectedMode as 'fill_missing' | 'redo_all';
+          if (activeClarificationState) activeClarificationState.recoveryMode = recoveryMode;
+          recoveryResolution = {
+            decision: 'resume',
+            route: recoveryRecord.resumeRoute,
+            skillId: skillSource === 'manual' ? selectedSkill?.id || null : recoveryRecord.skillId,
+            confidence: 'high',
+          };
+        } else if (recoveryRecord && requestedRecoveryTaskId) {
+          recoveryResolution = recoveryRecord.failure.retryability === 'requires_change'
+            || (Boolean(recoveryRecord.skillId) && skillSource !== 'manual' && !allowedSkillIds.has(recoveryRecord.skillId!))
+            ? { decision: 'cannot_resume', route: null, skillId: null, confidence: 'high' }
+            : recoveryRecord.resumeRoute ? {
+                decision: 'resume',
+                route: recoveryRecord.resumeRoute,
+                skillId: skillSource === 'manual' ? selectedSkill?.id || null : recoveryRecord.skillId,
+                confidence: 'high',
+              } : await runRecoveryGate(recoveryRecord);
+        } else if (recoveryRecord && !body.confirmation && !body.clarificationResponse) {
+          recoveryResolution = await runRecoveryGate(recoveryRecord);
+        }
+
+        if (recoveryRecord && recoveryResolution?.decision === 'cannot_resume') {
+          const blocker = recoveryRecord.failure.message;
+          writeEvent(controller, {
+            type: 'assistant_delta',
+            delta: `${blocker}\n\n请先修正失败原因后再重试。`,
+            channel: 'content',
+            model: resolvedChatSelection.model,
+          });
+          writeAgentDone('recovery_requires_change');
+          return;
+        }
+        if (recoveryRecord && recoveryResolution?.decision === 'continue_current_request') {
+          recoveryBaseRecord = null;
+          preserveRecoveryRecordOnFailure = false;
+        }
+        if (recoveryRecord && recoveryResolution?.decision === 'resume') {
+          preserveRecoveryRecordOnFailure = false;
+          recoveryTaskIdForExecution = recoveryRecord.taskId;
+          writeProgress({
+            stepId: 'routing',
+            phase: 'resuming',
+            status: 'completed',
+            label: recoveryResolution.route === 'main_agent' ? '已定位上次任务，正在继续分析' : '已定位上次任务，正在重新规划',
+          });
+          if (recoveryRecord.completedAssetCount > 0 && recoveryResolution.route === 'image_planner' && !recoveryMode) {
+            const request: AgentClarificationRequest = {
+              id: randomUUID(),
+              taskId: recoveryRecord.taskId,
+              question: `上次已有 ${recoveryRecord.completedAssetCount} 个素材完成，这次要如何继续？`,
+              dimension: 'recovery_scope',
+              options: [
+                { id: 'fill_missing', label: '只补齐未完成项', answer: '只生成缺失的素材，保留已完成结果。' },
+                { id: 'redo_all', label: '全部重做', answer: '忽略已完成结果，重新生成完整任务。' },
+              ],
+              allowCustom: false,
+              allowProceed: false,
+            };
+            const checkpoint = progressTracker.snapshot();
             writeEvent(controller, {
-              type: 'assistant_delta',
-              delta: safeFrontDoorAnswer,
-              channel: 'content',
-              model: resolvedChatSelection.model,
+              type: 'clarification_required',
+              message: request.question,
+              request,
+              state: {
+                taskId: recoveryRecord.taskId,
+                operationId: checkpoint.operationId,
+                skillSource,
+                lastSequence: checkpoint.lastSequence,
+                intent: recoveryRecord.intent === 'skill_action' ? 'skill_action' : 'image',
+                ...(recoveryRecord.skillId ? { skillId: recoveryRecord.skillId } : {}),
+                originalRequest: recoveryRecord.originalRequest,
+                workingBrief: recoveryRecord.originalRequest,
+                askedDimensions: ['recovery_scope'],
+                answers: [],
+                recoveryRecord,
+              },
+            });
+            writeAgentDone('recovery_scope_required');
+            return;
+          }
+          plannerHistoryMessages = cropMessagesToRecoverySource(recoveryRecord);
+          if (recoveryResolution.route === 'main_agent') {
+            mainAgentInputMessages = plannerHistoryMessages;
+            mainAgentReferenceImages = [];
+            mainAgentReferenceContext = undefined;
+          } else if (recoveryResolution.route === 'local_delivery') {
+            const versions = recoveryRecord.taskSnapshot?.activeVersions || [];
+            const assets = versions.flatMap((version) => {
+              const entity = contextEntityById.get(version.referenceId);
+              const src = version.assetUrl || entity?.assetUrl || entity?.referenceImageUrls?.[0];
+              return src ? [{
+                src,
+                slotId: version.slotId,
+                versionId: version.versionId,
+                plannerPreviewSrc: version.plannerPreviewSrc,
+                naturalWidth: version.naturalWidth,
+                naturalHeight: version.naturalHeight,
+                model: version.model,
+                itemId: version.itemId,
+                index: version.index,
+                label: version.label,
+                promptTrace: version.promptTrace,
+              }] : [];
+            });
+            if (assets.length === 0) throw new Error('已生成素材不再可读取，无法重新交付');
+            writeEvent(controller, {
+              type: 'client_action',
+              action: { type: 'add_generated_assets', runId, taskId: recoveryRecord.taskId, assets },
+            });
+            writeAgentDone('local_delivery_recovered');
+            return;
+          } else {
+            const contextEntityIds = validateContextIds(recoveryRecord.contextEntityIds, 'context');
+            const visualReferenceIds = validateContextIds(recoveryRecord.visualReferenceIds, 'visual');
+            forcedPlannerTerminal = {
+              type: 'planner_handoff',
+              route: 'planner',
+              skillId: recoveryResolution.skillId || null,
+              confidence: recoveryResolution.confidence || 'high',
+              contextEntityIds,
+              visualReferenceIds,
+              visualSummary: recoveryRecord.visualSummary || null,
+              recoveryTaskId: recoveryRecord.taskId,
+            };
+          }
+        }
+        const mainAgentRegistry = createAgentToolRegistry({
+          getConversationMemory: async () => ({
+            modelResult: {
+              memory: normalizeAgentConversationMemory(body.agentMemory) || null,
+              recentMessages: body.messages.slice(-20),
+            },
+            publicResult: { loaded: true },
+          }),
+          listProjectContext: async () => ({
+            modelResult: {
+              entities: contextEntities.slice(-80).map((entity) => ({
+                id: entity.id,
+                kind: entity.kind,
+                label: entity.label,
+                aliases: entity.aliases || [],
+                summary: entity.summary || '',
+                selected: entity.selected === true,
+                createdAt: entity.createdAt || null,
+              })),
+              total: contextEntities.length,
+              truncated: contextEntities.length > 80,
+              omitted: Math.max(0, contextEntities.length - 80),
+            },
+            publicResult: { total: contextEntities.length, truncated: contextEntities.length > 80 },
+          }),
+          readContextEntity: async (id: string) => {
+            const entity = contextEntityById.get(id);
+            if (!entity) throw new Error(`Unknown context entity: ${id}`);
+            return {
+              modelResult: {
+                id: entity.id,
+                kind: entity.kind,
+                label: entity.label,
+                aliases: entity.aliases || [],
+                summary: entity.summary || '',
+                brief: entity.brief,
+                selected: entity.selected === true,
+                hasVisual: Boolean(entity.assetUrl || entity.referenceImageUrls?.length),
+              },
+              publicResult: { id: entity.id, kind: entity.kind, label: entity.label },
+            };
+          },
+          loadVisualReference: async (ids: string[]) => {
+            const validatedIds = validateContextIds(ids, 'visual');
+            if (validatedIds.length === 0 || validatedIds.length > 4) throw new Error('load_visual_reference requires 1 to 4 stable IDs');
+            if (validatedIds.some((id) => initiallyAttachedVisualIds.has(id))) {
+              throw new Error('The requested visual reference is already attached to the current Main Agent turn');
+            }
+            const visualReferences = validatedIds.map((id) => {
+              const runtimeReference = runtimeReferenceById.get(id);
+              const entity = contextEntityById.get(id);
+              const src = runtimeReference?.src || entity?.assetUrl || entity?.referenceImageUrls?.[0];
+              if (!src) throw new Error(`Visual reference is unavailable: ${id}`);
+              return { id, label: runtimeReference?.label || entity?.label || id, src };
+            });
+            return {
+              modelResult: { loaded: visualReferences.map(({ id, label }) => ({ id, label })) },
+              publicResult: { loadedIds: visualReferences.map((reference) => reference.id) },
+              visualReferences,
+            };
+          },
+          updateConversationMemory: async (patch: Record<string, unknown>) => {
+            if (!patch || typeof patch !== 'object' || Array.isArray(patch)) {
+              throw new Error('update_conversation_memory requires a memoryPatch object');
+            }
+            // Validate and bound through the same normalizer used for persisted topic memory,
+            // but keep the mutation staged until the loop resolves successfully.
+            const normalized = normalizeAgentConversationMemory(
+              mergeTopicMemory(topicMemory, patch, body.messages),
+            );
+            if (!normalized) throw new Error('Invalid conversation memory patch');
+            stagedMainAgentMemoryPatches.push(structuredClone(patch));
+            return {
+              type: 'memory_staged',
+              modelResult: { accepted: true },
+              publicResult: { accepted: true },
+            };
+          },
+          handoffToImagePlanner: async (args: Record<string, unknown>) => {
+            const requestedResumeTaskId = typeof args.resumeTaskId === 'string' && args.resumeTaskId.trim()
+              ? args.resumeTaskId.trim()
+              : null;
+            if (requestedResumeTaskId && requestedResumeTaskId !== recentFailedTask?.taskId) {
+              throw new Error('Unknown failed task selected for Image Planner retry');
+            }
+            const resumedTask = requestedResumeTaskId ? recentFailedTask : null;
+            let skillId = typeof args.skillId === 'string' && args.skillId.trim() ? args.skillId.trim() : null;
+            if (skillSource === 'manual') skillId = selectedSkill?.id || null;
+            if (skillSource !== 'manual' && resumedTask?.skillId && !allowedSkillIds.has(resumedTask.skillId)) {
+              throw new Error(`Failed task Skill is no longer enabled: ${resumedTask.skillId}`);
+            }
+            if (skillSource !== 'manual' && resumedTask?.skillId && skillId && skillId !== resumedTask.skillId) {
+              throw new Error('Image Planner retry cannot replace the failed task Skill');
+            }
+            if (skillSource !== 'manual' && resumedTask?.skillId) {
+              skillId = resumedTask.skillId;
+            }
+            if (skillId && !allowedSkillIds.has(skillId)) throw new Error(`Unknown skill: ${skillId}`);
+            if (args.confidence === 'low' && skillId && skillSource !== 'manual') {
+              throw new Error('Low-confidence Main Agent handoff cannot select a Skill');
+            }
+            const restoredReferenceIds = resumedTask?.contextEntityIds || [];
+            const restoredVisualReferenceIds = resumedTask?.visualReferenceIds || [];
+            const contextEntityIds = validateContextIds([
+              ...(Array.isArray(args.contextEntityIds) ? args.contextEntityIds : []),
+              ...restoredReferenceIds,
+            ], 'context');
+            const visualReferenceIds = validateContextIds([
+              ...(Array.isArray(args.visualReferenceIds) ? args.visualReferenceIds : []),
+              ...restoredVisualReferenceIds,
+            ], 'visual');
+            if (visualReferenceIds.length > 4) throw new Error('Image Planner handoff supports at most 4 visual references');
+            const visualSummary = normalizeAgentVisualSummary(
+              resumedTask?.visualSummary || args.visualSummary,
+              visualReferenceIds,
+            );
+            if (visualReferenceIds.length > 0 && !visualSummary) {
+              throw new Error('Image Planner handoff requires one valid visual summary entry for every visual reference');
+            }
+            if (visualReferenceIds.length === 0 && args.visualSummary !== null) {
+              throw new Error('Image Planner handoff cannot include a visual summary without visual references');
+            }
+            return {
+              terminate: true,
+              type: 'planner_handoff',
+              route: 'planner',
+              skillId,
+              confidence: args.confidence,
+              contextEntityIds,
+              visualReferenceIds,
+              visualSummary,
+              resumeTaskId: requestedResumeTaskId,
+              modelResult: { accepted: true },
+              publicResult: { accepted: true },
+            };
+          },
+          requestContextSelection: async (args: Record<string, unknown>) => {
+            const candidates = Array.isArray(args.candidates) ? args.candidates.slice(0, 4) : [];
+            if (candidates.length < 2) throw new Error('At least two context candidates are required');
+            const normalizedCandidates = candidates.map((candidate) => {
+              const value = candidate as { id?: unknown; label?: unknown; kind?: unknown };
+              const id = String(value.id || '').trim();
+              const entity = contextEntityById.get(id);
+              if (!entity) throw new Error(`Unknown context candidate: ${id}`);
+              return { id, label: entity.label, kind: entity.kind };
+            });
+            return {
+              confirmationRequired: true,
+              message: String(args.question || '').trim(),
+              candidates: normalizedCandidates,
+            };
+          },
+        });
+        const mainAgentToolNames = [
+          'get_conversation_memory',
+          'list_project_context',
+          'read_context_entity',
+          'load_visual_reference',
+          'update_conversation_memory',
+          'handoff_to_image_planner',
+          'request_context_selection',
+        ];
+        const mainAgentTools = getAgentModelTools(mainAgentRegistry, mainAgentToolNames);
+        const loopMessages = buildMainAgentLoopMessages({
+          messages: mainAgentInputMessages,
+          referenceImages: mainAgentReferenceImages,
+          referenceContext: mainAgentReferenceContext,
+          manifests: skillManifests,
+          manualSkillId: skillSource === 'manual' ? selectedSkill?.id || null : null,
+          pendingTask: activeClarificationState ? {
+            taskId: activeClarificationState.taskId,
+            intent: activeClarificationState.intent,
+            skillId: activeClarificationState.skillId || null,
+          } : null,
+          memory: normalizeAgentConversationMemory(body.agentMemory) || null,
+          contextEntities,
+          canvasContext: body.canvasContext,
+        });
+        const selectedContextResponse = body.clarificationRequest?.dimension === 'context_reference'
+          && typeof body.clarificationResponse?.selectedOptionId === 'string'
+          ? body.clarificationResponse.selectedOptionId
+          : '';
+        const savedMainAgentLoop = activeClarificationState?.mainAgentLoop;
+        if (
+          savedMainAgentLoop
+          && body.clarificationRequest?.dimension === 'context_reference'
+          && !selectedContextResponse
+        ) {
+          throw new Error('Context selection requires choosing one of the listed references');
+        }
+        if (savedMainAgentLoop && selectedContextResponse) {
+          const permittedIds = new Set((body.clarificationRequest?.options || []).map((option) => option.id));
+          if (!permittedIds.has(selectedContextResponse) || !contextEntityById.has(selectedContextResponse)) {
+            throw new Error('Context selection response does not match the pending Main Agent request');
+          }
+        }
+        let activitySequence = 0;
+        let currentActivity: { activityId: string; text: string } | null = null;
+        const appendActivityText = (activityId: string, delta: string, maxLength = 1200) => {
+          const remaining = maxLength - (currentActivity?.text.length || 0);
+          if (remaining <= 0 || !delta) return;
+          const boundedDelta = delta.slice(0, remaining);
+          if (!boundedDelta) return;
+          currentActivity = {
+            activityId,
+            text: `${currentActivity?.text || ''}${boundedDelta}`,
+          };
+          writeEvent(controller, {
+            type: 'agent_activity_delta',
+            activityId,
+            delta: boundedDelta,
+            model: resolvedChatSelection.model,
+          });
+        };
+        const emitMainAgentEvent = (event: any) => {
+          if (event?.type === 'message_start' && event.message?.role === 'assistant') {
+            currentActivity = { activityId: `${runId}-activity-${++activitySequence}`, text: '' };
+            return;
+          }
+          if (event?.type === 'message_update' && event.assistantMessageEvent?.type === 'text_delta') {
+            const activityId = currentActivity?.activityId || `${runId}-activity-${++activitySequence}`;
+            appendActivityText(activityId, String(event.assistantMessageEvent.delta || ''));
+            return;
+          }
+          if (event?.type !== 'turn_end' || event.message?.role !== 'assistant') return;
+          const activityId = currentActivity?.activityId || `${runId}-activity-${++activitySequence}`;
+          const hasToolCall = Array.isArray(event.message.content)
+            && event.message.content.some((part: any) => part?.type === 'toolCall');
+          const failed = event.message.stopReason === 'error' || event.message.stopReason === 'aborted';
+          const fullText = Array.isArray(event.message.content)
+            ? event.message.content.filter((part: any) => part?.type === 'text').map((part: any) => part.text || '').join('')
+            : '';
+          if (fullText && (currentActivity?.text || '').length < fullText.length) {
+            appendActivityText(
+              activityId,
+              fullText.slice(currentActivity?.text.length || 0),
+              failed || hasToolCall ? 1200 : Number.POSITIVE_INFINITY,
+            );
+          }
+          if (currentActivity?.text) {
+            writeEvent(controller, {
+              type: 'agent_activity_commit',
+              activityId,
+              disposition: failed || hasToolCall ? 'commentary' : 'final',
             });
           }
-          writeProgress({ stepId: 'composing', phase: 'responding', status: 'completed', label: '回复已完成' });
+          currentActivity = null;
+        };
+        const loopResult: any = forcedPlannerTerminal ? {
+          content: '',
+          messages: [],
+          transcript: [],
+          turns: 0,
+          toolCalls: 0,
+          budgetedToolCalls: 0,
+          mutationToolCalls: 0,
+          stopReason: 'completed',
+          terminal: forcedPlannerTerminal,
+          rawResults: new Map(),
+        } : await runZFlowAgentBrain({
+          messages: loopMessages,
+          providerId: resolvedChatSelection.providerId!,
+          model: resolvedChatSelection.model!,
+          modelMetadata: providers.find((provider) => provider.id === resolvedChatSelection.providerId),
+          tools: mainAgentTools,
+          maxTurns: MAX_MAIN_AGENT_TURNS,
+          maxToolCalls: MAX_MAIN_AGENT_TOOL_CALLS,
+          reserveClosingTurn: true,
+          signal: runSignal,
+          chatStream,
+          executeTool: async (toolName, args, context) => {
+            void contextLogger.info('main_agent.tool_call', 'Main Agent called an internal tool', { toolName });
+            return executeAgentTool(mainAgentRegistry, toolName, args, {
+              allowedTools: mainAgentToolNames,
+              confirmed: false,
+              canvasContext: body.canvasContext,
+              toolCallId: context.toolCallId,
+            });
+          },
+          ...(savedMainAgentLoop && selectedContextResponse ? {
+            continuation: {
+              transcript: savedMainAgentLoop.transcript,
+              pendingCall: savedMainAgentLoop.pendingCall,
+              toolResult: {
+                modelResult: { selectedContextEntityId: selectedContextResponse },
+                publicResult: { selectedContextEntityId: selectedContextResponse },
+              },
+              budgets: savedMainAgentLoop.budgets,
+            },
+          } : {}),
+          onToolStart: ({ id, name }) => {
+            writeToolProgress(name, 'active', id);
+            writeEvent(controller, { type: 'tool_start', toolCallId: id, toolName: name });
+          },
+          onToolResult: ({ id, name, isError }) => writeToolProgress(name, isError ? 'failed' : 'completed', id),
+          onEvent: emitMainAgentEvent,
+        });
+        if (loopResult.stopReason === 'budget_exceeded' || loopResult.stopReason === 'error' || loopResult.stopReason === 'aborted') {
+          void contextLogger.warn('main_agent.loop_failed', 'Main Agent Loop failed closed', {
+            durationMs: Date.now() - mainAgentStartedAt,
+            stopReason: loopResult.stopReason,
+            error: loopResult.errorMessage || null,
+            mutationBlocked: true,
+          });
+          throw new Error(loopResult.stopReason === 'budget_exceeded'
+            ? 'Main Agent 上下文读取预算已用尽，请缩小范围后重试'
+            : loopResult.errorMessage || 'Main Agent Loop failed');
+        }
+        if (loopResult.stopReason === 'confirmation_required' && loopResult.confirmation?.toolName === 'request_context_selection') {
+          const candidates = Array.isArray(loopResult.confirmation.candidates) ? loopResult.confirmation.candidates : [];
+          const taskId = randomUUID();
+          const request: AgentClarificationRequest = {
+            id: randomUUID(),
+            taskId,
+            question: String(loopResult.confirmation.message || '请选择要使用的历史图片。'),
+            dimension: 'context_reference',
+            options: candidates.map((candidate: any) => ({
+              id: String(candidate.id),
+              label: String(candidate.label),
+              answer: `选择上下文实体 ${candidate.id}`,
+              description: String(candidate.kind),
+            })),
+            allowCustom: false,
+            allowProceed: false,
+          };
+          const checkpoint = progressTracker.snapshot();
+          writeEvent(controller, {
+            type: 'clarification_required',
+            message: request.question,
+            request,
+            state: {
+              taskId,
+              operationId: checkpoint.operationId,
+              skillSource,
+              lastSequence: checkpoint.lastSequence,
+              intent: 'chat',
+              originalRequest: latestUserMessage,
+              workingBrief: latestUserMessage,
+              askedDimensions: ['context_reference'],
+              answers: [],
+              contextCandidates: candidates.map((candidate: any) => contextEntityById.get(String(candidate.id))).filter(Boolean),
+              mainAgentLoop: {
+                transcript: structuredClone(loopResult.transcript),
+                pendingCall: {
+                  id: String(loopResult.confirmation.toolCallId || ''),
+                  name: String(loopResult.confirmation.toolName || ''),
+                  args: (loopResult.confirmation.arguments && typeof loopResult.confirmation.arguments === 'object')
+                    ? structuredClone(loopResult.confirmation.arguments as Record<string, unknown>)
+                    : {},
+                  ...(Array.isArray(loopResult.confirmation.batch)
+                    ? { batch: structuredClone(loopResult.confirmation.batch) }
+                    : {}),
+                },
+                budgets: {
+                  turnsUsed: loopResult.turns,
+                  toolCallsUsed: loopResult.toolCalls,
+                  budgetedToolCallsUsed: loopResult.budgetedToolCalls,
+                  mutationToolCallsUsed: loopResult.mutationToolCalls,
+                },
+                memoryPatches: structuredClone(stagedMainAgentMemoryPatches),
+              },
+            },
+          });
+          void contextLogger.info('main_agent.loop_paused', 'Main Agent Loop paused for context selection', {
+            candidateIds: candidates.map((candidate: any) => candidate.id),
+          });
+          writeAgentDone('context_reference_required');
+          return;
+        }
+        const terminal = loopResult.terminal as any;
+        if (!terminal && !String(loopResult.content || '').trim()) {
+          throw new Error('Main Agent returned an empty response');
+        }
+        if (!terminal) {
+          intent = 'chat';
+          const proposal = parseAgentProposalBlock(loopResult.content || '');
+          writeEvent(controller, { type: 'intent_resolved', intent });
+          commitMainAgentMemory();
+          if (proposal.proposal) writeEvent(controller, { type: 'proposal_presented', proposal: proposal.proposal });
+          void contextLogger.info('main_agent.loop_resolved', 'Main Agent Loop returned a final answer', {
+            durationMs: Date.now() - mainAgentStartedAt,
+            route: 'chat',
+            turns: loopResult.turns,
+            toolCalls: loopResult.toolCalls,
+          });
           writeAgentDone('completed');
           return;
         }
+        if (terminal.type !== 'planner_handoff') {
+          throw new Error(`Main Agent returned unsupported terminal control: ${terminal.type || 'unknown'}`);
+        }
+        const resumedFailedTask = terminal.recoveryTaskId || terminal.resumeTaskId ? recentFailedTask : null;
+        const plannerUserMessage = resumedFailedTask?.originalRequest || latestUserMessage;
+        intent = resumedFailedTask?.intent === 'skill_action' ? 'skill_action' : 'image';
+        frontDoorResult = {
+          route: 'planner',
+          skillId: terminal.skillId || null,
+          confidence: terminal.confidence,
+        };
+        plannerVisualSummary = terminal.visualSummary || resumedFailedTask?.visualSummary || null;
+        selectedContextEntityIds.splice(0, selectedContextEntityIds.length, ...terminal.contextEntityIds);
+        for (const referenceId of terminal.visualReferenceIds) {
+          if (runtimeReferenceById.has(referenceId)) continue;
+          const entity = contextEntityById.get(referenceId);
+          const src = entity?.assetUrl || entity?.referenceImageUrls?.[0];
+          if (!entity || !src) throw new Error(`Visual reference is unavailable: ${referenceId}`);
+          runReferenceContext.references.push({
+            id: referenceId,
+            src,
+            label: entity.label,
+            source: entity.kind === 'canvas_item' ? 'canvas' : 'history',
+            role: 'reference',
+          });
+        }
+        if (!selectedSkill && frontDoorResult.skillId) {
+          selectedSkill = skillManifests.find((manifest) => manifest.id === frontDoorResult?.skillId) || null;
+          if (!selectedSkill) throw new Error('Main Agent selected a Skill that is no longer enabled');
+          skillSource = 'auto';
+          skillSelectionMethod = 'model';
+          skillCandidateIds = [selectedSkill.id];
+        }
+        if (selectedSkill) await ensureSelectedSkillContent();
+        void contextLogger.info('main_agent.loop_resolved', 'Main Agent Loop handed off to Image Planner', {
+          durationMs: Date.now() - mainAgentStartedAt,
+          skillId: selectedSkill?.id || null,
+          contextEntityIds: terminal.contextEntityIds,
+          visualReferenceIds: terminal.visualReferenceIds,
+          resumeTaskId: resumedFailedTask?.taskId || null,
+          turns: loopResult.turns,
+          toolCalls: loopResult.toolCalls,
+        });
         if (
           !body.clarificationResponse
           && (!activeClarificationState || legacyExecutionPlanDetected)
@@ -2310,8 +3161,13 @@ export async function POST(request: NextRequest) {
           const plannerResult = await planAgentExecutionRequest({
             userMessage: legacyExecutionPlanDetected
               ? activeClarificationState?.workingBrief || activeClarificationState?.originalRequest || latestUserMessage
-              : latestUserMessage,
-            messages: body.messages,
+              : plannerUserMessage,
+            messages: plannerHistoryMessages,
+            recoveryContext: resumedFailedTask ? {
+              mode: recoveryMode || 'redo_all',
+              completedAssetCount: resumedFailedTask.completedAssetCount,
+              taskSnapshot: resumedFailedTask.taskSnapshot || null,
+            } : null,
             frontDoorDecision: {
               route: 'planner',
               skillId: frontDoorResult.skillId,
@@ -2322,7 +3178,7 @@ export async function POST(request: NextRequest) {
             selectedContextEntityIds,
             activeSkillId: skillSource === 'manual' ? selectedSkill?.id || null : null,
             lockedSkillId: selectedSkill?.id || null,
-            skillContent,
+            visualSummary: plannerVisualSummary,
             hasReferenceImages: plannerHasVisualReferences,
             referenceContext: runReferenceContext,
             imageOptions: body.imageOptions,
@@ -2333,6 +3189,7 @@ export async function POST(request: NextRequest) {
             signal: runSignal,
             chatFn: chat,
           });
+          plannerVisualSummary = plannerResult.visualSummary || plannerVisualSummary;
           if (plannerResult.plan?.intent === 'image') {
             promptCompilation = {
               skillId: selectedSkill?.id || null,
@@ -2345,6 +3202,12 @@ export async function POST(request: NextRequest) {
               compiledAt: Date.now(),
             };
           }
+          if (plannerResult.plan) {
+            commitMainAgentMemory({
+              activeTask: { status: 'planning', summary: plannerUserMessage.slice(0, 1000) },
+              recentReferencedAssetIds: terminal.visualReferenceIds,
+            });
+          }
           if (plannerShadowMode) {
             const shadowPlan = plannerResult.plan;
             void contextLogger.info('planner.shadow', 'Image Planner shadow result', {
@@ -2352,7 +3215,7 @@ export async function POST(request: NextRequest) {
               providerId: plannerProviderId || null,
               model: plannerModel,
               plannerRequestCount: plannerResult.attempts > 0 ? 1 : 0,
-              userTextLength: latestUserMessage.length,
+              userTextLength: plannerUserMessage.length,
               usage: plannerResult.usage || null,
               decisionSource: plannerResult.source,
               sourceDetail: plannerResult.sourceDetail,
@@ -2411,12 +3274,13 @@ export async function POST(request: NextRequest) {
                     lastSequence: checkpoint.lastSequence,
                     intent: 'image',
                     ...(selectedSkill ? { skillId: selectedSkill.id } : {}),
-                    originalRequest: latestUserMessage,
-                    workingBrief: latestUserMessage,
+                    originalRequest: plannerUserMessage,
+                    workingBrief: plannerUserMessage,
                     askedDimensions: [],
                     answers: [],
                     referenceImages: executionReferenceImages,
                     ...(runReferenceContext ? { referenceContext: structuredClone(runReferenceContext) } : {}),
+                    ...(plannerVisualSummary ? { visualSummary: structuredClone(plannerVisualSummary) } : {}),
                   },
                 });
                 writeAgentDone('clarification_required');
@@ -2459,7 +3323,7 @@ export async function POST(request: NextRequest) {
                 providerId: plannerProviderId || null,
                 model: plannerModel,
                 plannerRequestCount: plannerResult.attempts > 0 ? 1 : 0,
-                userTextLength: latestUserMessage.length,
+                userTextLength: plannerUserMessage.length,
                 decisionSource: plannerResult.source,
                 sourceDetail: plannerResult.sourceDetail,
                 attempts: plannerResult.attempts,
@@ -2488,12 +3352,13 @@ export async function POST(request: NextRequest) {
                     lastSequence: switchCheckpoint.lastSequence,
                     intent: 'image',
                     ...(selectedSkill ? { skillId: selectedSkill.id } : {}),
-                    originalRequest: latestUserMessage,
-                    workingBrief: latestUserMessage,
+                    originalRequest: plannerUserMessage,
+                    workingBrief: plannerUserMessage,
                     askedDimensions: [],
                     answers: [],
                     referenceImages: executionReferenceImages,
                     ...(runReferenceContext ? { referenceContext: structuredClone(runReferenceContext) } : {}),
+                    ...(plannerVisualSummary ? { visualSummary: structuredClone(plannerVisualSummary) } : {}),
                     plannerCandidates: plannerModelSwitch.plannerCandidates,
                     plannerFailure: {
                       reason: plannerFailureReason,
@@ -2528,12 +3393,13 @@ export async function POST(request: NextRequest) {
                   lastSequence: failedCheckpoint.lastSequence,
                   intent: 'image',
                   ...(selectedSkill ? { skillId: selectedSkill.id } : {}),
-                  originalRequest: latestUserMessage,
-                  workingBrief: latestUserMessage,
+                  originalRequest: plannerUserMessage,
+                  workingBrief: plannerUserMessage,
                   askedDimensions: [],
                   answers: [],
                   referenceImages: executionReferenceImages,
                   ...(runReferenceContext ? { referenceContext: structuredClone(runReferenceContext) } : {}),
+                  ...(plannerVisualSummary ? { visualSummary: structuredClone(plannerVisualSummary) } : {}),
                   plannerFailure: {
                     reason: plannerFailureReason,
                     retryMode: 'replan',
@@ -2546,7 +3412,14 @@ export async function POST(request: NextRequest) {
                 stage: 'planning',
                 message: plannerFailureMessage,
                 reason: plannerFailureReason,
-                retryable: true,
+                retryable: ['timeout', 'transport'].includes(plannerFailureReason),
+                recoveryRecord: buildRecoveryRecord({
+                  stage: 'planning',
+                  message: plannerFailureMessage,
+                  reason: plannerFailureReason,
+                  retryable: ['timeout', 'transport'].includes(plannerFailureReason),
+                  resumeRoute: 'image_planner',
+                }),
               });
               writeAgentDone('planner_failed');
               return;
@@ -2556,7 +3429,7 @@ export async function POST(request: NextRequest) {
             executionPlanSourceDetail = plannerResult.sourceDetail as AgentPlannerSourceDetail;
             executionKind = executionPlan.execution.kind;
             imageDeliveryPlan = executionPlanToImageDeliveryPlan(executionPlan) as ImageDeliveryPlan;
-            executionBriefData = executionPlanToBrief(executionPlan, latestUserMessage, contextEntities) as ExecutionBrief;
+            executionBriefData = executionPlanToBrief(executionPlan, plannerUserMessage, contextEntities) as ExecutionBrief;
             executionBrief = executionBriefData.plainText;
             executionReferenceImages = Array.from(new Set([
               ...executionReferenceImages,
@@ -2589,7 +3462,7 @@ export async function POST(request: NextRequest) {
               providerId: plannerProviderId || null,
               model: plannerModel,
               plannerRequestCount: plannerResult.attempts > 0 ? 1 : 0,
-              userTextLength: latestUserMessage.length,
+              userTextLength: plannerUserMessage.length,
               usage: plannerResult.usage || null,
               decisionSource: plannerResult.source,
               sourceDetail: plannerResult.sourceDetail,
@@ -2655,7 +3528,7 @@ export async function POST(request: NextRequest) {
                 lastSequence: checkpoint.lastSequence,
                 intent: intent === 'skill_action' ? 'skill_action' : 'image',
                 ...(selectedSkill ? { skillId: selectedSkill.id } : {}),
-                originalRequest: latestUserMessage,
+                originalRequest: plannerUserMessage,
                 workingBrief: executionBrief,
                 askedDimensions: [],
                 answers: [],
@@ -2678,8 +3551,8 @@ export async function POST(request: NextRequest) {
           writeProgress({ stepId: 'context_resolution', phase: 'resolving', status: 'active', label: '正在解析上下文引用' });
           if (contextResolution.status === 'resolved') {
             executionBriefData = executionPlan
-              ? executionPlanToBrief(executionPlan, latestUserMessage, contextEntities) as ExecutionBrief
-              : compileExecutionBrief({ userMessage: latestUserMessage, contextResolution });
+              ? executionPlanToBrief(executionPlan, plannerUserMessage, contextEntities) as ExecutionBrief
+              : compileExecutionBrief({ userMessage: plannerUserMessage, contextResolution });
             executionBrief = executionBriefData.plainText;
             executionReferenceImages = Array.from(new Set([
               ...executionReferenceImages,
@@ -2745,8 +3618,8 @@ export async function POST(request: NextRequest) {
                 skillSource,
                 lastSequence: checkpoint.lastSequence,
                 intent: candidates.every((candidate) => candidate.intent === 'skill_action') ? 'skill_action' : 'image',
-                originalRequest: latestUserMessage,
-                workingBrief: latestUserMessage,
+                originalRequest: plannerUserMessage,
+                workingBrief: plannerUserMessage,
                 askedDimensions: [],
                 answers: [],
                 referenceImages: executionReferenceImages,
@@ -2770,6 +3643,7 @@ export async function POST(request: NextRequest) {
           const isImageOperationClarification = body.clarificationRequest.dimension === 'image_operation';
           const isSkillSelectionClarification = body.clarificationRequest.dimension === 'skill_selection';
           const isPlannerModelSwitch = body.clarificationRequest.dimension === 'planner_model_switch';
+          const isRecoveryScope = body.clarificationRequest.dimension === 'recovery_scope';
           const selectedPlannerCandidate = isPlannerModelSwitch
             ? activeClarificationState.plannerCandidates?.find((candidate) => (
                 candidate.id === body.clarificationResponse?.selectedOptionId
@@ -2825,7 +3699,7 @@ export async function POST(request: NextRequest) {
               model: selectedPlannerResolution.model,
             };
           }
-          executionBrief = isPlannerFailureRetry || isPlannerModelSwitch
+          executionBrief = isPlannerFailureRetry || isPlannerModelSwitch || isRecoveryScope
             ? activeClarificationState.originalRequest
             : activeClarificationState.workingBrief || activeClarificationState.originalRequest;
           executionReferenceImages = [...(activeClarificationState.referenceImages || executionReferenceImages)];
@@ -2835,6 +3709,7 @@ export async function POST(request: NextRequest) {
               || isPlannerModelSwitch
               || isImageOperationClarification
               || isSkillSelectionClarification
+              || isRecoveryScope
               || legacyExecutionPlanDetected
               || activeClarificationState.executionPlan?.needsClarification === true
             );
@@ -2847,7 +3722,12 @@ export async function POST(request: NextRequest) {
             const plannerProviderId = plannerSelection.providerId || undefined;
             const replanned = await planAgentExecutionRequest({
               userMessage: executionBrief,
-              messages: body.messages,
+              messages: plannerHistoryMessages,
+              recoveryContext: activeClarificationState.recoveryRecord ? {
+                mode: activeClarificationState.recoveryMode || recoveryMode || 'redo_all',
+                completedAssetCount: activeClarificationState.recoveryRecord.completedAssetCount,
+                taskSnapshot: activeClarificationState.recoveryRecord.taskSnapshot || null,
+              } : null,
               frontDoorDecision: frontDoorResult ? {
                 route: 'planner',
                 skillId: frontDoorResult.skillId,
@@ -2858,7 +3738,7 @@ export async function POST(request: NextRequest) {
               selectedContextEntityIds,
               activeSkillId: skillSource === 'manual' ? selectedSkill?.id || null : null,
               lockedSkillId: selectedSkill?.id || null,
-              skillContent,
+              visualSummary: plannerVisualSummary,
               hasReferenceImages: plannerHasVisualReferences,
               referenceContext: runReferenceContext,
               imageOptions: body.imageOptions,
@@ -2869,6 +3749,7 @@ export async function POST(request: NextRequest) {
               signal: runSignal,
               chatFn: chat,
             });
+            plannerVisualSummary = replanned.visualSummary || plannerVisualSummary;
             if (replanned.plan?.intent === 'image') {
               promptCompilation = {
                 skillId: selectedSkill?.id || null,
@@ -2902,6 +3783,7 @@ export async function POST(request: NextRequest) {
                     plannerFailure: undefined,
                     referenceImages: [...executionReferenceImages],
                     ...(runReferenceContext ? { referenceContext: structuredClone(runReferenceContext) } : {}),
+                    ...(plannerVisualSummary ? { visualSummary: structuredClone(plannerVisualSummary) } : {}),
                   },
                 });
                 writeAgentDone('clarification_required');
@@ -2954,6 +3836,7 @@ export async function POST(request: NextRequest) {
                     executionPlan: undefined,
                     referenceImages: [...executionReferenceImages],
                     ...(runReferenceContext ? { referenceContext: structuredClone(runReferenceContext) } : {}),
+                    ...(plannerVisualSummary ? { visualSummary: structuredClone(plannerVisualSummary) } : {}),
                     plannerCandidates: replannedModelSwitch.plannerCandidates,
                     plannerFailure: {
                       reason: failureReason,
@@ -2993,6 +3876,7 @@ export async function POST(request: NextRequest) {
                 workingBrief: activeClarificationState.originalRequest,
                 referenceImages: [...executionReferenceImages],
                 ...(runReferenceContext ? { referenceContext: structuredClone(runReferenceContext) } : {}),
+                ...(plannerVisualSummary ? { visualSummary: structuredClone(plannerVisualSummary) } : {}),
                 executionPlan: undefined,
                 plannerFailure: {
                   reason: failureReason,
@@ -3006,7 +3890,20 @@ export async function POST(request: NextRequest) {
                 request: failedRequest,
                 state: failedState,
               });
-              writeEvent(controller, { type: 'agent_error', stage: 'planning', message, reason: failureReason, retryable: true });
+              writeEvent(controller, {
+                type: 'agent_error',
+                stage: 'planning',
+                message,
+                reason: failureReason,
+                retryable: ['timeout', 'transport'].includes(failureReason),
+                recoveryRecord: buildRecoveryRecord({
+                  stage: 'planning',
+                  message,
+                  reason: failureReason,
+                  retryable: ['timeout', 'transport'].includes(failureReason),
+                  resumeRoute: 'image_planner',
+                }),
+              });
               writeAgentDone('planner_failed');
               void contextLogger.warn('planner.clarification_failed', 'Planner failed after clarification', {
                 durationMs: Date.now() - plannerStartedAt,
@@ -3155,7 +4052,7 @@ export async function POST(request: NextRequest) {
                 skillId: frontDoorResult.skillId,
                 confidence: frontDoorResult.confidence === 'high' ? 1 : frontDoorResult.confidence === 'medium' ? 0.7 : 0.4,
                 needsClarification: false,
-                source: 'frontdoor',
+                source: 'main_agent',
               }
             : explicitBatchImageRequest
             ? {
@@ -3451,6 +4348,7 @@ export async function POST(request: NextRequest) {
             answers: [],
             referenceImages: executionReferenceImages,
             ...(runReferenceContext ? { referenceContext: structuredClone(runReferenceContext) } : {}),
+            ...(plannerVisualSummary ? { visualSummary: structuredClone(plannerVisualSummary) } : {}),
             ...(executionPlan ? { executionPlan: structuredClone(executionPlan) } : {}),
           };
           const clarification = await resolveBriefClarification({
@@ -3611,7 +4509,14 @@ export async function POST(request: NextRequest) {
               stage: 'planning',
               message,
               reason: 'invalid_plan',
-              retryable: true,
+              retryable: false,
+              recoveryRecord: buildRecoveryRecord({
+                stage: 'planning',
+                message,
+                reason: 'invalid_plan',
+                retryable: false,
+                resumeRoute: 'image_planner',
+              }),
             });
             writeAgentDone('planner_failed');
             return;
@@ -3819,8 +4724,63 @@ export async function POST(request: NextRequest) {
             rawResult: generationPayload,
           }), generationPayload)) writeEvent(controller, event as AgentEvent);
           writeImageCompletionSummary(generationPayload);
+          updateTopicMemory({
+            activeTask: { status: 'completed', summary: executionPlan.presentation?.completionSummary || 'Image Planner image delivery completed.' },
+            recentReferencedAssetIds: executionPlan.contextReferences,
+          });
           writeToolProgress('generate_image', 'completed', toolCallId);
           writeAgentDone('image_generated');
+          return;
+        }
+
+        if (executionPlan) {
+          if (executionPlan.execution.tool !== 'start_skill_job') {
+            throw new Error(`Unsupported deterministic Image Planner tool: ${executionPlan.execution.tool}`);
+          }
+          const skillType = selectedSkill?.id;
+          if (skillType !== 'logo' && skillType !== 'brand') {
+            throw new Error('Image Planner Skill job requires a supported locked Skill');
+          }
+          const confirmationId = randomUUID();
+          const progressToolCallId = `${runId}-start-skill-job-confirmation`;
+          const checkpoint = progressTracker.snapshot();
+          const reservation = getTaskExecutionReservation({
+            kind: executionPlan.execution.kind,
+            tool: 'start_skill_job',
+            outputCount: 1,
+          });
+          confirmationStore.set(confirmationId, {
+            ...confirmationTaskIdentity(),
+            version: 1,
+            confirmationId,
+            status: 'pending',
+            operationId: checkpoint.operationId,
+            skillSource,
+            lastSequence: checkpoint.lastSequence,
+            progressToolCallId,
+            skillId: selectedSkill.id,
+            toolName: 'start_skill_job',
+            toolArgs: { skillType, payload: { brief: executionBrief } },
+            allowedTools: ['start_skill_job'],
+            userMessage: latestUserMessage,
+            generationBrief: executionBrief,
+            executionBrief: structuredClone(executionBriefData),
+            referenceImages: [...executionReferenceImages],
+            referenceContext: structuredClone(runReferenceContext),
+            canvasContext: body.canvasContext ? structuredClone(body.canvasContext) : undefined,
+            ...(reservation ? { taskId: reservation.taskId, contractVersion: reservation.contractVersion, taskContract: reservation.contract } : {}),
+            expiresAt: Date.now() + CONFIRMATION_TTL_MS,
+          });
+          writeToolProgress('start_skill_job', 'waiting', progressToolCallId);
+          writeEvent(controller, {
+            type: 'confirmation_required',
+            request: {
+              confirmationId,
+              toolName: 'start_skill_job',
+              message: '确认后启动 Image Planner 已验证的 Skill 任务。',
+            },
+          });
+          writeAgentDone('awaiting_confirmation');
           return;
         }
 
@@ -3959,6 +4919,7 @@ export async function POST(request: NextRequest) {
               type: 'agent_error',
               stage: 'budget',
               message: '工具调用预算已用尽，请缩小任务范围后重试',
+              recoveryRecord: buildRecoveryRecord({ stage: 'budget', message: '工具调用预算已用尽，请缩小任务范围后重试' }),
             });
             return;
           }
@@ -4197,15 +5158,24 @@ export async function POST(request: NextRequest) {
           clarificationSubmissionStore.delete(clarificationSubmissionKey);
         }
         const aborted = request.signal.aborted;
-        const timedOut = timeoutSignal.aborted && !aborted;
+        const failureStage = aborted ? 'cancelled' : executionKind || (intent === 'image' ? 'image_pipeline' : 'chat');
+        const failureMessage = aborted ? '运行已取消' : error instanceof Error ? error.message : 'Agent run failed';
+        const recoveryRecord = preserveRecoveryRecordOnFailure && recoveryBaseRecord
+          ? recoveryBaseRecord
+          : buildRecoveryRecord({
+              stage: failureStage,
+              message: failureMessage,
+              status: aborted ? 'cancelled' : 'failed',
+            });
         progressTracker.settleActive(
           'failed',
-          aborted ? '运行已取消' : timedOut ? '运行超时' : '运行失败',
+          aborted ? '运行已取消' : '运行失败',
         );
         writeEvent(controller, {
           type: 'agent_error',
-          stage: aborted ? 'cancelled' : timedOut ? 'timeout' : executionKind || (intent === 'image' ? 'image_pipeline' : 'chat'),
-          message: aborted ? '运行已取消' : timedOut ? '运行超时，请重试' : error instanceof Error ? error.message : 'Agent run failed',
+          stage: failureStage,
+          message: failureMessage,
+          recoveryRecord,
         });
       } finally {
         controller.close();

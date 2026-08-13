@@ -2,9 +2,79 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  normalizeAgentConversationMemory,
   normalizeChatMessageReferences,
   normalizeSessionChatMessages,
 } from './chat-message-persistence.mjs';
+
+test('chat messages persist bounded recovery records and drop invalid ones', () => {
+  const normalized = normalizeChatMessageReferences({
+    id: 'assistant-1',
+    role: 'assistant',
+    content: 'failed',
+    agentRecovery: {
+      version: 1,
+      taskId: 'task-1',
+      runId: 'run-1',
+      topicId: 'topic-1',
+      sourceUserMessageId: 'user-1',
+      status: 'failed',
+      resumeRoute: 'image_planner',
+      intent: 'image',
+      originalRequest: '生成海报',
+      failure: { stage: 'planning', kind: 'transport', message: '<b>upstream</b> https://private.test', retryability: 'retryable' },
+      skillId: null,
+      contextEntityIds: [],
+      visualReferenceIds: [],
+      completedAssetCount: 0,
+      createdAt: 10,
+    },
+  });
+  assert.equal(normalized.agentRecovery.taskId, 'task-1');
+  assert.equal(normalized.agentRecovery.failure.message, 'upstream');
+  assert.equal(normalizeChatMessageReferences({ id: 'a', role: 'assistant', content: '', agentRecovery: { version: 1 } }).agentRecovery, undefined);
+});
+
+test('topic agent memory is bounded and legacy sessions remain compatible', () => {
+  assert.equal(normalizeAgentConversationMemory(null), undefined);
+
+  const memory = normalizeAgentConversationMemory({
+    recentRawConversation: [
+      { role: 'system', content: 'ignore' },
+      { role: 'user', content: '  keep this  ' },
+    ],
+    rollingSummary: 'S'.repeat(7000),
+    facts: ['fact', '', 42],
+    preferences: ['quiet UI'],
+    activeTask: { status: 'planning', summary: 'Create a poster', taskId: 'task-1' },
+    recentReferencedAssetIds: ['history-image:1'],
+    updatedAt: 123,
+  });
+
+  assert.deepEqual(memory.recentRawConversation, [{ role: 'user', content: 'keep this' }]);
+  assert.equal(memory.rollingSummary.length, 6000);
+  assert.deepEqual(memory.facts, ['fact']);
+  assert.deepEqual(memory.activeTask, { status: 'planning', summary: 'Create a poster', taskId: 'task-1' });
+  assert.equal(memory.updatedAt, 123);
+
+  const normalized = normalizeSessionChatMessages({
+    activeTopicId: 'legacy',
+    topics: [{ id: 'legacy', messages: [] }],
+  });
+  assert.equal(normalized.topics[0].agentMemory, undefined);
+});
+
+test('topic agent memory keeps the latest twenty raw conversation messages', () => {
+  const memory = normalizeAgentConversationMemory({
+    recentRawConversation: Array.from({ length: 25 }, (_, index) => ({
+      role: index % 2 === 0 ? 'user' : 'assistant',
+      content: `message-${index}`,
+    })),
+  });
+  assert.equal(memory.recentRawConversation.length, 20);
+  assert.equal(memory.recentRawConversation[0].content, 'message-5');
+  assert.equal(memory.recentRawConversation.at(-1).content, 'message-24');
+});
 
 test('chat message persistence stores one canonical image source instead of three copies', () => {
   const src = `data:image/png;base64,${'A'.repeat(1024)}`;

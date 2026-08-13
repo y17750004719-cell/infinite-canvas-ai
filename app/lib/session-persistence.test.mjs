@@ -180,6 +180,13 @@ test('buildPersistedSession keeps task snapshots only on their owning assistant 
       compiledAt: 123456,
     },
   }];
+  const agentRecovery = {
+    version: 1,
+    taskId: 'task-1', runId: 'run-1', topicId: 'topic-1', sourceUserMessageId: 'user-1',
+    status: 'failed', resumeRoute: 'image_planner', intent: 'image', originalRequest: '生成海报',
+    failure: { stage: 'planning', kind: 'transport', message: '连接中断', retryability: 'retryable' },
+    skillId: null, contextEntityIds: [], visualReferenceIds: [], completedAssetCount: 0, createdAt: 1,
+  };
   const assistantMessage = {
     id: 'assistant-1',
     role: 'assistant',
@@ -187,6 +194,7 @@ test('buildPersistedSession keeps task snapshots only on their owning assistant 
     taskSnapshot,
     agentImagePrompts,
     agentProgressMode: 'compact',
+    agentRecovery,
   };
   const result = buildPersistedSession({
     id: 'session-1',
@@ -203,6 +211,8 @@ test('buildPersistedSession keeps task snapshots only on their owning assistant 
   assert.deepEqual(result.topics[0].messages[0].agentImagePrompts, agentImagePrompts);
   assert.equal(result.messages[0].agentProgressMode, 'compact');
   assert.equal(result.topics[0].messages[0].agentProgressMode, 'compact');
+  assert.deepEqual(result.messages[0].agentRecovery, agentRecovery);
+  assert.deepEqual(result.topics[0].messages[0].agentRecovery, agentRecovery);
   assert.equal(result.topics[0].taskSnapshot, undefined);
 });
 

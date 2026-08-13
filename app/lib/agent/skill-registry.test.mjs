@@ -123,17 +123,16 @@ test('modular watercolor collage skill compiles prompts for the host image pipel
   assert.match(manifest.generationContract, /one continuous edge-to-edge handmade-paper surface/);
   assert.match(manifest.generationContract, /no three fields side by side/);
   assert.match(manifest.generationContract, /jagged open outer silhouette/);
-  assert.match(manifest.generationContract, /actual pixels/);
+  assert.match(manifest.generationContract, /visualSummary/);
   assert.match(manifest.generationContract, /38%-52% of the canvas width and 68%-78% of its height/);
   assert.match(manifest.generationContract, /14% clear paper on both sides/);
   assert.match(manifest.generationContract, /10% above and below/);
-  assert.match(manifest.planningGuidance, /never invent, retrieve, attach, or request one/);
+  assert.match(manifest.planningGuidance, /without visualSummary, do not invent reference-specific facts/);
   assert.match(manifest.generationContract, /3-4 main fields/);
   assert.match(manifest.generationContract, /3-5 supporting fields/);
   assert.match(manifest.generationContract, /full horizontal field of view without cropping or stretching/);
-  assert.match(manifest.generationContract, /generation\.prompt/);
-  assert.match(manifest.generationContract, /generation\.items/);
-  assert.match(manifest.generationContract, /Do not invoke image tools/);
+  assert.match(manifest.generationContract, /flat orthographic scan/);
+  assert.doesNotMatch(manifest.generationContract, /invoke image tools|quality-gate|retry/i);
   assert.match(manifest.planningGuidance, /gc-minimal-zine-poster-v0-1/);
 });
 
@@ -143,6 +142,13 @@ test('minimal zine skill uses the direct image pipeline with plain-text prompts'
   assert.equal(manifest.promptStyle, 'text');
   assert.deepEqual(manifest.allowedTools, ['generate_image', 'get_canvas_context']);
   assert.match(manifest.generationContract, /2:3/);
+  assert.match(manifest.generationContract, /70%-90%/);
+  assert.match(manifest.generationContract, /8%-25%/);
+  assert.match(manifest.generationContract, /visualSummary/);
+  assert.match(manifest.generationContract, /0\.8%-2\.5%/);
+  assert.match(manifest.generationContract, /flat orthographic scanned-paper/);
+  assert.match(manifest.generationContract, /Preserve all literal user copy exactly/i);
+  assert.doesNotMatch(manifest.generationContract, /then generate|workflow|quality gate/i);
   assert.match(manifest.planningGuidance, /magazine-poster/);
 });
 
@@ -150,7 +156,13 @@ test('magazine skill opts into the direct image pipeline and JSON text prompts',
   const manifest = await getSkillManifest('magazine-poster', { projectRoot });
   assert.equal(manifest.executionMode, 'image_pipeline');
   assert.equal(manifest.promptStyle, 'json-text');
-  assert.match(manifest.generationContract, /supplier-ready prompt/i);
+  assert.match(manifest.generationContract, /valid JSON object/i);
+  assert.match(manifest.generationContract, /editorial_direction/);
+  assert.match(manifest.generationContract, /margins_and_safe_area/);
+  assert.match(manifest.generationContract, /visualSummary/);
+  assert.match(manifest.generationContract, /preserve every literal user-supplied name and line exactly/i);
+  assert.match(manifest.generationContract, /publication system/);
+  assert.doesNotMatch(manifest.generationContract, /workflow|quality gate|invoke image tools/i);
   assert.deepEqual(manifest.allowedTools, ['generate_image', 'get_canvas_context']);
   assert.match(manifest.description, /拼贴艺术编辑海报/);
   assert.match(manifest.planningGuidance, /typography-led cultural/i);

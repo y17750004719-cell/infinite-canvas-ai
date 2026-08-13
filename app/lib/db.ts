@@ -2,6 +2,7 @@ import type { AgentContextEntity, AgentProposal } from './agent/context-referenc
 import type { AgentTaskContract } from './agent/execution-planner.types';
 import type { CanvasItem } from './canvas-types';
 import type { RegionSelection } from './image-region-selection.types';
+import type { AgentRecoveryRecord } from './agent/events';
 
 export type { CanvasItem } from './canvas-types';
 export type { AgentTaskContract } from './agent/execution-planner.types';
@@ -111,8 +112,8 @@ export interface ChatMessage {
       question: string;
       dimension: string;
       options: Array<{ id: string; label: string; answer: string; description?: string }>;
-      allowCustom: true;
-      allowProceed: true;
+      allowCustom: boolean;
+      allowProceed: boolean;
       failed?: boolean;
     };
     state: {
@@ -134,6 +135,8 @@ export interface ChatMessage {
         retryMode: 'replan';
         failedAt: number;
       };
+      recoveryRecord?: AgentRecoveryRecord;
+      recoveryMode?: 'fill_missing' | 'redo_all';
     };
   };
   agentClarificationResponsePayload?: {
@@ -160,6 +163,7 @@ export interface ChatMessage {
   };
   executionBriefSummary?: string;
   taskSnapshot?: TaskSnapshot;
+  agentRecovery?: AgentRecoveryRecord;
 }
 
 export interface ChatTopic {
@@ -168,7 +172,23 @@ export interface ChatTopic {
   messages: ChatMessage[];
   activeSkill?: { id: string; label: string } | null;
   activeSkillExplicit?: boolean;
+  agentMemory?: AgentConversationMemory;
   createdAt: number;
+  updatedAt: number;
+}
+
+export interface AgentConversationMemory {
+  version: 1;
+  recentRawConversation: Array<{ role: 'user' | 'assistant'; content: string }>;
+  rollingSummary: string;
+  facts: string[];
+  preferences: string[];
+  activeTask: {
+    status: 'idle' | 'planning' | 'awaiting_confirmation' | 'executing' | 'completed' | 'failed';
+    summary: string;
+    taskId?: string;
+  } | null;
+  recentReferencedAssetIds: string[];
   updatedAt: number;
 }
 
@@ -204,6 +224,15 @@ export interface TaskSnapshotActiveVersion {
   batchId: string;
   slotId: string;
   versionId: string;
+  assetUrl?: string;
+  plannerPreviewSrc?: string;
+  naturalWidth?: number;
+  naturalHeight?: number;
+  model?: string;
+  itemId?: string;
+  index?: number;
+  label?: string;
+  promptTrace?: ChatMessage['promptTrace'];
 }
 
 export interface TaskSnapshot {

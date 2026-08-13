@@ -15,6 +15,29 @@ test('classifyModel treats known image model families as image models', () => {
   assert.equal(classifyModel('gpt-4.1'), 'chat');
 });
 
+test('classifyModel keeps the nano-banana family in image models without renaming provider IDs', () => {
+  for (const modelId of [
+    'nano-banana-2-2k',
+    'nano-banana-2-4k',
+    'provider/nano-banana-3-preview',
+  ]) {
+    assert.equal(classifyModel(modelId), 'image');
+  }
+  assert.equal(
+    classifyModel('nano-banana-2-4k', { modalities: ['text'] }),
+    'image'
+  );
+
+  const result = parseProviderModels({
+    data: [
+      { id: 'nano-banana-2-2k' },
+      { id: 'nano-banana-2-4k', modalities: ['text'] },
+    ],
+  }, 'openai');
+  assert.deepEqual(result.imageModels, ['nano-banana-2-2k', 'nano-banana-2-4k']);
+  assert.deepEqual(result.chatModels, []);
+});
+
 test('classifyModel prefers upstream capability fields over model id keywords', () => {
   assert.equal(
     classifyModel('custom-renderer-v1', {

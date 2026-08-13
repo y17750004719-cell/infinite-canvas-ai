@@ -94,7 +94,7 @@ export interface AgentExecutionPlannerInput extends Record<string, unknown> {
   userMessage?: string;
   referenceContext?: AgentPlannerReferenceContext | null;
   lockedSkillId?: string | null;
-  skillContent?: string;
+  visualSummary?: import('./events').AgentVisualSummary | null;
   frontDoorDecision?: {
     route: 'planner';
     skillId: string | null;
@@ -217,6 +217,7 @@ export interface AgentPlannerResolution {
   diagnostics: AgentPlannerAttemptDiagnostic[];
   failureReason?: AgentPlannerFailureReason;
   usage?: unknown;
+  visualSummary?: import('./events').AgentVisualSummary | null;
 }
 
 export interface AgentPlannerModelSelection {

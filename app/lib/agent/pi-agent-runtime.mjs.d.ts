@@ -12,11 +12,15 @@ export function runZFlowAgentBrain(input: {
     description?: string;
     parameters?: Record<string, unknown>;
     readOnly?: boolean;
+    terminal?: boolean;
+    countAgainstToolBudget?: boolean;
     requiresConfirmation?: boolean;
     confirmationMessage?: string;
   }>;
+  toolChoice?: 'auto' | 'none' | 'required' | { type: 'function'; function: { name: string } };
   maxTurns?: number;
   maxToolCalls?: number;
+  reserveClosingTurn?: boolean;
   requireMutationTool?: boolean;
   signal?: AbortSignal;
   chatStream: (request: Record<string, unknown>) => AsyncIterable<unknown>;
@@ -37,6 +41,7 @@ export function runZFlowAgentBrain(input: {
     budgets?: {
       turnsUsed?: number;
       toolCallsUsed?: number;
+      budgetedToolCallsUsed?: number;
       mutationToolCallsUsed?: number;
     };
   };
@@ -47,9 +52,11 @@ export function runZFlowAgentBrain(input: {
   transcript: unknown[];
   turns: number;
   toolCalls: number;
+  budgetedToolCalls: number;
   mutationToolCalls: number;
   stopReason: 'completed' | 'execution_required' | 'confirmation_required' | 'budget_exceeded' | 'aborted' | 'error';
   errorMessage?: string;
   confirmation?: Record<string, unknown>;
   rawResults: Map<string, unknown>;
+  terminal?: unknown;
 }>;

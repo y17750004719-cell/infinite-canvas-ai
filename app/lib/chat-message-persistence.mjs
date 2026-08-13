@@ -1,5 +1,42 @@
+import { normalizeAgentRecoveryRecord } from './agent/recovery.mjs';
+
 const isRecord = (value) => typeof value === 'object' && value !== null;
 const text = (value) => typeof value === 'string' ? value : '';
+
+/** @returns {import('./db').AgentConversationMemory | undefined} */
+export function normalizeAgentConversationMemory(value) {
+  if (!isRecord(value)) return undefined;
+  const boundedText = (entry, limit) => text(entry).trim().slice(0, limit);
+  const list = (entries, maxItems, maxLength) => Array.isArray(entries)
+    ? entries.map((entry) => boundedText(entry, maxLength)).filter(Boolean).slice(0, maxItems)
+    : [];
+  const recentRawConversation = Array.isArray(value.recentRawConversation)
+    ? value.recentRawConversation.slice(-20).flatMap((message) => (
+      isRecord(message) && (message.role === 'user' || message.role === 'assistant') && boundedText(message.content, 2000)
+        ? [{ role: message.role, content: boundedText(message.content, 2000) }]
+        : []
+    ))
+    : [];
+  const activeTask = isRecord(value.activeTask)
+    && ['idle', 'planning', 'awaiting_confirmation', 'executing', 'completed', 'failed'].includes(value.activeTask.status)
+    && boundedText(value.activeTask.summary, 1000)
+    ? {
+      status: value.activeTask.status,
+      summary: boundedText(value.activeTask.summary, 1000),
+      ...(boundedText(value.activeTask.taskId, 200) ? { taskId: boundedText(value.activeTask.taskId, 200) } : {}),
+    }
+    : null;
+  return {
+    version: 1,
+    recentRawConversation,
+    rollingSummary: boundedText(value.rollingSummary, 6000),
+    facts: list(value.facts, 24, 500),
+    preferences: list(value.preferences, 16, 500),
+    activeTask,
+    recentReferencedAssetIds: list(value.recentReferencedAssetIds, 20, 200),
+    updatedAt: Number.isFinite(Number(value.updatedAt)) ? Number(value.updatedAt) : Date.now(),
+  };
+}
 
 function createLegacyReference(messageId, src, index, overrides = {}) {
   return {
@@ -24,6 +61,7 @@ function createLegacyReference(messageId, src, index, overrides = {}) {
 
 export function normalizeChatMessageReferences(message) {
   if (!isRecord(message)) return message;
+  const agentRecovery = normalizeAgentRecoveryRecord(message.agentRecovery);
   const messageId = text(message.id) || 'message';
   const existingContext = isRecord(message.referenceContext) ? message.referenceContext : null;
   const references = [];
@@ -101,12 +139,17 @@ export function normalizeChatMessageReferences(message) {
     referenceImages: _legacyReferenceImages,
     inlineContent: _legacyInlineContent,
     referenceContext: _legacyReferenceContext,
+    agentRecovery: _legacyAgentRecovery,
     ...rest
   } = message;
-  if (references.length === 0) return rest;
+  if (references.length === 0) return {
+    ...rest,
+    ...(agentRecovery ? { agentRecovery } : {}),
+  };
 
   return {
     ...rest,
+    ...(agentRecovery ? { agentRecovery } : {}),
     referenceContext: {
       references,
       composerSegments,
@@ -126,12 +169,16 @@ export function normalizeSessionChatMessages(session) {
       ? session.messages
       : [];
   const activeMessages = activeSource.map(normalizeChatMessageReferences);
-  const normalizedTopics = topics.map((topic, index) => ({
-    ...topic,
-    messages: index === activeTopicIndex
-      ? activeMessages
-      : (Array.isArray(topic?.messages) ? topic.messages.map(normalizeChatMessageReferences) : []),
-  }));
+  const normalizedTopics = topics.map((topic, index) => {
+    const agentMemory = normalizeAgentConversationMemory(topic?.agentMemory);
+    return {
+      ...topic,
+      ...(agentMemory ? { agentMemory } : {}),
+      messages: index === activeTopicIndex
+        ? activeMessages
+        : (Array.isArray(topic?.messages) ? topic.messages.map(normalizeChatMessageReferences) : []),
+    };
+  });
 
   return { messages: activeMessages, topics: normalizedTopics };
 }

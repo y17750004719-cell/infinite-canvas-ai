@@ -101,12 +101,30 @@ function piMessageToChatMessage(message) {
     const content = Array.isArray(message.content)
       ? message.content.filter((part) => part?.type === 'text').map((part) => part.text).join('\n')
       : text(message.content);
-    return {
+    const toolMessage = {
       role: 'tool',
       tool_call_id: message.toolCallId,
       name: message.toolName,
       content: content || JSON.stringify(message.details ?? null),
     };
+    const visualReferences = Array.isArray(message.details?.visualReferences)
+      ? message.details.visualReferences
+        .filter((reference) => typeof reference?.src === 'string' && reference.src.trim())
+        .slice(0, 4)
+      : [];
+    if (visualReferences.length === 0) return toolMessage;
+    return [
+      toolMessage,
+      {
+        // Chat Completions tool messages do not consistently accept image parts.
+        // Preserve the tool result, then attach the validated visuals as the next input.
+        role: 'user',
+        content: visualReferences.flatMap((reference, index) => [
+          { type: 'text', text: `Visual reference ${index + 1}${reference.id ? ` (ID: ${reference.id})` : ''}${reference.label ? `: ${reference.label}` : ''}.` },
+          { type: 'image_url', image_url: { url: reference.src } },
+        ]),
+      },
+    ];
   }
   if (message?.role === 'assistant') {
     const textParts = [];
@@ -138,7 +156,7 @@ function piMessageToChatMessage(message) {
 
 export function convertPiMessagesToChatMessages(messages) {
   return (Array.isArray(messages) ? messages : [])
-    .map(piMessageToChatMessage)
+    .flatMap((message) => piMessageToChatMessage(message) || [])
     .filter(Boolean);
 }
 
@@ -221,7 +239,7 @@ function createAssistantMessage(model, content = [], stopReason = 'pending', err
   };
 }
 
-function createProviderStreamFn({ chatStream }) {
+function createProviderStreamFn({ chatStream, toolChoice = 'auto' }) {
   return async (model, context, options = {}) => {
     const stream = createStream();
     void (async () => {
@@ -247,7 +265,7 @@ function createProviderStreamFn({ chatStream }) {
               parameters: tool.parameters,
             },
           })),
-          toolChoice: 'auto',
+          toolChoice,
           signal: options.signal,
           stream: true,
         };
@@ -339,6 +357,8 @@ function normalizeToolDefinition(entry) {
     description: text(entry?.description || fn?.description),
     parameters: entry?.parameters || fn?.parameters || { type: 'object', properties: {} },
     readOnly: entry?.readOnly === true,
+    terminal: entry?.terminal === true,
+    countAgainstToolBudget: entry?.countAgainstToolBudget !== false,
     requiresConfirmation: entry?.requiresConfirmation === true,
     confirmationMessage: text(entry?.confirmationMessage),
   };
@@ -364,7 +384,10 @@ function continuationMessages(transcript, pendingCall, toolResult) {
       toolCallId: text(call?.id),
       toolName: text(call?.name),
       content: [{ type: 'text', text: JSON.stringify(result?.modelResult ?? result ?? null) }],
-      details: result?.publicResult ?? result,
+      details: {
+        ...(isObject(result?.publicResult) ? result.publicResult : { value: result?.publicResult ?? result }),
+        ...(Array.isArray(result?.visualReferences) ? { visualReferences: result.visualReferences } : {}),
+      },
       isError: false,
       timestamp: Date.now(),
     });
@@ -380,8 +403,10 @@ export async function runZFlowAgentBrain({
   model,
   modelMetadata,
   tools = [],
+  toolChoice = 'auto',
   maxTurns = 6,
   maxToolCalls = 4,
+  reserveClosingTurn = false,
   requireMutationTool = false,
   signal,
   chatStream,
@@ -403,17 +428,32 @@ export async function runZFlowAgentBrain({
     turnCount: Number(continuation?.budgets?.turnsUsed) || 0,
     toolCallCount: Number(continuation?.budgets?.toolCallsUsed) || 0,
     mutationToolCallCount: Number(continuation?.budgets?.mutationToolCallsUsed) || 0,
+    budgetedToolCallCount: Number(continuation?.budgets?.budgetedToolCallsUsed) || 0,
     executionCorrectionUsed: false,
     budgetExceeded: false,
     executionRequired: false,
     invalidToolArguments: '',
+    truncatedToolCall: false,
+    closingError: '',
     pendingConfirmation: null,
+    terminal: null,
   };
   const rawResults = new Map();
   const pendingToolStarts = new Map();
   const batchCounts = new WeakMap();
   const toolCallBatches = new Map();
   const normalizedTools = (Array.isArray(tools) ? tools : []).map(normalizeToolDefinition);
+  if (toolChoice && typeof toolChoice === 'object') {
+    const requiredToolName = text(toolChoice?.function?.name);
+    if (!requiredToolName || !normalizedTools.some((tool) => tool.name === requiredToolName)) {
+      throw new Error(`Required Agent tool is unavailable: ${requiredToolName || 'unknown'}`);
+    }
+  }
+  const closingToolNames = new Set(
+    normalizedTools
+      .filter((tool) => tool.terminal === true && tool.countAgainstToolBudget === false)
+      .map((tool) => tool.name),
+  );
   const piTools = normalizedTools.map((entry) => ({
     name: entry.name,
     description: entry.description || entry.name,
@@ -438,14 +478,36 @@ export async function runZFlowAgentBrain({
       }
       const modelResult = result?.modelResult ?? result;
       const publicResult = result?.publicResult ?? result;
+      if (entry.terminal === true) counters.terminal = result;
       return {
         content: [{ type: 'text', text: JSON.stringify(modelResult ?? null) }],
-        details: publicResult,
+        details: {
+          ...(isObject(publicResult) ? publicResult : { value: publicResult }),
+          ...(Array.isArray(result?.visualReferences) ? { visualReferences: result.visualReferences } : {}),
+        },
+        terminate: result?.terminate === true || entry.terminal === true,
       };
     },
   }));
+  const closingPiTools = piTools.filter((tool) => closingToolNames.has(tool.name));
+  const closingState = {
+    active: reserveClosingTurn && (
+      counters.budgetedToolCallCount >= maxToolCalls
+      || counters.turnCount >= Math.max(0, maxTurns - 1)
+    ),
+    steeringPending: false,
+    skipCurrentStop: false,
+    requested: false,
+  };
+  if (closingState.active) closingState.steeringPending = true;
+  const activateClosingTurn = () => {
+    if (closingState.active) return;
+    closingState.active = true;
+    closingState.steeringPending = true;
+    closingState.skipCurrentStop = true;
+  };
 
-  const actualStreamFn = createProviderStreamFn({ chatStream });
+  const actualStreamFn = createProviderStreamFn({ chatStream, toolChoice });
   const resolvedSystemPrompt = systemPrompt || (Array.isArray(messages) ? messages : [])
     .filter((message) => message?.role === 'system' && typeof message.content === 'string')
     .map((message) => message.content)
@@ -456,7 +518,7 @@ export async function runZFlowAgentBrain({
   const initialContext = {
     systemPrompt: resolvedSystemPrompt,
     messages: piMessages.slice(0, -1),
-    tools: piTools,
+    tools: closingState.active ? closingPiTools : piTools,
   };
 
   const config = {
@@ -472,6 +534,14 @@ export async function runZFlowAgentBrain({
         const calls = assistantMessage.content.filter((part) => part?.type === 'toolCall');
         const batch = calls.map((call) => ({ id: call.id, name: call.name, args: call.arguments || {} }));
         for (const call of batch) toolCallBatches.set(call.id, batch);
+        if (closingState.active) {
+          const unavailableCall = calls.find((call) => !closingToolNames.has(call.name));
+          if (unavailableCall) {
+            counters.closingError = `Closing turn cannot call ${unavailableCall.name}`;
+            batchCounts.set(assistantMessage, calls.length);
+            return { block: true, reason: counters.closingError };
+          }
+        }
         try {
           for (const call of batch) {
             const tool = normalizedTools.find((entry) => entry.name === call.name);
@@ -483,13 +553,25 @@ export async function runZFlowAgentBrain({
           batchCounts.set(assistantMessage, calls.length);
           return { block: true, reason: counters.invalidToolArguments };
         }
-        const nextCount = counters.toolCallCount + calls.length;
+        const budgetedCalls = calls.filter((call) => (
+          normalizedTools.find((tool) => tool.name === call.name)?.countAgainstToolBudget !== false
+        ));
+        const terminalOnly = calls.length > 0 && calls.every((call) => (
+          normalizedTools.find((tool) => tool.name === call.name)?.terminal === true
+        ));
+        const nextCount = counters.budgetedToolCallCount + budgetedCalls.length;
         batchCounts.set(assistantMessage, calls.length);
-        if (nextCount > maxToolCalls || counters.turnCount >= maxTurns) {
+        if (nextCount > maxToolCalls && reserveClosingTurn && !closingState.active) {
+          closingState.requested = true;
+          batchCounts.set(assistantMessage, calls.length);
+          return { block: true, reason: 'Context query budget reached; finish without more reads' };
+        }
+        if (nextCount > maxToolCalls || (counters.turnCount >= maxTurns && !terminalOnly)) {
           counters.budgetExceeded = true;
           return { block: true, reason: 'Agent tool call budget exceeded' };
         }
-        counters.toolCallCount = nextCount;
+        counters.toolCallCount += calls.length;
+        counters.budgetedToolCallCount = nextCount;
         counters.mutationToolCallCount += calls.filter((call) => !normalizedTools.find((tool) => tool.name === call.name)?.readOnly).length;
         const confirmationCall = calls.find((call) => normalizedTools.find((tool) => tool.name === call.name)?.requiresConfirmation);
         if (confirmationCall) {
@@ -506,15 +588,77 @@ export async function runZFlowAgentBrain({
       if (counters.pendingConfirmation) return { block: true, reason: 'Tool batch paused for confirmation' };
       return undefined;
     },
+    prepareNextTurn: async ({ message, context }) => {
+      const usedTool = message?.content?.some((part) => part?.type === 'toolCall') === true;
+      if (
+        reserveClosingTurn
+        && !closingState.active
+        && !counters.terminal
+        && !counters.pendingConfirmation
+        && usedTool
+        && (
+          closingState.requested
+          || counters.budgetedToolCallCount >= maxToolCalls
+          || counters.turnCount >= Math.max(0, maxTurns - 1)
+        )
+      ) activateClosingTurn();
+      if (!closingState.active) return undefined;
+      return {
+        context: {
+          ...context,
+          tools: closingPiTools,
+        },
+      };
+    },
     shouldStopAfterTurn: async ({ message }) => {
+      if (message?.stopReason === 'length' && message.content?.some((part) => part?.type === 'toolCall')) {
+        counters.truncatedToolCall = true;
+        return true;
+      }
       if (counters.budgetExceeded) return true;
       if (counters.invalidToolArguments) return true;
       if (counters.pendingConfirmation) return true;
+      if (counters.terminal) return true;
+      if (closingState.skipCurrentStop) {
+        closingState.skipCurrentStop = false;
+        return false;
+      }
+      if (closingState.active) {
+        if (counters.closingError) return true;
+        if (counters.terminal) return true;
+        const closingToolCalls = message?.content?.filter((part) => part?.type === 'toolCall') || [];
+        const unavailableCall = closingToolCalls.find((part) => !closingToolNames.has(part.name));
+        if (unavailableCall) {
+          counters.closingError = `Closing turn cannot call ${unavailableCall.name}`;
+          return true;
+        }
+        const hasToolCall = closingToolCalls.length > 0;
+        const hasFinalText = message?.content?.some((part) => part?.type === 'text' && part.text.trim()) === true;
+        if (!hasToolCall && hasFinalText) return true;
+        counters.closingError = 'Agent closing turn ended without a final response or terminal control';
+        return true;
+      }
+      if (counters.turnCount >= maxTurns) {
+        counters.budgetExceeded = true;
+        return true;
+      }
       if (requireMutationTool && counters.executionCorrectionUsed && counters.mutationToolCallCount === 0 && !message.content.some((part) => part.type === 'toolCall')) {
         counters.executionRequired = true;
         return true;
       }
       return false;
+    },
+    getSteeringMessages: async () => {
+      if (!closingState.steeringPending) return [];
+      closingState.steeringPending = false;
+      return [{
+        role: 'user',
+        content: [{
+          type: 'text',
+          text: 'Context reading is finished. Do not call read or memory tools. Finish now with ordinary final text, handoff_to_image_planner, or request_context_selection. Do not return draft commentary without a final answer.',
+        }],
+        timestamp: Date.now(),
+      }];
     },
     getFollowUpMessages: async () => {
       if (requireMutationTool && counters.mutationToolCallCount === 0 && !counters.executionCorrectionUsed) {
@@ -574,7 +718,7 @@ export async function runZFlowAgentBrain({
   const continuationContext = continuation ? {
     systemPrompt: resolvedSystemPrompt,
     messages: continuationMessages(continuation.transcript, continuation.pendingCall, continuation.toolResult),
-    tools: piTools,
+    tools: closingState.active ? closingPiTools : piTools,
   } : null;
   const newMessages = continuationContext
     ? await runAgentLoopContinue(continuationContext, config, emit, signal, actualStreamFn)
@@ -584,9 +728,15 @@ export async function runZFlowAgentBrain({
   const reasoningContent = assistant?.content?.filter((part) => part.type === 'thinking').map((part) => part.thinking).join('') || '';
   const stopReason = counters.pendingConfirmation
     ? 'confirmation_required'
-    : counters.executionRequired
+      : counters.terminal
+        ? 'completed'
+      : counters.executionRequired
       ? 'execution_required'
       : counters.invalidToolArguments
+        ? 'error'
+      : counters.truncatedToolCall
+        ? 'error'
+      : counters.closingError
         ? 'error'
       : counters.budgetExceeded
         ? 'budget_exceeded'
@@ -603,12 +753,19 @@ export async function runZFlowAgentBrain({
     transcript: [...(continuationContext?.messages || initialContext.messages), ...newMessages],
     turns: counters.turnCount,
     toolCalls: counters.toolCallCount,
+    budgetedToolCalls: counters.budgetedToolCallCount,
     mutationToolCalls: counters.mutationToolCallCount,
     stopReason,
-    ...(counters.invalidToolArguments || assistant?.errorMessage
-      ? { errorMessage: counters.invalidToolArguments || assistant.errorMessage }
+    ...(counters.invalidToolArguments || counters.truncatedToolCall || counters.closingError || assistant?.errorMessage
+      ? {
+        errorMessage: counters.invalidToolArguments
+          || (counters.truncatedToolCall
+            ? 'Model returned an incomplete tool call; the tool was not executed.'
+            : counters.closingError || assistant.errorMessage),
+      }
       : {}),
     ...(counters.pendingConfirmation ? { confirmation: counters.pendingConfirmation } : {}),
+    ...(counters.terminal ? { terminal: counters.terminal } : {}),
     rawResults,
   };
 }

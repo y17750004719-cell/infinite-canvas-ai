@@ -4,558 +4,192 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 const routePath = path.resolve(import.meta.dirname, '../../api/agent/route.ts');
-const generateRoutePath = path.resolve(import.meta.dirname, '../../api/generate/route.ts');
-const apiClientPath = path.resolve(import.meta.dirname, '../api-client.ts');
-const agentEventsPath = path.resolve(import.meta.dirname, 'events.ts');
-const agentLoopPath = path.resolve(import.meta.dirname, 'agent-loop.mjs');
-const executionPlannerPath = path.resolve(import.meta.dirname, 'execution-planner.mjs');
+const pagePath = path.resolve(import.meta.dirname, '../../page.tsx');
+const mainAgentPath = path.resolve(import.meta.dirname, 'main-agent.mjs');
+const runtimePath = path.resolve(import.meta.dirname, 'pi-agent-runtime.mjs');
+const contextPath = path.resolve(import.meta.dirname, 'context-reference.mjs');
 
-test('agent route exposes NDJSON orchestration events and reuses the generate route', () => {
-  const source = fs.readFileSync(routePath, 'utf8');
-  const orchestrationSource = `${source}\n${fs.readFileSync(agentLoopPath, 'utf8')}`;
-  for (const eventType of [
-    'agent_start',
-    'routing_start',
-    'intent_resolved',
-    'proposal_presented',
-    'context_resolved',
-    'brief_compiled',
-    'skill_selected',
-    'active_skill_changed',
-    'clarification_required',
-    'image_prompts_ready',
-    'tool_start',
-    'tool_result',
-    'client_action',
-    'assistant_delta',
-    'agent_done',
-    'agent_error',
-  ]) {
-    assert.match(orchestrationSource, new RegExp(`['\"]${eventType}['\"]`));
-  }
-  assert.match(source, /\/api\/generate/);
-  assert.doesNotMatch(source, /fetch\(new URL\('\/api\/generate'/);
-  assert.match(source, /generatePost/);
-  assert.match(source, /executeAgentTool/);
-  assert.match(source, /resolveMainAgentFrontDoor/);
-  assert.match(source, /planAgentExecutionRequest/);
-  assert.match(source, /executionPlanToImageDeliveryPlan/);
-  assert.match(source, /decisionSource:\s*plannerResult\.source/);
-  assert.match(source, /resolveBriefClarification/);
-  assert.match(source, /shouldAskClarification/);
-  assert.match(source, /clarificationResponse/);
-  assert.match(source, /clarificationResponse\.retry/);
-  assert.match(source, /clarificationState/);
-  assert.match(source, /workingBrief/);
-  assert.match(source, /buildMainAgentMessages/);
-  assert.match(source, /runZFlowAgentBrain/);
-  assert.match(source, /claimConfirmationContinuation/);
-  assert.match(source, /getAgentModelTools/);
-  assert.match(source, /maxTurns:\s*MAX_AGENT_TURNS/);
-  assert.match(source, /maxToolCalls:\s*MAX_TOOL_CALLS/);
-  assert.match(source, /onToolResult:\s*\(\{ id, name, result, rawResult: runtimeRawResult, isError \}\)/);
-  assert.match(source, /createAgentToolResultEvents/);
-  assert.match(source, /source:\s*skillSource \|\| 'auto'/);
-  assert.match(source, /application\/x-ndjson/);
+const read = (file) => fs.readFileSync(file, 'utf8');
+
+test('agent route uses one Pi Main Agent Loop instead of an independent Front Door request', () => {
+  const source = read(routePath);
+  assert.match(source, /buildMainAgentLoopMessages/);
+  assert.match(source, /const loopResult(?::\s*any)? = forcedPlannerTerminal[\s\S]{0,400}: await runZFlowAgentBrain/);
+  assert.doesNotMatch(source, /resolveMainAgentFrontDoor|frontdoor\.resolved|frontdoor\.failed/);
+  assert.match(source, /MAX_MAIN_AGENT_TURNS\s*=\s*12/);
+  assert.match(source, /MAX_MAIN_AGENT_TOOL_CALLS\s*=\s*12/);
+  assert.match(source, /reserveClosingTurn:\s*true/);
 });
 
-test('agent region prompts are compiled by the planner without post-processing', () => {
-  const source = fs.readFileSync(routePath, 'utf8');
-  const plannerSource = fs.readFileSync(executionPlannerPath, 'utf8');
-  assert.match(source, /canvasContext:\s*body\.canvasContext/);
-  assert.match(plannerSource, /canvasContext:\s*compactCanvasContext\(canvasContext\)/);
-  assert.doesNotMatch(source, /ensureOptimizedPromptCoverage|appendRegionTargetContract|optimizeImagePrompt/);
+test('Main Agent exposes only bounded context and handoff controls', () => {
+  const source = read(routePath);
+  for (const tool of [
+    'get_conversation_memory',
+    'list_project_context',
+    'read_context_entity',
+    'load_visual_reference',
+    'update_conversation_memory',
+    'handoff_to_image_planner',
+    'request_context_selection',
+  ]) assert.match(source, new RegExp(`'${tool}'`));
+  const namesStart = source.indexOf('const mainAgentToolNames = [');
+  const namesEnd = source.indexOf('];', namesStart);
+  const names = source.slice(namesStart, namesEnd);
+  assert.doesNotMatch(names, /generate_image|start_skill_job/);
 });
 
-test('agent route resolves context before planning and image tools', () => {
-  const source = fs.readFileSync(routePath, 'utf8');
-  assert.match(source, /resolveContextReference/);
-  assert.match(source, /compileExecutionBrief/);
-  assert.doesNotMatch(source, /ensureOptimizedPromptCoverage|appendRegionTargetContract|optimizeImagePrompt/);
-  assert.match(source, /contextEntities\?:\s*AgentContextEntity\[\]/);
-  assert.match(source, /selectedContextEntityIds\?:\s*string\[\]/);
-  assert.match(source, /contextResolution\.status === 'resolved'/);
-  assert.match(source, /dimension:\s*'context_reference'/);
-  assert.match(source, /writeAgentDone\('context_reference_required'\)/);
-  assert.match(source, /userMessage:\s*executionBrief/);
-  const contextGate = source.indexOf('if (!body.clarificationResponse && contextResolution.detected)');
-  const planner = source.indexOf('await planAgentExecutionRequest', contextGate);
-  const imageTool = source.indexOf("executeAgentTool(toolRegistry, 'generate_image'", contextGate);
-  assert.ok(contextGate >= 0 && planner > contextGate && imageTool > planner);
+test('Main Agent naturally completes with text and Planner handoff carries stable IDs only', () => {
+  const source = read(routePath);
+  assert.match(source, /Main Agent returned an empty response/);
+  assert.doesNotMatch(source, /Main Agent ended without a valid terminal tool/);
+  assert.match(source, /type: 'planner_handoff'/);
+  assert.match(source, /contextEntityIds = validateContextIds/);
+  assert.match(source, /visualReferenceIds = validateContextIds/);
+  assert.match(source, /contextEntityIds = validateContextIds\(\[[\s\S]{0,200}\.\.\.restoredReferenceIds/);
+  assert.match(source, /visualReferenceIds = validateContextIds\(\[[\s\S]{0,200}\.\.\.restoredVisualReferenceIds/);
+  assert.doesNotMatch(source, /handoffToImagePlanner:[\s\S]{0,1200}(?:prompt|brief):/i);
 });
 
-test('agent route strips structured proposals and emits public proposal events', () => {
-  const source = fs.readFileSync(routePath, 'utf8');
-  assert.match(source, /parseAgentProposalBlock/);
-  assert.match(source, /type:\s*'proposal_presented'/);
-  assert.match(source, /loopProposal\.cleanContent/);
-  assert.match(source, /streamedProposal\.cleanContent/);
+test('ordinary text cannot trigger an image mutation when the model misses Planner handoff', () => {
+  const source = read(routePath);
+  const naturalStart = source.indexOf('if (!terminal) {');
+  const naturalEnd = source.indexOf("if (terminal.type !== 'planner_handoff')", naturalStart);
+  const naturalBranch = source.slice(naturalStart, naturalEnd);
+  assert.match(naturalBranch, /writeAgentDone\('completed'\)/);
+  assert.doesNotMatch(naturalBranch, /generate_image|start_skill_job|planAgentExecutionRequest/);
 });
 
-test('agent route emits versioned semantic progress and keeps asset URLs in client actions', () => {
-  const source = fs.readFileSync(routePath, 'utf8');
-  const eventsSource = fs.readFileSync(agentEventsPath, 'utf8');
-  const loopSource = fs.readFileSync(agentLoopPath, 'utf8');
-  assert.match(eventsSource, /type:\s*'progress_update'/);
-  assert.match(eventsSource, /version:\s*1/);
-  assert.match(loopSource, /createAgentProgressTracker/);
-  assert.match(source, /operationId/);
-  assert.match(loopSource, /sequence/);
-  assert.match(source, /stepId/);
-  assert.match(source, /phase/);
-  assert.match(source, /status/);
-  assert.match(source, /label/);
-  assert.match(source, /createAgentToolResultViews/);
-  assert.match(source, /createAgentToolResultEvents/);
-  assert.doesNotMatch(source, /type:\s*'tool_result',[\s\S]{0,180}result:\s*\{[\s\S]{0,80}assets/);
-  assert.match(loopSource, /type:\s*'client_action'[\s\S]{0,180}assets/);
+test('historical visual loading is bounded and becomes a multimodal next-turn attachment', () => {
+  const route = read(routePath);
+  const runtime = read(runtimePath);
+  assert.match(route, /validatedIds\.length === 0 \|\| validatedIds\.length > 4/);
+  assert.match(route, /contextEntities\.slice\(-80\)/);
+  assert.match(route, /visualReferences,/);
+  assert.match(runtime, /message\.details\?\.visualReferences/);
+  assert.match(runtime, /role: 'user'[\s\S]{0,300}type: 'image_url'/);
 });
 
-test('agent route streams confirmed batch images individually without a duplicate aggregate action', () => {
-  const source = fs.readFileSync(routePath, 'utf8');
-  const loopSource = fs.readFileSync(agentLoopPath, 'utf8');
-  assert.match(source, /onSettled:\s*streamIncrementally/);
-  assert.match(source, /type:\s*'add_generated_assets'[\s\S]{0,1800}itemId:[\s\S]{0,900}batch:/);
-  assert.match(source, /total:\s*requests\.length/);
-  assert.match(source, /settled:\s*streamedSettled/);
-  assert.match(source, /succeeded:\s*streamedSucceeded/);
-  assert.match(source, /failed:\s*streamedFailed/);
-  assert.match(source, /includeAssets:\s*!\(result as any\)\?\.streamedAssets/);
-  assert.match(loopSource, /includeAssets = true/);
-  assert.match(loopSource, /toolName === 'generate_image' && includeAssets/);
-});
-
-test('agent route resolves raw user counts before briefs and validates the final request count', () => {
-  const source = fs.readFileSync(routePath, 'utf8');
-  assert.match(source, /const rawUserCountResolution = plannerAuthoritative[\s\S]{0,220}extractAgentImageCount\(latestUserMessage\)/);
-  assert.match(source, /rawUserCountResolution\.status !== 'none'[\s\S]{0,120}rawUserCountResolution[\s\S]{0,80}briefCountResolution/);
-  assert.match(source, /rawPrompt:\s*latestUserMessage/);
-  assert.match(source, /requests\.length !== payloadOutputCount/);
-  assert.match(source, /Number\(request\?\.n\) !== 1/);
-  assert.match(source, /image\.requests_built/);
-  assert.match(source, /actualRequestCount:\s*requests\.length/);
-});
-
-test('agent route exposes exact supplier prompts before image generation starts', () => {
-  const source = fs.readFileSync(routePath, 'utf8');
-  const requestValidationIndex = source.indexOf("requests.some((request) => Number(request?.n) !== 1)");
-  const promptEventIndex = source.indexOf("type: 'image_prompts_ready'", requestValidationIndex);
-  const supplierCallIndex = source.indexOf('settleCanvasImageGenerationRequests({', promptEventIndex);
-
-  assert.ok(requestValidationIndex >= 0 && promptEventIndex > requestValidationIndex);
-  assert.ok(supplierCallIndex > promptEventIndex);
-  assert.match(source.slice(requestValidationIndex, supplierCallIndex), /const prompt = request\.messages\?\.\[0\]\?\.content/);
-  assert.match(source.slice(requestValidationIndex, supplierCallIndex), /prompt,[\s\S]{0,120}promptCompilation/);
-});
-
-test('agent route resolves continuation context and final execution intent before announcing it', () => {
-  const source = fs.readFileSync(routePath, 'utf8');
-  assert.match(source, /resolveAgentConversationIntent/);
-  assert.match(source, /const initialBriefSource = conversationIntent\.brief \|\| latestUserMessage/);
-  assert.match(source, /let executionBrief = executionBriefData\.plainText/);
-  assert.match(source, /conversationIntent\.inherited[\s\S]{0,120}conversationIntent\.intent/);
-  assert.match(source, /if \(!plannerAuthoritative && !executionPlan && intent === 'chat' && selectedSkillExecutionRequest\) \{[\s\S]{0,80}intent = 'skill_action'/);
-  const executionIntentIndex = source.indexOf("intent = 'skill_action';");
-  const resolvedEventIndex = source.indexOf("writeEvent(controller, { type: 'intent_resolved', intent });", executionIntentIndex);
-  assert.ok(executionIntentIndex >= 0 && resolvedEventIndex > executionIntentIndex);
-  assert.match(source, /originalRequest:\s*executionBrief/);
-  assert.match(source, /workingBrief:\s*executionBrief/);
-});
-
-test('agent route rejects unbacked execution claims and requests a real mutation tool', () => {
-  const source = fs.readFileSync(routePath, 'utf8');
-  assert.match(source, /requireMutationTool:\s*executionPlan[\s\S]{0,120}Boolean\(executionPlan\.execution\.tool\)[\s\S]{0,120}intent === 'image' \|\| intent === 'skill_action'/);
-  assert.match(source, /loopResult\.stopReason === 'execution_required'/);
-  assert.match(source, /等待确认真实启动生成/);
-  assert.match(source, /sanitizeAgentResponseContent/);
-  assert.match(source, /UNBACKED_EXECUTION_CLAIM_PATTERN/);
-  assert.match(source, /生成尚未实际启动/);
-});
-
-test('agent route turns isolated image operation conflicts into a user clarification', () => {
-  const source = fs.readFileSync(routePath, 'utf8');
-  assert.match(source, /function hasOnlyImageOperationAmbiguity/);
-  assert.match(source, /\.code === 'operation_mismatch'/);
-  assert.match(source, /dimension:\s*'image_operation'/);
-  assert.match(source, /id:\s*'generate'[\s\S]{0,180}label:\s*'生成新图'/);
-  assert.match(source, /id:\s*'edit'[\s\S]{0,180}label:\s*'编辑原图'/);
-  assert.match(source, /isImageOperationClarification/);
-  const plannerFailureIndex = source.indexOf('if (!plannerResult.plan)');
-  const ambiguityIndex = source.indexOf('hasOnlyImageOperationAmbiguity', plannerFailureIndex);
-  const genericFailureIndex = source.indexOf("const plannerFailureReason = plannerResult.failureReason", plannerFailureIndex);
-  assert.ok(plannerFailureIndex >= 0 && ambiguityIndex > plannerFailureIndex && genericFailureIndex > ambiguityIndex);
-});
-
-test('confirmation records preserve operation identity and skill source', () => {
-  const source = fs.readFileSync(routePath, 'utf8');
-  assert.match(source, /operationId:\s*string/);
-  assert.match(source, /skillSource:\s*'manual'\s*\|\s*'auto'\s*\|\s*null/);
-  assert.match(source, /lastSequence:\s*number/);
-  assert.match(source, /progressToolCallId\?:\s*string/);
-  assert.match(source, /operationId,/);
-  assert.match(source, /skillSource,/);
-  assert.match(source, /lastSequence:/);
-  assert.match(source, /createAgentProgressTracker/);
-  assert.match(source, /settleActive\(\s*'failed'/);
-  assert.match(source, /confirmationRecord\.progressToolCallId/);
-});
-
-test('image generation progress has one outer tool lifecycle', () => {
-  const source = fs.readFileSync(routePath, 'utf8');
-  const payloadStart = source.indexOf('const generateImagePayload = async');
-  const payloadEnd = source.indexOf('const writeResolvedImageOptionUpdate', payloadStart);
-  const payloadSource = source.slice(payloadStart, payloadEnd);
-
-  assert.ok(payloadStart >= 0 && payloadEnd > payloadStart);
-  assert.doesNotMatch(payloadSource, /writeProgress\(\{ stepId: 'generate_image'/);
-  assert.match(source, /writeToolProgress\('generate_image', 'active', toolCallId\)/);
-  assert.match(source, /writeToolProgress\('generate_image', 'completed', toolCallId\)/);
-});
-
-test('agent route uses one main-agent message hierarchy for text and referenced chat', () => {
-  const source = fs.readFileSync(routePath, 'utf8');
-  assert.match(source, /buildMainAgentMessages\(\{/);
-  assert.match(source, /referenceImages:\s*executionReferenceImages/);
-  assert.doesNotMatch(source, /if \(body\.referenceImages\?\.length\) \{[\s\S]{0,1200}generatePost/);
-  assert.match(source, /const shouldUseImagePipeline = executionKind[\s\S]{0,180}executionKind === 'image_pipeline'/);
-  assert.doesNotMatch(source, /if \(intent === 'skill_action'\)/);
-  assert.match(source, /loadSkillContent\(selectedSkill\.id\)/);
-  assert.match(source, /runZFlowAgentBrain\(\{/);
-  assert.match(source, /loopResult\.stopReason === 'error' \|\| loopResult\.stopReason === 'aborted'/);
-  assert.match(source, /loopResult\.stopReason === 'budget_exceeded'/);
-  assert.doesNotMatch(source, /\brunAgentLoop\(\{/);
-});
-
-test('agent route enforces run and tool limits', () => {
-  const source = fs.readFileSync(routePath, 'utf8');
-  assert.match(source, /MAX_AGENT_TURNS\s*=\s*6/);
-  assert.match(source, /MAX_TOOL_CALLS\s*=\s*4/);
-  assert.match(source, /AbortSignal\.timeout/);
-  assert.match(source, /confirmation_required/);
-  assert.match(source, /randomUUID/);
-  assert.match(source, /confirmationStore/);
-  assert.match(source, /expiresAt/);
-  assert.match(source, /execution/);
-  assert.match(source, /loopResult\.confirmation\?\.toolName \|\| 'start_skill_job'/);
-  assert.match(source, /toolArgs:/);
-  assert.match(source, /allowedTools:/);
-  assert.match(source, /body\.confirmation\?\.confirmationId/);
-  assert.match(source, /confirmed:\s*true/);
-  assert.match(source, /version:\s*1/);
-  assert.match(source, /argsHash:\s*hashEnvelopeValue/);
-  assert.match(source, /status:\s*'pending'/);
-  assert.match(source, /confirmationRecord\.status = 'completed'/);
-  assert.match(source, /claimConfirmationContinuation/);
-  assert.match(source, /providerModelFingerprint/);
-  assert.match(source, /resolvedImageProviderId/);
-  assert.match(source, /imageProviderModelFingerprint/);
-  assert.match(source, /piTranscript/);
-  assert.match(source, /pendingToolCall/);
-  assert.match(source, /assistantToolCallIds/);
-  assert.match(source, /progressSequence/);
+test('context ambiguity pauses and resumes the same Pi transcript', () => {
+  const source = read(routePath);
+  assert.match(source, /toolName === 'request_context_selection'/);
+  assert.match(source, /mainAgentLoop:\s*\{/);
+  assert.match(source, /transcript: structuredClone\(loopResult\.transcript\)/);
   assert.match(source, /continuation:\s*\{/);
-  assert.match(source, /normalizeAgentImageCount\(body\.imageOptions\?\.count\)/);
-  assert.match(source, /describeImageDelivery\(imageDeliveryPlan, requestedImageCount\)/);
-  assert.doesNotMatch(source, /channel:\s*'reasoning'/);
-  assert.match(source, /clarificationSubmissionStore/);
-  assert.match(source, /Clarification response has already been submitted/);
-  assert.match(source, /selectedSkill\s*=\s*activeClarificationState\.skillId[\s\S]{0,220}:\s*null/);
-  assert.match(source, /clarificationSubmissionStore\.delete\(clarificationSubmissionKey\)/);
+  assert.match(source, /selectedContextEntityId: selectedContextResponse/);
+  assert.match(source, /dimension: 'context_reference'/);
 });
 
-test('main agent Front Door reuses the selected chat provider and model', () => {
-  const source = fs.readFileSync(routePath, 'utf8');
-  assert.match(source, /frontDoorResult = await resolveMainAgentFrontDoor\(\{/);
-  assert.match(source, /model:\s*resolvedChatSelection\.model/);
-  assert.match(source, /providerId:\s*resolvedChatSelection\.providerId/);
-  assert.doesNotMatch(source, /AGENT_ROUTER_PROVIDER_ID|AGENT_ROUTER_MODEL/);
+test('local context code validates explicit stable IDs without semantic history selection', () => {
+  const source = read(contextPath);
+  const resolverStart = source.indexOf('export function resolveContextReference');
+  const resolverEnd = source.indexOf('export function compileExecutionBrief', resolverStart);
+  const resolver = source.slice(resolverStart, resolverEnd);
+  assert.match(resolver, /selectedEntityIds\.includes\(entity\.id\)/);
+  assert.doesNotMatch(resolver, /上一张图|刚才那张|reduce\(\(current, entity\)/);
 });
 
-test('agent image requests opt into supplier cancellation while legacy requests stay detached', () => {
-  const agentSource = fs.readFileSync(routePath, 'utf8');
-  const generateSource = fs.readFileSync(generateRoutePath, 'utf8');
-  assert.match(agentSource, /cancelWithRequest:\s*true/);
-  assert.match(generateSource, /cancelWithRequest\?: boolean/);
-  assert.match(generateSource, /signal:\s*cancelWithRequest \? request\.signal : undefined/);
-  const apiClientSource = fs.readFileSync(apiClientPath, 'utf8');
-  assert.match(apiClientSource, /Gemini official image request cancelled/);
+test('Image Planner receives the original request, visual summary, and compact Skill manifest after handoff', () => {
+  const source = read(routePath);
+  const loopIndex = source.indexOf('const loopResult: any = forcedPlannerTerminal');
+  const plannerIndex = source.indexOf('await planAgentExecutionRequest', loopIndex);
+  assert.ok(loopIndex >= 0 && plannerIndex > loopIndex);
+  const plannerCall = source.slice(plannerIndex, plannerIndex + 1800);
+  assert.match(source, /const plannerUserMessage = resumedFailedTask\?\.originalRequest \|\| latestUserMessage/);
+  assert.match(plannerCall, /userMessage:[\s\S]{0,220}plannerUserMessage/);
+  assert.match(plannerCall, /messages: plannerHistoryMessages/);
+  assert.match(plannerCall, /visualSummary: plannerVisualSummary/);
+  assert.doesNotMatch(plannerCall, /skillContent,/);
+  assert.match(source, /selectedSkill\.executionMode === 'image_pipeline'/);
+  assert.match(plannerCall, /lockedSkillId: selectedSkill\?\.id \|\| null/);
 });
 
-test('agent image execution reuses the canvas image-card request builders', () => {
-  const source = fs.readFileSync(routePath, 'utf8');
-  assert.match(source, /buildProviderImageOptionProfiles/);
-  assert.match(source, /buildAgentImageGenerationRequests/);
-  assert.match(source, /resolveCanvasImageTaskExecutionMode/);
-  assert.match(source, /settleCanvasImageGenerationRequests/);
-  assert.match(source, /resolvedImageOptions/);
-  assert.match(source, /runtimeReferenceContext\s*=\s*normalizeAgentRuntimeReferenceContext/);
-  assert.match(source, /referenceContext:\s*runReferenceContext/);
-  assert.match(source, /linkedImagePreviews:\s*resolvedReferences\.linkedImagePreviews/);
-  assert.match(source, /referenceIds:\s*resolvedReferences\.referenceIds/);
-  assert.match(source, /imageOperation:\s*imageTask\?\.operation \|\| 'generate'/);
-  assert.match(source, /ratioFallback/);
-  assert.doesNotMatch(source, /aspect_ratio:\s*imageOptions\?\.aspectRatio/);
-  assert.doesNotMatch(source, /size:\s*imageOptions\?\.size/);
-  assert.doesNotMatch(source, /quality:\s*imageOptions\?\.quality/);
-  assert.doesNotMatch(source, /n:\s*imageOptions\?\.count/);
+test('failed tasks use a restricted recovery gate and exact retry ID', () => {
+  const route = read(routePath);
+  const page = read(pagePath);
+  const mainAgent = read(mainAgentPath);
+
+  assert.match(page, /getLatestAgentRecoveryForTask\(chatMessages, options\.recoveryRecord\.taskId\)/);
+  assert.match(page, /recentFailedTask: recentRecoveryTask/);
+  assert.match(page, /recoveryRecord: recovery/);
+  assert.match(route, /normalizeRecentFailedTask\(body\.recentFailedTask, body\.messages\)/);
+  assert.match(route, /buildFailedTaskRecoveryMessages/);
+  assert.match(route, /\['resolve_failed_task_recovery'\]/);
+  assert.match(route, /toolChoice:\s*\{\s*type:\s*'function',\s*function:\s*\{\s*name:\s*'resolve_failed_task_recovery'/);
+  assert.match(route, /for \(let attempt = 0; attempt < 2; attempt \+= 1\)/);
+  assert.match(route, /mainAgentReferenceImages = \[\]/);
+  assert.match(route, /plannerHistoryMessages = cropMessagesToRecoverySource/);
+  assert.match(route, /knownVisualReferenceIds = new Set/);
+  assert.match(route, /const route = decision === 'resume' \? record\.resumeRoute : null/);
+  assert.match(route, /skillSource === 'manual'/);
+  assert.match(route, /reserveTaskExecution\([\s\S]{0,500}recoveryTaskIdForExecution/);
+  assert.match(route, /preserveRecoveryRecordOnFailure && recoveryBaseRecord[\s\S]{0,120}\? recoveryBaseRecord/);
+  assert.match(route, /recoveryResolution\?\.decision === 'continue_current_request'[\s\S]{0,160}recoveryBaseRecord = null[\s\S]{0,100}preserveRecoveryRecordOnFailure = false/);
+  assert.match(route, /!nextSnapshot\?\.activeVersions\.length && previousSnapshot[\s\S]{0,80}\? previousSnapshot/);
+  const recoveryValidation = route.slice(
+    route.indexOf('const validateRecoveryResolution'),
+    route.indexOf('const runRecoveryGate'),
+  );
+  assert.doesNotMatch(recoveryValidation, /args\.taskId|args\.route|args\.skillId/);
+  assert.match(route, /const src = version\.assetUrl \|\| entity\?\.assetUrl/);
+  assert.match(mainAgent, /任务恢复门控/);
+  assert.doesNotMatch(mainAgent, /系统可能提供 recentFailedTask/);
 });
 
-test('agent rejects unconfirmed region targets before generic image fallback can run', () => {
-  const source = fs.readFileSync(routePath, 'utf8');
-  const rejectionIndex = source.indexOf("reference?.role === 'region_target' && reference.confirmationStatus !== 'confirmed'");
-  const normalizationIndex = source.indexOf('const runtimeReferenceContext = normalizeAgentRuntimeReferenceContext');
-  assert.ok(rejectionIndex >= 0 && rejectionIndex < normalizationIndex);
-  assert.match(source, /body\.clarificationState\?\.referenceContext/);
-  assert.match(source, /Region targets must be explicitly confirmed before sending/);
-  assert.match(source, /status: 400/);
+test('validated Image Planner contracts execute deterministically without another model decision', () => {
+  const source = read(routePath);
+  const imagePipeline = source.indexOf('if (shouldUseImagePipeline)');
+  const directTool = source.indexOf("executeAgentTool(toolRegistry, 'generate_image'", imagePipeline);
+  const completed = source.indexOf("writeAgentDone('image_generated')", directTool);
+  assert.ok(imagePipeline >= 0 && directTool > imagePipeline && completed > directTool);
+  assert.match(source, /Unsupported deterministic Image Planner tool/);
+  assert.match(source, /toolName: 'start_skill_job'/);
 });
 
-test('agent preserves model-authored image task and result presentation through confirmations and asset actions', () => {
-  const source = fs.readFileSync(routePath, 'utf8');
-  assert.match(source, /imageTask:\s*executionPlan\?\.imageTask \? structuredClone/);
-  assert.match(source, /presentation:\s*executionPlan\?\.presentation \? structuredClone/);
-  assert.match(source, /confirmationRecord\.imageTask/);
-  assert.match(source, /confirmationRecord\.presentation/);
-  assert.match(source, /presentation\.completionSummary/);
-  assert.match(source, /operation:\s*imageTask\?\.operation \|\| 'generate'/);
+test('topic memory is bounded, emitted, and persisted by the client', () => {
+  const route = read(routePath);
+  const page = read(pagePath);
+  assert.match(route, /mergeTopicMemory/);
+  assert.match(route, /stagedMainAgentMemoryPatches/);
+  assert.match(route, /commitMainAgentMemory/);
+  assert.match(route, /memoryPatches: structuredClone/);
+  assert.match(route, /type: 'agent_memory_updated'/);
+  assert.match(route, /recentRawConversation:[\s\S]{0,100}slice\(-20\)/);
+  assert.match(page, /agentMemory: requestTopicMemory/);
+  assert.match(page, /event\.type === 'agent_memory_updated'/);
+  assert.match(page, /topic\.id === requestTopicId \? \{ \.\.\.topic, agentMemory: memory/);
 });
 
-test('agent image confirmations preserve compiled prompts and report partial request results', () => {
-  const source = fs.readFileSync(routePath, 'utf8');
-  assert.match(source, /promptCompilation:\s*promptCompilation \? structuredClone\(promptCompilation\) : undefined/);
-  assert.match(source, /generationItems:\s*structuredClone\(generationItems\)/);
-  assert.doesNotMatch(source, /optimizePrompt|optimizeImagePrompt/);
-  assert.match(source, /buildCanvasImageGenerationFailureMessage/);
-  assert.match(source, /requestFailureCount/);
-  assert.match(source, /partialFailureMessage/);
-});
-
-test('agent route resolves natural-language output counts before clarification and preserves batch state', () => {
-  const source = fs.readFileSync(routePath, 'utf8');
-  assert.match(source, /resolveAgentImageCountDecision/);
-  assert.match(source, /output_count_ambiguity/);
-  assert.match(source, /output_count_batching/);
-  assert.match(source, /requestedImageCountSource/);
-  assert.match(source, /requestedTotalImageCount/);
-  assert.match(source, /imageBatchPlan/);
-  assert.match(source, /split_batches/);
-  assert.match(source, /first_batch/);
-  assert.match(source, /remainingCount/);
-  assert.match(source, /completedCount \+ succeeded/);
-  assert.match(source, /还需生成 \$\{remainingCount\} 张/);
-  const countResolutionIndex = source.indexOf('resolveAgentImageCountDecision');
-  const genericClarifierIndex = source.indexOf('resolveBriefClarification', countResolutionIndex);
-  assert.ok(countResolutionIndex >= 0 && genericClarifierIndex > countResolutionIndex);
-});
-
-test('unified planner is authoritative and survives clarification', () => {
-  const source = fs.readFileSync(routePath, 'utf8');
-  assert.match(source, /const plannerAuthoritative = true/);
-  assert.doesNotMatch(source, /AGENT_UNIFIED_PLANNER_ENABLED|AGENT_PLANNER_SHADOW_MODE/);
-  assert.match(source, /executionPlan:\s*structuredClone\(executionPlan\)/);
-  assert.match(source, /activeClarificationState\?\.executionPlan/);
-  assert.match(source, /legacyExecutionPlanDetected/);
-  assert.match(source, /Number\(\(activeClarificationState\.executionPlan as any\)\.version\) !== 4/);
-  assert.match(source, /if \(legacyExecutionPlanDetected && activeClarificationState\)/);
-  assert.match(source, /activeClarificationState\.executionPlan = undefined/);
-  assert.match(source, /executionPlan\.execution\.kind/);
-  assert.match(source, /plannerSeriesItems/);
-  assert.match(source, /sourceDetail: plannerResult\.sourceDetail/);
-  assert.match(source, /mutationBlocked: true/);
-  assert.match(source, /stage: 'planning'/);
-  assert.match(source, /writeAgentDone\('planner_failed'\)/);
-  assert.match(source, /failureReason/);
-  assert.match(source, /reason: plannerFailureReason/);
-  assert.match(source, /dimension: 'planner_failure'/);
-  assert.match(source, /referenceContext: structuredClone\(runReferenceContext\)/);
-  assert.match(source, /const shouldRunClarifier = \(intent === 'image' \|\| intent === 'skill_action'\)[\s\S]*&& !executionPlan/);
-  assert.match(source, /deliveryPlan[\s\S]*executionPlanToImageDeliveryPlan\(executionPlan\)/);
-  assert.match(source, /buildCanonicalAgentReferenceContext/);
-  assert.match(source, /runtimeReferenceId[\s\S]*createHash\('sha256'\)/);
-  assert.match(source, /const plannerSelection = explicitPlannerSelection \|\| resolvedChatSelection/);
-  assert.match(source, /AGENT_PLANNER_TIMEOUT_MS/);
-  assert.match(source, /Math\.min\(1_800_000,[\s\S]*AGENT_PLANNER_TIMEOUT_MS[\s\S]*\|\| 1_800_000\)/);
-  assert.match(source, /Math\.min\(1_800_000,[\s\S]*AGENT_RUN_TIMEOUT_MS[\s\S]*\|\| 1_800_000\)/);
-  const executionPlannerSource = fs.readFileSync(executionPlannerPath, 'utf8');
-  assert.match(executionPlannerSource, /DEFAULT_PLANNER_TIMEOUT_MS = 1_800_000/);
-  assert.match(executionPlannerSource, /Math\.min\(1_800_000,[\s\S]*DEFAULT_PLANNER_TIMEOUT_MS\)/);
-  assert.match(source, /referenceContext:\s*runReferenceContext/);
-  assert.match(source, /vision_unsupported/);
-  assert.match(source, /vision_unavailable/);
-  assert.match(source, /planner_model_switch/);
-  assert.match(source, /listAlternativeProviderModelSelections/);
-  assert.match(source, /plannerCandidates/);
-  assert.match(source, /remainingCandidates\s*\n\s*\?\s*remainingCandidates\.filter/);
-  assert.match(source, /isPlannerModelSwitch \? activeClarificationState\.plannerCandidates/);
-  assert.match(source, /plannerSelection/);
-  assert.match(source, /const isPlannerFailureRetry/);
-  assert.match(source, /body\.clarificationResponse\.retryMode === 'replan'/);
-  assert.match(source, /activeClarificationState\.plannerFailure\?\.retryMode === 'replan'/);
-  assert.match(source, /isPlannerFailureRetry[\s\S]*activeClarificationState\.executionPlan\?\.needsClarification === true/);
-  assert.match(source, /isPlannerFailureRetry[\s\S]*activeClarificationState\.originalRequest/);
-  assert.match(source, /plannerFailure:\s*\{[\s\S]*retryMode: 'replan'/);
-  assert.match(source, /Agent 混淆了图片引用和画布上下文/);
-  assert.match(source, /planner\.clarification_failed/);
-  assert.match(source, /activeClarificationState\.executionPlan = structuredClone\(executionPlan\)/);
-});
-
-test('main agent Front Door selects a manifest before Image Planner loads full Skill content', () => {
-  const source = fs.readFileSync(routePath, 'utf8');
-  const firstPlannerIndex = source.indexOf('const plannerResult = await planAgentExecutionRequest');
-  const frontDoorIndex = source.indexOf('frontDoorResult = await resolveMainAgentFrontDoor({');
-  assert.ok(frontDoorIndex >= 0 && firstPlannerIndex > frontDoorIndex);
-  assert.match(source, /messages:\s*body\.messages/);
-  assert.match(source, /referenceImages:\s*body\.referenceImages \|\| \[\]/);
-  assert.match(source, /referenceContext:\s*runtimeReferenceContext/);
-  assert.match(source, /frontDoorResult\.route === 'planner'/);
-  assert.match(source, /frontDoorResult\.skillId/);
-  assert.match(source, /manifests: selectedSkill \? \[selectedSkill\] : \[\]/);
-  assert.match(source, /lockedSkillId: selectedSkill\?\.id \|\| null/);
-  assert.match(source, /skillContent,/);
-  assert.match(source, /await ensureSelectedSkillContent\(\)/);
-  assert.match(source, /isSkillSelectionClarification[\s\S]*const replanned = await planAgentExecutionRequest/);
-  assert.doesNotMatch(source, /hasDirectSkillExecutionIntent\(latestUserMessage\)/);
-  assert.doesNotMatch(source, /findDirectSkillMatches\(latestUserMessage/);
-});
-
-test('authoritative image execution fails closed without a complete planner contract', () => {
-  const source = fs.readFileSync(routePath, 'utf8');
-  assert.match(source, /const invalidExecutablePlan = !executionPlan/);
-  assert.match(source, /executionPlan\.execution\.tool !== 'generate_image'/);
-  assert.match(source, /!imageTask/);
-  assert.match(source, /!presentation/);
-  assert.match(source, /executionPlan\.version !== 4/);
-  assert.match(source, /!generation/);
-  assert.match(source, /referencedTaskWithoutRoles/);
-  assert.match(source, /图片计划校验失败，已停止执行/);
-});
-
-test('image completion summaries and prompt traces follow generated asset delivery', () => {
-  const source = fs.readFileSync(routePath, 'utf8');
-  assert.match(source, /promptTraceForRequest/);
-  assert.match(source, /finalPrompt:\s*String\(requests\[requestIndex\]\?\.messages\?\.\[0\]\?\.content \|\| ''\)/);
-  assert.match(source, /type: 'agent_completion_summary'/);
-  const directActionIndex = source.indexOf("source: 'direct'");
-  const directSummaryIndex = source.indexOf('writeImageCompletionSummary(generationPayload)', directActionIndex);
-  assert.ok(directActionIndex >= 0 && directSummaryIndex > directActionIndex);
-});
-
-test('authoritative routing does not use local Skill or batch semantic selection', () => {
-  const source = fs.readFileSync(routePath, 'utf8');
-  assert.match(source, /const explicitBatchImageRequest = !plannerAuthoritative && !body\.activeSkillId/);
-  assert.doesNotMatch(source, /const deterministicImageSkill/);
-  assert.doesNotMatch(source, /source: 'deterministic_image_skill'/);
-  assert.match(source, /frontDoorResult = await resolveMainAgentFrontDoor/);
-  assert.match(source, /frontDoorResult\.route === 'planner'/);
-  assert.match(source, /contextResolutionSkipped/);
-  assert.match(source, /frontdoor\.resolved/);
-  assert.doesNotMatch(source, /routeAgentRequest/);
-});
-
-test('authoritative image plans use their final generation prompt without prompt optimization', () => {
-  const source = fs.readFileSync(routePath, 'utf8');
-  assert.match(source, /const generation = executionPlan\?\.version === 4 \? executionPlan\.generation : null/);
-  assert.match(source, /const finalGenerationPrompt = generation!\.prompt/);
-  assert.match(source, /generationPrompt:\s*finalGenerationPrompt/);
-  assert.doesNotMatch(source, /optimizeImagePrompt|ensureOptimizedPromptCoverage|appendRegionTargetContract/);
-});
-
-test('series batches persist distinct prompts and retry failed issue ids', () => {
-  const source = fs.readFileSync(routePath, 'utf8');
-  assert.match(source, /resolveImageDeliveryPlan\(executionBrief, requestedTotalImageCount\)/);
-  assert.match(source, /outputCount: requestedTotalImageCount/);
-  assert.match(source, /const imageBatchMode = imageDeliveryPlan\.mode as AgentImageBatchMode/);
-  assert.match(source, /generationItems: structuredClone\(generationItems\)/);
-  assert.match(source, /remainingGenerationItems/);
-  assert.match(source, /generationPrompts: effectiveGenerationItems\.map/);
-  assert.match(source, /failedItemIds/);
-  assert.match(source, /resolveAgentImageBatchContinuation/);
-});
-
-test('agent route preserves three-mode image delivery plans through confirmation and requests', () => {
-  const source = fs.readFileSync(routePath, 'utf8');
-  assert.match(source, /imageDeliveryPlan\?: ImageDeliveryPlan/);
-  assert.match(source, /resolvedImageDeliveryMode:\s*'composite'/);
-  assert.match(source, /dimension:\s*'image_delivery_scope'/);
-  assert.doesNotMatch(source, /applyImagePromptDeliveryContract/);
-  assert.match(source, /deliveryMode:\s*payloadDeliveryPlan\.mode/);
-  assert.match(source, /panelCount:\s*payloadDeliveryPlan\.panelCount/);
-  assert.match(source, /confirmationRecord\.imageDeliveryPlan/);
-});
-
-test('agent route ignores implicit active task context and preserves explicit provenance', () => {
-  const source = fs.readFileSync(routePath, 'utf8');
-  assert.doesNotMatch(source, /activeTaskContext/);
-  assert.doesNotMatch(source, /function normalizeActiveTaskContext/);
-  assert.match(source, /sourceReferenceId/);
-  assert.match(source, /sourceTaskId/);
-  assert.match(source, /sourceVersionId/);
-  assert.match(source, /source === 'history'/);
-});
-
-test('authoritative route avoids regex semantic context resolution', () => {
-  const source = fs.readFileSync(routePath, 'utf8');
-  assert.match(source, /const shouldResolveInitialContext = !plannerAuthoritative &&/);
-  assert.match(source, /const initialContextResolution = plannerAuthoritative[\s\S]{0,240}: shouldResolveInitialContext[\s\S]{0,160}resolveContextReference/);
-});
-
-test('task identities survive confirmation and enrich streamed and aggregate assets', () => {
-  const source = fs.readFileSync(routePath, 'utf8');
-  const eventsSource = fs.readFileSync(agentEventsPath, 'utf8');
-  assert.match(source, /function reserveTaskExecution/);
-  assert.match(source, /pendingTaskIdentities/);
-  assert.match(source, /identities\.slice\(0, requestedImageCount\)/);
-  assert.match(source, /identities\.slice\(requestedImageCount\)/);
-  assert.match(source, /taskExecutionReservation = \{/);
-  assert.match(source, /recordSucceededTaskIdentities/);
-  assert.match(source, /plannerPreviewSrc: asset\.src/);
-  assert.match(source, /writeAgentDone/);
-  assert.match(eventsSource, /taskSnapshot\?: AgentTaskSnapshot/);
-  for (const field of ['taskId', 'contractVersion', 'batchId', 'sourceTaskId', 'sourceVersionId', 'slotId', 'versionId', 'parentVersionId', 'plannerPreviewSrc']) {
-    assert.match(eventsSource, new RegExp(`${field}\\?`));
+test('all chat modes use the Agent endpoint and preserve NDJSON progress and delivery events', () => {
+  const route = read(routePath);
+  const page = read(pagePath);
+  assert.match(page, /const usesAgentRequest = true/);
+  assert.match(route, /application\/x-ndjson/);
+  for (const event of ['progress_update', 'clarification_required', 'agent_activity_delta', 'agent_activity_commit', 'assistant_delta', 'client_action', 'agent_done']) {
+    assert.match(`${route}\n${read(path.resolve(import.meta.dirname, 'events.ts'))}`, new RegExp(`'${event}'`));
   }
 });
 
-test('runtime execution reserves tasks without requiring a planner plan', () => {
-  const source = fs.readFileSync(routePath, 'utf8');
-  assert.match(source, /if \(!executionPlan && !runtime\) return null/);
-  assert.match(source, /kind: 'image_pipeline',[\s\S]{0,100}tool: 'generate_image'/);
-  assert.match(source, /toolRegistry\.get\(toolName\)\?\.readOnly !== true/);
-  assert.match(source, /if \(taskExecutionReservation\) return taskExecutionReservation/);
+test('Main Agent streams visible text activity without exposing reasoning and has no app wall-clock timeout', () => {
+  const source = read(routePath);
+  assert.match(source, /assistantMessageEvent\?\.type === 'text_delta'/);
+  assert.match(source, /disposition: failed \|\| hasToolCall \? 'commentary' : 'final'/);
+  assert.match(source, /const runSignal = request\.signal/);
+  assert.doesNotMatch(source, /AGENT_RUN_TIMEOUT_MS|timeoutSignal/);
+  assert.doesNotMatch(source, /assistantMessageEvent\?\.type === 'thinking_delta'/);
 });
 
-test('image confirmation reserves before snapshotting task identity and reuses the local identities', () => {
-  const source = fs.readFileSync(routePath, 'utf8');
-  const reservationIndex = source.indexOf('const confirmationTaskReservation = getTaskExecutionReservation({');
-  const identitySpreadIndex = source.indexOf('...confirmationTaskIdentity()', reservationIndex);
-  assert.ok(reservationIndex >= 0 && identitySpreadIndex > reservationIndex);
-  assert.match(source, /pendingTaskIdentities:\s*structuredClone\(confirmationTaskReservation\?\.identities\.slice\(0, requestedImageCount\)/);
-  assert.match(source, /remainingTaskIdentities:\s*structuredClone\(confirmationTaskReservation\?\.identities\.slice\(requestedImageCount\)/);
+test('Main Agent prompt uses natural completion and forbids direct image mutation', () => {
+  const source = read(mainAgentPath);
+  assert.doesNotMatch(source, /finish_main_agent_turn/);
+  assert.match(source, /普通文本.*自然结束/);
+  assert.match(source, /update_conversation_memory/);
+  assert.match(source, /handoff_to_image_planner/);
+  assert.match(source, /request_context_selection/);
+  assert.match(source, /不得调用生成、编辑、导出或任何变更工具/);
 });
 
-test('agent-loop image confirmation splits one reservation across current and later batches', () => {
-  const source = fs.readFileSync(routePath, 'utf8');
-  const reservationIndex = source.indexOf('const loopConfirmationTaskReservation = getTaskExecutionReservation({');
-  const identitySpreadIndex = source.indexOf('...confirmationTaskIdentity()', reservationIndex);
-  assert.ok(reservationIndex >= 0 && identitySpreadIndex > reservationIndex);
-  assert.match(source, /pendingTaskIdentities:\s*structuredClone\([\s\S]{0,100}loopConfirmationTaskReservation\?\.identities\.slice\(0, requestedImageCount\)/);
-  assert.match(source, /remainingTaskIdentities:\s*structuredClone\([\s\S]{0,100}loopConfirmationTaskReservation\?\.identities\.slice\(requestedImageCount\)/);
-  assert.match(source, /resolveRemainingConfirmationTaskIdentities\([\s\S]{0,240}pendingTaskIdentities:[\s\S]{0,160}completedTaskIdentities/);
-});
-
-test('reservation keeps edit provenance distinct from regenerate provenance', () => {
-  const source = fs.readFileSync(routePath, 'utf8');
-  assert.match(source, /const editBaseVersionId = imageTask\?\.operation === 'edit' \? parentVersionId \|\| null : null/);
-  assert.match(source, /editBaseVersionId: reservation\.editBaseVersionId/);
-  assert.match(source, /editBaseVersionId: confirmationRecord\.editBaseVersionId \|\| null/);
-  assert.match(source, /sourceVersionId: confirmationRecord\.sourceVersionId \|\| null/);
-});
-
-test('edit execution requires an explicitly supplied original reference', () => {
-  const source = fs.readFileSync(routePath, 'utf8');
-  assert.match(source, /requireOriginalAsset\(\{/);
-  assert.doesNotMatch(source, /pinnedVersionId:/);
-  assert.doesNotMatch(source, /editBaseAsset:/);
-  assert.match(source, /imageTask\.sourceReferenceId/);
-  assert.match(source, /sourceReferenceId: outputSourceReferenceId/);
+test('vendor-specific compatibility does not define the Main Agent protocol', () => {
+  const mainAgent = read(mainAgentPath);
+  const runtime = read(runtimePath);
+  assert.doesNotMatch(`${mainAgent}\n${runtime}`, /xiaomi|mimo|tool_choice\.name/i);
 });
