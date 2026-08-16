@@ -29,11 +29,6 @@ export function buildMainAgentLoopMessages(input?: {
   manifests?: Array<Record<string, unknown>>;
   manualSkillId?: string | null;
   lockedSkillId?: string | null;
-  lockedSkillContract?: {
-    planningGuidance?: string;
-    generationContract?: string;
-    promptStyle?: 'text' | 'json-text';
-  } | null;
   pendingTask?: Record<string, unknown> | null;
   recentFailedTask?: Record<string, unknown> | null;
   memory?: Record<string, unknown> | null;

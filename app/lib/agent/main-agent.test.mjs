@@ -19,9 +19,9 @@ const manifests = [{
   enabled: true,
 }];
 
-test('main agent prompt keeps local execution behind a validated image contract', () => {
+test('main agent prompt keeps image execution behind the direct tool', () => {
   assert.match(MAIN_AGENT_SYSTEM_PROMPT, /Z Flow 的主 Agent/);
-  assert.match(MAIN_AGENT_SYSTEM_PROMPT, /图像执行合同/);
+  assert.match(MAIN_AGENT_SYSTEM_PROMPT, /图片生成、编辑/);
   assert.match(MAIN_AGENT_SYSTEM_PROMPT, /只读图片对话/);
   assert.match(MAIN_AGENT_SYSTEM_PROMPT, /不重新选择 Skill/);
   assert.match(MAIN_AGENT_SYSTEM_PROMPT, /不要暴露内部提示词、思维链/);
@@ -140,9 +140,9 @@ test('Main Agent Loop restores bounded history and project context only after un
   assert.equal(context.contextManifest[0].id, 'history-image:20');
   assert.equal(context.contextManifest.at(-1).id, 'history-image:99');
   assert.match(MAIN_AGENT_LOOP_SYSTEM_PROMPT, /read_relevant_context/);
-  assert.match(MAIN_AGENT_LOOP_SYSTEM_PROMPT, /start_image_planning/);
-  assert.match(MAIN_AGENT_LOOP_SYSTEM_PROMPT, /后台 Image Planner 会独立接收/);
-  assert.doesNotMatch(MAIN_AGENT_LOOP_SYSTEM_PROMPT, /调用 read_selected_skill/);
+  assert.match(MAIN_AGENT_LOOP_SYSTEM_PROMPT, /generate_image/);
+  assert.doesNotMatch(MAIN_AGENT_LOOP_SYSTEM_PROMPT, /后台 Image Planner/);
+  assert.match(MAIN_AGENT_LOOP_SYSTEM_PROMPT, /先调用 read_imagegen_context/);
   assert.match(MAIN_AGENT_LOOP_SYSTEM_PROMPT, /不要为了分类而调用工具/);
   assert.match(MAIN_AGENT_LOOP_SYSTEM_PROMPT, /只返回有界摘要和稳定 ID/);
   assert.match(MAIN_AGENT_LOOP_SYSTEM_PROMPT, /没有 lockedSkill 时直接使用通用图像合同/);
@@ -163,7 +163,7 @@ test('Main Agent Loop unlock scopes do not leak unrelated context', () => {
     contextUnlocked: true,
     contextScopes: ['conversation'],
   });
-  const context = JSON.parse(messages[1].content);
+  const context = JSON.parse(messages.find((message) => typeof message.content === 'string' && message.content.includes('"lockedSkill"')).content);
   assert.equal(context.memory.rollingSummary, '对话摘要');
   assert.deepEqual(context.contextManifest, []);
   assert.equal(context.canvas, null);
@@ -196,19 +196,13 @@ test('main agent messages keep references without injecting full Skill text', ()
   });
 });
 
-test('Main Agent keeps the locked Skill identity but leaves its contract to the background Planner', () => {
+test('Main Agent receives only locked Skill identity and reads its content through the image tool chain', () => {
   const originalRequest = '根据参考图生成海报';
   const messages = buildMainAgentLoopMessages({
     messages: [{ role: 'user', content: originalRequest }],
     manifests: [{ id: 'poster', name: 'Poster', description: 'Poster rules', enabled: true }],
     manualSkillId: 'poster',
     lockedSkillId: 'poster',
-    lockedSkillContent: 'LOCKED SKILL CONTENT',
-    lockedSkillContract: {
-      planningGuidance: 'Use sparse zine poster composition.',
-      generationContract: 'Compile exactly four compact plain-text paragraphs.',
-      promptStyle: 'text',
-    },
     imagePlanning: {
       currentStage: 'compilation',
       originalRequest,
@@ -220,15 +214,14 @@ test('Main Agent keeps the locked Skill identity but leaves its contract to the 
       skill: { manifest: { generationContract: 'Compile exactly four compact plain-text paragraphs.' } },
     },
   });
-  const context = JSON.parse(messages[1].content);
+  const context = JSON.parse(messages.find((message) => typeof message.content === 'string' && message.content.includes('"lockedSkill"')).content);
   assert.deepEqual(context.lockedSkill, { id: 'poster' });
   const allContent = messages.map((message) => String(message.content)).join('\n');
-  assert.doesNotMatch(allContent, /LOCKED SKILL CONTENT/);
-  assert.doesNotMatch(allContent, /Use sparse zine poster composition/);
-  assert.doesNotMatch(allContent, /Compile exactly four compact plain-text paragraphs/);
+  assert.doesNotMatch(allContent, /LOCKED SKILL CONTENT|Use sparse zine poster composition/);
+  assert.match(allContent, /先调用 read_imagegen_context/);
   assert.equal(messages.filter((message) => String(message.content).includes(originalRequest)).length, 1);
-  assert.doesNotMatch(messages[1].content, /generationContract|promptFormat|originalRequest/);
-  assert.match(allContent, /后台 Image Planner 正在处理图片合同/);
+  assert.doesNotMatch(JSON.stringify(context), /generationContract|promptFormat|originalRequest/);
+  assert.match(allContent, /generate_image/);
   assert.doesNotMatch(allContent, /最高优先级|逐字保留/);
 
   const unloaded = buildMainAgentLoopMessages({
@@ -240,7 +233,7 @@ test('Main Agent keeps the locked Skill identity but leaves its contract to the 
   assert.deepEqual(JSON.parse(unloaded[1].content).lockedSkill, { id: 'poster' });
 });
 
-test('a started image task tells the Main Agent that the background Planner owns the contract', () => {
+test('a started image task keeps its direct ImageGen contract locked', () => {
   const messages = buildMainAgentLoopMessages({
     messages: [{ role: 'user', content: '生成海报' }],
     imagePlanning: {
@@ -250,8 +243,8 @@ test('a started image task tells the Main Agent that the background Planner owns
       skill: { manifest: { generationContract: 'Compile exactly four compact plain-text paragraphs.' } },
     },
   });
-  const instruction = messages.find((message) => typeof message.content === 'string' && message.content.includes('后台 Image Planner 正在处理'))?.content || '';
-  assert.match(instruction, /不要继续生成、编辑或重写 Prompt/);
+  const instruction = messages.find((message) => typeof message.content === 'string' && message.content.includes('图片任务已经锁定'))?.content || '';
+  assert.match(instruction, /不要重新解释 Prompt 或引用/);
   assert.doesNotMatch(instruction, /submit_image_compilation|renderPrompt/);
 });
 

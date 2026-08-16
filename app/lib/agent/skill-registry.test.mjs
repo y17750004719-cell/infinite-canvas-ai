@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 
 import {
+  IMAGEGEN_HOST_SKILL_ID,
   findDirectSkillMatches,
   getSkillManifest,
   hasDirectSkillExecutionIntent,
@@ -20,6 +21,22 @@ test('skill registry exposes only enabled skills backed by real directories', as
   const skills = await listSkillManifests({ projectRoot });
   assert.deepEqual(skills.map((skill) => skill.id), ['api-helper', 'brand', 'gc-minimal-zine-poster-v0-1', 'logo', 'magazine-poster', 'modular-watercolor-collage-v0-1']);
   assert.equal(skills.every((skill) => skill.enabled), true);
+  assert.equal(skills.some((skill) => skill.id === IMAGEGEN_HOST_SKILL_ID), false);
+});
+
+test('the internal ImageGen host is available only to the image runtime', async () => {
+  await assert.rejects(() => getSkillManifest(IMAGEGEN_HOST_SKILL_ID, { projectRoot }), /Unknown skill/);
+  await assert.rejects(() => loadSkillContent(IMAGEGEN_HOST_SKILL_ID, { projectRoot }), /Unknown skill/);
+
+  const manifests = await listSkillManifests({ projectRoot, includeInternal: true });
+  const host = manifests.find((skill) => skill.id === IMAGEGEN_HOST_SKILL_ID);
+  assert.equal(host?.internal, true);
+  assert.deepEqual(host?.allowedTools, ['generate_image']);
+
+  const content = await loadSkillContent(IMAGEGEN_HOST_SKILL_ID, { projectRoot, includeInternal: true });
+  assert.match(content, /request is detailed, normalize/i);
+  assert.match(content, /what changes and what remains unchanged/i);
+  assert.doesNotMatch(content, /image_gen|OPENAI_API_KEY|output path/i);
 });
 
 test('skill registry rejects unknown and traversal ids', async () => {

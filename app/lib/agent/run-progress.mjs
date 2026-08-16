@@ -361,6 +361,7 @@ export function routeAgentProgressEvent(router, event) {
   const current = router || createAgentProgressEventRouter();
   if (event?.type === 'intent_resolved') {
     const intent = event.intent === 'image' || event.intent === 'skill_action' ? event.intent : 'chat';
+    if (current.intent === intent) return { router: current, events: [] };
     return {
       router: { intent, pending: [] },
       events: current.pending,

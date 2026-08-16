@@ -14,37 +14,40 @@ const read = (file) => fs.readFileSync(file, 'utf8');
 test('agent route uses one Pi Main Agent Loop instead of an independent Front Door request', () => {
   const source = read(routePath);
   assert.match(source, /buildMainAgentLoopMessages/);
-  assert.match(source, /const loopResult(?::\s*any)? = await runZFlowAgentBrain/);
+  assert.match(source, /const runMainAgentOnce = async[\s\S]*runZFlowAgentBrain/);
   assert.doesNotMatch(source, /resolveMainAgentFrontDoor|frontdoor\.resolved|frontdoor\.failed/);
   assert.match(source, /MAX_MAIN_AGENT_TURNS\s*=\s*12/);
   assert.match(source, /MAX_MAIN_AGENT_TOOL_CALLS\s*=\s*6/);
   assert.match(source, /reserveClosingTurn:\s*true/);
 });
 
-test('Main Agent first turn exposes only lazy entry tools', () => {
+test('Main Agent gates image execution on an explicit ImageGen-context read', () => {
   const source = read(routePath);
-  const namesStart = source.indexOf('const standardMainAgentInitialToolNames = [');
+  const namesStart = source.indexOf('const standardMainAgentToolNames = [');
   const namesEnd = source.indexOf('];', namesStart);
   const names = source.slice(namesStart, namesEnd);
-  for (const tool of ['read_relevant_context', 'submit_agent_analysis_checkpoint', 'request_user_decision', 'start_image_planning']) {
+  for (const tool of ['read_relevant_context', 'submit_agent_analysis_checkpoint', 'request_user_decision']) {
     assert.match(names, new RegExp(`'${tool}'`));
   }
   assert.doesNotMatch(names, /request_context_selection/);
-  assert.doesNotMatch(names, /read_selected_skill|submit_image_context_analysis|submit_image_brief|submit_image_prompt_compilation|submit_image_execution_plan/);
+  assert.doesNotMatch(names, /submit_image_context_analysis|submit_image_brief|submit_image_prompt_compilation|submit_image_execution_plan/);
   assert.match(source, /relevantContextCandidateIds\.size >= 2 \? \['request_context_selection'\] : \[\]/);
   const modelToolNames = source.slice(source.indexOf('const mainAgentToolNames = ['), source.indexOf('];', source.indexOf('const mainAgentToolNames = [')));
-  assert.doesNotMatch(modelToolNames, /read_selected_skill/);
+  assert.match(modelToolNames, /read_imagegen_context/);
+  assert.match(modelToolNames, /generate_image/);
+  assert.match(source, /!mainAgentLoopState\.skillRead \? 'read_imagegen_context' : 'generate_image'/);
+  assert.match(source, /skillRead: hasExplicitImagegenContextTranscript\(restoredMainAgentLoop\)/);
   assert.match(source, /manifests: selectedSkill \? \[selectedSkill\] : \[\]/);
 });
 
-test('image tasks hand off once to the background Planner before execution', () => {
+test('image tasks submit one direct ImageGen contract before execution', () => {
   const source = read(routePath);
-  assert.match(source, /start_image_planning/);
-  assert.match(source, /const runStagedImagePlanning = async/);
-  assert.match(source, /await planAgentExecutionRequest\(plannerRequest\)/);
-  assert.match(source, /imageContractOnly: true/);
-  assert.match(source, /resolvedRequirement: imagePlanning\.resolvedRequirement/);
-  assert.match(source, /referenceContext: runReferenceContext/);
+  assert.match(source, /generateImage: async \(args: Record<string, unknown>\)/);
+  assert.match(source, /const prompt = String\(args\.prompt \|\| ''\)\.trim\(\)/);
+  assert.match(source, /const directPlan: AgentExecutionPlan/);
+  assert.match(source, /executionPlan = directPlan/);
+  assert.match(source, /completeImagePlanningStage\(imagePlanning, 'routing', 'execution'\)/);
+  assert.doesNotMatch(source, /loopResult = await runStagedImagePlanning\(\)/);
   assert.doesNotMatch(source, /validateSkillPromptAssertions|missingCompiledPromptLiterals/);
   assert.match(source, /imagePlanning:\s*structuredClone\(imagePlanning\)/);
   assert.match(source, /agent_task_checkpoint/);
@@ -61,15 +64,14 @@ test('image recovery keeps stable references and does not restore six-stage hand
   assert.doesNotMatch(source, /submitImageContextAnalysis|submitImageBrief|submitImagePromptCompilation|classifyImageOperation/);
 });
 
-test('Main Agent naturally completes with text and Planner handoff carries stable IDs only', () => {
+test('Main Agent naturally completes with text and direct ImageGen keeps stable IDs', () => {
   const source = read(routePath);
   assert.match(source, /Main Agent returned an empty response/);
   assert.doesNotMatch(source, /Main Agent ended without a valid terminal tool/);
   assert.match(source, /type: 'image_execution_plan'/);
-  assert.match(source, /contextEntityIds = validateContextIds/);
-  assert.match(source, /visualReferenceIds = validateContextIds/);
-  assert.match(source, /planAgentExecutionRequest/);
-  assert.match(source, /loopResult\.terminal\?\.type === 'image_planning_started'/);
+  assert.match(source, /referenceIds\.some\(\(id\) => !runtimeReferenceById\.has\(id\)\)/);
+  assert.match(source, /targetReferenceId = operation === 'edit' \? requestedTargetReferenceId : null/);
+  assert.match(source, /type: 'image_execution_plan'/);
 });
 
 test('ordinary text cannot trigger an image mutation when the model misses Planner handoff', () => {
@@ -113,41 +115,56 @@ test('local context code validates explicit stable IDs without semantic history 
   assert.doesNotMatch(resolver, /上一张图|刚才那张|reduce\(\(current, entity\)/);
 });
 
-test('Runtime gives the Planner the resolved requirement and preserves task identity locally', () => {
+test('Runtime preserves direct ImageGen task identity locally', () => {
   const source = read(routePath);
-  const stagedStart = source.indexOf('const runStagedImagePlanning = async');
-  const stagedEnd = source.indexOf('let loopResult', stagedStart);
-  const staged = source.slice(stagedStart, stagedEnd);
-  assert.match(staged, /originalRequest: imagePlanning\.originalRequest/);
-  assert.match(staged, /lockedImageOperation: imagePlanning\.operation/);
-  assert.match(staged, /lockedTargetReferenceId: imagePlanning\.targetReferenceId/);
-  assert.match(staged, /lockedOutputCount: imagePlanning\.outputCount/);
-  assert.match(staged, /lockedAspectRatio/);
-  assert.match(staged, /const plannerRequest = \{/);
-  assert.match(staged, /\['transport', 'timeout'\]\.includes\(plannerResult\.failureReason/);
-  assert.match(staged, /Retrying the unchanged Image Planner contract/);
-  assert.match(staged, /executionPlanToImageDeliveryPlan\(executionPlan\)/);
+  const mainAgentStart = source.indexOf('const mainAgentRegistry = createAgentToolRegistry');
+  const directStart = source.indexOf('generateImage: async (args: Record<string, unknown>)', mainAgentStart);
+  const directEnd = source.indexOf('getConversationMemory:', directStart);
+  const direct = source.slice(directStart, directEnd);
+  assert.match(direct, /referenceIds\.some\(\(id\) => !runtimeReferenceById\.has\(id\)\)/);
+  assert.match(direct, /requestedAspectRatio \|\| imagePlanningDefaults\.aspectRatio \|\| selectedSkill\?\.aspectRatio/);
+  assert.match(direct, /deliveryMode === 'series' && generationItems\.length !== outputCount/);
+  assert.match(direct, /generation: \{ aspectRatio, promptFormat: 'text', prompt, items: generationItems \}/);
+  assert.match(direct, /lockedImageToolArgs = \{/);
+  assert.match(direct, /emitIntentResolved\('image'\)/);
+  assert.doesNotMatch(direct, /executionPlanToImageDeliveryPlan|executionPlanToBrief/);
 });
 
-test('background Planner receives locked source data and is the only prompt-writing model stage', () => {
+test('Main Agent reads ImageGen and the locked visual Skill together before writing the prompt', () => {
   const source = read(routePath);
-  const stagedStart = source.indexOf('const runStagedImagePlanning = async');
-  const stagedEnd = source.indexOf('let loopResult', stagedStart);
-  const stagedSource = source.slice(stagedStart, stagedEnd);
-  assert.match(stagedSource, /imageContractOnly: true/);
-  assert.match(stagedSource, /manifests: selectedSkill \? \[selectedSkill\] : \[\]/);
-  assert.match(stagedSource, /referenceContext: runReferenceContext/);
-  assert.match(stagedSource, /chatStreamFn: chatStream/);
-  assert.doesNotMatch(stagedSource, /submit_image_compilation|buildImageExecutionDraft|composeFinalImagePrompt/);
-  assert.doesNotMatch(stagedSource, /onEvent: emitMainAgentEvent/);
+  const mainAgent = read(mainAgentPath);
+  assert.match(source, /readImagegenContext: async \(\) => \{/);
+  assert.match(source, /const context = await loadImagegenContext\(\{ source: 'model' \}\)/);
+  assert.match(source, /modelResult: context/);
+  assert.match(source, /publicResult: \{/);
+  assert.match(source, /hostSkill: \{ id: context\.hostSkill\.id, contentHash: context\.hostSkill\.contentHash \}/);
+  assert.match(source, /hostSkill: \{ id: IMAGEGEN_HOST_SKILL_ID, content: hostContent, contentHash: hostContentHash \}/);
+  assert.doesNotMatch(source, /lockedSkillContract:/);
+  assert.match(mainAgent, /先调用 read_imagegen_context/);
+  assert.match(mainAgent, /ImageGen 方法负责 Prompt 组织/);
+  assert.doesNotMatch(source, /validateSkillPromptAssertions|missingCompiledPromptLiterals/);
 });
 
-test('Image contract generation uses one independent Planner transport', () => {
+test('direct ImageGen does not invoke Planner transport from the active route', () => {
   const routeSource = read(routePath);
-  assert.match(routeSource, /AGENT_PLANNER_PROVIDER_ID/);
-  assert.match(routeSource, /AGENT_PLANNER_MODEL/);
-  assert.match(routeSource, /await planAgentExecutionRequest/);
-  assert.match(routeSource, /Planner returned an empty image prompt/);
+  const mainAgentStart = routeSource.indexOf('const mainAgentRegistry = createAgentToolRegistry');
+  const directStart = routeSource.indexOf('generateImage: async (args: Record<string, unknown>)', mainAgentStart);
+  const directEnd = routeSource.indexOf('getConversationMemory:', directStart);
+  const activeSource = routeSource.slice(directStart, directEnd);
+  assert.doesNotMatch(activeSource, /planAgentExecutionRequest|AGENT_PLANNER_PROVIDER_ID|AGENT_PLANNER_MODEL/);
+  assert.match(activeSource, /executionPlan = directPlan/);
+});
+
+test('direct image execution and confirmation reuse the complete locked tool arguments', () => {
+  const source = read(routePath);
+  const pipelineStart = source.indexOf('if (shouldUseImagePipeline)');
+  const pipelineEnd = source.indexOf("if (executionPlan) {", pipelineStart);
+  const pipeline = source.slice(pipelineStart, pipelineEnd);
+  assert.match(pipeline, /const imageToolArgs = lockedImageToolArgs/);
+  assert.match(pipeline, /toolArgs: structuredClone\(imageToolArgs\)/);
+  assert.match(pipeline, /args: structuredClone\(imageToolArgs\)/);
+  assert.match(pipeline, /executeAgentTool\(toolRegistry, 'generate_image', imageToolArgs/);
+  assert.doesNotMatch(pipeline, /executeAgentTool\(toolRegistry, 'generate_image', \{\}/);
 });
 
 test('failed tasks stay passive until the lightweight entry explicitly resumes them', () => {
@@ -229,6 +246,9 @@ test('long-running image supplier calls keep the Agent delivery stream active', 
   const stop = source.indexOf('stopImageGenerationHeartbeat()', settle);
   assert.ok(heartbeat >= 0 && settle > heartbeat && stop > settle);
   assert.match(source, /onPulse:[\s\S]{0,300}stepId: 'generate_image'/);
+  assert.match(source, /const heartbeatToolCallId = streamOptions\?\.toolCallId/);
+  assert.match(source, /toolCallId: heartbeatToolCallId/);
+  assert.match(source, /canvasContext: body\.canvasContext,\n\s*toolCallId,/);
 });
 
 test('manual image Skills pass the compiler prompt directly to image generation', () => {
@@ -273,17 +293,17 @@ test('Main Agent streams visible text activity without exposing reasoning and ha
   assert.doesNotMatch(source, /assistantMessageEvent\?\.type === 'thinking_delta'/);
 });
 
-test('Main Agent prompt uses natural completion and forbids direct image mutation', () => {
+test('Main Agent prompt uses natural completion and direct ImageGen', () => {
   const source = read(mainAgentPath);
   assert.doesNotMatch(source, /finish_main_agent_turn/);
   assert.match(source, /直接用普通文本回答，不创建任务/);
   assert.match(source, /submit_agent_analysis_checkpoint/);
   assert.match(source, /request_user_decision/);
-  assert.match(source, /主 Agent 不编写、重写或校验供应商 Prompt/);
-  assert.match(source, /后台 Image Planner 会独立接收已理解需求、Skill 和稳定参考图并生成供应商合同/);
+  assert.match(source, /generate_image/);
+  assert.match(source, /获得 ImageGen 方法和可选的已选视觉 Skill；再结合用户需求和稳定参考图写出最终 Prompt/);
   assert.doesNotMatch(source, /submit_image_context_analysis|submit_image_brief|submit_image_prompt_compilation/);
   assert.doesNotMatch(source, /调用 submit_image_execution_plan/);
-  assert.doesNotMatch(source, /调用 read_selected_skill/);
+  assert.match(source, /先调用 read_imagegen_context/);
   assert.match(source, /不得声称已执行尚未发生的生成或变更/);
 });
 

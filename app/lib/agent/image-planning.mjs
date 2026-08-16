@@ -1,4 +1,4 @@
-const STAGES = ['routing', 'image_planner', 'execution'];
+const STAGES = ['routing', 'execution'];
 const STATUSES = new Set(['pending', 'in_progress', 'completed', 'awaiting_input', 'failed', 'skipped']);
 const MODES = new Set(['single', 'series', 'variants', 'composite']);
 
@@ -30,10 +30,10 @@ function hasExecutionContract(snapshot) {
     && object(snapshot.executionPlan);
 }
 
-export function createImagePlanningSnapshot({ taskId, runId, sourceUserMessageId, originalRequest, resolvedRequirement = null, referenceIds = [], outputCount = 1, aspectRatio, promptFormat = 'text', deliveryMode = null, panelCount = null, skill = null, currentStage = 'routing' } = {}) {
+export function createImagePlanningSnapshot({ taskId, runId, sourceUserMessageId, originalRequest, resolvedRequirement = null, referenceIds = [], outputCount = 1, aspectRatio, promptFormat = 'text', deliveryMode = null, panelCount = null, skill = null, imagegenContext = null, currentStage = 'routing' } = {}) {
   if (!STAGES.includes(currentStage)) throw new Error('currentStage is invalid');
   return {
-    version: 3,
+    version: 4,
     taskId: required(taskId, 'taskId'),
     runId: required(runId, 'runId'),
     sourceUserMessageId: required(sourceUserMessageId, 'sourceUserMessageId'),
@@ -53,6 +53,7 @@ export function createImagePlanningSnapshot({ taskId, runId, sourceUserMessageId
     deliveryMode: MODES.has(deliveryMode) ? deliveryMode : null,
     panelCount: deliveryMode === 'composite' ? Math.max(2, Math.floor(Number(panelCount) || 2)) : null,
     skill: object(skill) ? clone(skill) : null,
+    imagegenContext: object(imagegenContext) ? clone(imagegenContext) : null,
     executionPlan: null,
     failure: null,
     abandonedAt: null,
@@ -64,7 +65,7 @@ function migrateLegacy(value, defaults) {
   const snapshot = createImagePlanningSnapshot({
     ...defaults,
     ...value,
-    currentStage: completed ? 'execution' : value?.operation ? 'image_planner' : 'routing',
+    currentStage: completed ? 'execution' : 'routing',
   });
   snapshot.revision = Math.max(1, Math.floor(Number(value?.revision) || 1));
   snapshot.decision = ['chat', 'generate', 'edit'].includes(value?.decision) ? value.decision : null;
@@ -76,18 +77,15 @@ function migrateLegacy(value, defaults) {
     snapshot.executionPlan = clone(value.executionPlan);
     snapshot.stages = stages('execution', {
       routing: { status: 'completed' },
-      image_planner: { status: 'completed' },
       execution: { status: 'completed', completedAt: value?.stages?.local_finalization?.completedAt },
     });
-  } else if (snapshot.operation) {
-    snapshot.stages = stages('image_planner', { routing: { status: 'completed' } });
   }
   return snapshot;
 }
 
 export function restoreImagePlanningSnapshot(value, defaults = {}) {
   if (!object(value)) return createImagePlanningSnapshot(defaults);
-  if (value.version !== 3 || !STAGES.includes(value.currentStage)) return migrateLegacy(value, defaults);
+  if (value.version !== 4 || !STAGES.includes(value.currentStage)) return migrateLegacy(value, defaults);
   const snapshot = clone(value);
   snapshot.taskId = text(snapshot.taskId) || required(defaults.taskId, 'taskId');
   snapshot.runId = text(snapshot.runId) || required(defaults.runId, 'runId');
@@ -105,6 +103,7 @@ export function restoreImagePlanningSnapshot(value, defaults = {}) {
   snapshot.operation = ['generate', 'edit'].includes(snapshot.operation) ? snapshot.operation : null;
   snapshot.targetReferenceId = snapshot.operation === 'edit' ? text(snapshot.targetReferenceId) || null : null;
   snapshot.skill = object(snapshot.skill) ? clone(snapshot.skill) : null;
+  snapshot.imagegenContext = object(snapshot.imagegenContext) ? clone(snapshot.imagegenContext) : null;
   snapshot.executionPlan = object(snapshot.executionPlan) ? clone(snapshot.executionPlan) : null;
   snapshot.revision = Math.max(1, Math.floor(Number(snapshot.revision) || 1));
   snapshot.failure = object(snapshot.failure) ? clone(snapshot.failure) : null;
@@ -114,8 +113,8 @@ export function restoreImagePlanningSnapshot(value, defaults = {}) {
     snapshot.executionPlan = null;
     snapshot.failure = null;
     snapshot.revision += 1;
-    snapshot.currentStage = snapshot.operation ? 'image_planner' : 'routing';
-    snapshot.stages = stages(snapshot.currentStage, snapshot.operation ? { routing: { status: 'completed' } } : undefined);
+    snapshot.currentStage = 'routing';
+    snapshot.stages = stages('routing');
   }
   return snapshot;
 }

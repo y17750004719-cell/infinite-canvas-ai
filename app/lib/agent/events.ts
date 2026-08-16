@@ -283,7 +283,7 @@ export type AgentImagePlanningStage =
   | 'execution';
 
 export type AgentImagePlanningSnapshot = {
-  version: 3;
+  version: 4;
   taskId: string;
   runId: string;
   sourceUserMessageId: string;
@@ -319,6 +319,10 @@ export type AgentImagePlanningSnapshot = {
       planningGuidance?: string;
       generationContract?: string;
     };
+  } | null;
+  imagegenContext: {
+    host: { id: 'imagegen'; contentHash: string };
+    visualSkill: { id: string; contentHash: string } | null;
   } | null;
   executionPlan?: Record<string, unknown> | null;
   abandonedAt: number | null;

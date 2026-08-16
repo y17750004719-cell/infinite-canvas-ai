@@ -122,6 +122,7 @@ export function createAgentToolRegistry({
   createSkillJob,
   getSkillJob,
   generateImage,
+  readImagegenContext,
   getConversationMemory,
   listProjectContext,
   readContextEntity,
@@ -141,12 +142,56 @@ export function createAgentToolRegistry({
   requestContextSelection,
 } = {}) {
   const registry = new Map([
+    ['read_imagegen_context', {
+      name: 'read_imagegen_context',
+      requiresConfirmation: false,
+      readOnly: true,
+      countAgainstToolBudget: false,
+      description: 'Read the internal ImageGen method and the visual Skill locked for this image task before writing the final prompt.',
+      parameters: { type: 'object', properties: {}, additionalProperties: false },
+      execute: async (_args, context) => {
+        if (typeof readImagegenContext !== 'function') throw new Error('read_imagegen_context is unavailable');
+        return readImagegenContext(context);
+      },
+    }],
     ['generate_image', {
       name: 'generate_image',
       requiresConfirmation: false,
       readOnly: false,
-      description: 'Generate one image from the current request.',
-      parameters: { type: 'object', properties: {}, additionalProperties: true },
+      terminal: true,
+      countAgainstToolBudget: false,
+      description: 'Generate or edit images using the final prompt. For edits, targetReferenceId must identify the one image to edit and also appear in referenceIds.',
+      parameters: {
+        type: 'object',
+        properties: {
+          operation: { type: 'string', enum: ['generate', 'edit'] },
+          prompt: { type: 'string', minLength: 1 },
+          referenceIds: {
+            type: 'array',
+            maxItems: 20,
+            items: { type: 'string', minLength: 1, maxLength: 200 },
+          },
+          targetReferenceId: { type: ['string', 'null'], minLength: 1, maxLength: 200 },
+          outputCount: { type: 'integer', minimum: 1, maximum: 100 },
+          aspectRatio: { type: 'string', enum: AGENT_IMAGE_ASPECT_RATIO_IDS },
+          deliveryMode: { type: 'string', enum: ['single', 'variants', 'series', 'composite'] },
+          panelCount: { type: ['integer', 'null'], minimum: 2, maximum: 100 },
+          items: {
+            type: 'array',
+            maxItems: 100,
+            items: {
+              type: 'object',
+              properties: {
+                prompt: { type: 'string', minLength: 1 },
+              },
+              required: ['prompt'],
+              additionalProperties: false,
+            },
+          },
+        },
+        required: ['operation', 'prompt', 'referenceIds', 'targetReferenceId', 'outputCount', 'aspectRatio', 'deliveryMode', 'panelCount'],
+        additionalProperties: false,
+      },
       execute: async (args, context) => {
         if (typeof generateImage !== 'function') throw new Error('generate_image is unavailable');
         return generateImage(args, context);

@@ -251,6 +251,40 @@ test('image generation timing starts on active, freezes on completion, and reset
   assert.equal(getAgentProgressElapsedMs(state.steps[1], 11_250), 1_250);
 });
 
+test('image heartbeat updates the active tool row instead of creating a second timer', () => {
+  let state = reduceAgentRunProgress(null, progress(1, {
+    stepId: 'generate_image',
+    phase: 'generating',
+    status: 'active',
+    toolCallId: 'generate-image-1',
+    toolName: 'generate_image',
+    label: '正在生成图片',
+    timestampMs: 1_000,
+  }));
+  state = reduceAgentRunProgress(state, progress(2, {
+    stepId: 'generate_image',
+    phase: 'generating',
+    status: 'active',
+    toolCallId: 'generate-image-1',
+    toolName: 'generate_image',
+    label: '正在等待图片生成（10 秒）',
+    timestampMs: 11_000,
+  }));
+  state = reduceAgentRunProgress(state, progress(3, {
+    stepId: 'generate_image',
+    phase: 'generating',
+    status: 'completed',
+    toolCallId: 'generate-image-1',
+    toolName: 'generate_image',
+    label: '图片生成完成',
+    timestampMs: 20_000,
+  }));
+
+  assert.equal(state.steps.length, 1);
+  assert.equal(state.steps[0].status, 'completed');
+  assert.equal(getAgentProgressElapsedMs(state.steps[0], 60_000), 19_000);
+});
+
 test('agent_done before image assets settle does not complete the run', () => {
   let state = reduceAgentRunProgress(null, progress(1, {
     stepId: 'generate_image',
@@ -291,7 +325,7 @@ test('settling all announced assets completes an agent run', () => {
 test('recovered tool failures do not override a successful image delivery', () => {
   let state = null;
   let sequence = 0;
-  const progressEvent = (toolCallId, status, label, toolName = 'read_selected_skill') => ({
+  const progressEvent = (toolCallId, status, label, toolName = 'read_imagegen_context') => ({
     type: 'progress_update',
     runId: 'run-recovered-tool',
     operationId: 'run-recovered-tool',
@@ -455,6 +489,17 @@ test('buffers progress until an image intent is known and flushes it once', () =
 
   routed = routeAgentProgressEvent(routed.router, progress(2));
   assert.deepEqual(routed.events, [progress(2)]);
+});
+
+test('repeated image intent events do not reset progress routing', () => {
+  let router = createAgentProgressEventRouter();
+  let routed = routeAgentProgressEvent(router, { type: 'intent_resolved', intent: 'image' });
+  router = routed.router;
+  routed = routeAgentProgressEvent(router, { type: 'intent_resolved', intent: 'image' });
+  assert.deepEqual(routed.events, []);
+  assert.equal(routed.router.intent, 'image');
+  routed = routeAgentProgressEvent(routed.router, progress(1));
+  assert.deepEqual(routed.events, [progress(1)]);
 });
 
 test('flushes buffered and later progress for ordinary chat', () => {

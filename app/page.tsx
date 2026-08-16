@@ -1865,7 +1865,7 @@ const IMAGE_PLANNING_ERROR_MESSAGES: Record<string, string> = {
   skill: '已选 Skill 读取未完成，任务状态已保留，可继续重试',
   brief: '设计 Brief 未完成，任务状态已保留，可继续重试',
   prompt: '生图 Prompt 未完成，任务状态已保留，可继续重试',
-  image_planner: '图片合同规划未完成，任务状态已保留，可继续重试',
+  image_planner: '图片准备未完成，任务状态已保留，可继续重试',
   execution: '图片合同执行未完成，任务状态已保留，可继续重试',
   terminal_contract: '图像合同未完成，任务状态已保留，可继续重试',
 };

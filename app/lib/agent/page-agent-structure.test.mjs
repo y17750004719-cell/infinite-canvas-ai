@@ -42,7 +42,7 @@ test('all chat modes post to the Pi-backed agent route and handle agent events',
 
 test('image planning failures are presented as stage-specific recoverable Chinese UI copy', () => {
   assert.match(source, /IMAGE_PLANNING_ERROR_MESSAGES/);
-  assert.match(source, /image_planner: '图片合同规划未完成，任务状态已保留，可继续重试'/);
+  assert.match(source, /image_planner: '图片准备未完成，任务状态已保留，可继续重试'/);
   assert.match(source, /prompt: '生图 Prompt 未完成，任务状态已保留，可继续重试'/);
   assert.match(source, /closing turn ended\|final response or terminal control/i);
   assert.match(source, /图像合同未完成，任务状态已保留，可继续重试/);

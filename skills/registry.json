@@ -1,5 +1,14 @@
 [
   {
+    "id": "imagegen",
+    "name": "ImageGen Host",
+    "description": "Internal image-generation prompting and execution method.",
+    "triggerHints": [],
+    "internal": true,
+    "allowedTools": ["generate_image"],
+    "enabled": true
+  },
+  {
     "id": "api-helper",
     "name": "API 助手",
     "description": "分析第三方 AI API 文档并生成调用方案。",

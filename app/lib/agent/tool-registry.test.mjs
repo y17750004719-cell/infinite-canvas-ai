@@ -3,13 +3,13 @@ import assert from 'node:assert/strict';
 
 import { createAgentToolRegistry, executeAgentTool, getAgentModelTools } from './tool-registry.mjs';
 
-test('tool registry exposes the two-stage image domain tools and risk levels', () => {
+test('tool registry exposes the direct image tool and legacy recovery tools', () => {
   const registry = createAgentToolRegistry({
     createSkillJob: () => ({ id: 'job-1' }),
     getSkillJob: () => null,
   });
   assert.deepEqual([...registry.keys()], [
-    'generate_image', 'get_canvas_context', 'get_conversation_memory', 'list_project_context',
+    'read_imagegen_context', 'generate_image', 'get_canvas_context', 'get_conversation_memory', 'list_project_context',
     'read_context_entity', 'load_visual_reference', 'update_conversation_memory',
     'handle_failed_task', 'read_relevant_context', 'submit_agent_analysis_checkpoint',
     'request_user_decision', 'start_image_planning', 'rewind_agent_analysis', 'resolve_failed_task_recovery',
@@ -22,6 +22,10 @@ test('tool registry exposes the two-stage image domain tools and risk levels', (
   assert.equal(registry.get('get_canvas_context').readOnly, true);
   assert.equal(registry.get('get_skill_job').readOnly, true);
   assert.equal(registry.get('generate_image').readOnly, false);
+  assert.equal(registry.get('generate_image').terminal, true);
+  assert.equal(registry.get('read_imagegen_context').readOnly, true);
+  assert.equal(registry.get('read_imagegen_context').terminal, undefined);
+  assert.equal(registry.get('read_imagegen_context').countAgainstToolBudget, false);
   assert.equal(registry.get('load_visual_reference').readOnly, true);
   assert.equal(registry.get('update_conversation_memory').terminal, undefined);
   assert.equal(registry.get('update_conversation_memory').countAgainstToolBudget, false);
@@ -38,6 +42,97 @@ test('tool registry exposes the two-stage image domain tools and risk levels', (
   assert.equal(registry.get('submit_image_execution_plan').terminal, true);
   assert.equal(registry.get('submit_image_execution_plan').readOnly, true);
   assert.equal(registry.get('submit_image_execution_plan').countAgainstToolBudget, false);
+});
+
+test('read_imagegen_context reads the locked host and visual Skills without model arguments', async () => {
+  const imagegenContext = {
+    hostSkill: {
+      id: 'imagegen',
+      content: '# ImageGen Host\nShape the prompt without over-expanding it.',
+      contentHash: 'host-hash',
+    },
+    visualSkill: {
+      id: 'gc-minimal-zine-poster-v0-1',
+      content: '# Minimal Zine Poster\nUse the locked visual method.',
+      contentHash: 'visual-hash',
+    },
+  };
+  const calls = [];
+  const registry = createAgentToolRegistry({
+    readImagegenContext: (context) => {
+      calls.push(context.runId);
+      return imagegenContext;
+    },
+  });
+  const [modelTool] = getAgentModelTools(registry, ['read_imagegen_context']);
+
+  assert.deepEqual(modelTool.function.parameters, { type: 'object', properties: {}, additionalProperties: false });
+  assert.deepEqual(
+    await executeAgentTool(registry, 'read_imagegen_context', {}, {
+      allowedTools: ['read_imagegen_context'],
+      runId: 'run-skill-read',
+    }),
+    imagegenContext,
+  );
+  assert.deepEqual(calls, ['run-skill-read']);
+  await assert.rejects(
+    () => executeAgentTool(registry, 'read_imagegen_context', { skillId: 'other' }, { allowedTools: ['read_imagegen_context'] }),
+    /not allowed/,
+  );
+  await assert.rejects(
+    () => executeAgentTool(createAgentToolRegistry(), 'read_imagegen_context', {}, { allowedTools: ['read_imagegen_context'] }),
+    /unavailable/,
+  );
+});
+
+test('generate_image exposes a strict direct execution contract and forwards the final prompt unchanged', async () => {
+  const calls = [];
+  const registry = createAgentToolRegistry({
+    generateImage: (args, context) => {
+      calls.push([args, context.runId]);
+      return { accepted: true };
+    },
+  });
+  const args = {
+    operation: 'edit',
+    prompt: 'Replace the blue square with a red square; preserve every other visible element.',
+    referenceIds: ['canvas:image-1', 'canvas:style-1'],
+    targetReferenceId: 'canvas:image-1',
+    outputCount: 2,
+    aspectRatio: '1:1',
+    deliveryMode: 'series',
+    panelCount: null,
+    items: [
+      { prompt: 'Replace the blue square with a red square.' },
+      { prompt: 'Replace the blue square with a crimson square.' },
+    ],
+  };
+
+  const modelTool = getAgentModelTools(registry, ['generate_image'])[0];
+  assert.equal(modelTool.function.parameters.additionalProperties, false);
+  assert.deepEqual(modelTool.function.parameters.required, [
+    'operation', 'prompt', 'referenceIds', 'targetReferenceId', 'outputCount', 'aspectRatio', 'deliveryMode', 'panelCount',
+  ]);
+  assert.equal(modelTool.function.parameters.properties.items.items.additionalProperties, false);
+
+  assert.deepEqual(
+    await executeAgentTool(registry, 'generate_image', args, { allowedTools: ['generate_image'], runId: 'run-image-1' }),
+    { accepted: true },
+  );
+  assert.deepEqual(calls, [[args, 'run-image-1']]);
+
+  await assert.rejects(
+    () => executeAgentTool(registry, 'generate_image', { ...args, prompt: '' }, { allowedTools: ['generate_image'] }),
+    /too short/,
+  );
+  await assert.rejects(
+    () => executeAgentTool(registry, 'generate_image', { ...args, extraPromptRule: 'forbidden' }, { allowedTools: ['generate_image'] }),
+    /not allowed/,
+  );
+  await assert.rejects(
+    () => executeAgentTool(registry, 'generate_image', { ...args, items: [{ prompt: 'valid', style: 'unused' }] }, { allowedTools: ['generate_image'] }),
+    /not allowed/,
+  );
 });
 
 test('entry tools validate lazy routing contracts and forward runtime context', async () => {

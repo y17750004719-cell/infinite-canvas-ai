@@ -1,6 +1,6 @@
 import type { AgentImagePlanningSnapshot } from './events';
 
-export const IMAGE_PLANNING_STAGES: readonly ['routing', 'image_planner', 'execution'];
+export const IMAGE_PLANNING_STAGES: readonly ['routing', 'execution'];
 export function createImagePlanningSnapshot(input?: Record<string, unknown>): AgentImagePlanningSnapshot;
 export function restoreImagePlanningSnapshot(value: unknown, defaults?: Record<string, unknown>): AgentImagePlanningSnapshot;
 export function setImagePlanningStage(snapshot: AgentImagePlanningSnapshot, stage: string, status?: string): AgentImagePlanningSnapshot;

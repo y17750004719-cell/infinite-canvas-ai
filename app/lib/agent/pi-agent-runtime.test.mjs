@@ -182,7 +182,7 @@ test('Pi runtime honors terminate returned by a non-terminal tool', async () => 
     providerId: 'provider-1',
     model: 'test-model',
     tools: [{
-      name: 'read_selected_skill',
+      name: 'read_imagegen_context',
       parameters: { type: 'object', properties: {}, additionalProperties: false },
       readOnly: true,
       countAgainstToolBudget: false,
@@ -190,7 +190,7 @@ test('Pi runtime honors terminate returned by a non-terminal tool', async () => 
     toolChoice: 'required',
     maxTurns: 2,
     maxToolCalls: 0,
-    chatStream: () => toolStream([{ id: 'skill-1', name: 'read_selected_skill', args: {} }])(),
+    chatStream: () => toolStream([{ id: 'skill-1', name: 'read_imagegen_context', args: {} }])(),
     executeTool: async () => ({ terminate: true, type: 'skill_read_stage' }),
   });
   assert.equal(result.stopReason, 'completed');

@@ -2,6 +2,8 @@ import path from 'node:path';
 import { readFile, realpath } from 'node:fs/promises';
 import { AGENT_IMAGE_ASPECT_RATIO_IDS } from './image-options.mjs';
 
+export const IMAGEGEN_HOST_SKILL_ID = 'imagegen';
+
 function resolveProjectRoot(options = {}) {
   return options.projectRoot || process.cwd();
 }
@@ -22,6 +24,7 @@ function isManifest(value) {
     typeof value.name === 'string' &&
     typeof value.description === 'string' &&
     Array.isArray(value.triggerHints) &&
+    (value.internal === undefined || typeof value.internal === 'boolean') &&
     (value.directTriggerHints === undefined || Array.isArray(value.directTriggerHints)) &&
     Array.isArray(value.allowedTools) &&
     (value.executionMode === undefined || ['agent_loop', 'image_pipeline'].includes(value.executionMode)) &&
@@ -45,7 +48,9 @@ async function readRegistry(options = {}) {
 export async function listSkillManifests(options = {}) {
   const projectRoot = resolveProjectRoot(options);
   const skillsRoot = await realpath(path.join(projectRoot, 'skills'));
-  const manifests = (await readRegistry(options)).filter((item) => item.enabled);
+  const manifests = (await readRegistry(options)).filter((item) => (
+    item.enabled && (options.includeInternal === true || item.internal !== true)
+  ));
   const result = [];
   for (const manifest of manifests) {
     const skillFile = path.join(skillsRoot, manifest.id, 'SKILL.md');
