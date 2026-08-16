@@ -173,6 +173,25 @@ test('agent image options prefer prompt ratio, then selected ratio, then portrai
   }).aspectRatio, '3:4');
 });
 
+test('image contract ratio takes precedence over prompt and shared canvas ratio', () => {
+  const profiles = buildProviderImageOptionProfiles([
+    { id: 'custom', imageModels: ['gemini-3.1-flash-image-preview'] },
+  ]);
+
+  const resolved = resolveAgentImageOptions({
+    prompt: '生成一个 16:9 海报',
+    contractAspectRatio: '2:3',
+    selectedAspectRatio: '1:1',
+    providerId: 'custom',
+    modelId: 'gemini-3.1-flash-image-preview',
+    providerImageOptionProfiles: profiles,
+  });
+
+  assert.equal(resolved.requestedAspectRatio, '2:3');
+  assert.equal(resolved.aspectRatio, '2:3');
+  assert.equal(resolved.ratioSource, 'contract');
+});
+
 test('unsupported prompt ratios fall back through the image-card provider profile', () => {
   const profiles = buildProviderImageOptionProfiles([
     { id: 'comfly', imageModels: ['gpt-image-2'] },

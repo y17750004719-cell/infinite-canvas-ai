@@ -28,9 +28,21 @@ export function buildMainAgentLoopMessages(input?: {
   referenceContext?: AgentPlannerReferenceContext;
   manifests?: Array<Record<string, unknown>>;
   manualSkillId?: string | null;
+  lockedSkillId?: string | null;
+  lockedSkillContract?: {
+    planningGuidance?: string;
+    generationContract?: string;
+    promptStyle?: 'text' | 'json-text';
+  } | null;
   pendingTask?: Record<string, unknown> | null;
   recentFailedTask?: Record<string, unknown> | null;
   memory?: Record<string, unknown> | null;
   contextEntities?: Array<Record<string, unknown>>;
   canvasContext?: Record<string, unknown> | null;
+  imageOptions?: Record<string, unknown> | null;
+  imagePlanning?: Record<string, unknown> | null;
+  agentAnalysis?: Record<string, unknown> | null;
+  contextUnlocked?: boolean;
+  contextScopes?: string[];
+  recoveryState?: Record<string, unknown> | null;
 }): MainAgentMessage[];

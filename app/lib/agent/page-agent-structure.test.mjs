@@ -40,6 +40,14 @@ test('all chat modes post to the Pi-backed agent route and handle agent events',
   assert.match(source, /agent_error/);
 });
 
+test('image planning failures are presented as stage-specific recoverable Chinese UI copy', () => {
+  assert.match(source, /IMAGE_PLANNING_ERROR_MESSAGES/);
+  assert.match(source, /image_planner: '图片合同规划未完成，任务状态已保留，可继续重试'/);
+  assert.match(source, /prompt: '生图 Prompt 未完成，任务状态已保留，可继续重试'/);
+  assert.match(source, /closing turn ended\|final response or terminal control/i);
+  assert.match(source, /图像合同未完成，任务状态已保留，可继续重试/);
+});
+
 test('direct image and canvas image requests use the Planner-backed agent route', () => {
   const requestModeIndex = source.indexOf('const usesAgentRequest = true');
   const requestEndpointIndex = source.indexOf("const resolvedRequestEndpoint = usesAgentRequest ? '/api/agent'", requestModeIndex);
@@ -100,12 +108,20 @@ test('failed clarification submissions preserve their structured retry context',
   assert.match(source, /persistedReferenceContext\?\.references/);
 });
 
+test('clarification answers resume without adding a duplicate user message', () => {
+  const submitStart = source.indexOf('const submitAgentClarification =');
+  const retryStart = source.indexOf('const retryAgentClarification =', submitStart);
+  const submitSource = source.slice(submitStart, retryStart);
+  assert.match(submitSource, /handleGenerate\(\{[\s\S]*suppressUserMessage:\s*true/);
+});
+
 test('unified retry submits an exact recovery task and persists error checkpoints', () => {
   assert.match(source, /recoveryTaskId\?: string/);
   assert.match(source, /recoveryRecord\?: AgentRecoveryRecord/);
   assert.match(source, /recoveryTaskId: recovery\.taskId/);
   assert.match(source, /getLatestAgentRecoveryForTask\(chatMessages, clickedRecovery\.taskId\)/);
   assert.match(source, /suppressUserMessage: true/);
+  assert.doesNotMatch(source, /skill: activeSkill \|\| sourceMessage\.skill/);
   assert.match(source, /event\.type === 'agent_task_checkpoint'/);
   assert.match(source, /agentRecovery: event\.recoveryRecord/);
   assert.match(source, /latestTaskSnapshot\?\.activeVersions\.length/);
@@ -115,6 +131,12 @@ test('unified retry submits an exact recovery task and persists error checkpoint
   const agentStreamStart = source.indexOf("const contentType = response.headers.get('content-type')", agentResponseStart);
   assert.ok(agentResponseStart >= 0 && agentStreamStart > agentResponseStart);
   assert.doesNotMatch(source.slice(agentResponseStart, agentStreamStart), /errorMessage = errorText/);
+});
+
+test('exact image retries restore the source message reference context', () => {
+  assert.match(source, /const recoverySourceReferenceContext = options\?\.recoveryTaskId[\s\S]{0,500}sourceUserMessageId/);
+  assert.match(source, /effectiveAgentClarification\?\.state\.referenceContext \|\| recoverySourceReferenceContext/);
+  assert.match(source, /options\?\.recoveryTaskId && persistedReferenceContext/);
 });
 
 test('region targets are snapshotted before composer cleanup and submitted from the frozen data', () => {
@@ -305,8 +327,8 @@ test('typed confirmation replies submit the stored image delivery plan instead o
 
 test('skill jobs, cancellation, and clarification recovery preserve progress state', () => {
   assert.match(source, /interface AgentClarificationState\s*\{[\s\S]{0,260}operationId\?: string/);
-  assert.match(source, /interface AgentClarificationState\s*\{[\s\S]{0,320}skillSource\?: 'manual' \| 'auto' \| null/);
-  assert.match(source, /interface AgentClarificationState\s*\{[\s\S]{0,380}lastSequence\?: number/);
+  assert.match(source, /skillSource\?: 'manual_ui' \| 'explicit_text' \| 'user_confirmation' \| 'recovery' \| 'manual' \| 'auto' \| null/);
+  assert.match(source, /imagePlanning\?: TaskSnapshot\['imagePlanning'\]/);
 
   const jobResultStart = source.indexOf("event.type === 'tool_result' && typeof event.result?.jobId === 'string'");
   const imageResultStart = source.indexOf("event.type === 'tool_result' && event.result?.kind === 'image_generation'", jobResultStart);
@@ -344,16 +366,17 @@ test('chat panel sends selected providers and models to planner and chat routes'
   assert.match(source, /requestBody\.imageProviderId/);
 });
 
-test('agent and compact image modes preserve their separate aspect-ratio preferences', () => {
-  assert.match(source, /const \[imageAspectRatio, setImageAspectRatio\] = useState\('auto'\)/);
-  assert.match(source, /const \[agentImageAspectRatio, setAgentImageAspectRatio\] = useState\('3:4'\)/);
-  assert.match(source, /generationMode === 'agent' \? agentImageAspectRatio : imageAspectRatio/);
-  assert.match(source, /generationMode === 'agent'\s*\? setAgentImageAspectRatio\(option\.id\)\s*:\s*setImageAspectRatio\(option\.id\)/);
-  assert.match(source, /imageOptions:\s*\{[\s\S]{0,260}aspectRatio:\s*generationMode === 'image' \? imageAspectRatio : agentImageAspectRatio/);
+test('chat and canvas image generation share one canvas-owned aspect ratio', () => {
+  assert.match(source, /const \[imageAspectRatio, setImageAspectRatio\] = useState\('1:1'\)/);
+  assert.doesNotMatch(source, /agentImageAspectRatio|setAgentImageAspectRatio/);
+  assert.match(source, /const activeChatImageAspectRatio = selectedImageCardPanelItem\s*\? selectedImageCardPanelAspectRatio\s*:\s*imageAspectRatio/);
+  assert.match(source, /imageOptions:\s*\{[\s\S]{0,260}aspectRatio:\s*activeChatImageAspectRatio/);
+  assert.match(source, /onClick=\{\(\) => handleChatImageAspectRatioChange\(option\.id\)\}/);
+  assert.match(source, /setImageAspectRatio\(selectedImageCardPanelAspectRatio\)/);
   assert.match(source, /imageOptions:\s*\{[\s\S]{0,320}size:\s*'2048x2048'/);
   assert.match(source, /imageOptions:\s*\{[\s\S]{0,360}quality:\s*'auto'/);
   assert.match(source, /imageOptions:\s*\{[\s\S]{0,400}count:\s*1/);
-  assert.match(source, /generationMode === 'image' && imageAspectRatio !== 'auto'/);
+  assert.match(source, /generationMode === 'image' && activeChatImageAspectRatio !== 'auto'/);
 });
 
 test('chat panel keeps persisted model selections available while provider settings are unavailable', () => {
@@ -488,7 +511,7 @@ test('chat composer exposes disabled reasoning and one adaptive model preference
   assert.match(source, /generationMode === 'agent' \|\| generationMode === 'image'/);
   assert.match(
     source,
-    /ASPECT_RATIOS\s*\.filter\(\(option\) => generationMode !== 'agent' \|\| option\.id !== 'auto'\)\s*\.map/
+    /ASPECT_RATIOS\s*\.filter\(\(option\) => option\.id !== 'auto'\)\s*\.map/
   );
   assert.doesNotMatch(source, /aria-label="聊天框供应商与模型"/);
 });

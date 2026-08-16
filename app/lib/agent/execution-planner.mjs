@@ -1,6 +1,7 @@
 import { buildMultimodalReferenceParts } from './multimodal-reference-context.mjs';
 import { materializeChatMessageImages } from '../reference-image-source.mjs';
 import { normalizeAgentVisualSummary } from './visual-summary.mjs';
+import { AGENT_IMAGE_ASPECT_RATIO_IDS } from './image-options.mjs';
 
 const INTENTS = new Set(['chat', 'image', 'skill_action', 'analysis']);
 const MODES = new Set(['single', 'series', 'variants', 'composite']);
@@ -34,6 +35,7 @@ const COMPLETE_IMAGE_GENERATION_PLAN_EXAMPLE = {
     completionSummary: 'Generate one new image from the completed plan.',
   },
   generation: {
+    aspectRatio: '3:4',
     promptFormat: 'text',
     prompt: 'Create one complete supplier-ready image matching the requested subject, composition, style, lighting, materials, colors, text, and dimensions.',
     items: [],
@@ -286,8 +288,9 @@ export const AGENT_EXECUTION_PLAN_SCHEMA = {
     generation: {
       type: 'object',
       nullable: true,
-      required: ['promptFormat', 'prompt', 'items'],
+      required: ['aspectRatio', 'promptFormat', 'prompt', 'items'],
       properties: {
+        aspectRatio: { type: 'string', enum: AGENT_IMAGE_ASPECT_RATIO_IDS },
         promptFormat: { type: 'string', enum: ['text', 'json-text'] },
         prompt: { type: 'string' },
         items: {
@@ -331,6 +334,13 @@ export const AGENT_EXECUTION_PLAN_TOOL = {
 
 export function buildAgentExecutionPlanTool(input = {}) {
   const schema = structuredClone(AGENT_EXECUTION_PLAN_SCHEMA);
+  if (input.imageContractOnly) {
+    schema.properties.generation.properties.promptFormat = {
+      type: 'string',
+      minLength: 1,
+      description: 'Prompt representation selected by the Planner. The runtime forwards prompt text without parsing it.',
+    };
+  }
   if (input.lockedSkillId !== undefined) {
     if (input.lockedSkillId) {
       schema.required = [...new Set([...schema.required, 'skillId'])];
@@ -897,6 +907,7 @@ function normalizeGeneration(
     needsClarification,
     skillId,
     skillPromptStylesById,
+    skillAspectRatiosById,
     mode,
     outputCount,
     imageTask,
@@ -916,6 +927,15 @@ function normalizeGeneration(
     if (needsClarification === true && (value === undefined || value === null)) return null;
     validationErrors.push(issue('generation', value === undefined || value === null ? 'required' : 'invalid_type', 'Image intent requires a final generation contract.'));
     return null;
+  }
+  const requestedAspectRatio = text(value.aspectRatio);
+  if (!AGENT_IMAGE_ASPECT_RATIO_IDS.includes(requestedAspectRatio)) {
+    validationErrors.push(issue('generation.aspectRatio', requestedAspectRatio ? 'invalid_enum' : 'required', 'A valid image aspect ratio is required.'));
+  }
+  const skillAspectRatio = skillId ? text(skillAspectRatiosById?.[skillId]) : '';
+  const aspectRatio = skillAspectRatio || requestedAspectRatio;
+  if (skillAspectRatio && requestedAspectRatio !== skillAspectRatio) {
+    normalizedFields.push('generation.aspectRatio');
   }
   const promptFormat = text(value.promptFormat);
   if (!['text', 'json-text'].includes(promptFormat)) {
@@ -939,9 +959,9 @@ function normalizeGeneration(
     validationErrors.push(issue('generation.items', 'item_count_mismatch', 'Series generation prompt count must equal outputCount.'));
   }
   if (mode !== 'series' && rawItems.length > 0) {
-    validationErrors.push(issue('generation.items', 'unexpected_items', 'Only series delivery may include per-item generation prompts.'));
+    normalizedFields.push('generation.items');
   }
-  const items = rawItems.map((item, index) => {
+  const items = (mode === 'series' ? rawItems : []).map((item, index) => {
     if (!isObject(item)) {
       validationErrors.push(issue(`generation.items[${index}]`, 'invalid_type', 'Expected a generation item object.'));
       return null;
@@ -960,9 +980,209 @@ function normalizeGeneration(
       ? { index: itemIndex, label, prompt: itemPrompt }
       : null;
   }).filter(Boolean);
-  return promptFormat && prompt
-    ? { promptFormat, prompt, items }
+  return aspectRatio && promptFormat && prompt
+    ? { aspectRatio, promptFormat, prompt, items }
     : null;
+}
+
+export function assembleMainAgentImageExecutionPlan(draft, {
+  manifest = null,
+  lockedSkillId = null,
+  readSkillId = null,
+  lockedImageOperation = null,
+  lockedTargetReferenceId = null,
+  referenceIds = [],
+  userMessage = '',
+} = {}) {
+  const validationErrors = [];
+  if (!isObject(draft)) {
+    return {
+      plan: null,
+      validationErrors: [issue('$', 'invalid_type', 'Main Agent image contract must be an object.')],
+      normalizedFields: [],
+    };
+  }
+
+  const selectedSkillId = text(lockedSkillId) || null;
+  const draftSkillId = text(draft.skillId) || null;
+  const selectedManifest = selectedSkillId && isObject(manifest) && text(manifest.id) === selectedSkillId
+    ? manifest
+    : null;
+  if (selectedSkillId && !selectedManifest) {
+    validationErrors.push(issue('skillId', 'unknown_skill', 'The locked skill is not available for this request.'));
+  }
+  if (selectedSkillId && text(readSkillId) !== selectedSkillId) {
+    validationErrors.push(issue('skillId', 'skill_not_read', 'The locked skill must be read before submitting an image contract.'));
+  }
+  if (draftSkillId && !selectedSkillId) {
+    validationErrors.push(issue('skillId', 'unknown_skill', 'A task without a locked Skill cannot invent or select a Skill.'));
+  } else if (draftSkillId && draftSkillId !== selectedSkillId) {
+    validationErrors.push(issue('skillId', 'locked_skill_conflict', 'The image contract must preserve the runtime-locked Skill exactly.'));
+  }
+
+  const knownReferenceIds = Array.from(new Set(referenceIds.map(text).filter(Boolean)));
+  const selectedReferenceIds = Array.isArray(draft.visualReferenceIds)
+    ? draft.visualReferenceIds.map(text).filter(Boolean)
+    : [];
+  if (new Set(selectedReferenceIds).size !== selectedReferenceIds.length) {
+    validationErrors.push(issue('visualReferenceIds', 'duplicate_reference', 'Visual reference IDs must be unique.'));
+  }
+  for (const [index, referenceId] of selectedReferenceIds.entries()) {
+    if (!knownReferenceIds.includes(referenceId)) {
+      validationErrors.push(issue(`visualReferenceIds[${index}]`, 'unknown_reference', 'The selected visual reference is not available for this request.'));
+    }
+  }
+
+  const allowedTools = Array.isArray(selectedManifest?.allowedTools)
+    ? selectedManifest.allowedTools.map(text).filter(Boolean)
+    : [];
+  const skillJob = Boolean(selectedManifest && selectedManifest.executionMode !== 'image_pipeline');
+  const executionKind = skillJob ? 'skill_job' : 'image_pipeline';
+  const executionTool = skillJob ? 'start_skill_job' : 'generate_image';
+  if (selectedManifest && !allowedTools.includes(executionTool)) {
+    validationErrors.push(issue('execution.tool', 'unauthorized_tool', 'The selected skill does not allow its required execution tool.'));
+  }
+
+  if (validationErrors.length > 0) {
+    return { plan: null, validationErrors, normalizedFields: [] };
+  }
+
+  const decision = text(draft.decision);
+  const needsClarification = decision === 'clarify';
+  const delivery = isObject(draft.delivery) ? draft.delivery : {};
+  const mode = text(delivery.mode);
+  const outputCount = positive(delivery.outputCount);
+  const requestedOperation = text(draft.imageTask?.operation);
+  const requestedTargetReferenceId = text(draft.imageTask?.targetReferenceId) || null;
+  const operation = text(lockedImageOperation) || text(draft.imageTask?.operation);
+  const targetReferenceId = operation === 'edit' ? text(lockedTargetReferenceId) || null : null;
+  const sourceGeneration = isObject(draft.generation) ? draft.generation : null;
+  const prompt = text(sourceGeneration?.prompt);
+  const aspectRatio = text(selectedManifest?.aspectRatio) || text(sourceGeneration?.aspectRatio);
+  if (!needsClarification && !skillJob && (!IMAGE_OPERATIONS.has(operation) || (lockedImageOperation && requestedOperation !== lockedImageOperation))) {
+    validationErrors.push(issue('imageTask.operation', 'locked_operation_conflict', 'The image contract must preserve the runtime-locked image operation.'));
+  }
+  if (!MODES.has(mode) || !outputCount) {
+    validationErrors.push(issue('delivery', 'locked_delivery_conflict', 'The image contract must preserve locked delivery parameters.'));
+  }
+  if (mode === 'composite' && positive(delivery.panelCount) < 2) {
+    validationErrors.push(issue('delivery.panelCount', 'locked_delivery_conflict', 'Composite delivery requires the locked panel count.'));
+  }
+  if (!needsClarification && !skillJob && !prompt) {
+    validationErrors.push(issue('generation.prompt', 'required', 'A supplier-ready final image prompt is required.'));
+  }
+  if (!needsClarification && !skillJob && !AGENT_IMAGE_ASPECT_RATIO_IDS.includes(aspectRatio)) {
+    validationErrors.push(issue('generation.aspectRatio', 'locked_aspect_ratio_conflict', 'The selected Skill or locked image parameters must provide a valid aspect ratio.'));
+  }
+  if (operation === 'edit' && (!targetReferenceId || !knownReferenceIds.includes(targetReferenceId))) {
+    validationErrors.push(issue('imageTask.targetReferenceId', 'locked_target_conflict', 'The locked edit target is unavailable.'));
+  }
+  if (operation === 'edit' && lockedTargetReferenceId && requestedTargetReferenceId !== lockedTargetReferenceId) {
+    validationErrors.push(issue('imageTask.targetReferenceId', 'locked_target_conflict', 'The image contract must preserve the runtime-locked edit target.'));
+  }
+  const rawItems = Array.isArray(sourceGeneration?.items) ? sourceGeneration.items : [];
+  if (mode === 'series' && rawItems.length !== outputCount) {
+    validationErrors.push(issue('generation.items', 'item_count_mismatch', 'Series generation prompt count must equal outputCount.'));
+  }
+  const generationItems = mode === 'series'
+    ? rawItems.map((item, index) => {
+      const itemPrompt = text(item?.prompt);
+      if (!itemPrompt) validationErrors.push(issue(`generation.items[${index}].prompt`, 'required', 'A supplier-ready series prompt is required.'));
+      return { index: index + 1, label: text(item?.label) || `Image ${index + 1}`, prompt: itemPrompt };
+    })
+    : [];
+  if (validationErrors.length > 0) return { plan: null, validationErrors, normalizedFields: [] };
+
+  const visualSummary = normalizeAgentVisualSummary(draft.visualSummary, selectedReferenceIds);
+  const rolesById = new Map((Array.isArray(draft.referenceRoles) ? draft.referenceRoles : [])
+    .map((entry) => [text(entry?.referenceId), text(entry?.role)])
+    .filter(([referenceId, role]) => selectedReferenceIds.includes(referenceId) && VISUAL_REFERENCE_ROLES.has(role)));
+  const visualContext = visualSummary ? {
+    references: visualSummary.references.map((reference) => ({
+      referenceId: reference.referenceId,
+      summary: reference.description,
+      salientSubjects: reference.salientSubjects,
+      visibleText: reference.visibleText,
+      styleAndComposition: reference.description,
+      inferredRole: reference.referenceId === targetReferenceId ? 'edit_target' : rolesById.get(reference.referenceId) || 'unresolved',
+    })),
+    targetSelectionReason: null,
+    targetSelectionConfidence: null,
+  } : undefined;
+  const sourceDeliveryItems = Array.isArray(delivery.items) ? delivery.items : [];
+  const deliveryItems = mode === 'series'
+    ? generationItems.map((item, index) => {
+      const metadata = sourceDeliveryItems[index] || {};
+      const direction = text(metadata.contentDirections);
+      return {
+        index: item.index,
+        label: item.label,
+        subject: text(metadata.subject) || direction || item.label,
+        variation: text(metadata.variation) || direction || item.label,
+      };
+    })
+    : [];
+  const instruction = text(draft.imageTask?.instruction) || text(userMessage);
+  const imageTask = !needsClarification && !skillJob ? {
+    operation,
+    targetReferenceId,
+    supportingReferenceIds: operation === 'edit'
+      ? selectedReferenceIds.filter((referenceId) => referenceId !== targetReferenceId)
+      : selectedReferenceIds,
+    targetRegionIds: [],
+    instruction,
+    mustChange: [],
+    mustPreserve: Array.isArray(draft.imageTask?.mustPreserve) ? draft.imageTask.mustPreserve.map(text).filter(Boolean) : [],
+  } : undefined;
+  const brief = isObject(draft.brief) ? draft.brief : {};
+  return {
+    plan: {
+      version: 4,
+      intent: skillJob ? 'skill_action' : 'image',
+      skillId: selectedSkillId,
+      confidence: CONFIDENCES.has(text(draft.confidence)) ? text(draft.confidence) : 'medium',
+      needsClarification,
+      clarification: needsClarification ? draft.clarification : null,
+      contextReferences: Array.isArray(draft.contextEntityIds) ? draft.contextEntityIds.map(text).filter(Boolean) : [],
+      ...(visualContext ? { visualContext } : {}),
+      ...(imageTask ? { imageTask } : {}),
+      ...(!needsClarification && !skillJob ? {
+        presentation: {
+          title: operation === 'edit' ? 'Edited image' : outputCount > 1 ? 'Generated images' : 'Generated image',
+          completionSummary: operation === 'edit' ? 'Applied the requested image edit.' : `Generated ${outputCount} requested image${outputCount === 1 ? '' : 's'}.`,
+        },
+      } : {}),
+      generation: !needsClarification && !skillJob ? {
+        aspectRatio,
+        promptFormat: text(sourceGeneration?.promptFormat) === 'json-text' ? 'json-text' : 'text',
+        prompt,
+        items: generationItems,
+      } : null,
+      brief: {
+        deliverable: text(brief.deliverable) || mode,
+        subject: text(brief.subject) || instruction,
+        style: Array.isArray(brief.style) ? brief.style.map(text).filter(Boolean) : [],
+        literalCopy: Array.isArray(brief.literalCopy) ? brief.literalCopy.map(text).filter(Boolean) : [],
+        constraints: Array.isArray(brief.constraints) ? brief.constraints.map(text).filter(Boolean) : [],
+      },
+      delivery: {
+        mode,
+        outputCount,
+        panelCount: mode === 'composite' ? positive(delivery.panelCount) : null,
+        variationAxes: [],
+        sharedInvariants: Array.isArray(delivery.sharedInvariants) ? delivery.sharedInvariants.map(text).filter(Boolean) : [],
+        distinctPerItem: [],
+        items: deliveryItems,
+      },
+      execution: {
+        kind: needsClarification ? 'none' : executionKind,
+        requiresConfirmation: needsClarification ? false : outputCount > 1,
+        tool: needsClarification ? null : executionTool,
+      },
+    },
+    validationErrors: [],
+    normalizedFields: [],
+  };
 }
 
 export function validateAgentExecutionPlan(value, {
@@ -975,6 +1195,7 @@ export function validateAgentExecutionPlan(value, {
   manualSkillId = null,
   lockedSkillId,
   skillPromptStylesById = {},
+  skillAspectRatiosById = {},
   userMessage = '',
 } = {}) {
   const validationErrors = [];
@@ -1123,6 +1344,7 @@ export function validateAgentExecutionPlan(value, {
     needsClarification,
     skillId,
     skillPromptStylesById,
+    skillAspectRatiosById,
     mode,
     outputCount: outputCount || 0,
     imageTask,
@@ -1239,7 +1461,65 @@ export function buildAgentExecutionPlannerMessages({
   visualSummary = null,
   frontDoorDecision = null,
   recoveryContext = null,
+  imageContractOnly = false,
+  originalRequest = '',
+  resolvedRequirement = '',
+  lockedImageOperation = null,
+  lockedTargetReferenceId = null,
+  lockedOutputCount = null,
+  lockedAspectRatio = '',
+  lockedDeliveryMode = null,
+  lockedPanelCount = null,
 } = {}) {
+  if (imageContractOnly) {
+    const compactedReferenceContext = compactReferenceContext(referenceContext);
+    const plannerTool = buildAgentExecutionPlanTool({
+      lockedSkillId,
+      referenceContext,
+      imageContractOnly: true,
+    });
+    const imageParts = buildMultimodalReferenceParts(referenceContext, {
+      fallbackText: text(originalRequest || userMessage),
+      imageSource: 'preview',
+    });
+    const payload = JSON.stringify({
+      resolvedRequirement: text(resolvedRequirement || userMessage),
+      originalRequest: text(originalRequest || userMessage),
+      lockedTask: {
+        operation: lockedImageOperation,
+        targetReferenceId: lockedTargetReferenceId,
+        outputCount: lockedOutputCount,
+        aspectRatio: lockedAspectRatio,
+        deliveryMode: lockedDeliveryMode,
+        panelCount: lockedPanelCount,
+        skillId: lockedSkillId === undefined ? null : lockedSkillId,
+      },
+      skill: lockedSkillId
+        ? (Array.isArray(manifests) ? manifests : []).find((manifest) => manifest?.id === lockedSkillId) || null
+        : null,
+      referenceContext: compactedReferenceContext,
+      visualSummary: isObject(visualSummary) ? visualSummary : null,
+    });
+    const system = [
+      'You are the background Image Planner. Produce one complete AgentExecutionPlan version 4 for the locked image task.',
+      `Call ${PLANNER_TOOL_NAME} exactly once. Do not emit prose or reasoning.`,
+      'The resolvedRequirement is the primary creative goal. The originalRequest supplements it with details.',
+      'The selected Skill supplies professional visual and prompt guidance. Integrate its planningGuidance and generationContract into the supplier-ready generation.prompt.',
+      'The supplied reference images and visualSummary are evidence. Use only their stable IDs in the contract.',
+      'Do not change the locked operation, target reference, count, ratio, delivery mode, panel count, or skill identity.',
+      'generation.prompt and generation.items[].prompt are sent to the image supplier exactly as returned. Write the final prompts yourself; no later component will optimize, wrap, parse, or repair them.',
+      'Return the complete execution contract, including imageTask, visualContext when references exist, presentation, brief, delivery, generation, and execution.',
+    ].join('\n');
+    return [
+      { role: 'system', content: system },
+      {
+        role: 'user',
+        content: imageParts.some((part) => part.type === 'image_url')
+          ? [{ type: 'text', text: payload }, ...imageParts]
+          : payload,
+      },
+    ];
+  }
   const recoverySnapshot = isObject(recoveryContext?.taskSnapshot) ? recoveryContext.taskSnapshot : null;
   const recoveryContract = isObject(recoverySnapshot?.contract) ? recoverySnapshot.contract : null;
   const recoveryOutputCount = positive(recoveryContract?.delivery?.outputCount) || 0;
@@ -1353,6 +1633,7 @@ export function buildAgentExecutionPlannerMessages({
       allowedTools: manifest.allowedTools,
       executionMode: manifest.executionMode,
       promptStyle: manifest.promptStyle,
+      aspectRatio: text(manifest.aspectRatio) || undefined,
       planningGuidance: text(manifest.planningGuidance).slice(0, 4000),
       generationContract: text(manifest.generationContract).slice(0, 8000),
     })),
@@ -1455,6 +1736,14 @@ function parseToolArguments(raw) {
 function parsePlannerCandidate(response) {
   const message = response?.choices?.[0]?.message || {};
   const toolCalls = Array.isArray(message.tool_calls) ? message.tool_calls : [];
+  if (toolCalls.length > 1) {
+    return {
+      draft: null,
+      responseMode: 'wrong_tool_call',
+      toolCallPresent: true,
+      parseErrors: [issue('$', 'multiple_tool_calls', `Planner must call ${PLANNER_TOOL_NAME} exactly once.`)],
+    };
+  }
   const expectedCall = toolCalls.find((call) => call?.function?.name === PLANNER_TOOL_NAME);
   if (expectedCall) {
     try {
@@ -1499,6 +1788,9 @@ function validationOptions(input) {
     allowedSkillIds: manifests.map((item) => item.id),
     skillToolsById: Object.fromEntries(manifests.map((item) => [item.id, item.allowedTools || []])),
     skillPromptStylesById: Object.fromEntries(manifests.map((item) => [item.id, item.promptStyle || 'text'])),
+    skillAspectRatiosById: Object.fromEntries(
+      manifests.filter((item) => text(item.aspectRatio)).map((item) => [item.id, text(item.aspectRatio)]),
+    ),
     contextEntityIds: contextEntities.map((item) => item.id),
     requiredContextEntityIds: input.selectedContextEntityIds || [],
     referenceIds: referenceContext?.references.map((reference) => reference.id) || [],
@@ -1506,7 +1798,53 @@ function validationOptions(input) {
     manualSkillId: input.activeSkillId,
     lockedSkillId: Object.prototype.hasOwnProperty.call(input, 'lockedSkillId') ? input.lockedSkillId : undefined,
     userMessage: input.userMessage,
+    lockedImageOperation: input.lockedImageOperation,
+    lockedTargetReferenceId: input.lockedTargetReferenceId,
+    lockedOutputCount: input.lockedOutputCount,
+    lockedAspectRatio: input.lockedAspectRatio,
+    lockedDeliveryMode: input.lockedDeliveryMode,
+    lockedPanelCount: input.lockedPanelCount,
   };
+}
+
+function validateImagePlannerContract(value, options = {}) {
+  const errors = [];
+  const add = (path, code, message) => errors.push(issue(path, code, message));
+  if (!isObject(value)) return { plan: null, validationErrors: [issue('$', 'invalid_plan', 'Planner must return an object.')], normalizedFields: [] };
+  const references = new Set(Array.isArray(options.referenceIds) ? options.referenceIds : []);
+  const operation = text(value.imageTask?.operation);
+  const delivery = isObject(value.delivery) ? value.delivery : null;
+  const generation = isObject(value.generation) ? value.generation : null;
+  const execution = isObject(value.execution) ? value.execution : null;
+  if (value.version !== 4) add('version', 'unsupported_version', 'Only AgentExecutionPlan version 4 is supported.');
+  if (text(value.intent) !== 'image') add('intent', 'image_required', 'Image Planner must return an image contract.');
+  if (value.needsClarification === true) add('needsClarification', 'unexpected_clarification', 'Main Agent already completed image task readiness.');
+  if ((value.skillId || null) !== (options.lockedSkillId || null)) add('skillId', 'locked_skill_mismatch', 'Planner changed the locked Skill.');
+  if (operation !== options.lockedImageOperation) add('imageTask.operation', 'operation_mismatch', 'Planner changed the locked image operation.');
+  const targetReferenceId = text(value.imageTask?.targetReferenceId) || null;
+  if ((options.lockedTargetReferenceId || null) !== targetReferenceId) add('imageTask.targetReferenceId', 'target_mismatch', 'Planner changed the locked edit target.');
+  const taskReferenceIds = [
+    text(value.imageTask?.sourceReferenceId),
+    ...(Array.isArray(value.imageTask?.supportingReferenceIds) ? value.imageTask.supportingReferenceIds.map(text) : []),
+  ].filter(Boolean);
+  if (taskReferenceIds.some((id) => !references.has(id))) add('imageTask', 'unknown_reference', 'Planner used an unavailable reference ID.');
+  const visualReferences = Array.isArray(value.visualContext?.references) ? value.visualContext.references : [];
+  if (visualReferences.some((reference) => !references.has(text(reference?.referenceId)))) add('visualContext.references', 'unknown_reference', 'Planner used an unavailable visual reference ID.');
+  if (!delivery) add('delivery', 'required', 'Delivery contract is required.');
+  if (!generation || !text(generation.prompt)) add('generation.prompt', 'required', 'A non-empty supplier prompt is required.');
+  if (!execution || text(execution.kind) !== 'image_pipeline' || text(execution.tool) !== 'generate_image') add('execution', 'execution_mismatch', 'Image contracts must execute through generate_image.');
+  if (delivery) {
+    if (positive(delivery.outputCount) !== positive(options.lockedOutputCount)) add('delivery.outputCount', 'count_mismatch', 'Planner changed the locked image count.');
+    if (text(delivery.mode) !== text(options.lockedDeliveryMode)) add('delivery.mode', 'delivery_mismatch', 'Planner changed the locked delivery mode.');
+    const expectedPanelCount = options.lockedPanelCount || null;
+    if ((positive(delivery.panelCount) || null) !== expectedPanelCount) add('delivery.panelCount', 'panel_count_mismatch', 'Planner changed the locked panel count.');
+    if (text(delivery.mode) === 'series' && (!Array.isArray(generation?.items) || generation.items.length !== positive(options.lockedOutputCount) || generation.items.some((item) => !text(item?.prompt)))) {
+      add('generation.items', 'series_mismatch', 'Series contracts require one non-empty prompt per locked item.');
+    }
+  }
+  if (generation && text(generation.aspectRatio) !== text(options.lockedAspectRatio)) add('generation.aspectRatio', 'aspect_ratio_mismatch', 'Planner changed the locked aspect ratio.');
+  if (errors.length > 0) return { plan: null, validationErrors: errors, normalizedFields: [] };
+  return { plan: value, validationErrors: [], normalizedFields: [] };
 }
 
 function evaluatePlannerResponse(response, input) {
@@ -1514,8 +1852,100 @@ function evaluatePlannerResponse(response, input) {
   if (candidate.parseErrors.length > 0) {
     return { ...candidate, plan: null, validationErrors: candidate.parseErrors, normalizedFields: [] };
   }
-  const validated = validateAgentExecutionPlan(candidate.draft, validationOptions(input));
+  const validated = input.imageContractOnly
+    ? validateImagePlannerContract(candidate.draft, validationOptions(input))
+    : validateAgentExecutionPlan(candidate.draft, validationOptions(input));
   return { ...candidate, ...validated };
+}
+
+async function collectPlannerStream(chatStreamFn, request) {
+  const startedAt = Date.now();
+  const diagnostic = {
+    transportMode: 'stream',
+    firstEventMs: null,
+    firstToolCallMs: null,
+    argumentChars: 0,
+    toolCallCompleted: false,
+  };
+  const content = [];
+  const calls = new Map();
+  try {
+    for await (const event of chatStreamFn({ ...request, stream: true })) {
+      if (diagnostic.firstEventMs === null) diagnostic.firstEventMs = Date.now() - startedAt;
+      if (event.type === 'delta' && event.channel === 'content') {
+        content.push(event.content);
+        continue;
+      }
+      if (!['tool_call_start', 'tool_call_delta', 'tool_call_end'].includes(event.type)) continue;
+      if (diagnostic.firstToolCallMs === null) diagnostic.firstToolCallMs = Date.now() - startedAt;
+      const call = calls.get(event.index) || {
+        id: event.toolCallId,
+        type: 'function',
+        function: { name: '', arguments: '' },
+        completed: false,
+      };
+      if (event.type === 'tool_call_start') call.function.name = event.name || call.function.name;
+      if (event.type === 'tool_call_delta') {
+        call.function.arguments += event.argumentsDelta;
+        diagnostic.argumentChars += event.argumentsDelta.length;
+      }
+      if (event.type === 'tool_call_end') {
+        call.function.name = event.name || call.function.name;
+        call.function.arguments = event.arguments || call.function.arguments;
+        call.completed = true;
+        diagnostic.argumentChars = [...calls.values()]
+          .filter((entry) => entry !== call)
+          .reduce((total, entry) => total + entry.function.arguments.length, 0)
+          + call.function.arguments.length;
+      }
+      calls.set(event.index, call);
+      diagnostic.toolCallCompleted = calls.size === 1 && call.completed;
+    }
+  } catch (error) {
+    error.diagnostic = diagnostic;
+    throw error;
+  }
+  const toolCalls = [...calls.values()];
+  diagnostic.argumentChars = toolCalls.reduce((total, call) => total + call.function.arguments.length, 0);
+  diagnostic.toolCallCompleted = toolCalls.length === 1 && toolCalls[0].completed;
+  if (toolCalls.some((call) => !call.completed)) {
+    const error = new Error('Planner stream ended before the tool call completed.');
+    error.code = 'planner_stream_interrupted';
+    error.diagnostic = diagnostic;
+    throw error;
+  }
+  return {
+    response: {
+      choices: [{
+        message: {
+          content: content.join(''),
+          tool_calls: toolCalls.map(({ completed, ...call }) => call),
+        },
+      }],
+    },
+    diagnostic,
+  };
+}
+
+function streamLegacyPlannerResponse(chatFn, request) {
+  return (async function* stream() {
+    const response = await chatFn(request);
+    const message = response?.choices?.[0]?.message || {};
+    if (typeof message.content === 'string' && message.content) {
+      yield { type: 'delta', channel: 'content', content: message.content };
+    }
+    for (const [index, call] of (Array.isArray(message.tool_calls) ? message.tool_calls : []).entries()) {
+      const id = call?.id || `planner-call-${index}`;
+      const name = call?.function?.name || '';
+      const args = typeof call?.function?.arguments === 'string'
+        ? call.function.arguments
+        : JSON.stringify(call?.function?.arguments || {});
+      yield { type: 'tool_call_start', toolCallId: id, index, name };
+      yield { type: 'tool_call_delta', toolCallId: id, index, argumentsDelta: args };
+      yield { type: 'tool_call_end', toolCallId: id, index, name, arguments: args };
+    }
+    yield { type: 'done' };
+  })();
 }
 
 function describePlannerError(error) {
@@ -1680,7 +2110,7 @@ async function acquirePlannerVisualSummary(input, requestSignal) {
 }
 
 export async function planAgentExecutionRequest(input = {}) {
-  const { model, providerId, signal, chatFn } = input;
+  const { model, providerId, signal, chatFn, chatStreamFn } = input;
   let acquiredVisualSummary = normalizeAgentVisualSummary(input.visualSummary);
   const failed = (error, validationErrors = [], attempts = 0, diagnostics = [], failureReason = 'invalid_plan', normalizedFields = []) => ({
     plan: null,
@@ -1705,7 +2135,12 @@ export async function planAgentExecutionRequest(input = {}) {
       : issue('delivery.outputCount', 'recovery_count_mismatch', `Partial recovery requires exactly ${expected} missing outputs.`);
   };
 
-  if (typeof chatFn !== 'function' || !text(model)) {
+  const formalChatStreamFn = typeof chatStreamFn === 'function'
+    ? chatStreamFn
+    : typeof chatFn === 'function'
+      ? (request) => streamLegacyPlannerResponse(chatFn, request)
+      : null;
+  if (!formalChatStreamFn || !text(model)) {
     return failed('Planner model is unavailable');
   }
 
@@ -1716,11 +2151,13 @@ export async function planAgentExecutionRequest(input = {}) {
 
   try {
     requestSignal.throwIfAborted?.();
-    const intake = await acquirePlannerVisualSummary(input, requestSignal);
+    const intake = input.imageContractOnly
+      ? { visualSummary: normalizeAgentVisualSummary(input.visualSummary), diagnostic: null }
+      : await acquirePlannerVisualSummary(input, requestSignal);
     acquiredVisualSummary = intake.visualSummary;
     const plannerInput = { ...input, visualSummary: intake.visualSummary };
     const plannerStartedAt = Date.now();
-    const response = await chatFn({
+    const streamed = await collectPlannerStream(formalChatStreamFn, {
       providerId,
       model,
       signal: requestSignal,
@@ -1728,6 +2165,7 @@ export async function planAgentExecutionRequest(input = {}) {
       tools: [buildAgentExecutionPlanTool(plannerInput)],
       toolChoice: { type: 'function', function: { name: PLANNER_TOOL_NAME } },
     });
+    const response = streamed.response;
     const evaluated = evaluatePlannerResponse(response, plannerInput);
     const recoveryError = recoveryCountError(evaluated.plan);
     if (recoveryError) {
@@ -1744,6 +2182,7 @@ export async function planAgentExecutionRequest(input = {}) {
       toolCallPresent: evaluated.toolCallPresent,
       validationErrors: evaluated.validationErrors,
       normalizedFields: evaluated.normalizedFields,
+      ...streamed.diagnostic,
     }];
     if (evaluated.plan) {
       return {
@@ -1792,6 +2231,11 @@ export async function planAgentExecutionRequest(input = {}) {
       validationErrors: [],
       normalizedFields: [],
       error: plannerError,
+      transportMode: 'stream',
+      firstEventMs: error?.diagnostic?.firstEventMs ?? null,
+      firstToolCallMs: error?.diagnostic?.firstToolCallMs ?? null,
+      argumentChars: error?.diagnostic?.argumentChars || 0,
+      toolCallCompleted: error?.diagnostic?.toolCallCompleted === true,
     }];
     const invalidVisualSummary = String(error?.code || '') === 'invalid_visual_summary';
     const visualIntakeMaterializationFailed = error?.visualIntakeMaterializationFailed === true;
@@ -1819,7 +2263,7 @@ export async function planAgentExecutionRequest(input = {}) {
               : 'Planner transport failed.',
       )],
       visualIntakeMaterializationFailed ? 0 : 1,
-      visualIntakeMaterializationFailed ? [] : error?.diagnostic ? [error.diagnostic, ...diagnostics] : diagnostics,
+      visualIntakeMaterializationFailed ? [] : error?.diagnostic?.attempt ? [error.diagnostic, ...diagnostics] : diagnostics,
       invalidVisualSummary ? 'invalid_plan' : failureReason,
     );
   }

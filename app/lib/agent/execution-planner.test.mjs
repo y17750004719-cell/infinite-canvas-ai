@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   AGENT_EXECUTION_PLAN_TOOL,
+  assembleMainAgentImageExecutionPlan,
   buildAgentExecutionPlanTool,
   buildAgentExecutionPlannerMessages,
   buildAgentTaskContract,
@@ -76,6 +77,44 @@ test('planner receives the validated Front Door decision without replacing the o
   });
 });
 
+test('background image planner receives the resolved requirement, original request, Skill contract, and locked task', async () => {
+  const finalPlan = plan({
+    generation: {
+      ...plan().generation,
+      prompt: 'A single supplier prompt chosen by the Image Planner.',
+      items: plan().generation.items.map((item) => ({ ...item, prompt: `Supplier prompt ${item.index}` })),
+    },
+  });
+  let messages = [];
+  const result = await planAgentExecutionRequest({
+    imageContractOnly: true,
+    userMessage: '已理解的海报目标',
+    resolvedRequirement: '已理解的海报目标',
+    originalRequest: '用户原始请求保留作细节参考',
+    manifests,
+    lockedSkillId: 'magazine-poster',
+    lockedImageOperation: 'generate',
+    lockedTargetReferenceId: null,
+    lockedOutputCount: 4,
+    lockedAspectRatio: '2:3',
+    lockedDeliveryMode: 'series',
+    lockedPanelCount: null,
+    model: 'planner-model',
+    providerId: 'provider',
+    chatFn: async (request) => {
+      messages = request.messages;
+      return toolResponse(finalPlan);
+    },
+  });
+  assert.equal(result.plan?.generation.prompt, 'A single supplier prompt chosen by the Image Planner.');
+  const payload = JSON.parse(messages[1].content);
+  assert.equal(payload.resolvedRequirement, '已理解的海报目标');
+  assert.equal(payload.originalRequest, '用户原始请求保留作细节参考');
+  assert.equal(payload.skill.generationContract, manifests[0].generationContract);
+  assert.equal(payload.lockedTask.aspectRatio, '2:3');
+  assert.doesNotMatch(messages[0].content, /four compact paragraphs|JSON\.parse|keyword assertion/i);
+});
+
 const manifests = [{
   id: 'magazine-poster',
   name: 'Magazine Poster',
@@ -85,6 +124,7 @@ const manifests = [{
   allowedTools: ['generate_image'],
   executionMode: 'image_pipeline',
   promptStyle: 'json-text',
+  aspectRatio: '2:3',
   generationContract: 'Return supplier-ready valid JSON text prompts.',
   enabled: true,
 }];
@@ -142,6 +182,7 @@ function plan(overrides = {}) {
       ],
     },
     generation: {
+      aspectRatio: '2:3',
       promptFormat: 'json-text',
       prompt: finalPrompt('shared editorial system'),
       items: [
@@ -205,6 +246,20 @@ function legacyToolResponse(value) {
   return response;
 }
 
+function plannerStream(value, { name = 'submit_agent_execution_plan', fragments = 1, content = '' } = {}) {
+  return async function* stream() {
+    const args = JSON.stringify(value);
+    if (content) yield { type: 'delta', channel: 'content', content };
+    yield { type: 'tool_call_start', toolCallId: 'planner-call', index: 0, name };
+    const chunkSize = Math.ceil(args.length / fragments);
+    for (let offset = 0; offset < args.length; offset += chunkSize) {
+      yield { type: 'tool_call_delta', toolCallId: 'planner-call', index: 0, argumentsDelta: args.slice(offset, offset + chunkSize) };
+    }
+    yield { type: 'tool_call_end', toolCallId: 'planner-call', index: 0, name, arguments: args };
+    yield { type: 'done' };
+  };
+}
+
 function visualContext(referenceIds, targetReferenceId = null, confidence = null) {
   return {
     references: referenceIds.map((referenceId) => ({
@@ -232,6 +287,26 @@ function visualSummary(referenceIds) {
   };
 }
 
+function mainAgentDraft(overrides = {}) {
+  const source = plan();
+  return {
+    decision: 'execute',
+    confidence: source.confidence,
+    clarification: null,
+    contextEntityIds: [],
+    visualReferenceIds: [],
+    visualSummary: null,
+    referenceRoles: [],
+    targetSelectionReason: null,
+    targetSelectionConfidence: null,
+    imageTask: source.imageTask,
+    brief: source.brief,
+    delivery: source.delivery,
+    generation: source.generation,
+    ...overrides,
+  };
+}
+
 function assertStringEnums(value, path = '$') {
   if (Array.isArray(value)) {
     value.forEach((entry, index) => assertStringEnums(entry, `${path}[${index}]`));
@@ -245,6 +320,165 @@ function assertStringEnums(value, path = '$') {
   }
   Object.entries(value).forEach(([key, entry]) => assertStringEnums(entry, `${path}.${key}`));
 }
+
+test('Main Agent image draft is deterministically assembled into a validated v4 contract', () => {
+  const result = assembleMainAgentImageExecutionPlan(mainAgentDraft({
+    contextEntityIds: ['context:brief'],
+    visualReferenceIds: ['current:image'],
+    visualSummary: visualSummary(['current:image']),
+    referenceRoles: [{ referenceId: 'current:image', role: 'style_reference' }],
+    generation: { ...mainAgentDraft().generation, aspectRatio: '1:1' },
+  }), {
+    manifest: manifests[0],
+    lockedSkillId: 'magazine-poster',
+    readSkillId: 'magazine-poster',
+    contextEntityIds: ['context:brief', 'context:unused'],
+    referenceIds: ['current:image', 'history:unused'],
+    userMessage: '生成四张杂志海报',
+  });
+
+  assert.ok(result.plan);
+  assert.equal(result.plan.version, 4);
+  assert.equal(result.plan.intent, 'image');
+  assert.equal(result.plan.skillId, 'magazine-poster');
+  assert.deepEqual(result.plan.contextReferences, ['context:brief']);
+  assert.deepEqual(result.plan.visualContext.references.map((entry) => entry.referenceId), ['current:image']);
+  assert.equal(result.plan.visualContext.references[0].inferredRole, 'style_reference');
+  assert.equal(result.plan.execution.kind, 'image_pipeline');
+  assert.equal(result.plan.execution.tool, 'generate_image');
+  assert.equal(result.plan.execution.requiresConfirmation, true);
+  assert.equal(result.plan.generation.aspectRatio, '2:3');
+  assert.deepEqual(result.normalizedFields, []);
+  assert.equal(result.plan.generation.prompt, mainAgentDraft().generation.prompt);
+});
+
+test('Main Agent image draft requires the locked skill to have been read', () => {
+  const result = assembleMainAgentImageExecutionPlan(mainAgentDraft(), {
+    manifest: manifests[0],
+    lockedSkillId: 'magazine-poster',
+    readSkillId: null,
+  });
+  assert.equal(result.plan, null);
+  assert.ok(result.validationErrors.some((entry) => entry.code === 'skill_not_read'));
+});
+
+test('Main Agent image draft cannot change the locked image operation', () => {
+  const result = assembleMainAgentImageExecutionPlan(mainAgentDraft(), {
+    lockedImageOperation: 'edit',
+  });
+  assert.equal(result.plan, null);
+  assert.ok(result.validationErrors.some((entry) => entry.code === 'locked_operation_conflict'));
+});
+
+test('Main Agent image draft rejects unknown stable reference ids but ignores optional metadata', () => {
+  const result = assembleMainAgentImageExecutionPlan(mainAgentDraft({
+    contextEntityIds: ['missing-context'],
+    visualReferenceIds: ['missing-image'],
+    visualSummary: visualSummary(['missing-image']),
+    referenceRoles: [{ referenceId: 'missing-image', role: 'style_reference' }],
+  }), {
+    contextEntityIds: ['known-context'],
+    referenceIds: ['known-image'],
+  });
+  assert.equal(result.plan, null);
+  assert.ok(result.validationErrors.some((entry) => entry.code === 'unknown_reference'));
+});
+
+test('Main Agent image assembly accepts a non-JSON compiler prompt for a JSON Skill', () => {
+  const result = assembleMainAgentImageExecutionPlan(mainAgentDraft({
+    generation: { aspectRatio: '1:1', promptFormat: 'json-text', prompt: 'A magazine cover in compiler-selected prose.', items: [] },
+    delivery: { ...plan().delivery, mode: 'single', outputCount: 1, items: [] },
+  }), {
+    manifest: manifests[0],
+    lockedSkillId: 'magazine-poster',
+    readSkillId: 'magazine-poster',
+  });
+  assert.equal(result.plan?.generation?.prompt, 'A magazine cover in compiler-selected prose.');
+  assert.equal(result.plan?.generation?.aspectRatio, '2:3');
+});
+
+test('Main Agent image assembly uses the locked edit target without model role metadata', () => {
+  const result = assembleMainAgentImageExecutionPlan(mainAgentDraft({
+    imageTask: { ...plan().imageTask, operation: 'edit', targetReferenceId: 'target', supportingReferenceIds: [] },
+    delivery: { ...plan().delivery, mode: 'single', outputCount: 1, items: [] },
+    generation: { aspectRatio: '1:1', promptFormat: 'text', prompt: 'Change the target.', items: [] },
+    visualReferenceIds: ['target'],
+    visualSummary: null,
+    referenceRoles: [],
+  }), {
+    lockedImageOperation: 'edit',
+    lockedTargetReferenceId: 'target',
+    referenceIds: ['target'],
+  });
+  assert.equal(result.plan?.imageTask?.targetReferenceId, 'target');
+  assert.equal(result.plan?.generation?.prompt, 'Change the target.');
+});
+
+test('Main Agent image assembly derives series display metadata without changing item prompts', () => {
+  const result = assembleMainAgentImageExecutionPlan(mainAgentDraft({
+    delivery: {
+      ...plan().delivery,
+      mode: 'series',
+      outputCount: 2,
+      items: [
+        { index: 1, label: 'First', contentDirections: 'First direction.' },
+        { index: 2, label: 'Second', contentDirections: 'Second direction.' },
+      ],
+    },
+    generation: {
+      aspectRatio: '1:1', promptFormat: 'text', prompt: 'Shared prompt.',
+      items: [{ index: 1, label: 'First', prompt: 'First prompt.' }, { index: 2, label: 'Second', prompt: 'Second prompt.' }],
+    },
+  }));
+  assert.deepEqual(result.plan?.generation?.items.map((item) => item.prompt), ['First prompt.', 'Second prompt.']);
+  assert.deepEqual(result.plan?.delivery.items.map((item) => [item.subject, item.variation]), [['First direction.', 'First direction.'], ['Second direction.', 'Second direction.']]);
+});
+
+test('Main Agent generic image drafts use the direct image pipeline without inventing a skill', () => {
+  const source = plan();
+  const result = assembleMainAgentImageExecutionPlan(mainAgentDraft({
+    delivery: { ...source.delivery, mode: 'single', outputCount: 1, items: [] },
+    generation: { aspectRatio: '1:1', promptFormat: 'text', prompt: 'Create one red geometric poster.', items: [] },
+  }));
+  assert.ok(result.plan);
+  assert.equal(result.plan.skillId, null);
+  assert.equal(result.plan.execution.tool, 'generate_image');
+  assert.equal(result.plan.execution.requiresConfirmation, false);
+});
+
+test('Main Agent generic image drafts reject a model-invented Skill', () => {
+  const result = assembleMainAgentImageExecutionPlan(mainAgentDraft({ skillId: 'invented-skill' }));
+  assert.equal(result.plan, null);
+  assert.ok(result.validationErrors.some((entry) => entry.code === 'unknown_skill'));
+});
+
+test('Main Agent skill-action drafts derive start_skill_job only from the locked manifest', () => {
+  const skillManifest = {
+    ...manifests[0],
+    id: 'brand-workflow',
+    executionMode: 'agent_loop',
+    promptStyle: 'text',
+    allowedTools: ['start_skill_job'],
+  };
+  const result = assembleMainAgentImageExecutionPlan(mainAgentDraft(), {
+    manifest: skillManifest,
+    lockedSkillId: 'brand-workflow',
+    readSkillId: 'brand-workflow',
+  });
+  assert.ok(result.plan);
+  assert.equal(result.plan.intent, 'skill_action');
+  assert.equal(result.plan.execution.kind, 'skill_job');
+  assert.equal(result.plan.execution.tool, 'start_skill_job');
+  assert.equal(result.plan.generation, null);
+
+  const unauthorized = assembleMainAgentImageExecutionPlan(mainAgentDraft(), {
+    manifest: { ...skillManifest, allowedTools: ['generate_image'] },
+    lockedSkillId: 'brand-workflow',
+    readSkillId: 'brand-workflow',
+  });
+  assert.equal(unauthorized.plan, null);
+  assert.ok(unauthorized.validationErrors.some((entry) => entry.code === 'unauthorized_tool'));
+});
 
 test('planner prompt requires the structured tool and separates collage style from composite layout', () => {
   const messages = buildAgentExecutionPlannerMessages({
@@ -1151,6 +1385,26 @@ test('image plans require supplier-ready generation prompts with skill-compatibl
   assert.ok(indirectImage.validationErrors.some((entry) => entry.code === 'image_execution_kind_mismatch'));
 });
 
+test('non-series image plans discard redundant per-item generation prompts', () => {
+  for (const mode of ['single', 'variants', 'composite']) {
+    const draft = plan();
+    draft.delivery.mode = mode;
+    draft.delivery.outputCount = mode === 'single' ? 1 : 4;
+    draft.delivery.panelCount = mode === 'composite' ? 4 : null;
+
+    const result = validateAgentExecutionPlan(draft, {
+      allowedSkillIds: ['magazine-poster'],
+      skillToolsById: { 'magazine-poster': ['generate_image'] },
+      skillPromptStylesById: { 'magazine-poster': 'json-text' },
+    });
+
+    assert.ok(result.plan, `${mode} should normalize redundant generation items`);
+    assert.deepEqual(result.plan.generation.items, []);
+    assert.ok(result.normalizedFields.includes('generation.items'));
+    assert.equal(result.validationErrors.some((entry) => entry.code === 'unexpected_items'), false);
+  }
+});
+
 test('non-clarifying plans ignore empty clarification placeholders from tool schemas', () => {
   const result = validateAgentExecutionPlan(plan({
     needsClarification: false,
@@ -1184,6 +1438,7 @@ test('single planner request preserves the authoritative supplier prompt and det
       items: [],
     },
     generation: {
+      aspectRatio: '2:3',
       promptFormat: 'json-text',
       prompt: JSON.stringify({
         subject: 'fragmented Greek statue',
@@ -1241,6 +1496,7 @@ test('text prompt contracts are never supplemented by local string matching', ()
       items: [],
     },
     generation: {
+      aspectRatio: '2:3',
       promptFormat: 'text',
       prompt: 'Replace PERSON with DOGS. Add the exact cover text vogue.',
       items: [],
@@ -1260,6 +1516,7 @@ test('series prompts remain byte-equivalent while invalid JSON objects still fai
   const incompleteJsonPrompt = (label) => JSON.stringify({ subject: label, composition: 'editorial cover' });
   const seriesDraft = plan({
     generation: {
+      aspectRatio: '2:3',
       promptFormat: 'json-text',
       prompt: incompleteJsonPrompt('shared direction'),
       items: plan().delivery.items.map((item) => ({
@@ -1522,6 +1779,84 @@ test('planner never retries a transport interruption', async () => {
   assert.equal(result.attempts, 1);
   assert.equal(result.diagnostics[0].attempt, 1);
   assert.equal(result.diagnostics[0].providerId, 'provider');
+});
+
+test('planner streams fragmented tool arguments without using non-streaming chat', async () => {
+  let streamCalls = 0;
+  let chatCalls = 0;
+  const result = await planAgentExecutionRequest({
+    userMessage: 'Generate four posters',
+    messages: [{ role: 'user', content: 'Generate four posters' }],
+    manifests,
+    model: 'planner-model',
+    providerId: 'provider',
+    chatFn: async () => {
+      chatCalls += 1;
+      return toolResponse(plan());
+    },
+    chatStreamFn: (request) => {
+      streamCalls += 1;
+      assert.equal(request.stream, true);
+      return plannerStream(plan(), { fragments: 7 })();
+    },
+  });
+  assert.ok(result.plan);
+  assert.equal(streamCalls, 1);
+  assert.equal(chatCalls, 0);
+  assert.equal(result.diagnostics[0].transportMode, 'stream');
+  assert.equal(result.diagnostics[0].argumentChars, JSON.stringify(plan()).length);
+  assert.equal(result.diagnostics[0].toolCallCompleted, true);
+  assert.ok(result.diagnostics[0].firstEventMs >= 0);
+  assert.ok(result.diagnostics[0].firstToolCallMs >= 0);
+});
+
+test('planner fails closed on interrupted, malformed, multiple, wrong, and text-only streams', async () => {
+  const base = {
+    userMessage: 'Generate one poster',
+    messages: [{ role: 'user', content: 'Generate one poster' }],
+    manifests,
+    model: 'planner-model',
+    providerId: 'provider',
+  };
+  const interrupted = await planAgentExecutionRequest({
+    ...base,
+    chatStreamFn: () => (async function* stream() {
+      yield { type: 'tool_call_start', toolCallId: 'call-1', index: 0, name: 'submit_agent_execution_plan' };
+      yield { type: 'tool_call_delta', toolCallId: 'call-1', index: 0, argumentsDelta: '{"version":4' };
+    })(),
+  });
+  assert.equal(interrupted.failureReason, 'transport');
+  assert.equal(interrupted.diagnostics[0].argumentChars, 12);
+  assert.equal(interrupted.diagnostics[0].toolCallCompleted, false);
+
+  const malformed = await planAgentExecutionRequest({
+    ...base,
+    chatStreamFn: () => (async function* stream() {
+      yield { type: 'tool_call_end', toolCallId: 'call-1', index: 0, name: 'submit_agent_execution_plan', arguments: '{"version":4' };
+    })(),
+  });
+  assert.ok(malformed.validationErrors.some((entry) => entry.code === 'invalid_tool_arguments'));
+
+  const multiple = await planAgentExecutionRequest({
+    ...base,
+    chatStreamFn: () => (async function* stream() {
+      yield* plannerStream(plan())();
+      yield { type: 'tool_call_end', toolCallId: 'call-2', index: 1, name: 'submit_agent_execution_plan', arguments: JSON.stringify(plan()) };
+    })(),
+  });
+  assert.ok(multiple.validationErrors.some((entry) => entry.code === 'multiple_tool_calls'));
+
+  const wrong = await planAgentExecutionRequest({ ...base, chatStreamFn: () => plannerStream(plan(), { name: 'other_tool' })() });
+  assert.ok(wrong.validationErrors.some((entry) => entry.code === 'wrong_tool_name'));
+
+  const textOnly = await planAgentExecutionRequest({
+    ...base,
+    chatStreamFn: () => (async function* stream() {
+      yield { type: 'delta', channel: 'content', content: JSON.stringify(plan()) };
+      yield { type: 'done' };
+    })(),
+  });
+  assert.ok(textOnly.validationErrors.some((entry) => entry.code === 'missing_plan'));
 });
 
 test('planner classifies a single request timeout without retrying', async () => {

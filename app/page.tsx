@@ -379,6 +379,7 @@ type ChatMessageInlineSegment =
 interface AgentImagePromptCompilation {
   skillId: string | null;
   skillLabel: string | null;
+  skillRead: boolean;
   plannerProviderId: string | null;
   plannerModel: string;
   referenceCount: number;
@@ -410,6 +411,8 @@ interface ChatMessage {
     optimized: boolean;
     operation: 'generate' | 'edit';
     targetReferenceId: string | null;
+    skillId: string | null;
+    skillRead: boolean;
   };
   agentImagePrompts?: Array<{
     index: number;
@@ -548,10 +551,12 @@ interface AgentClarificationOption {
 
 interface AgentClarificationState {
   taskId: string;
+  sourceUserMessageId?: string;
   operationId?: string;
-  skillSource?: 'manual' | 'auto' | null;
+  skillSource?: 'manual_ui' | 'explicit_text' | 'user_confirmation' | 'recovery' | 'manual' | 'auto' | null;
+  skillRead?: boolean;
   lastSequence?: number;
-  intent: 'image' | 'skill_action';
+  intent: 'chat' | 'image' | 'skill_action';
   skillId?: string;
   originalRequest: string;
   workingBrief: string;
@@ -587,6 +592,7 @@ interface AgentClarificationState {
   };
   recoveryRecord?: AgentRecoveryRecord;
   recoveryMode?: 'fill_missing' | 'redo_all';
+  imagePlanning?: TaskSnapshot['imagePlanning'];
 }
 
 interface AgentClarificationRequest {
@@ -1853,6 +1859,24 @@ const resizeImageCardItemToNaturalImage = (
   return resizeCanvasItemFromCenter(item, nextSize);
 };
 
+const IMAGE_PLANNING_ERROR_MESSAGES: Record<string, string> = {
+  operation: '生成或编辑识别未完成，任务状态已保留，可继续重试',
+  context: '参考图分析未完成，任务状态已保留，可继续重试',
+  skill: '已选 Skill 读取未完成，任务状态已保留，可继续重试',
+  brief: '设计 Brief 未完成，任务状态已保留，可继续重试',
+  prompt: '生图 Prompt 未完成，任务状态已保留，可继续重试',
+  image_planner: '图片合同规划未完成，任务状态已保留，可继续重试',
+  execution: '图片合同执行未完成，任务状态已保留，可继续重试',
+  terminal_contract: '图像合同未完成，任务状态已保留，可继续重试',
+};
+
+const presentAgentErrorMessage = (stage?: string, message?: string) => (
+  IMAGE_PLANNING_ERROR_MESSAGES[stage || '']
+  || (/closing turn ended|final response or terminal control/i.test(message || '')
+    ? IMAGE_PLANNING_ERROR_MESSAGES.terminal_contract
+    : message || 'Agent 运行失败')
+);
+
 const consumeAgentImageResponse = async (response: Response) => {
   if (!response.ok) {
     const errorText = await response.text();
@@ -1885,6 +1909,7 @@ const consumeAgentImageResponse = async (response: Response) => {
       if (!line.trim()) continue;
       const event = JSON.parse(line) as {
         type?: string;
+        stage?: string;
         message?: string;
         error?: string;
         request?: { question?: string };
@@ -1893,7 +1918,9 @@ const consumeAgentImageResponse = async (response: Response) => {
           assets?: Array<{ src?: string; naturalWidth?: number; naturalHeight?: number }>;
         };
       };
-      if (event.type === 'agent_error') failureMessage = event.message || event.error || failureMessage;
+      if (event.type === 'agent_error') {
+        failureMessage = presentAgentErrorMessage(event.stage, event.message || event.error || failureMessage);
+      }
       if (event.type === 'clarification_required') {
         throw new Error(event.message || event.request?.question || '图片任务需要补充关键信息');
       }
@@ -6266,9 +6293,8 @@ export default function AIWorkspace() {
     if (!query) return quickActions;
     return quickActions.filter((action) => action.searchText.includes(query));
   }, [quickActions, skillMenuQuery]);
-  const [imageAspectRatio, setImageAspectRatio] = useState('auto');
-  const [agentImageAspectRatio, setAgentImageAspectRatio] = useState('3:4');
-  const activeChatImageAspectRatio = generationMode === 'agent' ? agentImageAspectRatio : imageAspectRatio;
+  const [imageAspectRatio, setImageAspectRatio] = useState('1:1');
+  const [imageAspectRatioLocked, setImageAspectRatioLocked] = useState(false);
   const [hideWelcomeByCenterSkillPick, setHideWelcomeByCenterSkillPick] = useState(false);
   const [referenceImages, setReferenceImages] = useState<string[]>([]);
   const [chatReferenceTokens, setChatReferenceTokens] = useState<ChatReferenceToken[]>([]);
@@ -7724,6 +7750,15 @@ export default function AIWorkspace() {
         providerImageOptionProfiles
       )
     : '1:1';
+  const activeChatImageAspectRatio = selectedImageCardPanelItem
+    ? selectedImageCardPanelAspectRatio
+    : imageAspectRatio;
+
+  useEffect(() => {
+    if (selectedImageCardPanelItem) {
+      setImageAspectRatio(selectedImageCardPanelAspectRatio);
+    }
+  }, [selectedImageCardPanelAspectRatio, selectedImageCardPanelItem]);
   const selectedImageCardEnabledAspectRatios = React.useMemo(
     () => getEnabledProviderModelAspectRatios(
       selectedImageCardProviderId,
@@ -7998,6 +8033,40 @@ export default function AIWorkspace() {
   const recordCurrentCanvasUndoSnapshot = useCallback(() => {
     pushCanvasUndoSnapshot(createCurrentCanvasUndoSnapshot());
   }, [createCurrentCanvasUndoSnapshot, pushCanvasUndoSnapshot]);
+
+  const handleChatImageAspectRatioChange = useCallback((aspectRatioId: string) => {
+    const normalizedAspectRatio = selectedImageCardPanelItem
+      ? normalizeProviderModelAspectRatioForSize(
+          selectedImageCardProviderId,
+          selectedImageCardPanelModelId,
+          selectedImageCardPanelSize,
+          aspectRatioId,
+          providerImageOptionProfiles
+        )
+      : normalizeImageCardAspectRatio(aspectRatioId, '1:1');
+    setImageAspectRatio(normalizedAspectRatio);
+    setImageAspectRatioLocked(true);
+    if (!selectedImageCardPanelItem) return;
+    recordCurrentCanvasUndoSnapshot();
+    setImageCardAspectRatioById((prev) => ({
+      ...prev,
+      [selectedImageCardPanelItem.id]: normalizedAspectRatio,
+    }));
+    setItems((prev) => prev.map((item) => (
+      item.id === selectedImageCardPanelItem.id && isImageCardItem(item)
+        ? resizeImageCardItemToAspectRatio(item, normalizedAspectRatio)
+        : item
+    )));
+  }, [
+    providerImageOptionProfiles,
+    recordCurrentCanvasUndoSnapshot,
+    selectedImageCardPanelItem,
+    selectedImageCardPanelModelId,
+    selectedImageCardPanelSize,
+    selectedImageCardProviderId,
+    setImageCardAspectRatioById,
+    setItems,
+  ]);
 
   const capturePendingCanvasUndoSnapshot = useCallback(() => {
     if (pendingCanvasHistorySnapshotRef.current) {
@@ -13416,6 +13485,7 @@ export default function AIWorkspace() {
               role: 'user',
               content: trimmedInput || '请根据所附参考图生成一张新图片。',
             }],
+            intent: 'image',
             activeSkillId: activeSkill?.id,
             referenceImages: linkedImagePreviews.map((preview) => preview.src),
             referenceContext,
@@ -13746,9 +13816,14 @@ export default function AIWorkspace() {
     const overrideReferencePayload = options?.referenceImagesOverride
       ? buildReferenceImageRequestPayload(options.referenceImagesOverride)
       : null;
-    const persistedReferenceContext = effectiveAgentClarification?.state.referenceContext;
+    const recoverySourceReferenceContext = options?.recoveryTaskId && options.recoveryRecord?.sourceUserMessageId
+      ? chatMessages.find((message) => message.id === options.recoveryRecord?.sourceUserMessageId)?.referenceContext
+      : undefined;
+    const persistedReferenceContext = effectiveAgentClarification?.state.referenceContext || recoverySourceReferenceContext;
     const currentReferenceImages = overrideReferencePayload
       ? [...overrideReferencePayload.referenceImages]
+      : options?.recoveryTaskId && persistedReferenceContext
+        ? persistedReferenceContext.references.map((reference) => reference.src)
       : chatReferenceImages.length > 0
         ? [...chatReferenceImages]
         : [...(persistedReferenceContext?.references || []).map((reference) => reference.src)];
@@ -13823,7 +13898,14 @@ export default function AIWorkspace() {
       }]);
       return;
     }
-    const currentSkill = options?.skill ?? retrySourceMessage?.skill ?? activeSkill;
+    const lockedSkillId = effectiveAgentClarification?.state.imagePlanning?.skill?.id
+      || effectiveAgentClarification?.state.skillId
+      || options?.recoveryRecord?.taskSnapshot?.imagePlanning?.skill?.id
+      || options?.recoveryRecord?.skillId;
+    const lockedSkill = lockedSkillId
+      ? quickActions.find((skill) => skill.id === lockedSkillId) || { id: lockedSkillId, label: lockedSkillId }
+      : null;
+    const currentSkill = options?.skill ?? retrySourceMessage?.skill ?? lockedSkill ?? activeSkill;
     const selectedChatProviderId = resolvedChatSelection.providerId || chatProviderId || undefined;
     const selectedChatModelId = resolvedChatSelection.model || chatModelId || undefined;
     const selectedImageProviderId = resolvedImageSelection.providerId || imageProviderId || undefined;
@@ -13878,7 +13960,8 @@ export default function AIWorkspace() {
         : undefined,
     };
     const assistantPlaceholderId = `msg-${Date.now()}-assistant-pending`;
-    const agentRunId = `agent-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const agentRunId = effectiveAgentClarification?.state.operationId
+      || `agent-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const usesAgentRequest = true;
     if (usesAgentRequest) {
       setActiveAgentRunMarker({
@@ -14056,8 +14139,8 @@ export default function AIWorkspace() {
         messages: messagesForAPI,
         intent: generationMode,
       };
-      if (generationMode === 'image' && imageAspectRatio !== 'auto') {
-        requestBody.aspect_ratio = imageAspectRatio;
+      if (generationMode === 'image' && activeChatImageAspectRatio !== 'auto') {
+        requestBody.aspect_ratio = activeChatImageAspectRatio;
       }
 
       if (currentSkill?.id === 'brand') {
@@ -14182,11 +14265,13 @@ export default function AIWorkspace() {
       const agentRequestBody = {
         runId: agentRunId,
         topicId: requestTopicId,
-        sourceUserMessageId: recentRecoveryTask && options?.recoveryTaskId === recentRecoveryTask.taskId
-          ? recentRecoveryTask.sourceUserMessageId
-          : userMessage.id,
+        sourceUserMessageId: effectiveAgentClarification?.state.sourceUserMessageId
+          || (recentRecoveryTask && options?.recoveryTaskId === recentRecoveryTask.taskId
+            ? recentRecoveryTask.sourceUserMessageId
+            : userMessage.id),
         ...(options?.recoveryTaskId ? { recoveryTaskId: options.recoveryTaskId } : {}),
         messages: messagesForAPI,
+        intent: generationMode,
         contextEntities,
         selectedContextEntityIds: options?.selectedContextEntityIds ?? selectedIds.map((id) => `canvas:${id}`),
         agentMemory: requestTopicMemory,
@@ -14220,7 +14305,8 @@ export default function AIWorkspace() {
         imageOptions: {
           providerId: selectedImageProviderId,
           model: selectedImageModelId,
-          aspectRatio: generationMode === 'image' ? imageAspectRatio : agentImageAspectRatio,
+          aspectRatio: activeChatImageAspectRatio,
+          aspectRatioLocked: imageAspectRatioLocked,
           size: '2048x2048',
           quality: 'auto',
           count: 1,
@@ -14342,7 +14428,7 @@ export default function AIWorkspace() {
               compilation?: AgentImagePromptCompilation;
               skillId?: string;
               skill?: { id?: string; label?: string } | null;
-              source?: 'manual' | 'auto';
+              source?: 'manual_ui' | 'explicit_text' | 'user_confirmation' | 'recovery' | 'manual' | 'auto';
               operationId?: string;
               sequence?: number;
               stepId?: string;
@@ -14404,6 +14490,12 @@ export default function AIWorkspace() {
               mustPreserveCount?: number;
               taskSnapshot?: TaskSnapshot;
               recoveryRecord?: AgentRecoveryRecord;
+              parameters?: {
+                outputCount?: number;
+                aspectRatio?: string;
+                deliveryMode?: 'single' | 'variants' | 'series' | 'composite';
+                panelCount?: number;
+              };
             };
             try {
               event = JSON.parse(trimmed) as {
@@ -14426,7 +14518,7 @@ export default function AIWorkspace() {
                 compilation?: AgentImagePromptCompilation;
                 skillId?: string;
                 skill?: { id?: string; label?: string } | null;
-                source?: 'manual' | 'auto';
+                source?: 'manual_ui' | 'explicit_text' | 'user_confirmation' | 'recovery' | 'manual' | 'auto';
                 runId?: string;
                 operationId?: string;
                 sequence?: number;
@@ -14477,6 +14569,12 @@ export default function AIWorkspace() {
                 mustPreserveCount?: number;
                 taskSnapshot?: TaskSnapshot;
                 recoveryRecord?: AgentRecoveryRecord;
+                parameters?: {
+                  outputCount?: number;
+                  aspectRatio?: string;
+                  deliveryMode?: 'single' | 'variants' | 'series' | 'composite';
+                  panelCount?: number;
+                };
               };
             } catch {
               continue;
@@ -14597,6 +14695,13 @@ export default function AIWorkspace() {
             }
 
             if (event.type === 'active_skill_changed') {
+              continue;
+            }
+
+            if (event.type === 'image_parameters_locked' && event.parameters) {
+              if (typeof event.parameters.aspectRatio === 'string') {
+                setImageAspectRatio(event.parameters.aspectRatio);
+              }
               continue;
             }
 
@@ -15004,6 +15109,7 @@ export default function AIWorkspace() {
             }
 
             if (event.type === 'agent_error') {
+              const publicFailureMessage = presentAgentErrorMessage(event.stage, event.message || event.error);
               if (event.recoveryRecord) latestRecoveryRecord = event.recoveryRecord;
               updatePendingAssistantMessage((msg) => {
                 const failedClarificationOwnsMessage = msg.agentClarification?.request.failed === true;
@@ -15012,14 +15118,14 @@ export default function AIWorkspace() {
                   taskStatus: 'failed',
                   ...(event.recoveryRecord ? { agentRecovery: event.recoveryRecord } : {}),
                   ...(event.stage === 'planning' && event.message && !failedClarificationOwnsMessage
-                    ? { content: event.message }
+                    ? { content: publicFailureMessage }
                     : {}),
                 };
               });
               if (event.stage === 'planning' && event.retryable) {
                 continue;
               }
-              throw new Error(event.message || event.error || 'Agent 运行失败');
+              throw new Error(publicFailureMessage);
             }
 
             if (event.type === 'agent_task_checkpoint' && event.taskSnapshot) {
@@ -15556,6 +15662,7 @@ export default function AIWorkspace() {
     void handleGenerate({
       input: answer,
       agentClarification: clarification,
+      suppressUserMessage: true,
       agentClarificationResponse: response,
     });
   };
@@ -18567,28 +18674,7 @@ export default function AIWorkspace() {
             [selectedImageCardPanelItem.id]: nextCount,
           }));
         }}
-        onSelectImageCardAspectRatio={(aspectRatioId) => {
-          if (!selectedImageCardPanelItem) return;
-          const normalizedAspectRatio = normalizeProviderModelAspectRatioForSize(
-            selectedImageCardProviderId,
-            selectedImageCardPanelModelId,
-            selectedImageCardPanelSize,
-            aspectRatioId,
-            providerImageOptionProfiles
-          );
-          recordCurrentCanvasUndoSnapshot();
-          setImageCardAspectRatioById((prev) => ({
-            ...prev,
-            [selectedImageCardPanelItem.id]: normalizedAspectRatio,
-          }));
-          setItems((prev) =>
-            prev.map((item) =>
-              item.id === selectedImageCardPanelItem.id && isImageCardItem(item)
-                ? resizeImageCardItemToAspectRatio(item, normalizedAspectRatio)
-                : item
-            )
-          );
-        }}
+        onSelectImageCardAspectRatio={handleChatImageAspectRatioChange}
         onSelectedImageCardPanelInputChange={handleSelectedImageCardPanelInputChange}
         onSelectedImageCardPanelBlur={commitPendingCanvasUndoSnapshot}
         onSelectedImageCardPanelSubmit={handleSelectedImageCardPanelSubmit}
@@ -20157,17 +20243,13 @@ export default function AIWorkspace() {
                                 className="workspace-control-chip ml-1 rounded-md px-2 py-0.5 text-[11px]"
                                 onClick={() => {
                                   const messageIndex = chatMessages.findIndex((item) => item.id === msg.id);
-                                  const sourceMessage = [...chatMessages.slice(0, messageIndex)]
-                                    .reverse()
-                                    .find((item) => item.role === 'user');
                                   const clickedRecovery = msg.agentRecovery;
                                   const recovery: AgentRecoveryRecord | null = clickedRecovery
                                     ? getLatestAgentRecoveryForTask(chatMessages, clickedRecovery.taskId) as AgentRecoveryRecord | null || clickedRecovery
                                     : null;
-                                  if (sourceMessage && recovery && !isGenerating) {
+                                  if (recovery && !isGenerating) {
                                     void handleGenerate({
                                       input: recovery.originalRequest,
-                                      skill: activeSkill || sourceMessage.skill,
                                       recoveryTaskId: recovery.taskId,
                                       recoveryRecord: recovery,
                                       suppressUserMessage: true,
@@ -20872,15 +20954,13 @@ export default function AIWorkspace() {
                             <div className="rounded-xl border border-[var(--workspace-border)] p-2.5">
                               <div className="workspace-text-muted mb-2 text-[10px] font-medium">画幅比例</div>
                               <div className="grid grid-cols-3 gap-1">
-                                {ASPECT_RATIOS
-                                  .filter((option) => generationMode !== 'agent' || option.id !== 'auto')
-                                  .map((option) => (
+                                    {ASPECT_RATIOS
+                                      .filter((option) => option.id !== 'auto')
+                                      .map((option) => (
                                   <button
                                     key={option.id}
                                     type="button"
-                                    onClick={() => generationMode === 'agent'
-                                      ? setAgentImageAspectRatio(option.id)
-                                      : setImageAspectRatio(option.id)}
+                                        onClick={() => handleChatImageAspectRatioChange(option.id)}
                                     className={`workspace-menu-item rounded-lg px-2 py-1.5 text-[11px] ${activeChatImageAspectRatio === option.id ? 'is-selected' : ''}`}
                                   >
                                     {option.name}

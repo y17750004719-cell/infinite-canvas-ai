@@ -89,6 +89,30 @@ test('progress tracker resumes one operation with strictly increasing sequence a
   assert.ok(resumedEvents.every((event) => event.operationId === 'operation-1'));
 });
 
+test('image generation heartbeat emits while a supplier request is pending and stops cleanly', () => {
+  const pulses = [];
+  let timerCallback;
+  let clearedTimer;
+  const clockValues = [1_000, 11_250];
+  const stop = agentLoopModule.startAgentImageGenerationHeartbeat({
+    intervalMs: 10_000,
+    now: () => clockValues.shift(),
+    onPulse: (elapsedMs) => pulses.push(elapsedMs),
+    setIntervalFn: (callback, intervalMs) => {
+      timerCallback = callback;
+      assert.equal(intervalMs, 10_000);
+      return 'heartbeat-timer';
+    },
+    clearIntervalFn: (timer) => { clearedTimer = timer; },
+  });
+
+  timerCallback();
+  stop();
+
+  assert.deepEqual(pulses, [10_250]);
+  assert.equal(clearedTimer, 'heartbeat-timer');
+});
+
 test('public tool event helper keeps image URLs only in client actions', () => {
   const events = agentLoopModule.createAgentToolResultEvents({
     runId: 'run-loop',

@@ -62,6 +62,7 @@ export function resolveAgentImageBatchContinuation<T extends { id: string }>(inp
 
 export function resolveAgentImageOptions(input?: {
   prompt?: string;
+  contractAspectRatio?: string;
   selectedAspectRatio?: string;
   requestedSize?: string;
   requestedQuality?: string;
@@ -87,6 +88,7 @@ export function buildAgentImageGenerationRequests(input?: {
   modelId?: string;
   allowedModelIds?: string[];
   providerImageOptionProfiles?: Record<string, unknown>;
+  contractAspectRatio?: string;
   selectedAspectRatio?: string;
   requestedSize?: string;
   requestedQuality?: string;

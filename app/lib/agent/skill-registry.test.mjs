@@ -8,6 +8,7 @@ import {
   hasDirectSkillExecutionIntent,
   listSkillManifests,
   loadSkillContent,
+  resolveLockedSkillReadId,
   resolveExplicitSkillDirective,
   selectSkillForPrompt,
   shouldInjectActiveSkill,
@@ -31,30 +32,28 @@ test('skill registry loads a registered SKILL.md inside the skills root', async 
   const content = await loadSkillContent('logo', { projectRoot });
   assert.match(content, /logo/i);
   const magazine = await loadSkillContent('magazine-poster', { projectRoot });
-  assert.match(magazine, /JSON\.parse/);
+  assert.match(magazine, /visual professional knowledge/i);
+  assert.match(magazine, /publication concept/i);
+  assert.doesNotMatch(magazine, /JSON\.parse|Output Format|### Quality Gate|generate_image/i);
   const zine = await loadSkillContent('gc-minimal-zine-poster-v0-1', { projectRoot });
-  assert.match(zine, /vertical 2:3 paper canvas/);
+  assert.match(zine, /70%-90% quiet paper/);
+  assert.match(zine, /one clear high-chroma ink anchor/);
+  assert.doesNotMatch(zine, /Write the final Standard Mode prompt|four compact paragraphs|### Quality Gate/i);
   const watercolor = await loadSkillContent('modular-watercolor-collage-v0-1', { projectRoot });
-  assert.match(watercolor, /7-10 unequal irregular rectangular pigment fields/);
-  assert.match(watercolor, /one continuous warm ivory/);
+  assert.match(watercolor, /7-10 fields/);
+  assert.match(watercolor, /continuous warm ivory/);
   assert.match(watercolor, /pigment stopping marks/);
-  assert.match(watercolor, /no more than about 20%/);
-  assert.match(watercolor, /### Reference mode/);
-  assert.match(watercolor, /Inspect the image pixels/);
-  assert.match(watercolor, /primary composition reference/);
-  assert.match(watercolor, /3-4 offset main fields/);
-  assert.match(watercolor, /Default to no typography/);
-  assert.match(watercolor, /host keeps supplied reference items attached/);
-  assert.match(watercolor, /38%-52% of the canvas width and 68%-78% of its height/);
-  assert.match(watercolor, /14% clear paper remains on both sides/);
-  assert.match(watercolor, /Never invent, retrieve, attach, or request a reference image/);
-  assert.match(watercolor, /Write exactly four compact prose paragraphs/);
-  assert.match(watercolor, /generation\.prompt/);
-  assert.match(watercolor, /generation\.items/);
-  assert.doesNotMatch(watercolor, /Generate the image/);
-  assert.doesNotMatch(watercolor, /Quality Gate/);
-  assert.doesNotMatch(watercolor, /at least two-thirds of the fragments square or near-square/);
-  assert.doesNotMatch(watercolor, /absolute-image-path-or-rendered-image/);
+  assert.match(watercolor, /actual reference subjects/i);
+  assert.match(watercolor, /one readable subject/i);
+  assert.doesNotMatch(watercolor, /Write exactly|generation\.prompt|generation\.items|### Quality Gate|generate_image/i);
+});
+
+test('locked Skill reads ignore a conflicting model-selected ID', () => {
+  assert.equal(
+    resolveLockedSkillReadId('magazine-poster', 'gc-minimal-zine-poster-v0-1'),
+    'gc-minimal-zine-poster-v0-1',
+  );
+  assert.equal(resolveLockedSkillReadId(' magazine-poster ', null), 'magazine-poster');
 });
 
 test('skill registry selects the most relevant enabled skill from trigger hints', async () => {
@@ -95,6 +94,15 @@ test('skill registry exposes curated direct triggers separately from general rou
   assert.equal(shouldInjectActiveSkill('你好，今天天气怎么样？', watercolor), false);
 });
 
+test('image pipeline manifests retain their compiler contracts', async () => {
+  const skills = await listSkillManifests({ projectRoot });
+  const zine = skills.find((skill) => skill.id === 'gc-minimal-zine-poster-v0-1');
+  assert.equal(zine?.promptStyle, 'text');
+  assert.match(zine?.planningGuidance || '', /sparse Japanese or Korean indie zine posters/);
+  assert.match(zine?.generationContract || '', /four compact plain-text paragraphs/);
+  assert.equal(Object.hasOwn(zine || {}, 'promptAssertions'), false);
+});
+
 test('explicit textual skill directives select, switch, or clear without a model call', async () => {
   const skills = await listSkillManifests({ projectRoot });
   const byId = resolveExplicitSkillDirective(
@@ -113,57 +121,32 @@ test('explicit textual skill directives select, switch, or clear without a model
   assert.equal(resolveExplicitSkillDirective('讨论一下模块化水彩的特点', skills), null);
 });
 
-test('modular watercolor collage skill compiles prompts for the host image pipeline', async () => {
+test('modular watercolor collage retains its image compiler contract', async () => {
   const manifest = await getSkillManifest('modular-watercolor-collage-v0-1', { projectRoot });
   assert.equal(manifest.executionMode, 'image_pipeline');
-  assert.equal(manifest.promptStyle, 'text');
+  assert.equal(manifest.aspectRatio, '9:16');
   assert.deepEqual(manifest.allowedTools, ['generate_image', 'get_canvas_context']);
-  assert.match(manifest.generationContract, /9:16/);
+  assert.equal(manifest.promptStyle, 'text');
   assert.match(manifest.generationContract, /7-10 fields/);
-  assert.match(manifest.generationContract, /one continuous edge-to-edge handmade-paper surface/);
-  assert.match(manifest.generationContract, /no three fields side by side/);
-  assert.match(manifest.generationContract, /jagged open outer silhouette/);
-  assert.match(manifest.generationContract, /visualSummary/);
-  assert.match(manifest.generationContract, /38%-52% of the canvas width and 68%-78% of its height/);
-  assert.match(manifest.generationContract, /14% clear paper on both sides/);
-  assert.match(manifest.generationContract, /10% above and below/);
   assert.match(manifest.planningGuidance, /without visualSummary, do not invent reference-specific facts/);
-  assert.match(manifest.generationContract, /3-4 main fields/);
-  assert.match(manifest.generationContract, /3-5 supporting fields/);
-  assert.match(manifest.generationContract, /full horizontal field of view without cropping or stretching/);
-  assert.match(manifest.generationContract, /flat orthographic scan/);
-  assert.doesNotMatch(manifest.generationContract, /invoke image tools|quality-gate|retry/i);
-  assert.match(manifest.planningGuidance, /gc-minimal-zine-poster-v0-1/);
 });
 
-test('minimal zine skill uses the direct image pipeline with plain-text prompts', async () => {
+test('minimal zine skill retains its image compiler contract', async () => {
   const manifest = await getSkillManifest('gc-minimal-zine-poster-v0-1', { projectRoot });
   assert.equal(manifest.executionMode, 'image_pipeline');
-  assert.equal(manifest.promptStyle, 'text');
+  assert.equal(manifest.aspectRatio, '2:3');
   assert.deepEqual(manifest.allowedTools, ['generate_image', 'get_canvas_context']);
-  assert.match(manifest.generationContract, /2:3/);
+  assert.equal(manifest.promptStyle, 'text');
+  assert.match(manifest.generationContract, /four compact plain-text paragraphs/);
   assert.match(manifest.generationContract, /70%-90%/);
-  assert.match(manifest.generationContract, /8%-25%/);
-  assert.match(manifest.generationContract, /visualSummary/);
-  assert.match(manifest.generationContract, /0\.8%-2\.5%/);
-  assert.match(manifest.generationContract, /flat orthographic scanned-paper/);
-  assert.match(manifest.generationContract, /Preserve all literal user copy exactly/i);
-  assert.doesNotMatch(manifest.generationContract, /then generate|workflow|quality gate/i);
-  assert.match(manifest.planningGuidance, /magazine-poster/);
 });
 
-test('magazine skill opts into the direct image pipeline and JSON text prompts', async () => {
+test('magazine skill retains its JSON compiler contract', async () => {
   const manifest = await getSkillManifest('magazine-poster', { projectRoot });
   assert.equal(manifest.executionMode, 'image_pipeline');
+  assert.deepEqual(manifest.allowedTools, ['generate_image', 'get_canvas_context']);
+  assert.match(manifest.description, /编辑海报/);
   assert.equal(manifest.promptStyle, 'json-text');
   assert.match(manifest.generationContract, /valid JSON object/i);
   assert.match(manifest.generationContract, /editorial_direction/);
-  assert.match(manifest.generationContract, /margins_and_safe_area/);
-  assert.match(manifest.generationContract, /visualSummary/);
-  assert.match(manifest.generationContract, /preserve every literal user-supplied name and line exactly/i);
-  assert.match(manifest.generationContract, /publication system/);
-  assert.doesNotMatch(manifest.generationContract, /workflow|quality gate|invoke image tools/i);
-  assert.deepEqual(manifest.allowedTools, ['generate_image', 'get_canvas_context']);
-  assert.match(manifest.description, /拼贴艺术编辑海报/);
-  assert.match(manifest.planningGuidance, /typography-led cultural/i);
 });

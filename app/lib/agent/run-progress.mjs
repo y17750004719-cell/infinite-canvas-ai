@@ -8,9 +8,16 @@ const TOOL_LABELS = {
   read_context_entity: '读取上下文实体',
   load_visual_reference: '加载视觉参考',
   update_conversation_memory: '更新对话记忆',
+  handle_failed_task: '处理失败任务',
+  read_relevant_context: '读取相关上下文',
+  submit_agent_analysis_checkpoint: '深入分析当前需求',
+  request_user_decision: '等待你选择',
+  start_image_planning: '启动图片规划',
+  rewind_agent_analysis: '按修订回退任务',
   resolve_failed_task_recovery: '定位上次任务',
   handoff_to_image_planner: '交给 Image Planner',
   request_context_selection: '等待选择引用',
+  request_image_clarification: '等待补充信息',
   generate_image: '生成图片',
   start_skill_job: '启动 Skill 任务',
 };
@@ -47,6 +54,7 @@ function createBaseState(event = {}) {
     lastSequence: 0,
     steps: [],
     agentDone: false,
+    terminalFailed: false,
     assets: { expected: 0, settled: 0, succeeded: 0, failed: 0 },
     outcome: 'running',
   };
@@ -85,7 +93,7 @@ function needsAssetSettlement(steps) {
 }
 
 function deriveOutcome(state) {
-  if (state.steps.some((step) => step.status === 'failed')) return 'failed';
+  if (state.terminalFailed) return 'failed';
   if (state.steps.some((step) => step.status === 'waiting')) return 'waiting';
   if (!state.agentDone) return 'running';
   if (needsAssetSettlement(state.steps)) {
@@ -113,6 +121,7 @@ export function createInitialAgentRunProgress(runId) {
     lastSequence: 0,
     steps: [],
     agentDone: false,
+    terminalFailed: false,
     assets: { expected: 0, settled: 0, succeeded: 0, failed: 0 },
     outcome: 'running',
   };
@@ -301,6 +310,7 @@ export function reduceAgentRunProgress(state, event) {
     return {
       ...state,
       agentDone: true,
+      terminalFailed: true,
       outcome: 'failed',
       steps: state.steps.length > 0
         ? state.steps.map((step, index) => index === state.steps.length - 1

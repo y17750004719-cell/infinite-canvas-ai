@@ -2,7 +2,7 @@ import type { AgentContextEntity, AgentProposal } from './agent/context-referenc
 import type { AgentTaskContract } from './agent/execution-planner.types';
 import type { CanvasItem } from './canvas-types';
 import type { RegionSelection } from './image-region-selection.types';
-import type { AgentRecoveryRecord } from './agent/events';
+import type { AgentAnalysisSnapshot, AgentImagePlanningSnapshot, AgentRecoveryRecord } from './agent/events';
 
 export type { CanvasItem } from './canvas-types';
 export type { AgentTaskContract } from './agent/execution-planner.types';
@@ -64,6 +64,7 @@ export interface ChatMessage {
   resultTitle?: string;
   resultSummary?: string;
   imageOperation?: 'generate' | 'edit';
+  targetReferenceId?: string;
   imageProviderId?: string;
   sourceReferenceId?: string;
   sourceTaskId?: string;
@@ -74,6 +75,8 @@ export interface ChatMessage {
     optimized: boolean;
     operation: 'generate' | 'edit';
     targetReferenceId: string | null;
+    skillId: string | null;
+    skillRead: boolean;
   };
   agentImagePrompts?: Array<{
     index: number;
@@ -82,6 +85,7 @@ export interface ChatMessage {
     compilation?: {
       skillId: string | null;
       skillLabel: string | null;
+      skillRead: boolean;
       plannerProviderId: string | null;
       plannerModel: string;
       referenceCount: number;
@@ -118,10 +122,12 @@ export interface ChatMessage {
     };
     state: {
       taskId: string;
+      sourceUserMessageId?: string;
       operationId?: string;
-      skillSource?: 'manual' | 'auto' | null;
+      skillSource?: 'manual_ui' | 'explicit_text' | 'user_confirmation' | 'recovery' | 'manual' | 'auto' | null;
+      skillRead?: boolean;
       lastSequence?: number;
-      intent: 'image' | 'skill_action';
+      intent: 'chat' | 'image' | 'skill_action';
       skillId?: string;
       originalRequest: string;
       workingBrief: string;
@@ -137,6 +143,11 @@ export interface ChatMessage {
       };
       recoveryRecord?: AgentRecoveryRecord;
       recoveryMode?: 'fill_missing' | 'redo_all';
+      agentAnalysis?: AgentAnalysisSnapshot;
+      imagePlanning?: AgentImagePlanningSnapshot;
+      imageOperation?: 'generate' | 'edit';
+      targetReferenceId?: string;
+      mainAgentLoop?: AgentRecoveryRecord['mainAgentLoop'];
     };
   };
   agentClarificationResponsePayload?: {
@@ -239,7 +250,9 @@ export interface TaskSnapshot {
   topicId: string;
   taskId: string;
   contractVersion: number;
-  contract: AgentTaskContract;
+  contract?: AgentTaskContract;
+  agentAnalysis?: AgentAnalysisSnapshot;
+  imagePlanning?: AgentImagePlanningSnapshot;
   editBaseVersionId?: string | null;
   latestBatchId?: string | null;
   activeVersions: TaskSnapshotActiveVersion[];

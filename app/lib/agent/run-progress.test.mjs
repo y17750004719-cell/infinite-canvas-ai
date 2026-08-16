@@ -288,6 +288,37 @@ test('settling all announced assets completes an agent run', () => {
   });
 });
 
+test('recovered tool failures do not override a successful image delivery', () => {
+  let state = null;
+  let sequence = 0;
+  const progressEvent = (toolCallId, status, label, toolName = 'read_selected_skill') => ({
+    type: 'progress_update',
+    runId: 'run-recovered-tool',
+    operationId: 'run-recovered-tool',
+    sequence: ++sequence,
+    stepId: toolName === 'generate_image' ? 'generate_image' : 'skill_loading',
+    phase: toolName === 'generate_image' ? 'generating' : 'loading',
+    status,
+    label,
+    toolCallId,
+    toolName,
+  });
+
+  for (let index = 0; index < 2; index += 1) {
+    state = reduceAgentRunProgress(state, progressEvent(`skill-${index}`, 'active', '正在读取选中的 Skill'));
+    state = reduceAgentRunProgress(state, progressEvent(`skill-${index}`, 'failed', 'Skill 读取失败'));
+  }
+  state = reduceAgentRunProgress(state, progressEvent('image-1', 'active', '正在生成图片', 'generate_image'));
+  state = reduceAgentRunProgress(state, progressEvent('image-1', 'completed', '图片生成完成', 'generate_image'));
+  state = reduceAgentRunProgress(state, { type: 'assets_pending', count: 1 });
+  state = reduceAgentRunProgress(state, { type: 'agent_done' });
+  state = reduceAgentRunProgress(state, { type: 'assets_settled', succeeded: 1, failed: 0 });
+
+  assert.equal(state.outcome, 'completed');
+  assert.equal(state.terminalFailed, false);
+  assert.equal(state.steps.filter((step) => step.status === 'failed').length, 2);
+});
+
 test('partial asset failure settles as a warning', () => {
   let state = reduceAgentRunProgress(null, progress(1, {
     stepId: 'generate_image',
@@ -330,6 +361,7 @@ test('agent errors terminalize the run for retry rendering', () => {
   state = reduceAgentRunProgress(state, { type: 'agent_error' });
 
   assert.equal(state.agentDone, true);
+  assert.equal(state.terminalFailed, true);
   assert.equal(state.outcome, 'failed');
   assert.equal(state.steps.at(-1).status, 'failed');
 });

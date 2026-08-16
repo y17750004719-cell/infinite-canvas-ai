@@ -3,14 +3,18 @@ import assert from 'node:assert/strict';
 
 import { createAgentToolRegistry, executeAgentTool, getAgentModelTools } from './tool-registry.mjs';
 
-test('tool registry exposes the v1 domain tools and risk levels', () => {
+test('tool registry exposes the two-stage image domain tools and risk levels', () => {
   const registry = createAgentToolRegistry({
     createSkillJob: () => ({ id: 'job-1' }),
     getSkillJob: () => null,
   });
   assert.deepEqual([...registry.keys()], [
     'generate_image', 'get_canvas_context', 'get_conversation_memory', 'list_project_context',
-    'read_context_entity', 'load_visual_reference', 'update_conversation_memory', 'resolve_failed_task_recovery',
+    'read_context_entity', 'load_visual_reference', 'update_conversation_memory',
+    'handle_failed_task', 'read_relevant_context', 'submit_agent_analysis_checkpoint',
+    'request_user_decision', 'start_image_planning', 'rewind_agent_analysis', 'resolve_failed_task_recovery',
+    'request_main_agent_context',
+    'request_image_clarification', 'submit_image_execution_plan',
     'handoff_to_image_planner', 'request_context_selection', 'start_skill_job', 'get_skill_job',
   ]);
   assert.equal(registry.get('start_skill_job').requiresConfirmation, true);
@@ -21,6 +25,234 @@ test('tool registry exposes the v1 domain tools and risk levels', () => {
   assert.equal(registry.get('load_visual_reference').readOnly, true);
   assert.equal(registry.get('update_conversation_memory').terminal, undefined);
   assert.equal(registry.get('update_conversation_memory').countAgainstToolBudget, false);
+  assert.equal(registry.get('handle_failed_task').terminal, undefined);
+  assert.equal(registry.get('read_relevant_context').terminal, undefined);
+  assert.equal(registry.get('submit_agent_analysis_checkpoint').terminal, true);
+  assert.equal(registry.get('request_user_decision').terminal, true);
+  assert.equal(registry.get('start_image_planning').terminal, true);
+  assert.equal(registry.get('rewind_agent_analysis').terminal, true);
+  assert.equal(registry.get('request_main_agent_context').terminal, undefined);
+  assert.equal(registry.get('request_main_agent_context').readOnly, true);
+  assert.equal(registry.get('request_main_agent_context').countAgainstToolBudget, false);
+  assert.equal(registry.has('submit_image_compilation'), false);
+  assert.equal(registry.get('submit_image_execution_plan').terminal, true);
+  assert.equal(registry.get('submit_image_execution_plan').readOnly, true);
+  assert.equal(registry.get('submit_image_execution_plan').countAgainstToolBudget, false);
+});
+
+test('entry tools validate lazy routing contracts and forward runtime context', async () => {
+  const calls = [];
+  const registry = createAgentToolRegistry({
+    handleFailedTask: (args, context) => calls.push(['failed', args, context.runId]),
+    readRelevantContext: (args, context) => calls.push(['context', args, context.runId]),
+    startImagePlanning: (args, context) => calls.push(['image', args, context.runId]),
+  });
+  const context = {
+    allowedTools: ['handle_failed_task', 'read_relevant_context', 'start_image_planning'],
+    runId: 'run-1',
+  };
+  await executeAgentTool(registry, 'handle_failed_task', { action: 'inspect' }, context);
+  await executeAgentTool(registry, 'handle_failed_task', { action: 'resume', revision: '背景改成蓝色' }, context);
+  await executeAgentTool(registry, 'read_relevant_context', { scope: 'canvas', ids: ['canvas:1'] }, context);
+  const imageEntry = {
+    operation: 'edit',
+    requestedParameters: { outputCount: 1, aspectRatio: '1:1', deliveryMode: 'single' },
+    readiness: {
+      goal: 'Edit the selected image', targetIds: ['canvas:1'], constraints: [],
+      resolvedAmbiguities: ['The selected image is the edit target'], blockingUnknowns: [],
+    },
+  };
+  await executeAgentTool(registry, 'start_image_planning', imageEntry, context);
+  assert.deepEqual(calls, [
+    ['failed', { action: 'inspect' }, 'run-1'],
+    ['failed', { action: 'resume', revision: '背景改成蓝色' }, 'run-1'],
+    ['context', { scope: 'canvas', ids: ['canvas:1'] }, 'run-1'],
+    ['image', imageEntry, 'run-1'],
+  ]);
+  await assert.rejects(
+    () => executeAgentTool(registry, 'handle_failed_task', { action: 'retry' }, context),
+    /allowed value/,
+  );
+  await assert.rejects(
+    () => executeAgentTool(registry, 'read_relevant_context', { scope: 'memory' }, context),
+    /allowed value/,
+  );
+  await assert.rejects(
+    () => executeAgentTool(registry, 'start_image_planning', { ...imageEntry, operation: 'describe' }, context),
+    /allowed value/,
+  );
+});
+
+test('analysis and user-decision tools keep checkpoints bounded and decisions explicit', async () => {
+  const calls = [];
+  const registry = createAgentToolRegistry({
+    submitAgentAnalysisCheckpoint: (args) => calls.push(['checkpoint', args]),
+    requestUserDecision: (args) => calls.push(['decision', args]),
+    rewindAgentAnalysis: (args) => calls.push(['rewind', args]),
+  });
+  const checkpoint = {
+    objective: 'Compare migration paths',
+    currentUnderstanding: { goal: 'Choose a migration', expectedResult: 'A phased plan', domain: 'other' },
+    evidence: [], workingAssumptions: [], constraints: [],
+    unresolvedQuestions: [{ dimension: 'risk', reason: 'Needs deeper analysis', resolvableBy: 'analysis' }],
+    nextFocus: 'Compare operational risk',
+  };
+  const decision = {
+    scope: 'analysis', dimension: 'downtime', question: '允许停机吗？', reason: '会改变迁移方案',
+    recommendedOptionId: 'no-downtime',
+    options: [
+      { id: 'no-downtime', label: '不停机', answer: '采用不停机迁移', description: '步骤更多，风险更低' },
+      { id: 'maintenance', label: '维护窗口', answer: '允许维护窗口', description: '步骤更少，但会短暂停机' },
+    ],
+  };
+  const rewind = { stage: 'compilation', reason: 'User changed the deliverable', preservedFacts: ['skill'], changedRequirements: ['blue background'] };
+  await executeAgentTool(registry, 'submit_agent_analysis_checkpoint', checkpoint, { allowedTools: ['submit_agent_analysis_checkpoint'] });
+  await executeAgentTool(registry, 'request_user_decision', decision, { allowedTools: ['request_user_decision'] });
+  await executeAgentTool(registry, 'rewind_agent_analysis', rewind, { allowedTools: ['rewind_agent_analysis'] });
+  assert.deepEqual(calls, [['checkpoint', checkpoint], ['decision', decision], ['rewind', rewind]]);
+  await assert.rejects(
+    () => executeAgentTool(registry, 'request_user_decision', { ...decision, options: decision.options.slice(0, 1) }, { allowedTools: ['request_user_decision'] }),
+    /too few items/,
+  );
+});
+
+test('Prompt compilation is not exposed as a Main Agent tool', async () => {
+  const registry = createAgentToolRegistry();
+  await assert.rejects(
+    () => executeAgentTool(registry, 'submit_image_compilation', { renderPrompt: 'unused' }, { allowedTools: ['submit_image_compilation'] }),
+    /Unknown tool/,
+  );
+});
+
+test('image clarification uses only the two model-owned image stages', async () => {
+  const calls = [];
+  const registry = createAgentToolRegistry({
+    requestImageClarification: (args) => calls.push(['clarification', args]),
+  });
+  const clarificationArgs = {
+    stage: 'compilation', dimension: 'edit_target', question: '编辑哪张图？', reason: '存在多个目标',
+    options: [{ id: 'ref-1', label: '图 1', answer: '编辑图 1' }, { id: 'ref-2', label: '图 2', answer: '编辑图 2' }],
+  };
+  await executeAgentTool(registry, 'request_image_clarification', clarificationArgs, { allowedTools: ['request_image_clarification'] });
+  assert.deepEqual(calls, [['clarification', clarificationArgs]]);
+  await assert.rejects(
+    () => executeAgentTool(registry, 'request_image_clarification', { ...clarificationArgs, stage: 'brief' }, { allowedTools: ['request_image_clarification'] }),
+    /allowed value/,
+  );
+});
+
+test('Main Agent context remains the only exposed auxiliary read operation', async () => {
+  const calls = [];
+  const registry = createAgentToolRegistry({
+    requestMainAgentContext: (args, context) => {
+      calls.push(['context', args, context.marker]);
+      return { unlocked: args.scopes };
+    },
+  });
+  const context = { allowedTools: ['request_main_agent_context'], marker: 'run-1' };
+  assert.deepEqual(
+    await executeAgentTool(registry, 'request_main_agent_context', { scopes: ['conversation', 'project'] }, context),
+    { unlocked: ['conversation', 'project'] },
+  );
+  assert.deepEqual(calls, [
+    ['context', { scopes: ['conversation', 'project'] }, 'run-1'],
+  ]);
+  await assert.rejects(
+    () => executeAgentTool(registry, 'request_main_agent_context', { scopes: ['memory'] }, context),
+    /Invalid arguments/,
+  );
+});
+
+test('submit_image_execution_plan is a strict terminal draft and performs no mutation itself', async () => {
+  const drafts = [];
+  const registry = createAgentToolRegistry({
+    submitImageExecutionPlan: (args) => {
+      drafts.push(args);
+      return { terminate: true, type: 'image_execution_plan', draft: args };
+    },
+  });
+  const draft = {
+    decision: 'execute',
+    confidence: 'high',
+    clarification: null,
+    contextEntityIds: Array.from({ length: 8 }, (_, index) => `entity-${index}`),
+    visualReferenceIds: ['reference-1'],
+    visualSummary: {
+      version: 1,
+      references: [{
+        referenceId: 'reference-1',
+        description: 'A red poster.',
+        salientSubjects: ['poster'],
+        visibleText: ['SALE'],
+      }],
+    },
+    referenceRoles: [{ referenceId: 'reference-1', role: 'edit_target' }],
+    targetSelectionReason: 'The user selected this image.',
+    targetSelectionConfidence: 'high',
+    imageTask: {
+      operation: 'edit',
+      targetReferenceId: 'reference-1',
+      supportingReferenceIds: [],
+      targetRegionIds: [],
+      instruction: 'Replace SALE with OPEN.',
+      mustChange: ['visible text'],
+      mustPreserve: ['layout'],
+    },
+    brief: {
+      deliverable: 'One edited poster',
+      subject: 'Red poster',
+      style: ['minimal'],
+      literalCopy: ['OPEN'],
+      constraints: ['preserve layout'],
+    },
+    delivery: {
+      mode: 'single',
+      outputCount: 1,
+      panelCount: null,
+      variationAxes: [],
+      sharedInvariants: [],
+      distinctPerItem: [],
+      items: [],
+    },
+    generation: { aspectRatio: '2:3', promptFormat: 'text', prompt: 'Edit the red poster.', items: [] },
+  };
+  const result = await executeAgentTool(
+    registry,
+    'submit_image_execution_plan',
+    draft,
+    { allowedTools: ['submit_image_execution_plan'] },
+  );
+  assert.equal(result.terminate, true);
+  assert.deepEqual(drafts, [draft]);
+
+  await assert.rejects(
+    () => executeAgentTool(registry, 'submit_image_execution_plan', {
+      ...draft,
+      contextEntityIds: [...draft.contextEntityIds, 'entity-8'],
+    }, { allowedTools: ['submit_image_execution_plan'] }),
+    /too many items/,
+  );
+  await assert.rejects(
+    () => executeAgentTool(registry, 'submit_image_execution_plan', {
+      ...draft,
+      visualReferenceIds: ['a', 'b', 'c', 'd', 'e'],
+    }, { allowedTools: ['submit_image_execution_plan'] }),
+    /too many items/,
+  );
+  await assert.rejects(
+    () => executeAgentTool(registry, 'submit_image_execution_plan', {
+      ...draft,
+      delivery: { ...draft.delivery, outputCount: 0 },
+    }, { allowedTools: ['submit_image_execution_plan'] }),
+    /too small/,
+  );
+  await assert.rejects(
+    () => executeAgentTool(registry, 'submit_image_execution_plan', {
+      ...draft,
+      generation: { ...draft.generation, aspectRatio: '7:5' },
+    }, { allowedTools: ['submit_image_execution_plan'] }),
+    /allowed value/,
+  );
 });
 
 test('recovery gate tool terminates without accepting rewritten task content', async () => {

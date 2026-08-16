@@ -1100,7 +1100,7 @@ test('image card resolution selection re-syncs aspect ratio and quality without 
 
 test('image card count updates are clamped to the 1 through 9 stepper range', () => {
   const countSelectStart = pageSource.indexOf('onSelectImageCardCount={(count) => {');
-  const countSelectEnd = pageSource.indexOf('        onSelectImageCardAspectRatio={(aspectRatioId) => {', countSelectStart);
+  const countSelectEnd = pageSource.indexOf('        onSelectImageCardAspectRatio={handleChatImageAspectRatioChange}', countSelectStart);
 
   assert.notEqual(countSelectStart, -1);
   assert.notEqual(countSelectEnd, -1);
@@ -1116,8 +1116,8 @@ test('image card count updates are clamped to the 1 through 9 stepper range', ()
 test('image card unified parameter menu stays open for grouped selections and closes on outside click', () => {
   const sizeSelectStart = pageSource.indexOf('onSelectImageCardSize={(sizeId) => {');
   const sizeSelectEnd = pageSource.indexOf('        onSelectImageCardQuality={(qualityId) => {', sizeSelectStart);
-  const aspectSelectStart = pageSource.indexOf('onSelectImageCardAspectRatio={(aspectRatioId) => {');
-  const aspectSelectEnd = pageSource.indexOf('        onSelectedImageCardPanelInputChange={handleSelectedImageCardPanelInputChange}', aspectSelectStart);
+  const aspectSelectStart = pageSource.indexOf('const handleChatImageAspectRatioChange = useCallback((aspectRatioId: string) => {');
+  const aspectSelectEnd = pageSource.indexOf('  const capturePendingCanvasUndoSnapshot = useCallback(() => {', aspectSelectStart);
 
   assert.notEqual(sizeSelectStart, -1);
   assert.notEqual(sizeSelectEnd, -1);
@@ -1131,6 +1131,7 @@ test('image card unified parameter menu stays open for grouped selections and cl
 
   assert.equal(sizeSelectBlock.includes('setShowImageCardSettingsMenu(false);'), false);
   assert.equal(aspectSelectBlock.includes('setShowImageCardSettingsMenu(false);'), false);
+  assert.equal(pageSource.includes('onSelectImageCardAspectRatio={handleChatImageAspectRatioChange}'), true);
   assert.equal(pageSource.includes('const isInsideImageCardSettingsMenu ='), true);
   assert.equal(pageSource.includes('if (!isInsideImageCardSettingsMenu) {\n        setShowImageCardSettingsMenu(false);\n      }'), true);
 });

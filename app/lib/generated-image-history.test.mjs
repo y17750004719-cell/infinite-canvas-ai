@@ -130,6 +130,8 @@ test('normalizeGeneratedImageHistory preserves agent edit provenance', () => {
       optimized: true,
       operation: 'edit',
       targetReferenceId: 'canvas-reference:image-1',
+      skillId: 'magazine-poster',
+      skillRead: true,
     },
   }]);
   assert.equal(entry.operation, 'edit');
@@ -138,6 +140,8 @@ test('normalizeGeneratedImageHistory preserves agent edit provenance', () => {
   assert.equal(entry.sourceVersionId, 'version-source');
   assert.equal(entry.providerId, 'comfly');
   assert.equal(entry.model, 'gpt-image-2');
+  assert.equal(entry.promptTrace.skillId, 'magazine-poster');
+  assert.equal(entry.promptTrace.skillRead, true);
   assert.equal(entry.promptTrace.finalPrompt, 'Edit the first reference image. Replace only the bottle.');
   assert.equal(entry.promptTrace.targetReferenceId, 'canvas-reference:image-1');
 });

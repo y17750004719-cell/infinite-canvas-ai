@@ -35,7 +35,7 @@ test('Gemini chat drops empty messages and OpenAI compatibility retries only a m
   assert.match(source, /if \(parts\.length === 0\) continue;/);
   assert.match(source, /function needsFlatToolChoiceRetry/);
   assert.match(source, /normalized\.includes\('tool_choice\.name'\).*normalized\.includes\('missing'\)/s);
-  assert.match(source, /tool_choice: \{ name: toolChoice\.function\.name \}/);
+  assert.match(source, /tool_choice: \{ type: toolChoice\.type, name: toolChoice\.function\.name \}/);
 });
 
 test('strict tool rejection surfaces a Planner capability error', () => {

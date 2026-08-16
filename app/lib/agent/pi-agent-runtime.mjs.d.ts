@@ -21,6 +21,13 @@ export function runZFlowAgentBrain(input: {
   maxTurns?: number;
   maxToolCalls?: number;
   reserveClosingTurn?: boolean;
+  repairInvalidTerminalToolOnce?: string;
+  repairInvalidTerminalToolsOnce?: string[];
+  terminalToolContext?: Record<string, unknown> | null;
+  requireTerminalTool?: string;
+  requireInitialTool?: string;
+  initialToolNames?: string[];
+  getNextTurnToolNames?: (input: Record<string, unknown>) => string[] | Promise<string[]>;
   requireMutationTool?: boolean;
   signal?: AbortSignal;
   chatStream: (request: Record<string, unknown>) => AsyncIterable<unknown>;
@@ -31,13 +38,14 @@ export function runZFlowAgentBrain(input: {
   onToolResult?: (event: unknown) => void | Promise<void>;
   continuation?: {
     transcript: unknown[];
-    pendingCall: {
+    pendingCall?: {
       id: string;
       name: string;
       args: Record<string, unknown>;
       batch?: Array<{ id: string; name: string; args: Record<string, unknown> }>;
     };
-    toolResult: unknown;
+    toolResult?: unknown;
+    resumeMessage?: string;
     budgets?: {
       turnsUsed?: number;
       toolCallsUsed?: number;

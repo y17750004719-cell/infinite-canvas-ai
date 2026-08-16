@@ -50,16 +50,43 @@ export type AgentRecoveryRecord = {
     retryability: 'retryable' | 'requires_change' | 'unknown';
   };
   skillId: string | null;
+  imageOperation?: 'generate' | 'edit';
+  targetReferenceId?: string;
   contextEntityIds: string[];
   visualReferenceIds: string[];
   visualSummary?: AgentVisualSummary;
   taskSnapshot?: AgentTaskSnapshot;
+  mainAgentLoop?: {
+    transcript: unknown[];
+    pendingCall?: {
+      id: string;
+      name: string;
+      args: Record<string, unknown>;
+      batch?: Array<{ id: string; name: string; args: Record<string, unknown> }>;
+    };
+    budgets: {
+      turnsUsed: number;
+      toolCallsUsed: number;
+      budgetedToolCallsUsed: number;
+      mutationToolCallsUsed: number;
+    };
+    selectedSkillId?: string | null;
+    skillRead?: boolean;
+    contextScopes?: Array<'conversation' | 'project'>;
+  };
   completedAssetCount: number;
   createdAt: number;
 };
 
 export type AgentProgressStepId =
   | 'routing'
+  | 'agent_analysis'
+  | 'image_operation'
+  | 'image_context'
+  | 'image_skill'
+  | 'image_brief'
+  | 'image_prompt'
+  | 'image_contract'
   | 'context_resolution'
   | 'clarification'
   | 'skill_loading'
@@ -103,6 +130,8 @@ export type AgentPromptTrace = {
   optimized: boolean;
   operation: 'generate' | 'edit';
   targetReferenceId: string | null;
+  skillId: string | null;
+  skillRead: boolean;
 };
 
 export type AgentClarificationOption = {
@@ -114,8 +143,10 @@ export type AgentClarificationOption = {
 
 export type AgentClarificationState = {
   taskId: string;
+  sourceUserMessageId?: string;
   operationId?: string;
-  skillSource?: 'manual' | 'auto' | null;
+  skillSource?: 'manual_ui' | 'explicit_text' | 'user_confirmation' | 'recovery' | 'manual' | 'auto' | null;
+  skillRead?: boolean;
   lastSequence?: number;
   intent: 'chat' | 'image' | 'skill_action';
   skillId?: string;
@@ -124,6 +155,8 @@ export type AgentClarificationState = {
   askedDimensions: string[];
   answers: Array<{ dimension: string; question: string; answer: string }>;
   referenceImages?: string[];
+  imageOperation?: 'generate' | 'edit';
+  targetReferenceId?: string;
   visualSummary?: AgentVisualSummary;
   referenceContext?: {
     references: Array<{
@@ -179,7 +212,7 @@ export type AgentClarificationState = {
   recoveryMode?: 'fill_missing' | 'redo_all';
   mainAgentLoop?: {
     transcript: unknown[];
-    pendingCall: {
+    pendingCall?: {
       id: string;
       name: string;
       args: Record<string, unknown>;
@@ -192,7 +225,12 @@ export type AgentClarificationState = {
       mutationToolCallsUsed: number;
     };
     memoryPatches?: Record<string, unknown>[];
+    selectedSkillId?: string | null;
+    skillRead?: boolean;
+    contextScopes?: Array<'conversation' | 'project'>;
   };
+  agentAnalysis?: AgentAnalysisSnapshot;
+  imagePlanning?: AgentImagePlanningSnapshot;
 };
 
 export type AgentClarificationRequest = {
@@ -239,11 +277,115 @@ export type AgentClientAction = {
   batch?: { total: number; settled: number; succeeded: number; failed: number };
 };
 
+export type AgentImagePlanningStage =
+  | 'routing'
+  | 'image_planner'
+  | 'execution';
+
+export type AgentImagePlanningSnapshot = {
+  version: 3;
+  taskId: string;
+  runId: string;
+  sourceUserMessageId: string;
+  originalRequest: string;
+  resolvedRequirement: string | null;
+  revision: number;
+  currentStage: AgentImagePlanningStage;
+  stages: Record<string, {
+    status: 'pending' | 'in_progress' | 'completed' | 'awaiting_input' | 'failed' | 'skipped';
+    repairCount: number;
+    completedAt?: number;
+  }>;
+  decision: 'chat' | 'generate' | 'edit' | null;
+  operation: 'generate' | 'edit' | null;
+  targetReferenceId: string | null;
+  referenceIds: string[];
+  contextEntityIds: string[];
+  outputCount: number;
+  aspectRatio: string;
+  promptFormat: 'text' | 'json-text';
+  deliveryMode: 'single' | 'variants' | 'series' | 'composite' | null;
+  panelCount: number | null;
+  skill: {
+    id: string;
+    source: 'manual_ui' | 'explicit_text' | 'user_confirmation' | 'recovery';
+    read: boolean;
+    contentHash?: string;
+    manifest: {
+      executionMode?: 'agent_loop' | 'image_pipeline';
+      promptStyle?: 'text' | 'json-text';
+      aspectRatio?: string;
+      allowedTools: string[];
+      planningGuidance?: string;
+      generationContract?: string;
+    };
+  } | null;
+  executionPlan?: Record<string, unknown> | null;
+  abandonedAt: number | null;
+  failure: {
+    stage: AgentImagePlanningStage;
+    kind: string;
+    message: string;
+    failedAt: number;
+  } | null;
+};
+
+export type AgentAnalysisCheckpoint = {
+  objective: string;
+  currentUnderstanding: {
+    goal: string;
+    expectedResult: string;
+    domain: 'chat' | 'image' | 'skill_action' | 'other';
+  };
+  evidence: Array<{ sourceId: string; conclusion: string }>;
+  workingAssumptions: Array<{
+    id: string;
+    statement: string;
+    confidence: 'high' | 'medium' | 'low';
+  }>;
+  constraints: string[];
+  unresolvedQuestions: Array<{
+    dimension: string;
+    reason: string;
+    resolvableBy: 'analysis' | 'context' | 'user';
+  }>;
+  nextFocus: string;
+};
+
+export type AgentAnalysisSnapshot = {
+  version: 1;
+  taskId: string;
+  runId: string;
+  originalRequest: string;
+  status: 'analyzing' | 'awaiting_input' | 'ready' | 'failed' | 'abandoned';
+  checkpointCount: number;
+  currentObjective: string | null;
+  lockedFacts: {
+    uiMode: 'agent' | 'image' | 'chat';
+    selectedSkillId: string | null;
+    explicitReferenceIds: string[];
+    userDecisions: Array<{ dimension: string; answer: string }>;
+    operation?: 'generate' | 'edit';
+  };
+  workingState: {
+    currentUnderstanding: AgentAnalysisCheckpoint['currentUnderstanding'] | null;
+    evidence: AgentAnalysisCheckpoint['evidence'];
+    assumptions: AgentAnalysisCheckpoint['workingAssumptions'];
+    constraints: string[];
+    unresolvedQuestions: AgentAnalysisCheckpoint['unresolvedQuestions'];
+    nextFocus: string | null;
+  };
+  checkpoints: Array<AgentAnalysisCheckpoint & { index: number }>;
+  repairCount: number;
+};
+
 export type AgentTaskSnapshot = {
   topicId: string;
   taskId: string;
   contractVersion: number;
-  contract: AgentTaskContract;
+  contract?: AgentTaskContract;
+  agentAnalysis?: AgentAnalysisSnapshot;
+  imagePlanning?: AgentImagePlanningSnapshot;
   editBaseVersionId?: string | null;
   latestBatchId?: string | null;
   activeVersions: Array<{
@@ -306,8 +448,17 @@ export type AgentEvent =
       kind: string;
     }
   | { type: 'brief_compiled'; resolvedEntityIds: string[]; summary: string; mustPreserveCount: number }
-  | { type: 'skill_selected'; skillId: string; label: string; source: 'manual' | 'auto' }
+  | { type: 'skill_selected'; skillId: string; label: string; source: 'manual_ui' | 'explicit_text' | 'user_confirmation' | 'recovery' | 'manual' | 'auto' }
   | { type: 'active_skill_changed'; skill: { id: string; label: string } | null }
+  | {
+      type: 'image_parameters_locked';
+      parameters: {
+        outputCount: number;
+        aspectRatio: string;
+        deliveryMode: 'single' | 'variants' | 'series' | 'composite';
+        panelCount?: number;
+      };
+    }
   | {
       type: 'clarification_required';
       message: string;
@@ -324,6 +475,7 @@ export type AgentEvent =
       compilation?: {
         skillId: string | null;
         skillLabel: string | null;
+        skillRead: boolean;
         plannerProviderId: string | null;
         plannerModel: string;
         referenceCount: number;

@@ -13,6 +13,7 @@ const shouldAskClarification = clarifier.shouldAskClarification || (() => false)
 const buildBriefClarifierMessages = clarifier.buildBriefClarifierMessages || (() => []);
 const applyClarificationResponse = clarifier.applyClarificationResponse || (() => null);
 const isPotentialDesignExecutionRequest = clarifier.isPotentialDesignExecutionRequest || (() => false);
+const resolveImageOperationResponse = clarifier.resolveImageOperationResponse || (() => 'missing');
 
 test('brief clarifier exports the required public helpers', () => {
   assert.equal(typeof clarifier.parseBriefClarifierResult, 'function');
@@ -20,6 +21,14 @@ test('brief clarifier exports the required public helpers', () => {
   assert.equal(typeof clarifier.buildBriefClarifierMessages, 'function');
   assert.equal(typeof clarifier.applyClarificationResponse, 'function');
   assert.equal(typeof clarifier.isPotentialDesignExecutionRequest, 'function');
+  assert.equal(typeof clarifier.resolveImageOperationResponse, 'function');
+});
+
+test('image operation responses accept only generate or edit without throwing on stale option ids', () => {
+  assert.equal(resolveImageOperationResponse({ selectedOptionId: 'generate' }), 'generate');
+  assert.equal(resolveImageOperationResponse({ selectedOptionId: 'edit' }), 'edit');
+  assert.equal(resolveImageOperationResponse({ selectedOptionId: 'img-1785682569374-reference' }), null);
+  assert.equal(resolveImageOperationResponse({ customText: '参考程度高一些' }), null);
 });
 
 test('recognizes vague design execution language without hijacking analysis or planning chat', () => {

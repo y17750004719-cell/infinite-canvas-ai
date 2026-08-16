@@ -115,6 +115,8 @@ export function normalizeGeneratedImageHistory(entries) {
               optimized: entry.promptTrace.optimized === true,
               operation: entry.promptTrace.operation,
               targetReferenceId: toSafeString(entry.promptTrace.targetReferenceId) || null,
+              skillId: toSafeString(entry.promptTrace.skillId) || null,
+              skillRead: entry.promptTrace.skillRead === true,
             },
           }
         : {}),

@@ -15,6 +15,7 @@ export interface AgentPlanPresentation {
 }
 
 export interface AgentGenerationContract {
+  aspectRatio: string;
   promptFormat: 'text' | 'json-text';
   prompt: string;
   items: Array<{
@@ -92,20 +93,66 @@ export interface AgentRegionSelection {
 
 export interface AgentExecutionPlannerInput extends Record<string, unknown> {
   userMessage?: string;
+  originalRequest?: string;
+  resolvedRequirement?: string;
   referenceContext?: AgentPlannerReferenceContext | null;
   lockedSkillId?: string | null;
+  lockedImageOperation?: 'generate' | 'edit';
+  lockedTargetReferenceId?: string | null;
+  lockedOutputCount?: number;
+  lockedAspectRatio?: string;
+  lockedDeliveryMode?: 'single' | 'series' | 'variants' | 'composite';
+  lockedPanelCount?: number | null;
+  imageContractOnly?: boolean;
   visualSummary?: import('./events').AgentVisualSummary | null;
   frontDoorDecision?: {
     route: 'planner';
     skillId: string | null;
     confidence: 'high' | 'medium' | 'low';
   } | null;
+  chatFn?: (input: any) => Promise<any>;
+  chatStreamFn?: (input: any) => AsyncIterable<any>;
 }
 
 export interface AgentExecutionPlanValidationOptions extends Record<string, unknown> {
   referenceIds?: string[];
   regionIds?: string[];
   lockedSkillId?: string | null;
+}
+
+export interface MainAgentImageExecutionDraft {
+  decision: 'execute' | 'clarify';
+  confidence: 'high' | 'medium' | 'low';
+  clarification: AgentExecutionPlan['clarification'];
+  contextEntityIds: string[];
+  visualReferenceIds: string[];
+  visualSummary: import('./events').AgentVisualSummary | null;
+  referenceRoles: Array<{
+    referenceId: string;
+    role: AgentVisualReferenceRole;
+  }>;
+  targetSelectionReason: string | null;
+  targetSelectionConfidence: 'high' | 'medium' | 'low' | null;
+  imageTask: AgentImageTask | null;
+  brief: AgentExecutionPlan['brief'];
+  delivery: AgentExecutionPlan['delivery'];
+  generation: AgentGenerationContract | null;
+}
+
+export interface MainAgentImageExecutionAssemblyOptions {
+  manifest?: {
+    id: string;
+    allowedTools: string[];
+    executionMode?: 'agent_loop' | 'image_pipeline';
+    promptStyle?: 'text' | 'json-text';
+    aspectRatio?: string;
+  } | null;
+  lockedSkillId?: string | null;
+  readSkillId?: string | null;
+  lockedImageOperation?: 'generate' | 'edit' | null;
+  lockedTargetReferenceId?: string | null;
+  referenceIds?: string[];
+  userMessage?: string;
 }
 
 export interface AgentTaskContract {
@@ -185,7 +232,7 @@ export type AgentPlannerSourceDetail =
   | 'planner_failed';
 
 export interface AgentPlannerAttemptDiagnostic {
-  attempt: 1;
+  attempt: number;
   providerId: string;
   model: string;
   durationMs: number;
@@ -194,6 +241,11 @@ export interface AgentPlannerAttemptDiagnostic {
   validationErrors: PlanValidationIssue[];
   normalizedFields: string[];
   error?: { name: string; message: string; code?: string };
+  transportMode?: 'stream';
+  firstEventMs?: number | null;
+  firstToolCallMs?: number | null;
+  argumentChars?: number;
+  toolCallCompleted?: boolean;
 }
 
 export type AgentPlannerFailureReason =

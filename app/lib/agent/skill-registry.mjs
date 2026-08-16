@@ -1,5 +1,6 @@
 import path from 'node:path';
 import { readFile, realpath } from 'node:fs/promises';
+import { AGENT_IMAGE_ASPECT_RATIO_IDS } from './image-options.mjs';
 
 function resolveProjectRoot(options = {}) {
   return options.projectRoot || process.cwd();
@@ -8,6 +9,11 @@ function resolveProjectRoot(options = {}) {
 function registryPath(projectRoot) {
   return path.join(projectRoot, 'skills', 'registry.json');
 }
+
+const normalizeMatchText = (value) => typeof value === 'string'
+  ? value.trim().toLowerCase().replace(/\s+/g, ' ')
+  : '';
+const escapeRegExp = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 function isManifest(value) {
   return value &&
@@ -20,17 +26,12 @@ function isManifest(value) {
     Array.isArray(value.allowedTools) &&
     (value.executionMode === undefined || ['agent_loop', 'image_pipeline'].includes(value.executionMode)) &&
     (value.promptStyle === undefined || ['text', 'json-text'].includes(value.promptStyle)) &&
+    (value.aspectRatio === undefined || AGENT_IMAGE_ASPECT_RATIO_IDS.includes(value.aspectRatio)) &&
     (value.planningGuidance === undefined || typeof value.planningGuidance === 'string') &&
     (value.generationContract === undefined || typeof value.generationContract === 'string') &&
     (value.executionMode !== 'image_pipeline' || (typeof value.generationContract === 'string' && value.generationContract.trim().length > 0)) &&
     typeof value.enabled === 'boolean';
 }
-
-const normalizeMatchText = (value) => typeof value === 'string'
-  ? value.trim().toLowerCase().replace(/\s+/g, ' ')
-  : '';
-
-const escapeRegExp = (value) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 async function readRegistry(options = {}) {
   const projectRoot = resolveProjectRoot(options);
@@ -80,6 +81,12 @@ export async function loadSkillContent(skillId, options = {}) {
     throw new Error(`Skill path escapes skills root: ${manifest.id}`);
   }
   return readFile(skillFile, 'utf8');
+}
+
+export function resolveLockedSkillReadId(requestedSkillId, lockedSkillId = null) {
+  const locked = typeof lockedSkillId === 'string' ? lockedSkillId.trim() : '';
+  if (locked) return locked;
+  return typeof requestedSkillId === 'string' ? requestedSkillId.trim() : '';
 }
 
 export function selectSkillForPrompt(prompt, manifests) {

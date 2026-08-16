@@ -6,6 +6,8 @@ import type {
   AgentTaskContract,
   AgentPlannerResolution,
   AgentPlannerFailureReason,
+  MainAgentImageExecutionDraft,
+  MainAgentImageExecutionAssemblyOptions,
   PlanValidationIssue,
 } from './execution-planner.types';
 export type {
@@ -26,6 +28,8 @@ export type {
   AgentPlannerResolution,
   AgentPlannerFailureReason,
   PlanValidationIssue,
+  MainAgentImageExecutionDraft,
+  MainAgentImageExecutionAssemblyOptions,
 } from './execution-planner.types';
 
 export const AGENT_EXECUTION_PLAN_SCHEMA: Record<string, unknown>;
@@ -41,6 +45,7 @@ export function buildAgentExecutionPlannerMessages(input?: AgentExecutionPlanner
 }>;
 export function parseAgentExecutionPlan(raw: string, options?: AgentExecutionPlanValidationOptions): AgentExecutionPlan | null;
 export function validateAgentExecutionPlan(value: unknown, options?: AgentExecutionPlanValidationOptions): { plan: AgentExecutionPlan | null; validationErrors: PlanValidationIssue[]; normalizedFields: string[] };
+export function assembleMainAgentImageExecutionPlan(draft: MainAgentImageExecutionDraft, options?: MainAgentImageExecutionAssemblyOptions): { plan: AgentExecutionPlan | null; validationErrors: PlanValidationIssue[]; normalizedFields: string[] };
 export function buildAgentTaskContract(plan: AgentExecutionPlan | AgentTaskContract): AgentTaskContract;
 export function planAgentExecutionRequest(input?: AgentExecutionPlannerInput): Promise<AgentPlannerResolution>;
 export function executionPlanToImageDeliveryPlan(plan: AgentExecutionPlan): Record<string, unknown>;

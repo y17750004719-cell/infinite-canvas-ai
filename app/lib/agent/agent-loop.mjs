@@ -168,6 +168,29 @@ function extractAgentImagePresentation(rawResult) {
   return { title, summary, operation };
 }
 
+/**
+ * Keeps a long-running image request's NDJSON stream active while its supplier
+ * call is pending. The injected clock/timers keep this transport boundary testable.
+ * @param {{
+ *   intervalMs?: number,
+ *   now?: () => number,
+ *   onPulse?: (elapsedMs: number) => void,
+ *   setIntervalFn?: (callback: () => void, intervalMs: number) => unknown,
+ *   clearIntervalFn?: (timer: unknown) => void,
+ * }} options
+ */
+export function startAgentImageGenerationHeartbeat({
+  intervalMs = 10_000,
+  now = () => Date.now(),
+  onPulse = () => {},
+  setIntervalFn = setInterval,
+  clearIntervalFn = clearInterval,
+} = {}) {
+  const startedAt = now();
+  const timer = setIntervalFn(() => onPulse(Math.max(0, now() - startedAt)), intervalMs);
+  return () => clearIntervalFn(timer);
+}
+
 /** @param {{
  * source?: 'direct'|'loop'|'confirmed',
  * runId?: string,

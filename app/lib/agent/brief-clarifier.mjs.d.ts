@@ -23,7 +23,7 @@ export interface BriefClarifierResult {
 export interface AgentClarificationState {
   taskId: string;
   operationId?: string;
-  skillSource?: 'manual' | 'auto' | null;
+  skillSource?: 'manual_ui' | 'explicit_text' | 'user_confirmation' | 'recovery' | 'manual' | 'auto' | null;
   lastSequence?: number;
   intent: 'image' | 'skill_action';
   skillId?: string;
@@ -73,3 +73,4 @@ export function applyClarificationResponse(input?: Record<string, unknown>): {
   retry?: boolean;
   retryMode?: 'replan';
 } | null;
+export function resolveImageOperationResponse(response?: Record<string, unknown>): 'generate' | 'edit' | null;

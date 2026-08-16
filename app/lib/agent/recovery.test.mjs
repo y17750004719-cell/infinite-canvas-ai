@@ -23,6 +23,26 @@ test('recovery records are bounded and keep stable task state', () => {
   assert.equal(record.completedAssetCount, 2);
 });
 
+test('terminal contract recovery retains the operation lock and resumable Main Agent transcript', () => {
+  const record = createAgentRecoveryRecord({
+    taskId: 'task-1', runId: 'run-2', topicId: 'topic-1', sourceUserMessageId: 'user-1',
+    status: 'failed', resumeRoute: 'main_agent', intent: 'image', originalRequest: '编辑海报',
+    failureStage: 'terminal_contract', failureMessage: '图像合同未完成',
+    imageOperation: 'edit', targetReferenceId: 'reference-1',
+    mainAgentLoop: {
+      transcript: [{ role: 'assistant', content: [{ type: 'text', text: '准备提交合同' }] }],
+      budgets: { turnsUsed: 3, toolCallsUsed: 2, budgetedToolCallsUsed: 0, mutationToolCallsUsed: 0 },
+      selectedSkillId: 'poster',
+      skillRead: true,
+      contextScopes: [],
+    },
+  });
+  assert.equal(record.imageOperation, 'edit');
+  assert.equal(record.targetReferenceId, 'reference-1');
+  assert.equal(record.mainAgentLoop.skillRead, true);
+  assert.equal(record.mainAgentLoop.transcript.length, 1);
+});
+
 test('recovery records strictly normalize and persist bounded visual summaries', () => {
   const record = createAgentRecoveryRecord({
     taskId: 'task-1', runId: 'run-1', topicId: 'topic-1', sourceUserMessageId: 'user-1',

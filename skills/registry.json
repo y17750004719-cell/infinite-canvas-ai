@@ -21,7 +21,7 @@
   {
     "id": "modular-watercolor-collage-v0-1",
     "name": "Modular Watercolor Collage",
-    "description": "将任意主题或视觉摘要编译为四段式模块化水彩分区生图提示词；有视觉证据时保留主体、视角、空间关系、构图动线、色彩比例和氛围。",
+    "description": "模块化水彩色域拼贴的视觉方向：连续手工纸面、不规则颜料分区、克制的自然色与参考图转译。",
     "triggerHints": ["modular watercolor collage", "watercolor field collage", "reference-guided watercolor collage", "模块化水彩", "水彩分区拼贴", "水彩宫格", "不规则水彩色块", "宣纸色域拼贴", "东方水彩分区", "参考图模块水彩", "参考图水彩分区", "botanical paper collage", "watercolor paper collage", "水彩纸本拼贴", "植物拼贴", "东方水彩拼贴", "竖版植物海报", "水墨植物海报", "庭院植物海报"],
     "directTriggerHints": ["modular watercolor collage", "reference-guided watercolor collage", "模块化水彩", "水彩分区拼贴", "水彩宫格", "参考图模块水彩"],
     "planningGuidance": "Use as a pure prompt compiler for any subject rendered as irregular rectangular watercolor fields painted directly on one continuous handmade-paper surface. Default to 9:16 unless the user requests another ratio. When visualSummary is supplied, preserve its subject identity, viewpoint, spatial relationships, composition paths, palette proportions, light, and mood; without visualSummary, do not invent reference-specific facts. Prefer gc-minimal-zine-poster-v0-1 for sparse zine posters and magazine-poster for publication-led editorial collages.",
@@ -29,12 +29,13 @@
     "allowedTools": ["generate_image", "get_canvas_context"],
     "executionMode": "image_pipeline",
     "promptStyle": "text",
+    "aspectRatio": "9:16",
     "enabled": true
   },
   {
     "id": "gc-minimal-zine-poster-v0-1",
     "name": "Minimal Zine Poster",
-    "description": "将主题、句子、物件、情绪、文章构想或参考图转化为留白充足、旧纸印刷质感的日式或韩式极简 ZINE 编辑海报，并直接生成图片。",
+    "description": "日式或韩式极简 ZINE 海报的视觉方向：旧纸、留白、小字号实验排版、印刷缺陷与单一高饱和彩色锚点。",
     "triggerHints": ["minimal zine", "ZINE 海报", "zine poster", "极简纸张海报", "旧纸海报", "孔版印刷海报", "复印质感海报", "日式独立海报", "韩式独立海报"],
     "directTriggerHints": ["minimal zine", "ZINE 海报", "孔版印刷海报", "复印质感海报"],
     "planningGuidance": "Use for sparse Japanese or Korean indie zine posters with aged paper, large negative space, experimental small typography, print defects, and one saturated color anchor. Do not select it from the generic word poster alone. Prefer magazine-poster for conventional magazine covers, fashion editorials, publication-led layouts, or dense collage posters.",
@@ -42,6 +43,7 @@
     "allowedTools": ["generate_image", "get_canvas_context"],
     "executionMode": "image_pipeline",
     "promptStyle": "text",
+    "aspectRatio": "2:3",
     "enabled": true
   },
   {
@@ -57,7 +59,7 @@
   {
     "id": "magazine-poster",
     "name": "杂志封面与编辑海报",
-    "description": "设计高级杂志封面、期刊主视觉、文字主导的文化海报、报纸或杂志排版语言海报、拼贴艺术编辑海报，并生成 JSON 文本形式的生图提示词。",
+    "description": "杂志封面、期刊主视觉与编辑海报的视觉方向：艺术指导摄影、清晰的版式层级、印刷质感与编辑叙事。",
     "triggerHints": ["杂志封面", "杂志海报", "编辑海报", "文化海报", "拼贴艺术海报", "报纸排版", "期刊封面", "刊物主视觉", "杂志感海报", "magazine cover", "editorial poster", "editorial typography poster", "collage editorial poster", "fashion editorial"],
     "directTriggerHints": ["杂志封面", "编辑海报", "期刊封面", "magazine cover", "editorial poster"],
     "planningGuidance": "Use for magazine covers and editorial posters, including typography-led cultural posters, newspaper or magazine visual language, and art-directed collage posters. Do not select it from the generic word poster alone; require a clear editorial, publication, typographic, or art-directed poster context. Do not use it for image analysis, magazine articles, web magazine layouts, or complete brand identity systems.",

@@ -8,6 +8,7 @@ export interface SkillManifest {
   entryPrompt?: string;
   executionMode?: 'agent_loop' | 'image_pipeline';
   promptStyle?: 'text' | 'json-text';
+  aspectRatio?: string;
   planningGuidance?: string;
   generationContract?: string;
   enabled: boolean;
@@ -16,6 +17,7 @@ export interface SkillManifest {
 export function listSkillManifests(options?: { projectRoot?: string }): Promise<SkillManifest[]>;
 export function getSkillManifest(skillId: string, options?: { projectRoot?: string }): Promise<SkillManifest>;
 export function loadSkillContent(skillId: string, options?: { projectRoot?: string }): Promise<string>;
+export function resolveLockedSkillReadId(requestedSkillId: unknown, lockedSkillId?: unknown): string;
 export function selectSkillForPrompt(prompt: string, manifests: SkillManifest[]): SkillManifest | null;
 export function findDirectSkillMatches(prompt: string, manifests: SkillManifest[]): Array<{
   manifest: SkillManifest;

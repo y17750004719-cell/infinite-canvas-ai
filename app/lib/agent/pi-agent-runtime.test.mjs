@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { convertPiMessagesToChatMessages, runZFlowAgentBrain } from './pi-agent-runtime.mjs';
+import { createAgentToolRegistry, executeAgentTool, getAgentModelTools } from './tool-registry.mjs';
 
 const tools = [
   {
@@ -48,6 +49,81 @@ function commentaryToolStream(commentary, call) {
     yield { type: 'done' };
   };
 }
+
+function imageExecutionDraft() {
+  return {
+    decision: 'execute',
+    confidence: 'high',
+    clarification: null,
+    contextEntityIds: [],
+    visualReferenceIds: [],
+    visualSummary: null,
+    referenceRoles: [],
+    targetSelectionReason: null,
+    targetSelectionConfidence: null,
+    imageTask: {
+      operation: 'generate',
+      targetReferenceId: null,
+      supportingReferenceIds: [],
+      targetRegionIds: [],
+      instruction: 'Generate one poster.',
+      mustChange: [],
+      mustPreserve: [],
+    },
+    brief: {
+      deliverable: 'One poster',
+      subject: 'Poster',
+      style: [],
+      literalCopy: [],
+      constraints: [],
+    },
+    delivery: {
+      mode: 'single',
+      outputCount: 1,
+      panelCount: null,
+      variationAxes: [],
+      sharedInvariants: [],
+      distinctPerItem: [],
+      items: [],
+    },
+    generation: {
+      aspectRatio: '2:3',
+      promptFormat: 'text',
+      prompt: 'Generate one complete poster.',
+      items: [],
+    },
+  };
+}
+
+test('lightweight failed-task entry answers a greeting in one request without tools', async () => {
+  const registry = createAgentToolRegistry({
+    handleFailedTask: () => {
+      throw new Error('handle_failed_task should not run for a greeting');
+    },
+  });
+  let requestCount = 0;
+  const result = await runZFlowAgentBrain({
+    messages: [{ role: 'user', content: '哈咯' }],
+    providerId: 'provider-1',
+    model: 'test-model',
+    tools: getAgentModelTools(registry, ['handle_failed_task']),
+    toolChoice: 'auto',
+    maxTurns: 2,
+    maxToolCalls: 1,
+    chatStream: (request) => {
+      requestCount += 1;
+      assert.deepEqual(request.tools.map((tool) => tool.function.name), ['handle_failed_task']);
+      return textStream('哈咯，有什么需要？')();
+    },
+    executeTool: (name, args, context) => executeAgentTool(registry, name, args, {
+      allowedTools: ['handle_failed_task'],
+      toolCallId: context.toolCallId,
+    }),
+  });
+  assert.equal(requestCount, 1);
+  assert.equal(result.content, '哈咯，有什么需要？');
+  assert.equal(result.toolCalls, 0);
+});
 
 test('Pi runtime executes a sequential tool and continues to a final response', async () => {
   let requestCount = 0;
@@ -98,6 +174,27 @@ test('Pi runtime terminates on an explicit handoff without charging the query bu
   assert.equal(result.toolCalls, 1);
   assert.equal(result.budgetedToolCalls, 0);
   assert.equal(result.terminal.type, 'planner_handoff');
+});
+
+test('Pi runtime honors terminate returned by a non-terminal tool', async () => {
+  const result = await runZFlowAgentBrain({
+    messages: [{ role: 'user', content: 'read the locked skill' }],
+    providerId: 'provider-1',
+    model: 'test-model',
+    tools: [{
+      name: 'read_selected_skill',
+      parameters: { type: 'object', properties: {}, additionalProperties: false },
+      readOnly: true,
+      countAgainstToolBudget: false,
+    }],
+    toolChoice: 'required',
+    maxTurns: 2,
+    maxToolCalls: 0,
+    chatStream: () => toolStream([{ id: 'skill-1', name: 'read_selected_skill', args: {} }])(),
+    executeTool: async () => ({ terminate: true, type: 'skill_read_stage' }),
+  });
+  assert.equal(result.stopReason, 'completed');
+  assert.equal(result.terminal.type, 'skill_read_stage');
 });
 
 test('Pi runtime forwards an explicitly required terminal tool choice', async () => {
@@ -462,6 +559,367 @@ test('Pi runtime allows a non-budgeted terminal control during the closing turn'
   assert.equal(result.stopReason, 'completed');
   assert.equal(result.terminal.type, 'planner_handoff');
   assert.equal(result.budgetedToolCalls, 1);
+  assert.equal(requests, 2);
+});
+
+test('Pi runtime gives one restricted repair turn after an invalid handoff', async () => {
+  let requests = 0;
+  let executions = 0;
+  const exposedTools = [];
+  const handoff = {
+    name: 'handoff_to_image_planner',
+    parameters: {
+      type: 'object',
+      properties: { confidence: { type: 'string', enum: ['high'] } },
+      required: ['confidence'],
+      additionalProperties: false,
+    },
+    readOnly: true,
+    terminal: true,
+    countAgainstToolBudget: false,
+  };
+  const result = await runZFlowAgentBrain({
+    messages: [{ role: 'user', content: 'generate an image' }],
+    providerId: 'provider-1',
+    model: 'test-model',
+    tools: [{ ...tools[0], readOnly: true }, handoff],
+    maxTurns: 3,
+    maxToolCalls: 3,
+    reserveClosingTurn: true,
+    repairInvalidTerminalToolOnce: 'handoff_to_image_planner',
+    chatStream: (request) => {
+      requests += 1;
+      exposedTools.push(request.tools.map((tool) => tool.function.name));
+      return requests === 1
+        ? toolStream([{ id: 'bad-handoff', name: 'handoff_to_image_planner', args: {} }])()
+        : toolStream([{ id: 'fixed-handoff', name: 'handoff_to_image_planner', args: { confidence: 'high' } }])();
+    },
+    executeTool: async () => {
+      executions += 1;
+      return { terminate: true, type: 'planner_handoff' };
+    },
+  });
+  assert.equal(result.stopReason, 'completed');
+  assert.equal(result.terminal.type, 'planner_handoff');
+  assert.equal(requests, 2);
+  assert.equal(executions, 1);
+  assert.deepEqual(exposedTools, [
+    ['echo', 'handoff_to_image_planner'],
+    ['handoff_to_image_planner'],
+  ]);
+});
+
+test('Pi runtime can repair any declared structured terminal exit once', async () => {
+  let requests = 0;
+  const tool = {
+    name: 'request_user_decision',
+    parameters: {
+      type: 'object',
+      properties: { question: { type: 'string', minLength: 1 } },
+      required: ['question'],
+      additionalProperties: false,
+    },
+    readOnly: true,
+    terminal: true,
+    countAgainstToolBudget: false,
+  };
+  const result = await runZFlowAgentBrain({
+    messages: [{ role: 'user', content: 'ambiguous request' }],
+    providerId: 'provider-1',
+    model: 'test-model',
+    tools: [tool],
+    repairInvalidTerminalToolsOnce: ['request_user_decision'],
+    chatStream: () => {
+      requests += 1;
+      return requests === 1
+        ? toolStream([{ id: 'bad-decision', name: 'request_user_decision', args: {} }])()
+        : toolStream([{ id: 'fixed-decision', name: 'request_user_decision', args: { question: 'Which option?' } }])();
+    },
+    executeTool: async () => ({ terminate: true, type: 'user_decision' }),
+  });
+  assert.equal(requests, 2);
+  assert.equal(result.stopReason, 'completed');
+  assert.equal(result.terminal.type, 'user_decision');
+});
+
+test('Pi runtime fails once when the restricted handoff repair is still invalid', async () => {
+  let requests = 0;
+  const result = await runZFlowAgentBrain({
+    messages: [{ role: 'user', content: 'generate an image' }],
+    providerId: 'provider-1',
+    model: 'test-model',
+    tools: [{
+      name: 'handoff_to_image_planner',
+      parameters: {
+        type: 'object',
+        properties: { confidence: { type: 'string', enum: ['high'] } },
+        required: ['confidence'],
+        additionalProperties: false,
+      },
+      readOnly: true,
+      terminal: true,
+      countAgainstToolBudget: false,
+    }],
+    maxTurns: 4,
+    maxToolCalls: 4,
+    reserveClosingTurn: true,
+    repairInvalidTerminalToolOnce: 'handoff_to_image_planner',
+    chatStream: () => {
+      requests += 1;
+      return requests === 1
+        ? toolStream([{ id: 'bad-handoff-1', name: 'handoff_to_image_planner', args: {} }])()
+        : textStream('I will keep investigating')();
+    },
+    executeTool: async () => ({ terminate: true, type: 'planner_handoff' }),
+  });
+  assert.equal(result.stopReason, 'error');
+  assert.match(result.errorMessage, /closing turn ended/i);
+  assert.equal(requests, 2);
+});
+
+test('Pi runtime preserves the final terminal-tool validation error', async () => {
+  let requests = 0;
+  const result = await runZFlowAgentBrain({
+    messages: [{ role: 'user', content: 'generate a poster' }],
+    providerId: 'provider-1',
+    model: 'test-model',
+    tools: [{
+      name: 'submit_image_compilation',
+      parameters: { type: 'object', properties: {}, additionalProperties: false },
+      readOnly: true,
+      terminal: true,
+      countAgainstToolBudget: false,
+    }],
+    repairInvalidTerminalToolOnce: 'submit_image_compilation',
+    chatStream: () => {
+      requests += 1;
+      return toolStream([{ id: `compilation-${requests}`, name: 'submit_image_compilation', args: {} }])();
+    },
+    executeTool: async () => { throw new Error('Prompt compiler returned no renderPrompt'); },
+  });
+  assert.equal(result.stopReason, 'error');
+  assert.match(result.errorMessage, /Prompt compiler returned no renderPrompt/);
+  assert.doesNotMatch(result.errorMessage, /closing turn ended/i);
+  assert.equal(requests, 2);
+});
+
+test('Pi runtime converts prose into one restricted terminal-tool correction turn', async () => {
+  let requests = 0;
+  const exposedTools = [];
+  const result = await runZFlowAgentBrain({
+    messages: [{ role: 'user', content: 'generate a poster' }],
+    providerId: 'provider-1',
+    model: 'test-model',
+    tools: [
+      { ...tools[0], readOnly: true },
+      {
+        name: 'submit_image_execution_plan',
+        parameters: { type: 'object', properties: {}, additionalProperties: false },
+        readOnly: true,
+        terminal: true,
+        countAgainstToolBudget: false,
+      },
+    ],
+    maxTurns: 4,
+    maxToolCalls: 4,
+    reserveClosingTurn: true,
+    requireTerminalTool: 'submit_image_execution_plan',
+    chatStream: (request) => {
+      requests += 1;
+      exposedTools.push(request.tools.map((tool) => tool.function.name));
+      return requests === 1
+        ? textStream('Which color should I use?')()
+        : toolStream([{ id: 'plan-1', name: 'submit_image_execution_plan', args: {} }])();
+    },
+    executeTool: async () => ({ terminate: true, type: 'image_execution_plan' }),
+  });
+  assert.equal(result.stopReason, 'completed');
+  assert.equal(result.terminal.type, 'image_execution_plan');
+  assert.equal(requests, 2);
+  assert.deepEqual(exposedTools, [
+    ['echo', 'submit_image_execution_plan'],
+    ['submit_image_execution_plan'],
+  ]);
+});
+
+test('Pi runtime forces and terminates the isolated image routing stage', async () => {
+  let requests = 0;
+  const registry = createAgentToolRegistry({
+    startImagePlanning: () => ({ terminate: true, type: 'image_planning_started' }),
+  });
+  const result = await runZFlowAgentBrain({
+    messages: [{ role: 'user', content: 'generate a poster' }],
+    providerId: 'provider-1',
+    model: 'test-model',
+    tools: getAgentModelTools(registry, ['start_image_planning']),
+    initialToolNames: ['start_image_planning'],
+    requireInitialTool: 'start_image_planning',
+    requireTerminalTool: 'start_image_planning',
+    chatStream: (request) => {
+      requests += 1;
+      if (requests === 1) {
+        assert.deepEqual(request.tools.map((tool) => tool.function.name), ['start_image_planning']);
+        assert.deepEqual(request.toolChoice, { type: 'function', function: { name: 'start_image_planning' } });
+        return toolStream([{
+          id: 'operation-1',
+          name: 'start_image_planning',
+          args: { operation: 'generate', requestedParameters: { outputCount: 1, aspectRatio: '3:4', deliveryMode: 'single' }, readiness: { goal: 'Generate a poster', targetIds: [], constraints: [], resolvedAmbiguities: [], blockingUnknowns: [] } },
+        }])();
+      }
+    },
+    executeTool: (name, args, context) => executeAgentTool(registry, name, args, {
+      allowedTools: ['start_image_planning'],
+      toolCallId: context.toolCallId,
+    }),
+  });
+  assert.equal(result.stopReason, 'completed');
+  assert.equal(requests, 1);
+});
+
+test('Pi runtime retries a missed isolated image routing stage once', async () => {
+  let requests = 0;
+  const registry = createAgentToolRegistry({
+    startImagePlanning: () => ({ terminate: true, type: 'image_planning_started' }),
+  });
+  const result = await runZFlowAgentBrain({
+    messages: [{ role: 'user', content: 'generate a poster' }],
+    providerId: 'provider-1',
+    model: 'test-model',
+    tools: getAgentModelTools(registry, ['start_image_planning']),
+    initialToolNames: ['start_image_planning'],
+    requireInitialTool: 'start_image_planning',
+    requireTerminalTool: 'start_image_planning',
+    chatStream: (request) => {
+      requests += 1;
+      if (requests === 1) return textStream('I will inspect the reference first.')();
+      if (requests === 2) {
+        assert.deepEqual(request.tools.map((tool) => tool.function.name), ['start_image_planning']);
+        assert.equal(request.toolChoice, 'required');
+        return toolStream([{
+          id: 'operation-1',
+          name: 'start_image_planning',
+          args: { operation: 'generate', requestedParameters: { outputCount: 1, aspectRatio: '3:4', deliveryMode: 'single' }, readiness: { goal: 'Generate a poster', targetIds: [], constraints: [], resolvedAmbiguities: [], blockingUnknowns: [] } },
+        }])();
+      }
+    },
+    executeTool: (name, args, context) => executeAgentTool(registry, name, args, {
+      allowedTools: ['start_image_planning'],
+      toolCallId: context.toolCallId,
+    }),
+  });
+  assert.equal(result.stopReason, 'completed');
+  assert.equal(requests, 2);
+});
+
+test('Pi runtime includes the locked contract snapshot in the forced repair turn', async () => {
+  let requests = 0;
+  const result = await runZFlowAgentBrain({
+    messages: [{ role: 'user', content: 'generate two posters' }],
+    providerId: 'provider-1',
+    model: 'test-model',
+    tools: [{
+      name: 'submit_image_execution_plan',
+      parameters: {
+        type: 'object',
+        properties: { decision: { type: 'string', enum: ['execute'] } },
+        required: ['decision'],
+        additionalProperties: false,
+      },
+      readOnly: true,
+      terminal: true,
+      countAgainstToolBudget: false,
+    }],
+    repairInvalidTerminalToolOnce: 'submit_image_execution_plan',
+    requireTerminalTool: 'submit_image_execution_plan',
+    terminalToolContext: {
+      skillId: 'gc-minimal-zine-poster-v0-1',
+      imageOperation: 'generate',
+      aspectRatio: '2:3',
+      outputCount: 2,
+      clarification: null,
+      forbiddenTopLevelFields: ['version'],
+    },
+    chatStream: (request) => {
+      requests += 1;
+      if (requests === 1) {
+        return toolStream([{ id: 'bad-plan', name: 'submit_image_execution_plan', args: { version: 1 } }])();
+      }
+      const serialized = JSON.stringify(request.messages);
+      assert.match(serialized, /gc-minimal-zine-poster-v0-1/);
+      assert.match(serialized, /clarification/);
+      assert.match(serialized, /forbiddenTopLevelFields/);
+      assert.deepEqual(request.tools.map((tool) => tool.function.name), ['submit_image_execution_plan']);
+      assert.deepEqual(request.toolChoice, { type: 'function', function: { name: 'submit_image_execution_plan' } });
+      return toolStream([{ id: 'good-plan', name: 'submit_image_execution_plan', args: { decision: 'execute' } }])();
+    },
+    executeTool: async () => ({ terminate: true, type: 'image_execution_plan' }),
+  });
+  assert.equal(result.stopReason, 'completed');
+  assert.equal(requests, 2);
+});
+
+test('Pi runtime resumes a transcript-only terminal contract checkpoint with the contract tool forced', async () => {
+  let requests = 0;
+  const result = await runZFlowAgentBrain({
+    messages: [{ role: 'user', content: 'retry' }],
+    providerId: 'provider-1',
+    model: 'test-model',
+    tools: [{
+      name: 'submit_image_execution_plan',
+      parameters: { type: 'object', properties: {}, additionalProperties: false },
+      readOnly: true,
+      terminal: true,
+      countAgainstToolBudget: false,
+    }],
+    initialToolNames: ['submit_image_execution_plan'],
+    toolChoice: { type: 'function', function: { name: 'submit_image_execution_plan' } },
+    requireTerminalTool: 'submit_image_execution_plan',
+    continuation: {
+      transcript: [{
+        role: 'assistant',
+        content: [{ type: 'text', text: 'I will prepare the contract.' }],
+        stopReason: 'stop',
+      }],
+      resumeMessage: 'Submit the saved image contract now.',
+      budgets: { turnsUsed: 2, toolCallsUsed: 1, budgetedToolCallsUsed: 0, mutationToolCallsUsed: 0 },
+    },
+    chatStream: (request) => {
+      requests += 1;
+      assert.deepEqual(request.tools.map((tool) => tool.function.name), ['submit_image_execution_plan']);
+      assert.deepEqual(request.toolChoice, { type: 'function', function: { name: 'submit_image_execution_plan' } });
+      return toolStream([{ id: 'plan-1', name: 'submit_image_execution_plan', args: {} }])();
+    },
+    executeTool: async () => ({ terminate: true, type: 'image_execution_plan' }),
+  });
+  assert.equal(result.stopReason, 'completed');
+  assert.equal(requests, 1);
+});
+
+test('Pi runtime fails closed when the required terminal correction is still prose', async () => {
+  let requests = 0;
+  const result = await runZFlowAgentBrain({
+    messages: [{ role: 'user', content: 'generate a poster' }],
+    providerId: 'provider-1',
+    model: 'test-model',
+    tools: [{
+      name: 'submit_image_execution_plan',
+      parameters: { type: 'object', properties: {}, additionalProperties: false },
+      readOnly: true,
+      terminal: true,
+      countAgainstToolBudget: false,
+    }],
+    maxTurns: 4,
+    maxToolCalls: 4,
+    reserveClosingTurn: true,
+    requireTerminalTool: 'submit_image_execution_plan',
+    chatStream: () => {
+      requests += 1;
+      return textStream(requests === 1 ? 'Which color should I use?' : 'Please answer first')();
+    },
+    executeTool: async () => ({ terminate: true, type: 'image_execution_plan' }),
+  });
+  assert.equal(result.stopReason, 'error');
+  assert.match(result.errorMessage, /closing turn ended/i);
   assert.equal(requests, 2);
 });
 

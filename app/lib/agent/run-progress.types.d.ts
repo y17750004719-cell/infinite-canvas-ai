@@ -25,6 +25,7 @@ export interface AgentRunProgress {
   lastSequence: number;
   steps: AgentRunProgressStep[];
   agentDone: boolean;
+  terminalFailed: boolean;
   assets: {
     expected: number;
     settled: number;

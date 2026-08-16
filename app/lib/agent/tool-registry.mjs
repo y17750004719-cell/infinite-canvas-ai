@@ -1,4 +1,59 @@
+import { AGENT_IMAGE_ASPECT_RATIO_IDS } from './image-options.mjs';
+
 const SKILL_JOB_TYPES = new Set(['logo', 'brand']);
+
+const CONFIDENCE_SCHEMA = { type: 'string', enum: ['high', 'medium', 'low'] };
+const VISUAL_REFERENCE_ROLE_SCHEMA = {
+  type: 'string',
+  enum: ['edit_target', 'style_reference', 'content_reference', 'layout_reference', 'unresolved'],
+};
+const VISUAL_SUMMARY_SCHEMA = {
+  type: ['object', 'null'],
+  properties: {
+    version: { type: 'integer', enum: [1] },
+    references: {
+      type: 'array',
+      maxItems: 4,
+      items: {
+        type: 'object',
+        properties: {
+          referenceId: { type: 'string', minLength: 1 },
+          description: { type: 'string', minLength: 1, maxLength: 2000 },
+          salientSubjects: { type: 'array', maxItems: 24, items: { type: 'string', maxLength: 500 } },
+          visibleText: { type: 'array', maxItems: 24, items: { type: 'string', maxLength: 500 } },
+        },
+        required: ['referenceId', 'description', 'salientSubjects', 'visibleText'],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ['version', 'references'],
+  additionalProperties: false,
+};
+const CLARIFICATION_SCHEMA = {
+  type: ['object', 'null'],
+  properties: {
+    dimension: { type: 'string', minLength: 1 },
+    question: { type: 'string', minLength: 1 },
+    reason: { type: 'string' },
+    options: {
+      type: 'array', minItems: 2, maxItems: 4,
+      items: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', minLength: 1 },
+          label: { type: 'string', minLength: 1 },
+          answer: { type: 'string', minLength: 1 },
+          description: { type: 'string' },
+        },
+        required: ['id', 'label', 'answer'],
+        additionalProperties: false,
+      },
+    },
+  },
+  required: ['dimension', 'question', 'options'],
+  additionalProperties: false,
+};
 
 function schemaTypeMatches(value, type) {
   if (type === 'object') return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -25,6 +80,12 @@ export function validateAgentToolArguments(schema, value, toolName = 'tool', pat
   }
   if (typeof value === 'string' && Number.isInteger(schema.maxLength) && value.length > schema.maxLength) {
     throw new Error(`Invalid arguments for ${toolName}: ${path} is too long`);
+  }
+  if (typeof value === 'number' && Number.isFinite(schema.minimum) && value < schema.minimum) {
+    throw new Error(`Invalid arguments for ${toolName}: ${path} is too small`);
+  }
+  if (typeof value === 'number' && Number.isFinite(schema.maximum) && value > schema.maximum) {
+    throw new Error(`Invalid arguments for ${toolName}: ${path} is too large`);
   }
   if (Array.isArray(value)) {
     if (Number.isInteger(schema.minItems) && value.length < schema.minItems) {
@@ -66,7 +127,16 @@ export function createAgentToolRegistry({
   readContextEntity,
   loadVisualReference,
   updateConversationMemory,
+  handleFailedTask,
+  readRelevantContext,
+  submitAgentAnalysisCheckpoint,
+  requestUserDecision,
+  startImagePlanning,
+  rewindAgentAnalysis,
   resolveFailedTaskRecovery,
+  requestMainAgentContext,
+  requestImageClarification,
+  submitImageExecutionPlan,
   handoffToImagePlanner,
   requestContextSelection,
 } = {}) {
@@ -209,6 +279,225 @@ export function createAgentToolRegistry({
         return updateConversationMemory(args.memoryPatch);
       },
     }],
+    ['handle_failed_task', {
+      name: 'handle_failed_task',
+      requiresConfirmation: false,
+      readOnly: true,
+      countAgainstToolBudget: false,
+      description: 'Inspect or resume the supplied failed task, or explicitly continue with the current request instead.',
+      parameters: {
+        type: 'object',
+        properties: {
+          action: { type: 'string', enum: ['inspect', 'resume', 'continue_current_request'] },
+          revision: { type: 'string', minLength: 1, maxLength: 4000 },
+        },
+        required: ['action'],
+        additionalProperties: false,
+      },
+      execute: async (args, context) => {
+        if (typeof handleFailedTask !== 'function') throw new Error('handle_failed_task is unavailable');
+        return handleFailedTask(args, context);
+      },
+    }],
+    ['read_relevant_context', {
+      name: 'read_relevant_context',
+      requiresConfirmation: false,
+      readOnly: true,
+      countAgainstToolBudget: false,
+      description: 'Read one bounded conversation, project, or canvas context summary only when the current request needs it.',
+      parameters: {
+        type: 'object',
+        properties: {
+          scope: { type: 'string', enum: ['conversation', 'project', 'canvas'] },
+          query: { type: 'string', minLength: 1, maxLength: 1000 },
+          ids: {
+            type: 'array',
+            minItems: 1,
+            maxItems: 8,
+            items: { type: 'string', minLength: 1, maxLength: 200 },
+          },
+        },
+        required: ['scope'],
+        additionalProperties: false,
+      },
+      execute: async (args, context) => {
+        if (typeof readRelevantContext !== 'function') throw new Error('read_relevant_context is unavailable');
+        return readRelevantContext(args, context);
+      },
+    }],
+    ['submit_agent_analysis_checkpoint', {
+      name: 'submit_agent_analysis_checkpoint',
+      requiresConfirmation: false,
+      readOnly: true,
+      terminal: true,
+      countAgainstToolBudget: false,
+      description: 'Save bounded conclusions when the current request needs another analysis pass. This is not chain-of-thought.',
+      parameters: {
+        type: 'object',
+        properties: {
+          objective: { type: 'string', minLength: 1, maxLength: 1000 },
+          currentUnderstanding: {
+            type: 'object',
+            properties: {
+              goal: { type: 'string', minLength: 1, maxLength: 2000 },
+              expectedResult: { type: 'string', minLength: 1, maxLength: 2000 },
+              domain: { type: 'string', enum: ['chat', 'image', 'skill_action', 'other'] },
+            },
+            required: ['goal', 'expectedResult', 'domain'],
+            additionalProperties: false,
+          },
+          evidence: {
+            type: 'array', maxItems: 24,
+            items: {
+              type: 'object',
+              properties: {
+                sourceId: { type: 'string', minLength: 1, maxLength: 200 },
+                conclusion: { type: 'string', minLength: 1, maxLength: 2000 },
+              },
+              required: ['sourceId', 'conclusion'],
+              additionalProperties: false,
+            },
+          },
+          workingAssumptions: {
+            type: 'array', maxItems: 24,
+            items: {
+              type: 'object',
+              properties: {
+                id: { type: 'string', minLength: 1, maxLength: 200 },
+                statement: { type: 'string', minLength: 1, maxLength: 2000 },
+                confidence: CONFIDENCE_SCHEMA,
+              },
+              required: ['id', 'statement', 'confidence'],
+              additionalProperties: false,
+            },
+          },
+          constraints: { type: 'array', maxItems: 32, items: { type: 'string', minLength: 1, maxLength: 1000 } },
+          unresolvedQuestions: {
+            type: 'array', maxItems: 16,
+            items: {
+              type: 'object',
+              properties: {
+                dimension: { type: 'string', minLength: 1, maxLength: 200 },
+                reason: { type: 'string', minLength: 1, maxLength: 1000 },
+                resolvableBy: { type: 'string', enum: ['analysis', 'context', 'user'] },
+              },
+              required: ['dimension', 'reason', 'resolvableBy'],
+              additionalProperties: false,
+            },
+          },
+          nextFocus: { type: 'string', minLength: 1, maxLength: 1000 },
+        },
+        required: ['objective', 'currentUnderstanding', 'evidence', 'workingAssumptions', 'constraints', 'unresolvedQuestions', 'nextFocus'],
+        additionalProperties: false,
+      },
+      execute: async (args, context) => {
+        if (typeof submitAgentAnalysisCheckpoint !== 'function') throw new Error('submit_agent_analysis_checkpoint is unavailable');
+        return submitAgentAnalysisCheckpoint(args, context);
+      },
+    }],
+    ['request_user_decision', {
+      name: 'request_user_decision',
+      requiresConfirmation: false,
+      readOnly: true,
+      terminal: true,
+      countAgainstToolBudget: false,
+      description: 'Pause for a blocking choice that only the user can decide.',
+      parameters: {
+        type: 'object',
+        properties: {
+          scope: { type: 'string', enum: ['entry', 'analysis', 'operation', 'context', 'brief', 'prompt', 'general'] },
+          dimension: { type: 'string', minLength: 1, maxLength: 200 },
+          question: { type: 'string', minLength: 1, maxLength: 2000 },
+          reason: { type: 'string', minLength: 1, maxLength: 1000 },
+          recommendedOptionId: { type: 'string', minLength: 1, maxLength: 200 },
+          options: {
+            type: 'array', minItems: 2, maxItems: 4,
+            items: {
+              type: 'object',
+              properties: {
+                id: { type: 'string', minLength: 1, maxLength: 200 },
+                label: { type: 'string', minLength: 1, maxLength: 200 },
+                answer: { type: 'string', minLength: 1, maxLength: 2000 },
+                description: { type: 'string', minLength: 1, maxLength: 1000 },
+              },
+              required: ['id', 'label', 'answer', 'description'],
+              additionalProperties: false,
+            },
+          },
+        },
+        required: ['scope', 'dimension', 'question', 'reason', 'recommendedOptionId', 'options'],
+        additionalProperties: false,
+      },
+      execute: async (args, context) => {
+        if (typeof requestUserDecision !== 'function') throw new Error('request_user_decision is unavailable');
+        return requestUserDecision(args, context);
+      },
+    }],
+    ['start_image_planning', {
+      name: 'start_image_planning',
+      requiresConfirmation: false,
+      readOnly: true,
+      terminal: true,
+      countAgainstToolBudget: false,
+      description: 'Start staged image planning after deciding that the user explicitly wants image generation or editing.',
+      parameters: {
+        type: 'object',
+        properties: {
+          operation: { type: 'string', enum: ['generate', 'edit'] },
+          requestedParameters: {
+            type: 'object',
+            properties: {
+              outputCount: { type: 'integer', minimum: 1, maximum: 100 },
+              aspectRatio: { type: 'string', enum: AGENT_IMAGE_ASPECT_RATIO_IDS },
+              deliveryMode: { type: 'string', enum: ['single', 'variants', 'series', 'composite'] },
+              panelCount: { type: 'integer', minimum: 2, maximum: 100 },
+            },
+            additionalProperties: false,
+          },
+          readiness: {
+            type: 'object',
+            properties: {
+              goal: { type: 'string', minLength: 1, maxLength: 2000 },
+              targetIds: { type: 'array', maxItems: 20, items: { type: 'string', minLength: 1, maxLength: 200 } },
+              constraints: { type: 'array', maxItems: 32, items: { type: 'string', minLength: 1, maxLength: 1000 } },
+              resolvedAmbiguities: { type: 'array', maxItems: 32, items: { type: 'string', minLength: 1, maxLength: 1000 } },
+              blockingUnknowns: { type: 'array', maxItems: 0, items: { type: 'string' } },
+            },
+            required: ['goal', 'targetIds', 'constraints', 'resolvedAmbiguities', 'blockingUnknowns'],
+            additionalProperties: false,
+          },
+        },
+        required: ['operation', 'requestedParameters', 'readiness'],
+        additionalProperties: false,
+      },
+      execute: async (args, context) => {
+        if (typeof startImagePlanning !== 'function') throw new Error('start_image_planning is unavailable');
+        return startImagePlanning(args, context);
+      },
+    }],
+    ['rewind_agent_analysis', {
+      name: 'rewind_agent_analysis',
+      requiresConfirmation: false,
+      readOnly: true,
+      terminal: true,
+      countAgainstToolBudget: false,
+      description: 'Rewind a resumed task from the affected structured stage while preserving locked user facts.',
+      parameters: {
+        type: 'object',
+        properties: {
+          stage: { type: 'string', enum: ['analysis', 'routing', 'compilation'] },
+          reason: { type: 'string', minLength: 1, maxLength: 1000 },
+          preservedFacts: { type: 'array', maxItems: 32, items: { type: 'string', minLength: 1, maxLength: 1000 } },
+          changedRequirements: { type: 'array', minItems: 1, maxItems: 32, items: { type: 'string', minLength: 1, maxLength: 1000 } },
+        },
+        required: ['stage', 'reason', 'preservedFacts', 'changedRequirements'],
+        additionalProperties: false,
+      },
+      execute: async (args, context) => {
+        if (typeof rewindAgentAnalysis !== 'function') throw new Error('rewind_agent_analysis is unavailable');
+        return rewindAgentAnalysis(args, context);
+      },
+    }],
     ['resolve_failed_task_recovery', {
       name: 'resolve_failed_task_recovery',
       requiresConfirmation: false,
@@ -228,6 +517,174 @@ export function createAgentToolRegistry({
       execute: async (args) => {
         if (typeof resolveFailedTaskRecovery !== 'function') throw new Error('resolve_failed_task_recovery is unavailable');
         return resolveFailedTaskRecovery(args);
+      },
+    }],
+    ['request_main_agent_context', {
+      name: 'request_main_agent_context',
+      requiresConfirmation: false,
+      readOnly: true,
+      countAgainstToolBudget: false,
+      description: 'Unlock bounded conversation or project context tools for this Main Agent loop. This may be called only once per loop.',
+      parameters: {
+        type: 'object',
+        properties: {
+          scopes: {
+            type: 'array',
+            minItems: 1,
+            maxItems: 2,
+            items: { type: 'string', enum: ['conversation', 'project'] },
+          },
+        },
+        required: ['scopes'],
+        additionalProperties: false,
+      },
+      execute: async (args, context) => {
+        if (typeof requestMainAgentContext !== 'function') throw new Error('request_main_agent_context is unavailable');
+        return requestMainAgentContext(args, context);
+      },
+    }],
+    ['request_image_clarification', {
+      name: 'request_image_clarification',
+      requiresConfirmation: false,
+      readOnly: true,
+      terminal: true,
+      countAgainstToolBudget: false,
+      description: 'Pause the current image planning stage with one structured user question.',
+      parameters: {
+        type: 'object',
+        properties: {
+          stage: { type: 'string', enum: ['routing', 'compilation'] },
+          dimension: { type: 'string', minLength: 1 },
+          question: { type: 'string', minLength: 1 },
+          reason: { type: 'string', minLength: 1 },
+          options: CLARIFICATION_SCHEMA.properties.options,
+        },
+        required: ['stage', 'dimension', 'question', 'reason', 'options'],
+        additionalProperties: false,
+      },
+      execute: async (args, context) => {
+        if (typeof requestImageClarification !== 'function') throw new Error('request_image_clarification is unavailable');
+        return requestImageClarification(args, context);
+      },
+    }],
+    ['submit_image_execution_plan', {
+      name: 'submit_image_execution_plan',
+      requiresConfirmation: false,
+      readOnly: true,
+      terminal: true,
+      countAgainstToolBudget: false,
+      description: 'Submit the complete image execution draft. This ends semantic planning but does not execute an external image action.',
+      parameters: {
+        type: 'object',
+        properties: {
+          decision: { type: 'string', enum: ['execute', 'clarify'] },
+          confidence: CONFIDENCE_SCHEMA,
+          clarification: CLARIFICATION_SCHEMA,
+          contextEntityIds: { type: 'array', maxItems: 8, items: { type: 'string', minLength: 1 } },
+          visualReferenceIds: { type: 'array', maxItems: 4, items: { type: 'string', minLength: 1 } },
+          visualSummary: VISUAL_SUMMARY_SCHEMA,
+          referenceRoles: {
+            type: 'array', maxItems: 4,
+            items: {
+              type: 'object',
+              properties: {
+                referenceId: { type: 'string', minLength: 1 },
+                role: VISUAL_REFERENCE_ROLE_SCHEMA,
+              },
+              required: ['referenceId', 'role'],
+              additionalProperties: false,
+            },
+          },
+          targetSelectionReason: { type: ['string', 'null'] },
+          targetSelectionConfidence: { type: ['string', 'null'], enum: ['high', 'medium', 'low', null] },
+          imageTask: {
+            type: ['object', 'null'],
+            properties: {
+              operation: { type: 'string', enum: ['generate', 'edit'] },
+              targetReferenceId: { type: ['string', 'null'] },
+              sourceReferenceId: { type: ['string', 'null'] },
+              supportingReferenceIds: { type: 'array', maxItems: 4, items: { type: 'string', minLength: 1 } },
+              targetRegionIds: { type: 'array', items: { type: 'string', minLength: 1 } },
+              instruction: { type: 'string', minLength: 1 },
+              mustChange: { type: 'array', items: { type: 'string', minLength: 1 } },
+              mustPreserve: { type: 'array', items: { type: 'string', minLength: 1 } },
+            },
+            required: ['operation', 'targetReferenceId', 'supportingReferenceIds', 'instruction', 'mustChange', 'mustPreserve'],
+            additionalProperties: false,
+          },
+          brief: {
+            type: 'object',
+            properties: {
+              deliverable: { type: 'string', minLength: 1 },
+              subject: { type: 'string', minLength: 1 },
+              style: { type: 'array', items: { type: 'string', minLength: 1 } },
+              literalCopy: { type: 'array', items: { type: 'string' } },
+              constraints: { type: 'array', items: { type: 'string', minLength: 1 } },
+            },
+            required: ['deliverable', 'subject', 'style', 'literalCopy', 'constraints'],
+            additionalProperties: false,
+          },
+          delivery: {
+            type: 'object',
+            properties: {
+              mode: { type: 'string', enum: ['single', 'series', 'variants', 'composite'] },
+              outputCount: { type: 'integer', minimum: 1, maximum: 100 },
+              panelCount: { type: ['integer', 'null'], minimum: 2 },
+              variationAxes: { type: 'array', items: { type: 'string', minLength: 1 } },
+              sharedInvariants: { type: 'array', items: { type: 'string', minLength: 1 } },
+              distinctPerItem: { type: 'array', items: { type: 'string', minLength: 1 } },
+              items: {
+                type: 'array', maxItems: 100,
+                items: {
+                  type: 'object',
+                  properties: {
+                    index: { type: 'integer', minimum: 1 },
+                    label: { type: 'string', minLength: 1 },
+                    subject: { type: 'string', minLength: 1 },
+                    variation: { type: 'string' },
+                  },
+                  required: ['index', 'label', 'subject', 'variation'],
+                  additionalProperties: false,
+                },
+              },
+            },
+            required: ['mode', 'outputCount', 'panelCount', 'variationAxes', 'sharedInvariants', 'distinctPerItem', 'items'],
+            additionalProperties: false,
+          },
+          generation: {
+            type: ['object', 'null'],
+            properties: {
+              aspectRatio: { type: 'string', enum: AGENT_IMAGE_ASPECT_RATIO_IDS },
+              promptFormat: { type: 'string', enum: ['text', 'json-text'] },
+              prompt: { type: 'string', minLength: 1 },
+              items: {
+                type: 'array', maxItems: 100,
+                items: {
+                  type: 'object',
+                  properties: {
+                    index: { type: 'integer', minimum: 1 },
+                    label: { type: 'string', minLength: 1 },
+                    prompt: { type: 'string', minLength: 1 },
+                  },
+                  required: ['index', 'label', 'prompt'],
+                  additionalProperties: false,
+                },
+              },
+            },
+            required: ['aspectRatio', 'promptFormat', 'prompt', 'items'],
+            additionalProperties: false,
+          },
+        },
+        required: [
+          'decision', 'confidence', 'clarification', 'contextEntityIds', 'visualReferenceIds',
+          'visualSummary', 'referenceRoles', 'targetSelectionReason', 'targetSelectionConfidence',
+          'imageTask', 'brief', 'delivery', 'generation',
+        ],
+        additionalProperties: false,
+      },
+      execute: async (args, context) => {
+        if (typeof submitImageExecutionPlan !== 'function') throw new Error('submit_image_execution_plan is unavailable');
+        return submitImageExecutionPlan(args, context);
       },
     }],
     ['handoff_to_image_planner', {

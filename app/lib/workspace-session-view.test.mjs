@@ -135,6 +135,51 @@ test('getRecentFailedAgentTask preserves the original request and failure stage 
   });
 });
 
+test('getRecentFailedAgentTask prefers the staged checkpoint over composer state', () => {
+  const result = getRecentFailedAgentTask([
+    { id: 'user-short', role: 'user', content: '再试一次' },
+    {
+      id: 'assistant-failed', role: 'assistant', content: 'internal validation detail', taskStatus: 'failed',
+      taskSnapshot: {
+        topicId: 'topic-1', taskId: 'task-root', contractVersion: 1, activeVersions: [],
+        imagePlanning: {
+          version: 1, taskId: 'task-root', runId: 'run-2', sourceUserMessageId: 'user-root',
+          originalRequest: '使用海报 Skill 编辑参考图', revision: 1, currentStage: 'prompt', stages: {},
+          operation: 'edit', targetReferenceId: 'ref-target', referenceIds: ['ref-target'], contextEntityIds: [],
+          outputCount: 1, aspectRatio: '3:4', promptFormat: 'text',
+          skill: { id: 'poster', source: 'manual_ui', read: true, manifest: { allowedTools: [] } },
+          contextAnalysis: {}, brief: {}, promptCompilation: null, abandonedAt: null,
+          failure: { stage: 'prompt', kind: 'validation', message: 'invalid prompt', failedAt: 1 },
+        },
+      },
+      agentRunProgress: { runId: 'run-2', intent: 'image', outcome: 'failed', steps: [] },
+    },
+  ]);
+  assert.equal(result.taskId, 'task-root');
+  assert.equal(result.sourceUserMessageId, 'user-root');
+  assert.equal(result.originalRequest, '使用海报 Skill 编辑参考图');
+  assert.equal(result.failure.stage, 'prompt');
+  assert.equal(result.skillId, 'poster');
+  assert.equal(result.imageOperation, 'edit');
+  assert.equal(result.targetReferenceId, 'ref-target');
+});
+
+test('getRecentFailedAgentTask skips abandoned image roots', () => {
+  const abandoned = createAgentRecoveryRecord({
+    taskId: 'task-abandoned', runId: 'run-abandoned', topicId: 'topic-1', sourceUserMessageId: 'user-1',
+    status: 'cancelled', resumeRoute: 'image_planner', intent: 'image', originalRequest: '取消的任务',
+    failureStage: 'cancelled', failureMessage: '运行已取消',
+    taskSnapshot: {
+      topicId: 'topic-1', taskId: 'task-abandoned', contractVersion: 1, activeVersions: [],
+      imagePlanning: { abandonedAt: Date.now() },
+    },
+  });
+  assert.equal(getRecentFailedAgentTask([
+    { id: 'user-1', role: 'user', content: '取消的任务' },
+    { id: 'assistant-1', role: 'assistant', taskStatus: 'cancelled', agentRecovery: abandoned },
+  ]), null);
+});
+
 test('getLatestAgentRecoveryForTask returns the latest state for the exact task only', () => {
   const recovery = (taskId, runId, completedAssetCount) => createAgentRecoveryRecord({
     taskId,
@@ -162,6 +207,74 @@ test('getLatestAgentRecoveryForTask returns the latest state for the exact task 
   assert.equal(latest.taskSnapshot.activeVersions.length, 2);
   assert.equal(getLatestAgentRecoveryForTask(messages, 'task-b').runId, 'run-b1');
   assert.equal(getLatestAgentRecoveryForTask(messages, 'missing'), null);
+});
+
+test('fallback recovery keeps the clarification root task across repeated failures', () => {
+  const messages = [
+    {
+      id: 'user-root',
+      role: 'user',
+      content: '生成一张极简海报',
+      skill: { id: 'poster', label: 'Poster' },
+    },
+    {
+      id: 'assistant-question',
+      role: 'assistant',
+      content: '',
+      agentClarification: {
+        request: { id: 'clarify-1', taskId: 'task-root', question: '使用什么颜色？', dimension: 'color', options: [] },
+        state: {
+          taskId: 'task-root',
+          sourceUserMessageId: 'user-root',
+          intent: 'image',
+          skillId: 'poster',
+          originalRequest: '生成一张极简海报',
+          workingBrief: '生成一张极简海报',
+          askedDimensions: [],
+          answers: [],
+        },
+      },
+    },
+    {
+      id: 'user-answer',
+      role: 'user',
+      content: '黑白',
+      agentClarificationResponsePayload: {
+        clarification: {
+          request: { id: 'clarify-1', taskId: 'task-root', question: '使用什么颜色？', dimension: 'color', options: [] },
+          state: {
+            taskId: 'task-root',
+            sourceUserMessageId: 'user-root',
+            intent: 'image',
+            skillId: 'poster',
+            originalRequest: '生成一张极简海报',
+            workingBrief: '生成一张极简海报',
+            askedDimensions: [],
+            answers: [],
+          },
+        },
+      },
+    },
+    {
+      id: 'assistant-failed',
+      role: 'assistant',
+      content: '生成失败',
+      taskStatus: 'failed',
+      agentRunProgress: {
+        runId: 'run-attempt-2',
+        intent: 'image',
+        outcome: 'failed',
+        steps: [{ stepId: 'generate', phase: 'image_pipeline', status: 'failed', label: '生成失败' }],
+      },
+    },
+  ];
+
+  const recovery = getRecentFailedAgentTask(messages);
+  assert.equal(recovery.taskId, 'task-root');
+  assert.equal(recovery.runId, 'run-attempt-2');
+  assert.equal(recovery.sourceUserMessageId, 'user-root');
+  assert.equal(recovery.originalRequest, '生成一张极简海报');
+  assert.equal(recovery.skillId, 'poster');
 });
 
 test('getLatestAgentRecoveryForTask stops at a later successful boundary for that task', () => {

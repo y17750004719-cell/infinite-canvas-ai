@@ -2,6 +2,7 @@ import {
   runAgentLoop,
   runAgentLoopContinue,
 } from '@earendil-works/pi-agent-core';
+import { materializeChatMessageImages } from '../reference-image-source.mjs';
 import { validateAgentToolArguments } from './tool-registry.mjs';
 
 const emptyUsage = () => ({
@@ -239,7 +240,7 @@ function createAssistantMessage(model, content = [], stopReason = 'pending', err
   };
 }
 
-function createProviderStreamFn({ chatStream, toolChoice = 'auto' }) {
+function createProviderStreamFn({ chatStream, resolveToolChoice = () => 'auto' }) {
   return async (model, context, options = {}) => {
     const stream = createStream();
     void (async () => {
@@ -265,7 +266,7 @@ function createProviderStreamFn({ chatStream, toolChoice = 'auto' }) {
               parameters: tool.parameters,
             },
           })),
-          toolChoice,
+          toolChoice: resolveToolChoice(),
           signal: options.signal,
           stream: true,
         };
@@ -364,7 +365,18 @@ function normalizeToolDefinition(entry) {
   };
 }
 
-function continuationMessages(transcript, pendingCall, toolResult) {
+function continuationMessages(transcript, pendingCall, toolResult, resumeMessage = '') {
+  if (!pendingCall) {
+    const messages = structuredClone(Array.isArray(transcript) ? transcript : []);
+    if (messages.at(-1)?.role === 'assistant') {
+      messages.push({
+        role: 'user',
+        content: [{ type: 'text', text: text(resumeMessage) || 'Resume the saved task now.' }],
+        timestamp: Date.now(),
+      });
+    }
+    return messages;
+  }
   const batchCallIds = new Set(
     (Array.isArray(pendingCall?.batch) ? pendingCall.batch : [pendingCall])
       .map((call) => text(call?.id))
@@ -403,10 +415,17 @@ export async function runZFlowAgentBrain({
   model,
   modelMetadata,
   tools = [],
+  initialToolNames,
+  getNextTurnToolNames,
   toolChoice = 'auto',
+  requireInitialTool = '',
   maxTurns = 6,
   maxToolCalls = 4,
   reserveClosingTurn = false,
+  repairInvalidTerminalToolOnce = '',
+  repairInvalidTerminalToolsOnce = [],
+  terminalToolContext = null,
+  requireTerminalTool = '',
   requireMutationTool = false,
   signal,
   chatStream,
@@ -424,15 +443,24 @@ export async function runZFlowAgentBrain({
   if (typeof executeTool !== 'function') throw new Error('Agent tool executor is unavailable');
 
   const piModel = createPiModel({ providerId, model, metadata: modelMetadata });
+  const repairableTerminalTools = new Set([
+    ...(Array.isArray(repairInvalidTerminalToolsOnce) ? repairInvalidTerminalToolsOnce : []),
+    repairInvalidTerminalToolOnce,
+  ].map(text).filter(Boolean));
   const counters = {
     turnCount: Number(continuation?.budgets?.turnsUsed) || 0,
     toolCallCount: Number(continuation?.budgets?.toolCallsUsed) || 0,
     mutationToolCallCount: Number(continuation?.budgets?.mutationToolCallsUsed) || 0,
     budgetedToolCallCount: Number(continuation?.budgets?.budgetedToolCallsUsed) || 0,
     executionCorrectionUsed: false,
+    terminalCorrectionUsed: false,
+    initialCorrectionUsed: false,
+    initialToolExecuted: !requireInitialTool,
+    initialToolError: '',
     budgetExceeded: false,
     executionRequired: false,
     invalidToolArguments: '',
+    lastToolError: '',
     truncatedToolCall: false,
     closingError: '',
     pendingConfirmation: null,
@@ -449,6 +477,9 @@ export async function runZFlowAgentBrain({
       throw new Error(`Required Agent tool is unavailable: ${requiredToolName || 'unknown'}`);
     }
   }
+  if (requireInitialTool && !normalizedTools.some((tool) => tool.name === requireInitialTool)) {
+    throw new Error(`Required initial Agent tool is unavailable: ${requireInitialTool}`);
+  }
   const closingToolNames = new Set(
     normalizedTools
       .filter((tool) => tool.terminal === true && tool.countAgainstToolBudget === false)
@@ -460,8 +491,18 @@ export async function runZFlowAgentBrain({
     parameters: entry.parameters || { type: 'object', properties: {} },
     executionMode: 'sequential',
     execute: async (toolCallId, args, toolSignal, onUpdate) => {
-      const result = await executeTool(entry.name, args, { toolCallId, signal: toolSignal, onUpdate });
+      let result;
+      try {
+        result = await executeTool(entry.name, args, { toolCallId, signal: toolSignal, onUpdate });
+      } catch (error) {
+        counters.lastToolError = error instanceof Error ? error.message : String(error);
+        if (repairableTerminalTools.has(entry.name) && !closingState.active) {
+          activateClosingTurn('terminal_tool_repair', entry.name);
+        }
+        throw error;
+      }
       rawResults.set(toolCallId, result);
+      if (entry.name === requireInitialTool) counters.initialToolExecuted = true;
       if (result?.confirmationRequired === true) {
         counters.pendingConfirmation = {
           toolCallId,
@@ -478,7 +519,7 @@ export async function runZFlowAgentBrain({
       }
       const modelResult = result?.modelResult ?? result;
       const publicResult = result?.publicResult ?? result;
-      if (entry.terminal === true) counters.terminal = result;
+      if (entry.terminal === true || result?.terminate === true) counters.terminal = result;
       return {
         content: [{ type: 'text', text: JSON.stringify(modelResult ?? null) }],
         details: {
@@ -489,7 +530,13 @@ export async function runZFlowAgentBrain({
       };
     },
   }));
+  const selectPiTools = (names) => {
+    if (!Array.isArray(names)) return piTools;
+    const allowed = new Set(names);
+    return piTools.filter((tool) => allowed.has(tool.name));
+  };
   const closingPiTools = piTools.filter((tool) => closingToolNames.has(tool.name));
+  const requiredToolChoice = (name) => ({ type: 'function', function: { name } });
   const closingState = {
     active: reserveClosingTurn && (
       counters.budgetedToolCallCount >= maxToolCalls
@@ -498,27 +545,59 @@ export async function runZFlowAgentBrain({
     steeringPending: false,
     skipCurrentStop: false,
     requested: false,
+    reason: '',
+    toolName: '',
   };
   if (closingState.active) closingState.steeringPending = true;
-  const activateClosingTurn = () => {
+  const activateClosingTurn = (reason = '', toolName = '') => {
     if (closingState.active) return;
     closingState.active = true;
     closingState.steeringPending = true;
     closingState.skipCurrentStop = true;
+    closingState.reason = reason;
+    closingState.toolName = text(toolName);
   };
 
-  const actualStreamFn = createProviderStreamFn({ chatStream, toolChoice });
+  const resolveClosingToolName = () => (
+    closingState.reason === 'terminal_tool_repair'
+      ? closingState.toolName || repairInvalidTerminalToolOnce || requireTerminalTool
+      : closingState.reason === 'terminal_tool_required'
+        ? requireTerminalTool
+        : ''
+  );
+  const resolveClosingPiTools = () => {
+    const requiredName = resolveClosingToolName();
+    return requiredName ? selectPiTools([requiredName]) : closingPiTools;
+  };
+  const terminalContextSuffix = isObject(terminalToolContext)
+    ? ` Locked runtime contract: ${JSON.stringify(terminalToolContext)}`
+    : '';
+  const actualStreamFn = createProviderStreamFn({
+    chatStream,
+    resolveToolChoice: () => {
+      if (!counters.initialToolExecuted && requireInitialTool) {
+        return counters.initialCorrectionUsed ? 'required' : requiredToolChoice(requireInitialTool);
+      }
+      const closingToolName = resolveClosingToolName();
+      return closingToolName ? requiredToolChoice(closingToolName) : toolChoice;
+    },
+  });
   const resolvedSystemPrompt = systemPrompt || (Array.isArray(messages) ? messages : [])
     .filter((message) => message?.role === 'system' && typeof message.content === 'string')
     .map((message) => message.content)
     .join('\n\n');
-  const piMessages = convertChatMessagesToPiMessages(messages, piModel);
+  const materializedMessages = continuation
+    ? messages
+    : (await materializeChatMessageImages(messages)).messages;
+  const piMessages = convertChatMessagesToPiMessages(materializedMessages, piModel);
   const prompt = piMessages.at(-1);
   if (!continuation && (!prompt || prompt.role !== 'user')) throw new Error('Agent prompt must end with a user message');
   const initialContext = {
     systemPrompt: resolvedSystemPrompt,
     messages: piMessages.slice(0, -1),
-    tools: closingState.active ? closingPiTools : piTools,
+    tools: closingState.active
+      ? resolveClosingPiTools()
+      : selectPiTools(!counters.initialToolExecuted && requireInitialTool ? [requireInitialTool] : initialToolNames),
   };
 
   const config = {
@@ -549,6 +628,12 @@ export async function runZFlowAgentBrain({
             validateAgentToolArguments(tool.parameters, call.args, call.name);
           }
         } catch (error) {
+          const repairableCall = batch.length === 1 && repairableTerminalTools.has(batch[0].name);
+          if (repairableCall && !closingState.active) {
+            batchCounts.set(assistantMessage, calls.length);
+            activateClosingTurn('terminal_tool_repair', batch[0].name);
+            return { block: true, reason: error instanceof Error ? error.message : String(error) };
+          }
           counters.invalidToolArguments = error instanceof Error ? error.message : String(error);
           batchCounts.set(assistantMessage, calls.length);
           return { block: true, reason: counters.invalidToolArguments };
@@ -588,8 +673,24 @@ export async function runZFlowAgentBrain({
       if (counters.pendingConfirmation) return { block: true, reason: 'Tool batch paused for confirmation' };
       return undefined;
     },
-    prepareNextTurn: async ({ message, context }) => {
+    prepareNextTurn: async ({ message, toolResults, context }) => {
       const usedTool = message?.content?.some((part) => part?.type === 'toolCall') === true;
+      const hasText = message?.content?.some((part) => part?.type === 'text' && part.text.trim()) === true;
+      if (!counters.initialToolExecuted && requireInitialTool) {
+        if (!usedTool && counters.initialCorrectionUsed) {
+          counters.initialToolError = `Provider did not call required tool ${requireInitialTool}`;
+          return undefined;
+        }
+        if (!usedTool) counters.initialCorrectionUsed = true;
+        return { context: { ...context, tools: selectPiTools([requireInitialTool]) } };
+      }
+      const invalidRepairCall = message?.content?.find((part) => (
+        part?.type === 'toolCall'
+        && repairableTerminalTools.has(part.name)
+        && !rawResults.has(part.id)
+        && toolResults?.some((result) => result?.toolCallId === part.id && result?.isError)
+      ));
+      if (invalidRepairCall && !closingState.active) activateClosingTurn('terminal_tool_repair', invalidRepairCall.name);
       if (
         reserveClosingTurn
         && !closingState.active
@@ -602,11 +703,30 @@ export async function runZFlowAgentBrain({
           || counters.turnCount >= Math.max(0, maxTurns - 1)
         )
       ) activateClosingTurn();
-      if (!closingState.active) return undefined;
+      if (
+        requireTerminalTool
+        && !closingState.active
+        && !counters.terminal
+        && !counters.pendingConfirmation
+        && !usedTool
+        && hasText
+        && !counters.terminalCorrectionUsed
+      ) {
+        counters.terminalCorrectionUsed = true;
+        activateClosingTurn('terminal_tool_required');
+      }
+      if (!closingState.active) {
+        const nextToolNames = typeof getNextTurnToolNames === 'function'
+          ? await getNextTurnToolNames({ message, toolResults, context, rawResults })
+          : null;
+        return Array.isArray(nextToolNames)
+          ? { context: { ...context, tools: selectPiTools(nextToolNames) } }
+          : undefined;
+      }
       return {
         context: {
           ...context,
-          tools: closingPiTools,
+          tools: resolveClosingPiTools(),
         },
       };
     },
@@ -619,6 +739,8 @@ export async function runZFlowAgentBrain({
       if (counters.invalidToolArguments) return true;
       if (counters.pendingConfirmation) return true;
       if (counters.terminal) return true;
+      if (counters.initialToolError) return true;
+      if (!counters.initialToolExecuted && requireInitialTool) return false;
       if (closingState.skipCurrentStop) {
         closingState.skipCurrentStop = false;
         return false;
@@ -626,6 +748,10 @@ export async function runZFlowAgentBrain({
       if (closingState.active) {
         if (counters.closingError) return true;
         if (counters.terminal) return true;
+        if (counters.lastToolError) {
+          counters.closingError = counters.lastToolError;
+          return true;
+        }
         const closingToolCalls = message?.content?.filter((part) => part?.type === 'toolCall') || [];
         const unavailableCall = closingToolCalls.find((part) => !closingToolNames.has(part.name));
         if (unavailableCall) {
@@ -634,7 +760,7 @@ export async function runZFlowAgentBrain({
         }
         const hasToolCall = closingToolCalls.length > 0;
         const hasFinalText = message?.content?.some((part) => part?.type === 'text' && part.text.trim()) === true;
-        if (!hasToolCall && hasFinalText) return true;
+        if (!hasToolCall && hasFinalText && !['terminal_tool_repair', 'terminal_tool_required'].includes(closingState.reason)) return true;
         counters.closingError = 'Agent closing turn ended without a final response or terminal control';
         return true;
       }
@@ -655,12 +781,23 @@ export async function runZFlowAgentBrain({
         role: 'user',
         content: [{
           type: 'text',
-          text: 'Context reading is finished. Do not call read or memory tools. Finish now with ordinary final text, handoff_to_image_planner, or request_context_selection. Do not return draft commentary without a final answer.',
+          text: closingState.reason === 'terminal_tool_repair'
+            ? `Your ${resolveClosingToolName() || 'terminal'} call was invalid. This is the only repair turn. Do not read more context or answer with prose. Call ${resolveClosingToolName() || 'the terminal tool'} with corrected arguments.${terminalContextSuffix}`
+            : closingState.reason === 'terminal_tool_required'
+              ? `This task requires a structured terminal decision. Do not answer or ask questions with prose. Call ${requireTerminalTool} now with decision execute, or decision clarify when user input is required.${terminalContextSuffix}`
+            : 'Context reading is finished. Do not call read or memory tools. Finish now with ordinary final text, submit_image_execution_plan, or request_context_selection. Do not return draft commentary without a final answer.',
         }],
         timestamp: Date.now(),
       }];
     },
     getFollowUpMessages: async () => {
+      if (!counters.initialToolExecuted && requireInitialTool && counters.initialCorrectionUsed) {
+        return [{
+          role: 'user',
+          content: [{ type: 'text', text: `Call ${requireInitialTool} now. Do not answer with prose or call another tool.` }],
+          timestamp: Date.now(),
+        }];
+      }
       if (requireMutationTool && counters.mutationToolCallCount === 0 && !counters.executionCorrectionUsed) {
         counters.executionCorrectionUsed = true;
         return [{
@@ -717,8 +854,15 @@ export async function runZFlowAgentBrain({
 
   const continuationContext = continuation ? {
     systemPrompt: resolvedSystemPrompt,
-    messages: continuationMessages(continuation.transcript, continuation.pendingCall, continuation.toolResult),
-    tools: closingState.active ? closingPiTools : piTools,
+    messages: continuationMessages(
+      continuation.transcript,
+      continuation.pendingCall,
+      continuation.toolResult,
+      continuation.resumeMessage,
+    ),
+    tools: closingState.active
+      ? resolveClosingPiTools()
+      : selectPiTools(!counters.initialToolExecuted && requireInitialTool ? [requireInitialTool] : initialToolNames),
   } : null;
   const newMessages = continuationContext
     ? await runAgentLoopContinue(continuationContext, config, emit, signal, actualStreamFn)
@@ -732,6 +876,8 @@ export async function runZFlowAgentBrain({
         ? 'completed'
       : counters.executionRequired
       ? 'execution_required'
+      : counters.initialToolError
+        ? 'error'
       : counters.invalidToolArguments
         ? 'error'
       : counters.truncatedToolCall
@@ -756,13 +902,16 @@ export async function runZFlowAgentBrain({
     budgetedToolCalls: counters.budgetedToolCallCount,
     mutationToolCalls: counters.mutationToolCallCount,
     stopReason,
-    ...(counters.invalidToolArguments || counters.truncatedToolCall || counters.closingError || assistant?.errorMessage
+    ...(counters.invalidToolArguments || counters.truncatedToolCall || counters.initialToolError || counters.closingError || assistant?.errorMessage
       ? {
         errorMessage: counters.invalidToolArguments
           || (counters.truncatedToolCall
             ? 'Model returned an incomplete tool call; the tool was not executed.'
-            : counters.closingError || assistant.errorMessage),
+            : counters.initialToolError || counters.closingError || assistant.errorMessage),
       }
+      : {}),
+    ...(['terminal_tool_repair', 'terminal_tool_required'].includes(closingState.reason) && stopReason === 'error'
+      ? { failureStage: 'terminal_contract' }
       : {}),
     ...(counters.pendingConfirmation ? { confirmation: counters.pendingConfirmation } : {}),
     ...(counters.terminal ? { terminal: counters.terminal } : {}),

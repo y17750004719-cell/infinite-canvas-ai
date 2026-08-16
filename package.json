@@ -16,6 +16,7 @@
     "build": "next build",
     "start": "next start -p 3001",
     "test": "node --test",
+    "test:image-smoke": "node scripts/smoke-image-generation.mjs",
     "lint": "eslint app",
     "typecheck": "next typegen && tsc --noEmit",
     "check": "npm run lint && npm run typecheck && npm test && npm run build"

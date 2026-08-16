@@ -335,7 +335,7 @@ export function resolveAgentImageCountDecision({
   };
 }
 
-const EXPLICIT_ASPECT_RATIO_IDS = new Set([
+export const AGENT_IMAGE_ASPECT_RATIO_IDS = Object.freeze([
   '1:1',
   '9:16',
   '16:9',
@@ -352,6 +352,8 @@ const EXPLICIT_ASPECT_RATIO_IDS = new Set([
   '1:8',
   '8:1',
 ]);
+
+const EXPLICIT_ASPECT_RATIO_IDS = new Set(AGENT_IMAGE_ASPECT_RATIO_IDS);
 
 export function extractExplicitImageAspectRatio(input) {
   const text = typeof input === 'string' ? input : '';
@@ -374,6 +376,7 @@ export function normalizeAgentImageCount(requestedCount) {
 
 export function resolveAgentImageOptions({
   prompt,
+  contractAspectRatio,
   selectedAspectRatio,
   requestedSize,
   requestedQuality,
@@ -383,17 +386,24 @@ export function resolveAgentImageOptions({
   providerImageOptionProfiles = {},
 } = {}) {
   const promptAspectRatio = extractExplicitImageAspectRatio(prompt);
+  const normalizedContractAspectRatio = typeof contractAspectRatio === 'string'
+    && EXPLICIT_ASPECT_RATIO_IDS.has(contractAspectRatio.trim())
+    ? contractAspectRatio.trim()
+    : '';
   const normalizedSelectedAspectRatio = typeof selectedAspectRatio === 'string' && selectedAspectRatio.trim() && selectedAspectRatio !== 'auto'
     ? selectedAspectRatio.trim()
     : '';
-  const requestedAspectRatio = promptAspectRatio
+  const requestedAspectRatio = normalizedContractAspectRatio
+    || promptAspectRatio
     || normalizedSelectedAspectRatio
     || AGENT_DEFAULT_IMAGE_OPTIONS.aspectRatio;
-  const ratioSource = promptAspectRatio
-    ? 'prompt'
-    : normalizedSelectedAspectRatio
-      ? 'selected'
-      : 'default';
+  const ratioSource = normalizedContractAspectRatio
+    ? 'contract'
+    : promptAspectRatio
+      ? 'prompt'
+      : normalizedSelectedAspectRatio
+        ? 'selected'
+        : 'default';
   const normalizedRequestedSize = typeof requestedSize === 'string' && requestedSize.trim()
     ? requestedSize.trim()
     : AGENT_DEFAULT_IMAGE_OPTIONS.size;
@@ -476,6 +486,7 @@ export function buildAgentImageGenerationRequests(input = {}) {
     modelId,
     allowedModelIds,
     providerImageOptionProfiles = {},
+    contractAspectRatio,
     selectedAspectRatio,
     requestedSize,
     requestedQuality,
@@ -486,6 +497,7 @@ export function buildAgentImageGenerationRequests(input = {}) {
     .map((value) => value.trim());
   const options = resolveAgentImageOptions({
     prompt,
+    contractAspectRatio,
     selectedAspectRatio,
     requestedSize,
     requestedQuality,

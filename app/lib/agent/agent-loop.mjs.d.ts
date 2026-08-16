@@ -33,6 +33,14 @@ export function createAgentToolResultEvents(input: {
   | { type: 'tool_result'; toolCallId: string; result: Record<string, unknown> }
   | { type: 'client_action'; action: AgentClientAction }
 >;
+
+export function startAgentImageGenerationHeartbeat(input?: {
+  intervalMs?: number;
+  now?: () => number;
+  onPulse?: (elapsedMs: number) => void;
+  setIntervalFn?: (callback: () => void, intervalMs: number) => unknown;
+  clearIntervalFn?: (timer: unknown) => void;
+}): () => void;
 import type {
   AgentClientAction,
   AgentProgressPhase,

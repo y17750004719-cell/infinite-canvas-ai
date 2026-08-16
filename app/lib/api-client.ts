@@ -2036,7 +2036,7 @@ function flatToolChoiceRetryBody(
   if (!toolChoice || typeof toolChoice !== 'object') return null;
   return {
     ...requestBody,
-    tool_choice: { name: toolChoice.function.name },
+    tool_choice: { type: toolChoice.type, name: toolChoice.function.name },
   };
 }
 

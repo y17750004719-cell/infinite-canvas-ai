@@ -18,13 +18,13 @@ Xiaomi 浏览器登录是专用凭证交换，不是标准 OAuth。平台返回�
 - **只读上下文**：主 Agent 只按稳定 ID读取历史资产；本地不根据“上一张”“刚才那张”等文字自动选择图片。视觉资产通过 `load_visual_reference` 作为下一轮模型视觉输入加载，单次最多 4 张。
 - **主题记忆**：每个 Topic 持久化近期对话、滚动摘要、事实、偏好、活动任务和最近引用资产。Main Agent 通过非终止的 `update_conversation_memory` 暂存语义补丁，仅在最终回答或 Planner 交接成功后提交；失败或取消时丢弃。完整历史保留，但每轮只注入受限快照；不使用跨 Topic 检索或向量数据库。
 - **统一任务恢复**：失败、取消、部分成功或本地交付失败统一持久化 `AgentRecoveryRecord`，包含精确任务 ID、原始用户消息、失败分类、恢复路由、锁定 Skill、稳定引用和可选任务快照。当前 Topic 只暴露最近一个未解决记录；后续成功、确认或澄清会关闭旧候选。
-- **恢复门控**：用户手输新消息且存在恢复候选时，Main Agent 先运行最多两轮的受限 Pi 门控，只能调用 `resolve_failed_task_recovery`；不接收图片、完整历史、Topic 记忆、实体清单或其他工具。点击重试直接提交 `recoveryTaskId`，已知路由时不运行门控。门控只决定恢复、继续当前请求或说明无法恢复，不改写原始 Brief。
-- **恢复执行**：聊天和只读视觉重新进入 Main Agent；图片、Planner 和 Skill 失败重新进入 Image Planner 并生成新合同；已保存资产的本地交付失败只重新交付对应资产。部分成功必须先选择补齐缺失项或全部重做。原 Skill 默认保持，手动 Skill 可以覆盖；未知、禁用或被模型替换的 Skill 失败关闭。
+- **恢复门控**：用户手输新消息且存在恢复候选时，Main Agent 先运行最多两轮的受限 Pi 门控，只能调用 `resolve_failed_task_recovery`；不接收图片、完整历史、Topic 记忆、实体清单或其他工具。两轮都没有返回有效协议时，手输消息按新任务继续；精确重试仍失败关闭。点击重试直接提交 `recoveryTaskId`，已知路由时不运行门控。门控只决定恢复、继续当前请求或说明无法恢复，不改写原始 Brief。
+- **恢复执行**：聊天和只读视觉重新进入 Main Agent；图片和 Skill 失败重新进入 Main Agent 并生成新合同；已保存资产的本地交付失败只重新交付对应资产。部分成功必须先选择补齐缺失项或全部重做。原 Skill 默认保持，手动 Skill 可以覆盖；未知、禁用或被模型替换的 Skill 失败关闭。
 - **只读图片对话**：描述、识别、OCR、评价、比较、建议或只输出 Prompt，不改变、导出或生成图片。
-- **Image Planner**：接收用户原始需求、必要的原始历史、稳定引用 ID、Main Agent 的结构化 `visualSummary` 和唯一选中 Skill 的精简 manifest，形成生成、编辑、批量、导出或 Skill 执行合同。Planner 不接收图片像素或完整 `SKILL.md`；原始需求仍是权威 Brief，`visualSummary` 只提供可验证的视觉证据。
-- **图像交付动作**：会产生或改变交付物的生成、编辑、批量输出和导出操作，必须先经过 Image Planner。
+- **图像执行合同**：由 Main Agent 在读取必要上下文和唯一选中 Skill 后形成；本地只做协议、引用、权限、数量和执行安全校验，不再发起独立 Planner 模型请求。
+- **图像交付动作**：会产生或改变交付物的生成、编辑、批量输出和导出操作，必须先经过 Main Agent 的图像执行合同。
 - **图像 Skill**：`image_pipeline` manifest 的 `planningGuidance` 和 `generationContract` 必须足以独立指导 Image Planner 编译最终供应商 Prompt；不向 Planner 注入完整 `SKILL.md`，也不把 Skill 的工作流、输出检查或质量门塞进运行时合同。真实图像动作仍由 `generate_image` 执行。
 
-Image Planner 合同校验通过后，本地按合同确定性执行；不会再启动第二个模型 Loop 决定是否调用图像工具。供应商能力不足只作为模型配置错误处理，不添加供应商专用 Agent 协议分支。
+图像执行合同校验通过后，本地按合同确定性执行；不会再启动第二个模型 Loop 决定是否调用图像工具。供应商能力不足只作为模型配置错误处理，不添加供应商专用 Agent 协议分支。
 
 避免使用独立 Front Door、展示思维链、强制 finish 工具或把 Main Agent 普通文本视为协议错误。

@@ -13,6 +13,34 @@ const bounded = (value, limit) => typeof value === 'string' ? value.trim().slice
 const ids = (value, limit = 20) => Array.isArray(value)
   ? Array.from(new Set(value.map((entry) => bounded(String(entry || ''), 200)).filter(Boolean))).slice(0, limit)
   : [];
+const nonNegativeInt = (value, max = 100) => Math.min(max, Math.max(0, Math.floor(Number(value) || 0)));
+
+function normalizeMainAgentLoop(value) {
+  const input = record(value);
+  if (!input || !Array.isArray(input.transcript)) return null;
+  const pending = record(input.pendingCall);
+  const budgets = record(input.budgets) || {};
+  return {
+    transcript: structuredClone(input.transcript.slice(-80)),
+    ...(pending && bounded(pending.id, 200) && bounded(pending.name, 160) ? {
+      pendingCall: {
+        id: bounded(pending.id, 200),
+        name: bounded(pending.name, 160),
+        args: structuredClone(record(pending.args) || {}),
+        ...(Array.isArray(pending.batch) ? { batch: structuredClone(pending.batch.slice(0, 8)) } : {}),
+      },
+    } : {}),
+    budgets: {
+      turnsUsed: nonNegativeInt(budgets.turnsUsed),
+      toolCallsUsed: nonNegativeInt(budgets.toolCallsUsed),
+      budgetedToolCallsUsed: nonNegativeInt(budgets.budgetedToolCallsUsed),
+      mutationToolCallsUsed: nonNegativeInt(budgets.mutationToolCallsUsed),
+    },
+    selectedSkillId: bounded(input.selectedSkillId, 160) || null,
+    skillRead: input.skillRead === true,
+    contextScopes: ids(input.contextScopes, 2).filter((scope) => scope === 'conversation' || scope === 'project'),
+  };
+}
 
 export function sanitizeAgentFailureMessage(value, fallback = '任务未完成') {
   const cleaned = bounded(value, 12_000)
@@ -66,6 +94,10 @@ export function normalizeAgentRecoveryRecord(value) {
   const retryability = RETRYABILITY.has(failure.retryability) ? failure.retryability : 'unknown';
   const snapshot = record(input.taskSnapshot);
   const visualSummary = normalizeAgentVisualSummary(input.visualSummary);
+  const mainAgentLoop = normalizeMainAgentLoop(input.mainAgentLoop);
+  const imageOperation = input.imageOperation === 'generate' || input.imageOperation === 'edit'
+    ? input.imageOperation
+    : null;
   return {
     version: 1,
     taskId,
@@ -83,10 +115,13 @@ export function normalizeAgentRecoveryRecord(value) {
       retryability,
     },
     skillId: bounded(input.skillId, 160) || null,
+    ...(imageOperation ? { imageOperation } : {}),
+    ...(bounded(input.targetReferenceId, 200) ? { targetReferenceId: bounded(input.targetReferenceId, 200) } : {}),
     contextEntityIds: ids(input.contextEntityIds),
     visualReferenceIds: ids(input.visualReferenceIds),
     ...(visualSummary ? { visualSummary } : {}),
     ...(snapshot ? { taskSnapshot: structuredClone(snapshot) } : {}),
+    ...(mainAgentLoop ? { mainAgentLoop } : {}),
     completedAssetCount: Math.min(100, Math.max(0, Math.floor(Number(input.completedAssetCount) || 0))),
     createdAt: Number.isFinite(Number(input.createdAt)) ? Number(input.createdAt) : Date.now(),
   };
@@ -116,10 +151,13 @@ export function createAgentRecoveryRecord(input = {}) {
       retryability: input.retryability || classified.retryability,
     },
     skillId: input.skillId || null,
+    imageOperation: input.imageOperation,
+    targetReferenceId: input.targetReferenceId,
     contextEntityIds: input.contextEntityIds || [],
     visualReferenceIds: input.visualReferenceIds || [],
     visualSummary: input.visualSummary,
     taskSnapshot: input.taskSnapshot,
+    mainAgentLoop: input.mainAgentLoop,
     completedAssetCount: input.completedAssetCount,
     createdAt: input.createdAt || Date.now(),
   });

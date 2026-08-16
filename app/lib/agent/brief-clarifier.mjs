@@ -304,4 +304,9 @@ export function applyClarificationResponse({ state, request, response } = {}) {
     },
   };
 }
+
+export function resolveImageOperationResponse(response) {
+  const selectedOptionId = normalizeString(response?.selectedOptionId);
+  return selectedOptionId === 'generate' || selectedOptionId === 'edit' ? selectedOptionId : null;
+}
 import { isReferentialShorthand } from './context-reference.mjs';
