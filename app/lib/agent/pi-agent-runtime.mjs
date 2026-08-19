@@ -361,6 +361,7 @@ function normalizeToolDefinition(entry) {
     terminal: entry?.terminal === true,
     countAgainstToolBudget: entry?.countAgainstToolBudget !== false,
     requiresConfirmation: entry?.requiresConfirmation === true,
+    mayRequireConfirmation: entry?.mayRequireConfirmation === true,
     confirmationMessage: text(entry?.confirmationMessage),
   };
 }
@@ -407,6 +408,26 @@ function continuationMessages(transcript, pendingCall, toolResult, resumeMessage
   return messages;
 }
 
+function mergePiUserMessages(primary, additions) {
+  const base = Array.isArray(primary) ? primary : [];
+  const extra = Array.isArray(additions) ? additions : [];
+  if (extra.length === 0 || base.length === 0) return extra.length === 0 ? base : extra;
+  const supplementalText = extra.flatMap((message) => Array.isArray(message?.content)
+    ? message.content
+      .filter((part) => part?.type === 'text' && text(part.text))
+      .map((part) => text(part.text))
+    : [],
+  ).join('\n\n');
+  if (!supplementalText) return base;
+  return [{
+    ...base[0],
+    content: [
+      ...(Array.isArray(base[0]?.content) ? base[0].content : []),
+      { type: 'text', text: `\n\nUser update:\n${supplementalText}` },
+    ],
+  }];
+}
+
 /** @param {Record<string, any>} input */
 export async function runZFlowAgentBrain({
   messages = [],
@@ -431,9 +452,13 @@ export async function runZFlowAgentBrain({
   chatStream,
   executeTool,
   onEvent,
+  onAssistantTurnComplete,
+  onToolPending,
   onToolStart,
   onToolUpdate,
   onToolResult,
+  getExternalSteeringMessages,
+  getExternalFollowUpMessages,
   continuation,
 } = {}) {
   if (typeof providerId !== 'string' || !providerId || typeof model !== 'string' || !model) {
@@ -468,6 +493,9 @@ export async function runZFlowAgentBrain({
   };
   const rawResults = new Map();
   const pendingToolStarts = new Map();
+  const publishedToolStarts = new Set();
+  const publishedToolPendings = new Set();
+  const completedAssistantTurns = new Set();
   const batchCounts = new WeakMap();
   const toolCallBatches = new Map();
   const normalizedTools = (Array.isArray(tools) ? tools : []).map(normalizeToolDefinition);
@@ -599,13 +627,48 @@ export async function runZFlowAgentBrain({
       ? resolveClosingPiTools()
       : selectPiTools(!counters.initialToolExecuted && requireInitialTool ? [requireInitialTool] : initialToolNames),
   };
+  const publishToolStart = async (toolCallId) => {
+    if (publishedToolStarts.has(toolCallId)) return;
+    const event = pendingToolStarts.get(toolCallId);
+    if (!event) return;
+    const tool = normalizedTools.find((entry) => entry.name === event.toolName);
+    if (tool?.mayRequireConfirmation) return;
+    pendingToolStarts.delete(toolCallId);
+    publishedToolStarts.add(toolCallId);
+    await onToolStart?.({ id: event.toolCallId, name: event.toolName, args: event.args });
+    await onEvent?.(event);
+  };
+  const publishToolPending = async (toolCall) => {
+    if (!toolCall?.id || publishedToolPendings.has(toolCall.id)) return;
+    publishedToolPendings.add(toolCall.id);
+    await onToolPending?.({ id: toolCall.id, name: toolCall.name, args: toolCall.args || {} });
+  };
+  const publishAssistantTurnComplete = async (assistantMessage, disposition) => {
+    if (!assistantMessage) return;
+    const calls = Array.isArray(assistantMessage?.content)
+      ? assistantMessage.content.filter((part) => part?.type === 'toolCall')
+      : [];
+    const textContent = calls.length === 0
+      ? assistantMessage.content?.filter((part) => part?.type === 'text').map((part) => part.text || '').join('') || ''
+      : '';
+    const key = calls.length > 0
+      ? `tool:${calls.map((call) => call.id).join(':')}`
+      : `final:${assistantMessage.timestamp || ''}:${textContent}`;
+    if (completedAssistantTurns.has(key)) return;
+    completedAssistantTurns.add(key);
+    await onAssistantTurnComplete?.({
+      message: assistantMessage,
+      toolCalls: calls,
+      disposition: disposition || (calls.length > 0 ? 'commentary' : 'final'),
+    });
+  };
 
   const config = {
     model: piModel,
     toolExecution: 'sequential',
     convertToLlm: (items) => items.filter((item) => item?.role === 'user' || item?.role === 'assistant' || item?.role === 'toolResult'),
     transformContext: async (items) => items,
-    beforeToolCall: async ({ assistantMessage }) => {
+    beforeToolCall: async ({ assistantMessage, toolCall }) => {
       if (counters.invalidToolArguments) return { block: true, reason: counters.invalidToolArguments };
       if (counters.budgetExceeded) return { block: true, reason: 'Agent tool call budget exceeded' };
       if (counters.pendingConfirmation) return { block: true, reason: 'Another tool call is awaiting confirmation' };
@@ -658,6 +721,8 @@ export async function runZFlowAgentBrain({
         counters.toolCallCount += calls.length;
         counters.budgetedToolCallCount = nextCount;
         counters.mutationToolCallCount += calls.filter((call) => !normalizedTools.find((tool) => tool.name === call.name)?.readOnly).length;
+        await publishAssistantTurnComplete(assistantMessage, 'commentary');
+        for (const call of batch) await publishToolPending(call);
         const confirmationCall = calls.find((call) => normalizedTools.find((tool) => tool.name === call.name)?.requiresConfirmation);
         if (confirmationCall) {
           const confirmationTool = normalizedTools.find((tool) => tool.name === confirmationCall.name);
@@ -671,6 +736,7 @@ export async function runZFlowAgentBrain({
         }
       }
       if (counters.pendingConfirmation) return { block: true, reason: 'Tool batch paused for confirmation' };
+      await publishToolStart(toolCall.id);
       return undefined;
     },
     prepareNextTurn: async ({ message, toolResults, context }) => {
@@ -775,9 +841,7 @@ export async function runZFlowAgentBrain({
       return false;
     },
     getSteeringMessages: async () => {
-      if (!closingState.steeringPending) return [];
-      closingState.steeringPending = false;
-      return [{
+      const internal = !closingState.steeringPending ? [] : [{
         role: 'user',
         content: [{
           type: 'text',
@@ -789,29 +853,42 @@ export async function runZFlowAgentBrain({
         }],
         timestamp: Date.now(),
       }];
+      closingState.steeringPending = false;
+      const external = typeof getExternalSteeringMessages === 'function'
+        ? await getExternalSteeringMessages()
+        : [];
+      return mergePiUserMessages(internal, external);
     },
     getFollowUpMessages: async () => {
+      const external = typeof getExternalFollowUpMessages === 'function'
+        ? await getExternalFollowUpMessages()
+        : [];
       if (!counters.initialToolExecuted && requireInitialTool && counters.initialCorrectionUsed) {
-        return [{
+        return mergePiUserMessages([{
           role: 'user',
           content: [{ type: 'text', text: `Call ${requireInitialTool} now. Do not answer with prose or call another tool.` }],
           timestamp: Date.now(),
-        }];
+        }], external);
       }
       if (requireMutationTool && counters.mutationToolCallCount === 0 && !counters.executionCorrectionUsed) {
         counters.executionCorrectionUsed = true;
-        return [{
+        return mergePiUserMessages([{
           role: 'user',
           content: [{ type: 'text', text: 'This is an execution request. Call one allowed mutation tool now. Do not claim execution started without a real tool call.' }],
           timestamp: Date.now(),
-        }];
+        }], external);
       }
-      return [];
+      return Array.isArray(external) ? external : [];
     },
   };
 
   const emit = async (event) => {
     if (event.type === 'turn_start') counters.turnCount += 1;
+    if (event.type === 'turn_end' && event.message?.role === 'assistant') {
+      const hasToolCall = Array.isArray(event.message.content)
+        && event.message.content.some((part) => part?.type === 'toolCall');
+      await publishAssistantTurnComplete(event.message, hasToolCall ? 'commentary' : 'final');
+    }
     if (event.type === 'tool_execution_start') {
       pendingToolStarts.set(event.toolCallId, event);
       return;
@@ -823,16 +900,8 @@ export async function runZFlowAgentBrain({
       pendingToolStarts.delete(event.toolCallId);
       return;
     }
-    if (event.type === 'tool_execution_update' || event.type === 'tool_execution_end') {
-      const startEvent = pendingToolStarts.get(event.toolCallId);
-      if (startEvent) {
-        pendingToolStarts.delete(event.toolCallId);
-        await onToolStart?.({ id: startEvent.toolCallId, name: startEvent.toolName, args: startEvent.args });
-        await onEvent?.(startEvent);
-      }
-    }
     if (event.type === 'tool_execution_update') {
-      await onToolUpdate?.({ id: event.toolCallId, name: event.toolName, result: event.partialResult });
+      await onToolUpdate?.({ id: event.toolCallId, name: event.toolName, partialResult: event.partialResult });
     } else if (event.type === 'tool_execution_end') {
       const rawResult = rawResults.get(event.toolCallId);
       if (rawResult?.confirmationRequired !== true) {

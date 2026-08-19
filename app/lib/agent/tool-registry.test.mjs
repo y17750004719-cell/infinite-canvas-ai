@@ -66,7 +66,8 @@ test('read_imagegen_context reads the locked host and visual Skills without mode
   });
   const [modelTool] = getAgentModelTools(registry, ['read_imagegen_context']);
 
-  assert.deepEqual(modelTool.function.parameters, { type: 'object', properties: {}, additionalProperties: false });
+  assert.deepEqual(modelTool.function.parameters.required, []);
+  assert.deepEqual(modelTool.function.parameters.properties.publicProgress.required, []);
   assert.deepEqual(
     await executeAgentTool(registry, 'read_imagegen_context', {}, {
       allowedTools: ['read_imagegen_context'],
@@ -89,7 +90,7 @@ test('generate_image exposes a strict direct execution contract and forwards the
   const calls = [];
   const registry = createAgentToolRegistry({
     generateImage: (args, context) => {
-      calls.push([args, context.runId]);
+      calls.push([args, context.runId, context.publicProgress]);
       return { accepted: true };
     },
   });
@@ -114,12 +115,33 @@ test('generate_image exposes a strict direct execution contract and forwards the
     'operation', 'prompt', 'referenceIds', 'targetReferenceId', 'outputCount', 'aspectRatio', 'deliveryMode', 'panelCount',
   ]);
   assert.equal(modelTool.function.parameters.properties.items.items.additionalProperties, false);
+  assert.deepEqual(
+    modelTool.function.parameters.properties.publicProgress.required,
+    [],
+  );
 
   assert.deepEqual(
     await executeAgentTool(registry, 'generate_image', args, { allowedTools: ['generate_image'], runId: 'run-image-1' }),
     { accepted: true },
   );
-  assert.deepEqual(calls, [[args, 'run-image-1']]);
+  assert.deepEqual(calls, [[args, 'run-image-1', undefined]]);
+
+  const publicProgress = {
+    activeLabel: '正在生成图片',
+    completedLabel: '图片已生成',
+    completionSummary: '已生成两张红色方块图片。',
+    failedLabel: '图片生成失败',
+    promptPreparation: {
+      activeLabel: '正在生成提示词',
+      completedLabel: '提示词已生成',
+      completionSummary: '已根据参考图完成提示词。',
+      failedLabel: '提示词生成失败',
+    },
+  };
+  await executeAgentTool(registry, 'generate_image', { ...args, publicProgress }, {
+    allowedTools: ['generate_image'], runId: 'run-image-2',
+  });
+  assert.deepEqual(calls.at(-1), [args, 'run-image-2', publicProgress]);
 
   await assert.rejects(
     () => executeAgentTool(registry, 'generate_image', { ...args, prompt: '' }, { allowedTools: ['generate_image'] }),
@@ -377,6 +399,20 @@ test('tool registry only exposes schemas for allowed tools', () => {
   const registry = createAgentToolRegistry({ createSkillJob: () => null, getSkillJob: () => null });
   const definitions = getAgentModelTools(registry, ['get_canvas_context', 'unknown']);
   assert.deepEqual(definitions.map((tool) => tool.function.name), ['get_canvas_context']);
+});
+
+test('every model-visible tool accepts optional public progress without changing registry schemas', () => {
+  const registry = createAgentToolRegistry({ createSkillJob: () => null, getSkillJob: () => null });
+  const definitions = getAgentModelTools(registry, [...registry.keys()]);
+  for (const definition of definitions) {
+    const progress = definition.function.parameters.properties.publicProgress;
+    assert.ok(progress, `${definition.function.name} exposes publicProgress`);
+    assert.equal(definition.function.parameters.required.includes('publicProgress'), false);
+    assert.deepEqual(progress.required, []);
+  }
+  assert.equal(registry.get('get_canvas_context').parameters.properties.publicProgress, undefined);
+  assert.equal(definitions.find((tool) => tool.function.name === 'generate_image')
+    .function.parameters.properties.publicProgress.properties.promptPreparation.type, 'object');
 });
 
 test('Image Planner handoff can select one validated failed task without rewriting its request', async () => {

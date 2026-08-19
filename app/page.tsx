@@ -95,6 +95,7 @@ import {
   createInitialAgentRunProgress,
   createAgentProgressEventRouter,
   formatAgentProgressLabel,
+  getAgentRunElapsedMs,
   getAgentProgressElapsedMs,
   reduceAgentRunProgress,
   routeAgentProgressEvent,
@@ -418,6 +419,9 @@ interface ChatMessage {
     index: number;
     label: string;
     prompt: string;
+    runId?: string;
+    toolCallId?: string;
+    sequence?: number;
     compilation?: AgentImagePromptCompilation;
   }>;
   agentProgressMode?: 'full' | 'compact';
@@ -462,7 +466,7 @@ const applyAgentRunProgressEvents = (
 
 const getAgentProgressMarker = (
   status: AgentRunProgressStep['status'] | AgentRunProgress['outcome'],
-) => status === 'completed' ? '✓' : status === 'cancelled' ? '■' : status === 'waiting' ? '⏸' : status === 'active' || status === 'running' ? '○' : '!';
+) => status === 'completed' ? '✓' : status === 'cancelled' ? '■' : status === 'waiting' ? '⏸' : status === 'pending' || status === 'active' || status === 'running' ? '○' : '!';
 
 const getAgentProgressCompletionLabel = (progress: AgentRunProgress) => {
   if (progress.outcome === 'warning') {
@@ -527,6 +531,223 @@ const AgentProgressDetails = memo(function AgentProgressDetails({
     >
       {children}
     </details>
+  );
+});
+
+type AgentTimelineStep = AgentRunProgressStep & {
+  kind?: AgentRunProgressStep['kind'] | 'execution' | 'interaction';
+  sequence?: number;
+  timestampMs?: number;
+  lastUpdateSequence?: number;
+  detail?: unknown;
+  publicResult?: unknown;
+  completionSummary?: string;
+};
+
+type AgentTimelineProgress = AgentRunProgress & {
+  timelineVersion?: number;
+  runStartedAt?: number;
+  runEndedAt?: number;
+};
+
+const isAgentTimelineV2 = (progress: AgentRunProgress | undefined): progress is AgentTimelineProgress =>
+  Number((progress as AgentTimelineProgress | undefined)?.timelineVersion) >= 2;
+
+const timelineTimestamp = (step: AgentTimelineStep) =>
+  Number(step.sequence || step.timestampMs || step.lastUpdateSequence || 0);
+
+const getTimelineExecutionDetail = (step: AgentTimelineStep) => {
+  const value = step.publicResult ?? step.detail;
+  if (typeof value === 'string') return value.trim().slice(0, 1200);
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return '';
+  const record = value as Record<string, unknown>;
+  for (const key of ['summary', 'message', 'result', 'detail']) {
+    if (typeof record[key] === 'string' && record[key].trim()) return record[key].trim().slice(0, 1200);
+  }
+  return '';
+};
+
+const getAgentTimelineIcon = (step: AgentTimelineStep) => {
+  const value = `${step.toolName || ''} ${step.phase || ''}`.toLowerCase();
+  if (step.kind === 'interaction' || step.status === 'waiting') return MessageCircle;
+  if (value.includes('image') || value.includes('asset') || value.includes('render')) return ImageIcon;
+  if (value.includes('skill')) return Sparkles;
+  if (value.includes('read') || value.includes('context') || value.includes('reference')) return Eye;
+  return Workflow;
+};
+
+const getAgentTimelineLabel = (step: AgentTimelineStep) =>
+  formatAgentProgressLabel(step).replace(/^[^\p{L}\p{N}]*/u, '').trim();
+
+const getAgentTimelineStartedAt = (
+  progress: AgentTimelineProgress,
+  fallbackStartedAt?: number,
+) => {
+  const direct = Number(progress.runStartedAt || fallbackStartedAt || 0);
+  if (Number.isFinite(direct) && direct > 0) return direct;
+  const first = progress.steps
+    .map((step) => Number((step as AgentTimelineStep).timestampMs || step.startedAt || 0))
+    .find((value) => Number.isFinite(value) && value > 0);
+  return first || Date.now();
+};
+
+const AgentImagePromptDetails = memo(function AgentImagePromptDetails({
+  messageId,
+  prompts,
+  copiedPromptId,
+  onCopy,
+}: {
+  messageId: string;
+  prompts: Array<{ index: number; label: string; prompt: string }>;
+  copiedPromptId: string | null;
+  onCopy: (id: string, prompt: string) => void;
+}) {
+  return (
+    <div className="panel-scrollbar max-h-[320px] overflow-y-auto rounded-lg border border-[var(--workspace-border)] bg-[var(--workspace-surface-soft)] p-3">
+      {prompts.map((entry, position) => {
+        const copyKey = `${messageId}:prompt:${entry.index}`;
+        const label = prompts.length > 1 ? entry.label || `图片 ${position + 1}` : '最终 Prompt';
+        return (
+          <div key={entry.index} className="border-t border-[var(--workspace-border)] pt-3 first:border-t-0 first:pt-0">
+            <div className="mb-2 flex items-center justify-between gap-3 text-[11px] font-medium text-[var(--workspace-text-muted)]">
+              <span>{label}</span>
+              <button
+                type="button"
+                className="workspace-control-chip inline-flex h-7 flex-none items-center gap-1 rounded-lg px-2 text-[11px]"
+                onClick={() => onCopy(copyKey, entry.prompt)}
+                aria-label={`复制${label}提示词`}
+              >
+                {copiedPromptId === copyKey ? <Check size={12} /> : <Copy size={12} />}
+                <span>{copiedPromptId === copyKey ? '已复制' : '复制'}</span>
+              </button>
+            </div>
+            <pre className="whitespace-pre-wrap break-words [overflow-wrap:anywhere] font-sans text-[12px] leading-5 text-[var(--workspace-text-primary)]">
+              {entry.prompt}
+            </pre>
+          </div>
+        );
+      })}
+    </div>
+  );
+});
+
+const AgentTimelineCommentary = memo(function AgentTimelineCommentary({
+  text,
+}: {
+  text: string;
+}) {
+  return <>{text}</>;
+});
+
+const AgentTurnTimeline = memo(function AgentTurnTimeline({
+  progress,
+  now,
+  fallbackStartedAt,
+  finalContent,
+  interactionContent,
+  executionDetailContent,
+}: {
+  progress: AgentTimelineProgress;
+  now: number;
+  fallbackStartedAt?: number;
+  finalContent?: React.ReactNode;
+  interactionContent?: (step: AgentTimelineStep) => React.ReactNode;
+  executionDetailContent?: (step: AgentTimelineStep) => React.ReactNode;
+}) {
+  const startedAt = getAgentTimelineStartedAt(progress, fallbackStartedAt);
+  const terminal = ['completed', 'warning', 'failed', 'cancelled'].includes(progress.outcome);
+  const endedAt = Number(progress.runEndedAt || 0) || (terminal ? now : 0);
+  const elapsed = getGenerationDurationDisplay(getAgentRunElapsedMs(progress, now) || Math.max(0, (endedAt || now) - startedAt));
+  const header = progress.outcome === 'running'
+    ? `处理中 ${elapsed}`
+    : progress.outcome === 'waiting'
+      ? `等待你的操作 · 已处理 ${elapsed}`
+      : progress.outcome === 'failed'
+        ? `任务失败 · 已处理 ${elapsed}`
+        : progress.outcome === 'cancelled'
+          ? `任务已终止 · 已处理 ${elapsed}`
+          : `已处理 ${elapsed}`;
+  const steps = [...progress.steps]
+    .map((step) => step as AgentTimelineStep)
+    .sort((left, right) => timelineTimestamp(left) - timelineTimestamp(right));
+  return (
+    <section className="agent-turn-timeline max-w-[760px] py-1 text-[13px] leading-5" aria-live="polite">
+      <div className="mb-3 flex items-center gap-2 border-b border-[var(--workspace-border)] pb-2 text-[11px] text-[var(--workspace-text-muted)]">
+        <Clock3 size={12} aria-hidden="true" />
+        <span>{header}</span>
+      </div>
+      <div className="space-y-2.5">
+        {steps.map((step, index) => {
+          const key = `${step.stepId}:${step.toolCallId || ''}:${index}`;
+          const isCommentary = step.kind === 'commentary';
+          const isInteraction = step.kind === 'interaction';
+          if (isCommentary) {
+            return (
+              <p key={key} className="agent-progress-enter whitespace-pre-wrap break-words text-[var(--workspace-text-primary)]">
+                <AgentTimelineCommentary
+                  text={step.commentary || step.label}
+                />
+              </p>
+            );
+          }
+          if (isInteraction) {
+            return (
+              <div key={key} className="agent-progress-enter border-l-2 border-[var(--workspace-border)] pl-3">
+                {interactionContent?.(step) || <span>{step.label || '等待你的选择'}</span>}
+              </div>
+            );
+          }
+          const Icon = getAgentTimelineIcon(step);
+          const detail = getTimelineExecutionDetail(step);
+          const detailContent = executionDetailContent?.(step);
+          const completionSummary = step.status === 'completed' ? step.completionSummary?.trim() : '';
+          const content = (
+            <>
+              <Icon size={16} strokeWidth={1.6} className="shrink-0" aria-hidden="true" />
+              <span className="min-w-0 flex-1 break-words">{getAgentTimelineLabel(step)}</span>
+              {getAgentProgressDurationLabel(step, now) ? (
+                <span className="shrink-0 text-[11px] text-[var(--workspace-text-muted)]">
+                  {getAgentProgressDurationLabel(step, now)}
+                </span>
+              ) : null}
+            </>
+          );
+          const className = `agent-progress-enter flex min-h-7 items-center gap-2 text-left ${
+            step.status === 'active' || step.status === 'pending'
+              ? 'agent-timeline-running'
+              : 'text-[var(--workspace-text-muted)]'
+          } ${step.status === 'failed' ? 'text-red-600 dark:text-red-300' : ''}`;
+          return detail || detailContent ? (
+            <div key={key}>
+              <details className="group">
+                <summary className={`${className} cursor-pointer list-none [&::-webkit-details-marker]:hidden`}>
+                  {content}
+                  <ChevronRight size={13} className="shrink-0 transition-transform group-open:rotate-90" aria-hidden="true" />
+                </summary>
+                <div className="ml-5 mt-1 whitespace-pre-wrap break-words border-l border-[var(--workspace-border)] pl-3 text-[12px] leading-5 text-[var(--workspace-text-muted)]">
+                  {detailContent || detail}
+                </div>
+              </details>
+              {completionSummary ? (
+                <p className="ml-5 mt-0.5 whitespace-pre-wrap break-words text-[12px] leading-5 text-[var(--workspace-text-muted)]">
+                  {completionSummary}
+                </p>
+              ) : null}
+            </div>
+          ) : (
+              <div key={key}>
+                <div className={className}>{content}</div>
+              {completionSummary ? (
+                <p className="ml-5 mt-0.5 whitespace-pre-wrap break-words text-[12px] leading-5 text-[var(--workspace-text-muted)]">
+                  {completionSummary}
+                </p>
+              ) : null}
+            </div>
+          );
+        })}
+      </div>
+      {finalContent ? <div className="agent-timeline-final mt-3">{finalContent}</div> : null}
+    </section>
   );
 });
 
@@ -7930,14 +8151,17 @@ export default function AIWorkspace() {
     canvasImageReleaseTimersRef.current.forEach((timer) => clearTimeout(timer));
     canvasImageReleaseTimersRef.current.clear();
   }, []);
-  const hasActiveAgentImageGeneration = React.useMemo(
-    () => chatMessages.some((message) => message.agentRunProgress?.steps.some(
-      (step) => step.status === 'active' && isAgentImageGenerationStep(step)
-    )),
+  const hasActiveAgentRunClock = React.useMemo(
+    () => chatMessages.some((message) => {
+      const progress = message.agentRunProgress;
+      if (!progress) return false;
+      if (Number(progress.timelineVersion) >= 2) return !progress.runEndedAt && ['running', 'waiting'].includes(progress.outcome);
+      return progress.steps.some((step) => step.status === 'active' && isAgentImageGenerationStep(step));
+    }),
     [chatMessages]
   );
   useEffect(() => {
-    if (!hasActiveAgentImageGeneration) return;
+    if (!hasActiveAgentRunClock) return;
 
     setGenerationClockMs(Date.now());
     const timer = window.setInterval(() => {
@@ -7947,7 +8171,7 @@ export default function AIWorkspace() {
     return () => {
       window.clearInterval(timer);
     };
-  }, [hasActiveAgentImageGeneration]);
+  }, [hasActiveAgentRunClock]);
   const isSelectedTextCardGenerating =
     !!selectedTextCardPanelItem && !!activeCanvasTextGenerations[selectedTextCardPanelItem.id];
   const isSelectedImageCardGenerating =
@@ -8802,7 +9026,9 @@ export default function AIWorkspace() {
       return;
     }
     setPendingAgentConfirmation(pendingMessage.agentConfirmation);
-    if (!pendingMessage.agentConfirmationDismissed) setShowAgentConfirmationModal(true);
+    if (!pendingMessage.agentConfirmationDismissed && !isAgentTimelineV2(pendingMessage.agentRunProgress)) {
+      setShowAgentConfirmationModal(true);
+    }
   }, [chatMessages]);
 
   useEffect(() => {
@@ -8817,7 +9043,7 @@ export default function AIWorkspace() {
       return;
     }
     setPendingAgentClarification(pendingMessage.agentClarification);
-    if (!pendingMessage.agentClarificationDismissed) {
+    if (!pendingMessage.agentClarificationDismissed && !isAgentTimelineV2(pendingMessage.agentRunProgress)) {
       setShowAgentClarificationModal(true);
     }
   }, [chatMessages]);
@@ -8957,6 +9183,16 @@ export default function AIWorkspace() {
     const messageId = pendingAssistantMessageIdRef.current;
     if (!messageId) return;
     updateChatMessageById(messageId, updater);
+  };
+
+  const updatePendingAssistantMessageImmediately = (
+    updater: (msg: ChatMessage) => ChatMessage
+  ) => {
+    const messageId = pendingAssistantMessageIdRef.current;
+    if (!messageId) return;
+    flushQueuedChatMessageUpdates();
+    updateChatMessageById(messageId, updater);
+    flushQueuedChatMessageUpdates();
   };
 
   const readAsDataURL = (file: File) => {
@@ -9488,7 +9724,7 @@ export default function AIWorkspace() {
 
     const filesToProcess = Array.from(files).slice(0, remainingSlots);
 
-    if (!isGeneratingRef.current) enqueueChatReferenceUploads(filesToProcess);
+    enqueueChatReferenceUploads(filesToProcess);
     
     e.target.value = '';
   };
@@ -9551,7 +9787,7 @@ export default function AIWorkspace() {
 
     const filesToProcess = imageFiles.slice(0, remainingSlots);
 
-    if (!isGeneratingRef.current) enqueueChatReferenceUploads(filesToProcess);
+    enqueueChatReferenceUploads(filesToProcess);
     if (canvasPerformanceEnabledRef.current) {
       console.info('[chat-input-perf]', {
         kind: 'paste-images',
@@ -9898,7 +10134,7 @@ export default function AIWorkspace() {
     if (e.key === 'Enter' && !e.shiftKey && !e.altKey) {
       e.preventDefault();
       if (isGenerating) {
-        void handleCancelGenerate();
+        void handleSubmitRunningAgentInput();
       } else if (!hasPendingChatReferenceUploads) {
         void handleGenerate();
       }
@@ -13778,6 +14014,8 @@ export default function AIWorkspace() {
     suppressUserMessage?: boolean;
     recoveryTaskId?: string;
     recoveryRecord?: AgentRecoveryRecord;
+    sourceAssistantMessageId?: string;
+    operationId?: string;
   }) => {
     const currentChatInput = options?.input ?? latestChatInputRef.current;
     if (!currentChatInput.trim()) return;
@@ -13960,14 +14198,30 @@ export default function AIWorkspace() {
         : undefined,
     };
     const assistantPlaceholderId = `msg-${Date.now()}-assistant-pending`;
-    const agentRunId = effectiveAgentClarification?.state.operationId
-      || `agent-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const recoveryAssistantMessageId = options?.recoveryTaskId
+      ? [...chatMessages].reverse().find((message) => message.agentRecovery?.taskId === options.recoveryTaskId)?.id
+      : undefined;
+    const assistantMessageId = options?.sourceAssistantMessageId
+      || recoveryAssistantMessageId
+      || assistantPlaceholderId;
+    const sourceAssistantMessage = options?.sourceAssistantMessageId
+      ? chatMessages.find((message) => message.id === options.sourceAssistantMessageId)
+      : recoveryAssistantMessageId
+        ? chatMessages.find((message) => message.id === recoveryAssistantMessageId)
+      : effectiveAgentClarification
+        ? chatMessages.find((message) => message.agentClarification?.request.id === effectiveAgentClarification.request.id)
+        : undefined;
+    const operationId = options?.operationId
+      || effectiveAgentClarification?.state.operationId
+      || sourceAssistantMessage?.agentRunProgress?.operationId
+      || `operation-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const agentRunId = `agent-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const usesAgentRequest = true;
     if (usesAgentRequest) {
       setActiveAgentRunMarker({
         runId: agentRunId,
         userMessageId: userMessage.id,
-        assistantMessageId: assistantPlaceholderId,
+        assistantMessageId,
         startedAt: Date.now(),
         status: 'running',
       });
@@ -13988,19 +14242,23 @@ export default function AIWorkspace() {
       });
     messagesForAPI.push({ id: userMessage.id, role: 'user', content: currentChatInput });
     
-    pendingAssistantMessageIdRef.current = assistantPlaceholderId;
-    setChatMessages(prev => [...prev, ...(options?.suppressUserMessage ? [] : [userMessage]), {
-      id: assistantPlaceholderId,
-      role: 'assistant',
-      content: usesAgentRequest ? '' : '...',
-      taskStatus: 'running',
-      agentRunProgress: usesAgentRequest
-        ? createInitialAgentRunProgress(agentRunId)
-        : undefined,
-      agentProgressMode: usesAgentRequest
-        ? generationMode === 'image' ? 'compact' : 'full'
-        : undefined,
-    }]);
+    pendingAssistantMessageIdRef.current = assistantMessageId;
+    setChatMessages(prev => options?.sourceAssistantMessageId || recoveryAssistantMessageId
+      ? prev.map((message) => message.id === assistantMessageId
+        ? { ...message, content: '', taskStatus: 'running', agentRecovery: undefined }
+        : message)
+      : [...prev, ...(options?.suppressUserMessage ? [] : [userMessage]), {
+        id: assistantPlaceholderId,
+        role: 'assistant',
+        content: usesAgentRequest ? '' : '...',
+        taskStatus: 'running',
+        agentRunProgress: usesAgentRequest
+          ? createInitialAgentRunProgress(agentRunId)
+          : undefined,
+        agentProgressMode: usesAgentRequest
+          ? generationMode === 'image' ? 'compact' : 'full'
+          : undefined,
+      }]);
     if (!options?.suppressUserMessage) {
       setChatInput('');
       setActiveSkillForCurrentTopic(null);
@@ -14264,7 +14522,9 @@ export default function AIWorkspace() {
         : getRecentFailedAgentTask(chatMessages);
       const agentRequestBody = {
         runId: agentRunId,
+        operationId,
         topicId: requestTopicId,
+        sourceAssistantMessageId: assistantMessageId,
         sourceUserMessageId: effectiveAgentClarification?.state.sourceUserMessageId
           || (recentRecoveryTask && options?.recoveryTaskId === recentRecoveryTask.taskId
             ? recentRecoveryTask.sourceUserMessageId
@@ -14370,6 +14630,15 @@ export default function AIWorkspace() {
         const activityTextById = new Map<string, string>();
         let promotedFinalActivityText = '';
         let promotedFinalReplayOffset = 0;
+        let committedCommentaryText = '';
+        let committedCommentaryReplayOffset = 0;
+        const settleGeneratedAssetDelivery = () => {
+          updateChatMessageById(assistantId, (msg) => updateAgentRunProgress(msg, {
+            type: 'assets_settled',
+            succeeded: generatedAssetSucceededCount,
+            failed: generatedAssetFailureCount + generatedAssetPreloadFailureCount,
+          }));
+        };
         const consumePromotedFinalReplay = (delta: string) => {
           if (!promotedFinalActivityText) return delta;
           const expected = promotedFinalActivityText.slice(promotedFinalReplayOffset);
@@ -14386,6 +14655,25 @@ export default function AIWorkspace() {
           if (promotedFinalReplayOffset >= promotedFinalActivityText.length) {
             promotedFinalActivityText = '';
             promotedFinalReplayOffset = 0;
+          }
+          return delta.slice(matched);
+        };
+        const consumeCommittedCommentaryReplay = (delta: string) => {
+          if (!committedCommentaryText) return delta;
+          const expected = committedCommentaryText.slice(committedCommentaryReplayOffset);
+          let matched = 0;
+          while (matched < delta.length && matched < expected.length && delta[matched] === expected[matched]) {
+            matched += 1;
+          }
+          if (matched === 0) {
+            committedCommentaryText = '';
+            committedCommentaryReplayOffset = 0;
+            return delta;
+          }
+          committedCommentaryReplayOffset += matched;
+          if (committedCommentaryReplayOffset >= committedCommentaryText.length) {
+            committedCommentaryText = '';
+            committedCommentaryReplayOffset = 0;
           }
           return delta.slice(matched);
         };
@@ -14431,9 +14719,10 @@ export default function AIWorkspace() {
               source?: 'manual_ui' | 'explicit_text' | 'user_confirmation' | 'recovery' | 'manual' | 'auto';
               operationId?: string;
               sequence?: number;
+              timestampMs?: number;
               stepId?: string;
               phase?: string;
-              status?: 'active' | 'waiting' | 'completed' | 'failed';
+              status?: 'pending' | 'active' | 'waiting' | 'completed' | 'failed';
               toolCallId?: string;
               toolName?: string;
               activityId?: string;
@@ -14525,7 +14814,7 @@ export default function AIWorkspace() {
                 timestampMs?: number;
                 stepId?: string;
                 phase?: string;
-                status?: 'active' | 'waiting' | 'completed' | 'failed';
+                status?: 'pending' | 'active' | 'waiting' | 'completed' | 'failed';
                 toolCallId?: string;
                 toolName?: string;
                 activityId?: string;
@@ -14634,6 +14923,9 @@ export default function AIWorkspace() {
                   activityId,
                   delta: event.delta || '',
                   model: event.model,
+                  runId: event.runId || agentRunId,
+                  sequence: event.sequence,
+                  timestampMs: event.timestampMs,
                 }),
                 ...(event.model && !msg.model ? { model: event.model } : {}),
               }));
@@ -14646,12 +14938,18 @@ export default function AIWorkspace() {
               if (event.disposition === 'final' && activityText) {
                 promotedFinalActivityText = activityText;
                 promotedFinalReplayOffset = 0;
+              } else if (event.disposition === 'commentary' && activityText) {
+                committedCommentaryText = activityText;
+                committedCommentaryReplayOffset = 0;
               }
-              updatePendingAssistantMessage((msg) => ({
+              updatePendingAssistantMessageImmediately((msg) => ({
                 ...updateAgentRunProgress(msg, {
                   type: 'agent_activity_commit',
                   activityId,
                   disposition: event.disposition,
+                  runId: event.runId || agentRunId,
+                  sequence: event.sequence,
+                  timestampMs: event.timestampMs,
                 }),
                 ...(event.disposition === 'final' && activityText && !msg.content
                   ? { content: activityText }
@@ -14665,9 +14963,9 @@ export default function AIWorkspace() {
               const routed = routeAgentProgressEvent(progressEventRouter, event);
               progressEventRouter = routed.router;
               if (routed.events.length > 0) {
-                updatePendingAssistantMessage((msg) => applyAgentRunProgressEvents(
+                updatePendingAssistantMessageImmediately((msg) => applyAgentRunProgressEvents(
                   msg,
-                  routed.events as AgentRunProgressEvent[],
+                  routed.events.map((progressEvent) => ({ ...progressEvent, runId: progressEvent.runId || agentRunId })) as AgentRunProgressEvent[],
                 ));
               }
               continue;
@@ -14728,8 +15026,8 @@ export default function AIWorkspace() {
                   },
                   state: event.state,
                 };
-                updatePendingAssistantMessage((msg) => ({
-                  ...msg,
+                updatePendingAssistantMessageImmediately((msg) => ({
+                  ...applyAgentRunProgressEvents(msg, [event as AgentRunProgressEvent]),
                   content: '',
                   taskStatus: undefined,
                   agentClarification: clarificationPayload,
@@ -14738,7 +15036,7 @@ export default function AIWorkspace() {
                 }));
                 setPendingAgentClarification(clarificationPayload);
                 setAgentClarificationCustomText('');
-                setShowAgentClarificationModal(true);
+                setShowAgentClarificationModal(false);
               }
               continue;
             }
@@ -14757,19 +15055,54 @@ export default function AIWorkspace() {
               && typeof event.prompt === 'string'
               && event.prompt.length > 0
             ) {
+              const imagePromptEvent = event as typeof event & {
+                completedLabel?: unknown;
+                completionSummary?: unknown;
+                toolCallId?: unknown;
+              };
               const promptIndex = event.index as number;
+              const promptRunId = event.runId || agentRunId;
+              const promptToolCallId = typeof imagePromptEvent.toolCallId === 'string'
+                ? imagePromptEvent.toolCallId
+                : '';
+              const promptIdentity = `${promptRunId}:${promptToolCallId}:${promptIndex}`;
               const promptEntry = {
                 index: promptIndex,
                 label: event.label || `图片 ${promptIndex + 1}`,
                 prompt: event.prompt,
+                runId: promptRunId,
+                ...(promptToolCallId ? { toolCallId: promptToolCallId } : {}),
+                ...(Number.isFinite(event.sequence) ? { sequence: event.sequence } : {}),
                 ...(event.compilation ? { compilation: event.compilation } : {}),
               };
-              updatePendingAssistantMessage((msg) => ({
-                ...msg,
+              updatePendingAssistantMessageImmediately((msg) => ({
+                ...updateAgentRunProgress(msg, {
+                  type: 'image_prompts_ready',
+                  index: promptIndex,
+                  label: promptEntry.label,
+                  prompt: promptEntry.prompt,
+                  ...(typeof imagePromptEvent.completedLabel === 'string'
+                    ? { completedLabel: imagePromptEvent.completedLabel }
+                    : {}),
+                  ...(typeof imagePromptEvent.completionSummary === 'string'
+                    ? { completionSummary: imagePromptEvent.completionSummary }
+                    : {}),
+                  ...(typeof imagePromptEvent.toolCallId === 'string'
+                    ? { toolCallId: imagePromptEvent.toolCallId }
+                    : {}),
+                  runId: event.runId || agentRunId,
+                  sequence: event.sequence,
+                  timestampMs: event.timestampMs,
+                }),
                 agentImagePrompts: [
-                  ...(msg.agentImagePrompts || []).filter((entry) => entry.index !== promptIndex),
+                  ...(msg.agentImagePrompts || []).filter((entry) => (
+                    `${entry.runId || 'legacy'}:${entry.toolCallId || ''}:${entry.index}` !== promptIdentity
+                  )),
                   promptEntry,
-                ].sort((left, right) => left.index - right.index),
+                ].sort((left, right) => (
+                  (left.sequence || Number.MAX_SAFE_INTEGER) - (right.sequence || Number.MAX_SAFE_INTEGER)
+                  || left.index - right.index
+                )),
               }));
               continue;
             }
@@ -14791,8 +15124,8 @@ export default function AIWorkspace() {
                     message: event.request.message || '此操作需要你的确认。',
                   }
                 : undefined;
-              updatePendingAssistantMessage((msg) => ({
-                ...msg,
+              updatePendingAssistantMessageImmediately((msg) => ({
+                ...applyAgentRunProgressEvents(msg, [event as AgentRunProgressEvent]),
                 content: '',
                 taskStatus: undefined,
                 agentConfirmation: confirmation,
@@ -14801,12 +15134,13 @@ export default function AIWorkspace() {
               }));
               if (confirmation) {
                 setPendingAgentConfirmation(confirmation);
-                setShowAgentConfirmationModal(true);
+                setShowAgentConfirmationModal(false);
               }
               continue;
             }
 
             if (event.type === 'tool_result' && typeof event.result?.jobId === 'string') {
+              flushQueuedChatMessageUpdates();
               const skillType = event.result.skillType === 'brand' ? 'brand' : 'logo';
               const total = typeof event.result.total === 'number' ? event.result.total : 0;
               const completed = typeof event.result.completed === 'number' ? event.result.completed : 0;
@@ -14834,10 +15168,12 @@ export default function AIWorkspace() {
                 { type: 'assets_pending', count: total },
                 { type: 'assets_progress', total, succeeded: completed, failed },
               ]));
+              flushQueuedChatMessageUpdates();
               continue;
             }
 
             if (event.type === 'tool_result' && event.result?.kind === 'image_generation') {
+              flushQueuedChatMessageUpdates();
               const requestStats = event.result.requestStats && typeof event.result.requestStats === 'object'
                 ? event.result.requestStats as Record<string, unknown>
                 : {};
@@ -14867,6 +15203,7 @@ export default function AIWorkspace() {
                 : typeof resolvedImageOptions.model === 'string'
                   ? resolvedImageOptions.model
                   : generatedAssetModel;
+              flushQueuedChatMessageUpdates();
               continue;
             }
 
@@ -14881,7 +15218,9 @@ export default function AIWorkspace() {
                     model: msg.model || event.model,
                   }));
                 }
-                const contentDelta = consumePromotedFinalReplay(event.delta);
+                const contentDelta = consumePromotedFinalReplay(
+                  consumeCommittedCommentaryReplay(event.delta),
+                );
                 if (contentDelta) enqueueStreamDelta(assistantId, contentDelta);
               }
               continue;
@@ -14975,7 +15314,10 @@ export default function AIWorkspace() {
                       const key = getAssetActionKey(asset);
                       processedAgentActionsRef.current.delete(key);
                       processedAgentActionKeysForRun.delete(key);
+                      failedLocalDeliveryIds.add(asset.versionId || asset.slotId || asset.src);
                     }
+                    generatedAssetPreloadFailureCount += freshAssets.length;
+                    settleGeneratedAssetDelivery();
                     return;
                   }
                   const loadedAssets = preloadResults.flatMap((result) => (
@@ -15068,11 +15410,7 @@ export default function AIWorkspace() {
                   setItems(prev => [...prev, ...canvasItems]);
                     setImageCount((prev) => prev + loadedAssets.length);
                   }
-                  updateChatMessageById(assistantId, (msg) => updateAgentRunProgress(msg, {
-                    type: 'assets_settled',
-                    succeeded: generatedAssetSucceededCount,
-                    failed: generatedAssetFailureCount + generatedAssetPreloadFailureCount,
-                  }));
+                  settleGeneratedAssetDelivery();
                   if (canvasPerformanceEnabledRef.current) {
                     console.info('[generated-asset-preload-perf]', {
                       count: freshAssets.length,
@@ -15083,6 +15421,14 @@ export default function AIWorkspace() {
                   }
                 }).catch((error) => {
                   console.error('Generated asset preload queue failed:', error);
+                  generatedAssetPreloadFailureCount += freshAssets.length;
+                  freshAssets.forEach((asset) => {
+                    const key = getAssetActionKey(asset);
+                    processedAgentActionsRef.current.delete(key);
+                    processedAgentActionKeysForRun.delete(key);
+                    failedLocalDeliveryIds.add(asset.versionId || asset.slotId || asset.src);
+                  });
+                  settleGeneratedAssetDelivery();
                 });
               }
               continue;
@@ -15099,11 +15445,7 @@ export default function AIWorkspace() {
                 processedAgentCompletionSummariesRef.current.add(summaryRunId);
                 await generatedAssetPreloadChain;
                 flushQueuedChatMessageUpdates();
-                setChatMessages(prev => [...prev, {
-                  id: `${assistantId}-completion-${summaryRunId}`,
-                  role: 'assistant',
-                  content: event.summary,
-                }]);
+                updatePendingAssistantMessage((msg) => ({ ...msg, content: event.summary }));
               }
               continue;
             }
@@ -15111,10 +15453,12 @@ export default function AIWorkspace() {
             if (event.type === 'agent_error') {
               const publicFailureMessage = presentAgentErrorMessage(event.stage, event.message || event.error);
               if (event.recoveryRecord) latestRecoveryRecord = event.recoveryRecord;
-              updatePendingAssistantMessage((msg) => {
+              updatePendingAssistantMessageImmediately((msg) => {
                 const failedClarificationOwnsMessage = msg.agentClarification?.request.failed === true;
                 return {
-                  ...updateAgentRunProgress(msg, { type: 'agent_error' }),
+                  ...updateAgentRunProgress(msg, {
+                    type: 'agent_error', runId: event.runId || agentRunId, sequence: event.sequence, timestampMs: event.timestampMs,
+                  }),
                   taskStatus: 'failed',
                   ...(event.recoveryRecord ? { agentRecovery: event.recoveryRecord } : {}),
                   ...(event.stage === 'planning' && event.message && !failedClarificationOwnsMessage
@@ -15136,8 +15480,10 @@ export default function AIWorkspace() {
 
             if (event.type === 'agent_done') {
               if (event.taskSnapshot) latestTaskSnapshot = event.taskSnapshot;
-              updatePendingAssistantMessage((msg) => ({
-                ...updateAgentRunProgress(msg, { type: 'agent_done' }),
+              updatePendingAssistantMessageImmediately((msg) => ({
+                ...updateAgentRunProgress(msg, {
+                  type: 'agent_done', runId: event.runId || agentRunId, sequence: event.sequence, timestampMs: event.timestampMs,
+                }),
                 ...(event.taskSnapshot ? { taskSnapshot: event.taskSnapshot } : {}),
               }));
               continue;
@@ -15387,7 +15733,7 @@ export default function AIWorkspace() {
       if (aborted) {
         updateActiveStreamMessageStatus('cancelled', '任务已终止');
         updatePendingAssistantMessage((msg) => ({
-          ...updateAgentRunProgress(msg, { type: 'agent_cancelled' }),
+          ...updateAgentRunProgress(msg, { type: 'agent_cancelled', runId: agentRunId }),
           taskStatus: 'cancelled',
           content: '任务已终止',
           ...(localRecovery ? { agentRecovery: localRecovery } : {}),
@@ -15398,7 +15744,7 @@ export default function AIWorkspace() {
       updateActiveStreamMessageStatus('failed', '生成失败，请重试');
       updatePendingAssistantMessage((msg) => usesAgentRequest
         ? {
-            ...updateAgentRunProgress(msg, { type: 'agent_error' }),
+            ...updateAgentRunProgress(msg, { type: 'agent_error', runId: agentRunId }),
             taskStatus: 'failed',
             content: localRecovery?.failure.message || 'Agent 运行失败',
             ...(localRecovery ? { agentRecovery: localRecovery } : {}),
@@ -15423,6 +15769,70 @@ export default function AIWorkspace() {
           }
         }
       }
+    }
+  };
+
+  const handleSubmitRunningAgentInput = async () => {
+    const input = latestChatInputRef.current.trim();
+    const runId = activeAgentRunMarker?.runId;
+    if (!input || !runId || hasPendingChatReferenceUploads) return;
+    const delivery = 'follow_up' as const;
+
+    const references = resolvedChatReferenceTokens.map((token) => ({
+      id: token.id,
+      src: token.src,
+      plannerPreviewSrc: token.previewSrc || token.src,
+      label: token.label,
+      source: token.source,
+      role: token.role,
+      ...(token.canvasItemId ? { canvasItemId: token.canvasItemId } : {}),
+      ...(token.sourceTaskId ? { sourceTaskId: token.sourceTaskId } : {}),
+      ...(token.sourceVersionId ? { sourceVersionId: token.sourceVersionId } : {}),
+    }));
+    const referenceContext: AgentReferenceContext | undefined = references.length > 0
+      ? {
+          references,
+          composerSegments: [{ type: 'text', text: input }],
+        }
+      : undefined;
+    const messageId = `msg-${Date.now()}-${delivery}`;
+    const userMessage: ChatMessage = {
+      id: messageId,
+      role: 'user',
+      content: input,
+      referenceImages: [...chatReferenceImages],
+      referenceContext,
+      taskStatus: delivery === 'follow_up' ? 'queued' : 'running',
+    };
+
+    setChatMessages((messages) => [...messages, userMessage]);
+    setChatInput('');
+    clearSentChatReferenceTokens();
+
+    try {
+      const response = await fetch('/api/agent/steer', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          runId,
+          delivery,
+          input,
+          referenceImages: userMessage.referenceImages,
+          referenceContext,
+        }),
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => null) as { error?: string } | null;
+        throw new Error(payload?.error || '当前任务已结束');
+      }
+      setChatMessages((messages) => messages.map((message) => message.id === messageId
+        ? { ...message, taskStatus: delivery === 'follow_up' ? 'queued' : undefined }
+        : message));
+    } catch (error) {
+      setChatMessages((messages) => messages.map((message) => message.id === messageId
+        ? { ...message, taskStatus: 'failed' }
+        : message));
+      console.warn('Agent steer failed:', error);
     }
   };
 
@@ -15501,8 +15911,8 @@ export default function AIWorkspace() {
     setShowAgentConfirmationModal(false);
   };
 
-  const submitAgentConfirmation = () => {
-    const confirmation = pendingAgentConfirmation;
+  const submitAgentConfirmation = (confirmationOverride?: AgentConfirmationPayload) => {
+    const confirmation = confirmationOverride || pendingAgentConfirmation;
     if (!confirmation || pendingAgentConfirmationsRef.current.has(confirmation.confirmationId)) return;
     const messageIndex = chatMessages.findIndex((message) => (
       message.agentConfirmation?.confirmationId === confirmation.confirmationId
@@ -15520,8 +15930,10 @@ export default function AIWorkspace() {
             ...message,
             content: '',
             agentRunProgress: reduceAgentRunProgress(message.agentRunProgress || null, {
-              type: 'confirmation_submitted',
-              toolName: confirmation.toolName,
+              type: 'interaction_submitted',
+              interactionId: confirmation.confirmationId,
+              interactionType: 'confirmation',
+              label: '已确认，正在启动任务',
             }) || undefined,
             agentConfirmationResolved: true,
             agentConfirmationDismissed: false,
@@ -15533,6 +15945,8 @@ export default function AIWorkspace() {
       input: sourceMessage.content,
       skill: sourceMessage.skill,
       agentConfirmation: confirmation,
+      sourceAssistantMessageId: chatMessages[messageIndex]?.id,
+      operationId: chatMessages[messageIndex]?.agentRunProgress?.operationId,
     }).finally(() => pendingAgentConfirmationsRef.current.delete(confirmation.confirmationId));
   };
 
@@ -15631,13 +16045,17 @@ export default function AIWorkspace() {
         : message));
   };
 
-  const submitAgentClarification = (proceedWithCurrent = false, selectedOptionId = '') => {
-    const clarification = pendingAgentClarification;
+  const submitAgentClarificationFor = (
+    clarification: AgentClarificationPayload | null,
+    proceedWithCurrent = false,
+    selectedOptionId = '',
+    customAnswer = '',
+  ) => {
     if (!clarification || isGenerating) return;
     const selectedOption = clarification.request.options.find(
       (option) => option.id === selectedOptionId
     );
-    const customText = selectedOptionId === 'custom' ? agentClarificationCustomText.trim() : '';
+    const customText = selectedOptionId === 'custom' ? customAnswer.trim() : '';
     if (!proceedWithCurrent && !selectedOption && !customText) return;
     const answer = proceedWithCurrent
       ? '按当前信息开始制作，其余创作细节由 Agent 决定。'
@@ -15652,6 +16070,12 @@ export default function AIWorkspace() {
       message.agentClarification?.request.id === clarification.request.id
         ? {
             ...message,
+            agentRunProgress: reduceAgentRunProgress(message.agentRunProgress || null, {
+              type: 'interaction_submitted',
+              interactionId: clarification.request.id,
+              interactionType: 'clarification',
+              label: answer,
+            }) || undefined,
             agentClarificationResolved: false,
             agentClarificationDismissed: true,
           }
@@ -15664,8 +16088,18 @@ export default function AIWorkspace() {
       agentClarification: clarification,
       suppressUserMessage: true,
       agentClarificationResponse: response,
+      sourceAssistantMessageId: chatMessages.find((message) => message.agentClarification?.request.id === clarification.request.id)?.id,
+      operationId: clarification.state.operationId,
     });
   };
+
+  const submitAgentClarification = (proceedWithCurrent = false, selectedOptionId = '') =>
+    submitAgentClarificationFor(
+      pendingAgentClarification,
+      proceedWithCurrent,
+      selectedOptionId,
+      agentClarificationCustomText,
+    );
 
   const retryAgentClarification = () => {
     const clarification = pendingAgentClarification;
@@ -15683,6 +16117,8 @@ export default function AIWorkspace() {
         retry: true,
         retryMode: 'replan',
       },
+      sourceAssistantMessageId: chatMessages.find((message) => message.agentClarification?.request.id === clarification.request.id)?.id,
+      operationId: clarification.state.operationId,
     }).finally(() => {
       agentReanalysisInFlightRef.current = false;
     });
@@ -16216,9 +16652,13 @@ export default function AIWorkspace() {
 
   useEffect(() => {
     if (!isGenerating) return;
-    closeChatComposerPopovers();
+    closeSkillMenu();
+    setShowGenerationModeMenu(false);
+    setShowModelPreferencePopover(false);
+    setShowChatModelSelector(false);
+    setShowImageModelSelector(false);
     setSelectedChatHistoryAssetIds([]);
-  }, [closeChatComposerPopovers, isGenerating]);
+  }, [closeSkillMenu, isGenerating]);
 
   const handleAttachSelectedChatHistoryAssets = useCallback(() => {
     const selectedIds = new Set(selectedChatHistoryAssetIds);
@@ -19969,6 +20409,8 @@ export default function AIWorkspace() {
                 {visibleChatMessages.map((msg) => {
                   const isAgentProgressMessage = msg.role === 'assistant'
                     && shouldShowAgentRunProgress(msg.agentRunProgress);
+                  const isAgentTimelineV2Message = isAgentProgressMessage
+                    && isAgentTimelineV2(msg.agentRunProgress);
                   const isAgentFirstTokenWait = msg.role === 'assistant'
                     && msg.id === activeAgentRunMarker?.assistantMessageId
                     && msg.taskStatus === 'running'
@@ -20026,6 +20468,9 @@ export default function AIWorkspace() {
                           ))}
                         </div>
                       </div>
+                      {msg.taskStatus === 'queued' && (
+                        <span className="mt-1 text-[11px] text-[var(--workspace-text-muted)]">当前任务完成后继续</span>
+                      )}
                     </div>
                   ) : msg.role === 'skill' ? (
                     <div className="workspace-message-assistant group relative flex max-w-[90%] items-center gap-2 rounded-2xl p-3" data-gsap-hover-root="true" data-gsap-no-scale="true">
@@ -20088,7 +20533,102 @@ export default function AIWorkspace() {
                       {isAgentFirstTokenWait && activeAgentRunMarker && (
                         <AgentFirstTokenWait startedAt={activeAgentRunMarker.startedAt} />
                       )}
-                      {isAgentProgressMessage && msg.agentRunProgress && (
+                      {isAgentTimelineV2Message && msg.agentRunProgress && (
+                        <AgentTurnTimeline
+                          progress={msg.agentRunProgress}
+                          now={generationClockMs}
+                          fallbackStartedAt={activeAgentRunMarker?.runId === msg.agentRunProgress.runId
+                            ? activeAgentRunMarker.startedAt
+                            : undefined}
+                          interactionContent={(step) => (
+                            step.status !== 'waiting' ? <span>{step.label}</span>
+                              : step.interactionType === 'confirmation' && msg.agentConfirmation && !msg.agentConfirmationResolved ? (
+                                <div className="space-y-2">
+                                  <p>{msg.agentConfirmation.message}</p>
+                                  <button
+                                    type="button"
+                                    className="workspace-control-chip inline-flex min-h-7 items-center px-2 text-[12px]"
+                                    onClick={() => submitAgentConfirmation(msg.agentConfirmation)}
+                                  >
+                                    确认并继续
+                                  </button>
+                                </div>
+                              ) : step.interactionType === 'clarification' && msg.agentClarification && !msg.agentClarificationResolved ? (
+                                <div className="space-y-2">
+                                  <p>{msg.agentClarification.request.question}</p>
+                                  {msg.agentClarification.request.failed ? (
+                                    <button
+                                      type="button"
+                                      className="workspace-control-chip inline-flex min-h-7 items-center px-2 text-[12px]"
+                                      onClick={retryAgentClarification}
+                                    >
+                                      重新分析
+                                    </button>
+                                  ) : (
+                                    <div className="flex flex-wrap gap-1.5">
+                                      {msg.agentClarification.request.options.map((option) => (
+                                        <button
+                                          key={option.id}
+                                          type="button"
+                                          className="workspace-control-chip min-h-7 px-2 text-left text-[12px]"
+                                          onClick={() => submitAgentClarificationFor(msg.agentClarification!, false, option.id)}
+                                        >
+                                          {option.label}
+                                        </button>
+                                      ))}
+                                      {msg.agentClarification.request.allowProceed ? (
+                                        <button
+                                          type="button"
+                                          className="workspace-control-chip min-h-7 px-2 text-left text-[12px]"
+                                          onClick={() => submitAgentClarificationFor(msg.agentClarification!, true)}
+                                        >
+                                          按当前信息继续
+                                        </button>
+                                      ) : null}
+                                    </div>
+                                  )}
+                                  {msg.agentClarification.request.allowCustom && !msg.agentClarification.request.failed ? (
+                                    <div className="flex max-w-xl gap-2">
+                                      <input
+                                        value={agentClarificationCustomText}
+                                        onChange={(event) => setAgentClarificationCustomText(event.target.value)}
+                                        placeholder="补充你的要求"
+                                        className="min-w-0 flex-1 border-b border-[var(--workspace-border)] bg-transparent px-0 py-1 text-[12px] outline-none focus:border-[var(--workspace-text-primary)]"
+                                      />
+                                      <button
+                                        type="button"
+                                        disabled={!agentClarificationCustomText.trim()}
+                                        className="workspace-control-chip min-h-7 px-2 text-[12px] disabled:opacity-40"
+                                        onClick={() => submitAgentClarificationFor(msg.agentClarification!, false, 'custom', agentClarificationCustomText)}
+                                      >
+                                        提交
+                                      </button>
+                                    </div>
+                                  ) : null}
+                                </div>
+                              ) : <span>{step.label || getPendingAgentDecisionLabel(msg)}</span>
+                          )}
+                          executionDetailContent={(step) => (
+                            step.stepId === 'prompt_optimization' && (msg.agentImagePrompts?.length || 0) > 0 ? (
+                              <AgentImagePromptDetails
+                                messageId={msg.id}
+                                prompts={msg.agentImagePrompts || []}
+                                copiedPromptId={copiedAssistantMessageId}
+                                onCopy={(id, prompt) => { void handleCopyAssistantMessage(id, prompt); }}
+                              />
+                            ) : null
+                          )}
+                          finalContent={msg.content ? (
+                            <MarkdownMessage
+                              content={msg.content}
+                              onPointerDown={handleAssistantSelectablePointerDown}
+                              onMouseDown={handleAssistantSelectableMouseDown}
+                              onClick={handleAssistantSelectableClick}
+                            />
+                          ) : null}
+                        />
+                      )}
+                      {isAgentProgressMessage && !isAgentTimelineV2Message && msg.agentRunProgress && (
                         <AgentProgressDetails
                           messageId={msg.id}
                           outcome={msg.agentRunProgress.outcome}
@@ -20265,7 +20805,7 @@ export default function AIWorkspace() {
                           </div>
                         </AgentProgressDetails>
                       )}
-                      {isAgentProgressMessage && msg.content && (
+                      {isAgentProgressMessage && !isAgentTimelineV2Message && msg.content && (
                         <div className="workspace-message-assistant mt-2 rounded-[22px] px-3.5 py-3">
                           <MarkdownMessage
                             content={msg.content}
@@ -20692,7 +21232,6 @@ export default function AIWorkspace() {
                         closeChatComposerPopovers();
                         setShowChatComposerMoreMenu(nextOpen);
                       }}
-                      disabled={isGenerating}
                       aria-label="更多"
                       aria-expanded={showChatComposerMoreMenu || showChatAssetPicker}
                       className={`workspace-chat-icon-control inline-flex h-8 w-8 items-center justify-center rounded-lg ${showChatComposerMoreMenu || showChatAssetPicker ? 'is-active' : ''}`}
@@ -20991,22 +21530,28 @@ export default function AIWorkspace() {
                     </button>
                   </div>
                 </div>
-                <button
+                <div className="ml-2 flex shrink-0 items-center gap-1">
+                  <button
                     ref={chatSendButtonRef}
                     data-chat-composer-control="send"
-                    onClick={isGenerating ? handleCancelGenerate : () => { void handleGenerate(); }}
-                    disabled={!isGenerating && (!latestChatInputRef.current.trim() || hasPendingChatReferenceUploads)}
-                    aria-label={isGenerating ? '终止任务' : '发送'}
-                    title={isGenerating ? '终止任务' : '发送'}
-                    className="ml-2 inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-zinc-950 text-white disabled:cursor-not-allowed disabled:opacity-30 dark:bg-zinc-100 dark:text-zinc-950"
+                    onClick={isGenerating && !latestChatInputRef.current.trim()
+                      ? handleCancelGenerate
+                      : isGenerating
+                        ? () => { void handleSubmitRunningAgentInput(); }
+                        : () => { void handleGenerate(); }}
+                    disabled={isGenerating
+                      ? Boolean(latestChatInputRef.current.trim() && hasPendingChatReferenceUploads)
+                      : !latestChatInputRef.current.trim() || hasPendingChatReferenceUploads}
+                    aria-label={isGenerating && !latestChatInputRef.current.trim() ? '终止任务' : isGenerating ? '当前任务后继续' : '发送'}
+                    title={isGenerating && !latestChatInputRef.current.trim() ? '终止任务' : isGenerating ? '当前任务后继续' : '发送'}
+                    className="inline-flex h-9 w-9 items-center justify-center rounded-full bg-zinc-950 text-white disabled:cursor-not-allowed disabled:opacity-30 dark:bg-zinc-100 dark:text-zinc-950"
                     data-gsap-interactive="true"
                   >
-                    {isGenerating ? (
-                      <Square size={13} fill="currentColor" />
-                    ) : (
-                      <ArrowUp size={17} strokeWidth={2.4} />
-                    )}
+                    {isGenerating && !latestChatInputRef.current.trim()
+                      ? <Square size={12} fill="currentColor" />
+                      : <ArrowUp size={17} strokeWidth={2.4} />}
                   </button>
+                </div>
               </div>
             </div>
           </div>
@@ -21016,6 +21561,14 @@ export default function AIWorkspace() {
           document.body
         )}
       <style jsx global>{`
+        .agent-timeline-running {
+          color: var(--workspace-text-primary);
+        }
+
+        .agent-timeline-running svg {
+          color: var(--workspace-text-primary);
+        }
+
         .panel-scrollbar {
           scrollbar-width: thin;
           scrollbar-color: rgba(161, 161, 170, 0.34) rgba(255, 255, 255, 0.04);

@@ -143,6 +143,11 @@ test('Main Agent Loop restores bounded history and project context only after un
   assert.match(MAIN_AGENT_LOOP_SYSTEM_PROMPT, /generate_image/);
   assert.doesNotMatch(MAIN_AGENT_LOOP_SYSTEM_PROMPT, /后台 Image Planner/);
   assert.match(MAIN_AGENT_LOOP_SYSTEM_PROMPT, /先调用 read_imagegen_context/);
+  assert.match(MAIN_AGENT_LOOP_SYSTEM_PROMPT, /公开执行反馈/);
+  assert.match(MAIN_AGENT_LOOP_SYSTEM_PROMPT, /publicProgress/);
+  assert.match(MAIN_AGENT_LOOP_SYSTEM_PROMPT, /promptPreparation/);
+  assert.match(MAIN_AGENT_LOOP_SYSTEM_PROMPT, /最终供应商 Prompt/);
+  assert.match(MAIN_AGENT_LOOP_SYSTEM_PROMPT, /思维链、隐藏推理、系统提示词、Skill 原文、原始参数或 Prompt 正文/);
   assert.match(MAIN_AGENT_LOOP_SYSTEM_PROMPT, /不要为了分类而调用工具/);
   assert.match(MAIN_AGENT_LOOP_SYSTEM_PROMPT, /只返回有界摘要和稳定 ID/);
   assert.match(MAIN_AGENT_LOOP_SYSTEM_PROMPT, /没有 lockedSkill 时直接使用通用图像合同/);

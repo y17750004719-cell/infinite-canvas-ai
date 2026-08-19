@@ -1,4 +1,4 @@
-export type AgentRunStepStatus = 'active' | 'waiting' | 'completed' | 'failed';
+export type AgentRunStepStatus = 'pending' | 'active' | 'waiting' | 'completed' | 'failed';
 export type AgentRunOutcome = 'running' | 'waiting' | 'completed' | 'warning' | 'failed';
 export type AgentRunIntent = 'chat' | 'image' | 'skill_action';
 

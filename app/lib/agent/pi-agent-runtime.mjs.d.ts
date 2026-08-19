@@ -15,6 +15,7 @@ export function runZFlowAgentBrain(input: {
     terminal?: boolean;
     countAgainstToolBudget?: boolean;
     requiresConfirmation?: boolean;
+    mayRequireConfirmation?: boolean;
     confirmationMessage?: string;
   }>;
   toolChoice?: 'auto' | 'none' | 'required' | { type: 'function'; function: { name: string } };
@@ -33,9 +34,13 @@ export function runZFlowAgentBrain(input: {
   chatStream: (request: Record<string, unknown>) => AsyncIterable<unknown>;
   executeTool: (name: string, args: Record<string, unknown>, context: Record<string, unknown>) => Promise<unknown>;
   onEvent?: (event: unknown) => void | Promise<void>;
+  onAssistantTurnComplete?: (event: unknown) => void | Promise<void>;
+  onToolPending?: (event: unknown) => void | Promise<void>;
   onToolStart?: (event: unknown) => void | Promise<void>;
   onToolUpdate?: (event: unknown) => void | Promise<void>;
   onToolResult?: (event: unknown) => void | Promise<void>;
+  getExternalSteeringMessages?: () => unknown[] | Promise<unknown[]>;
+  getExternalFollowUpMessages?: () => unknown[] | Promise<unknown[]>;
   continuation?: {
     transcript: unknown[];
     pendingCall?: {

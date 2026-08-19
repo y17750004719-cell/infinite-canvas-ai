@@ -1,6 +1,4 @@
 const ASSET_STEP_PATTERN = /(?:image|asset|render|generat)/i;
-const MAX_ACTIVITY_STEPS = 24;
-const MAX_ACTIVITY_COMMENTARY_LENGTH = 1200;
 
 const TOOL_LABELS = {
   get_conversation_memory: '读取对话记忆',
@@ -23,16 +21,11 @@ const TOOL_LABELS = {
 };
 
 const PHASE_EMOJI_RULES = [
-  [/(?:waiting|confirm|approval|input)/i, '📌'],
-  [/(?:render)/i, '🚀'],
-  [/(?:optimi|style|compose_visual)/i, '🎨'],
-  [/(?:image|asset|generat)/i, '🖼'],
-  [/(?:load|skill)/i, '📚'],
-  [/(?:analy|inspect|read|search)/i, '🔎'],
-  [/(?:plan|compos|orchestrat)/i, '🧩'],
-  [/(?:execut|tool|run)/i, '⚙️'],
-  [/(?:respond|writ|summar)/i, '✍️'],
-  [/(?:resolv|context)/i, '🔗'],
+  [/(?:waiting|confirm|approval|input)/i, '📌'], [/(?:render)/i, '🚀'],
+  [/(?:optimi|style|compose_visual)/i, '🎨'], [/(?:image|asset|generat)/i, '🖼'],
+  [/(?:load|skill)/i, '📚'], [/(?:analy|inspect|read|search)/i, '🔎'],
+  [/(?:plan|compos|orchestrat)/i, '🧩'], [/(?:execut|tool|run)/i, '⚙️'],
+  [/(?:respond|writ|summar)/i, '✍️'], [/(?:resolv|context)/i, '🔗'],
   [/(?:rout|understand|intent)/i, '🧠'],
 ];
 
@@ -41,43 +34,102 @@ function finiteCount(value) {
   return Number.isFinite(count) && count > 0 ? Math.floor(count) : 0;
 }
 
-function finiteTimestamp(value) {
+function finiteTimestamp(value, fallback = Date.now()) {
   const timestamp = Number(value);
-  return Number.isFinite(timestamp) && timestamp > 0 ? timestamp : Date.now();
+  return Number.isFinite(timestamp) && timestamp > 0 ? timestamp : fallback;
+}
+
+function normalStatus(value) {
+  return ['pending', 'active', 'waiting', 'completed', 'failed'].includes(value) ? value : 'active';
 }
 
 function createBaseState(event = {}) {
+  const startedAt = finiteTimestamp(event.timestampMs);
   return {
+    timelineVersion: 2,
     runId: typeof event.runId === 'string' ? event.runId : '',
     operationId: typeof event.operationId === 'string' ? event.operationId : '',
     intent: null,
     lastSequence: 0,
+    runStartedAt: startedAt,
+    attempts: typeof event.runId === 'string' && event.runId ? [{ runId: event.runId, startedAt }] : [],
     steps: [],
     agentDone: false,
     terminalFailed: false,
+    terminalCancelled: false,
     assets: { expected: 0, settled: 0, succeeded: 0, failed: 0 },
     outcome: 'running',
   };
 }
 
-function boundedCommentary(value) {
-  return String(value || '').slice(0, MAX_ACTIVITY_COMMENTARY_LENGTH);
+// Stored v1 messages remain unchanged; this only upgrades a reducer value receiving new events.
+function normalizeState(input, event = {}) {
+  const base = input || createBaseState(event);
+  if (base.timelineVersion === 2) return base;
+  const now = finiteTimestamp(event.timestampMs);
+  let sequence = Math.max(0, finiteCount(base.lastSequence) - (base.steps?.length || 0));
+  const steps = Array.isArray(base.steps) ? base.steps.map((step) => {
+    const firstSequence = finiteCount(step?.sequence) || ++sequence;
+    sequence = Math.max(sequence, firstSequence);
+    return {
+      ...step,
+      kind: step?.kind === 'commentary' ? 'commentary' : step?.kind === 'interaction' ? 'interaction' : 'execution',
+      sequence: firstSequence,
+      timestampMs: finiteTimestamp(step?.timestampMs, finiteTimestamp(step?.startedAt, now)),
+      lastUpdateSequence: finiteCount(step?.lastUpdateSequence) || firstSequence,
+    };
+  }) : [];
+  return {
+    ...base,
+    timelineVersion: 2,
+    runStartedAt: finiteTimestamp(base.runStartedAt, steps[0]?.timestampMs || now),
+    attempts: Array.isArray(base.attempts) && base.attempts.length ? base.attempts : (base.runId ? [{ runId: base.runId, startedAt: finiteTimestamp(base.runStartedAt, now), ...(base.runEndedAt ? { endedAt: finiteTimestamp(base.runEndedAt, now) } : {}) }] : []),
+    lastSequence: Math.max(finiteCount(base.lastSequence), sequence),
+    steps,
+  };
 }
 
-function boundedSteps(steps) {
-  if (steps.length <= MAX_ACTIVITY_STEPS) return steps;
-  return [
-    steps[0],
-    {
-      stepId: 'activity:truncated',
-      kind: 'status',
-      phase: 'truncated',
-      status: 'completed',
-      commentary: '较早的活动记录已省略',
-      label: '较早的活动记录已省略',
-    },
-    ...steps.slice(-(MAX_ACTIVITY_STEPS - 2)),
-  ];
+function stamp(state, event = {}, allowCurrentSequence = false) {
+  if (event.runId && event.runId !== state.runId) return { sequence: state.lastSequence + 1, timestampMs: finiteTimestamp(event.timestampMs) };
+  const explicitSequence = finiteCount(event.sequence);
+  if (explicitSequence && (explicitSequence < state.lastSequence || (explicitSequence === state.lastSequence && !allowCurrentSequence))) return null;
+  return { sequence: explicitSequence || state.lastSequence + 1, timestampMs: finiteTimestamp(event.timestampMs) };
+}
+
+function withStamp(state, marker) {
+  return {
+    ...state,
+    lastSequence: Math.max(state.lastSequence, marker.sequence),
+    runStartedAt: finiteTimestamp(state.runStartedAt, marker.timestampMs),
+  };
+}
+
+function withAttempt(state, event, marker, terminal = false) {
+  const runId = typeof event.runId === 'string' && event.runId ? event.runId : state.runId;
+  if (!runId) return withStamp(state, marker);
+  const attempts = Array.isArray(state.attempts) ? state.attempts : [];
+  const index = attempts.findIndex((attempt) => attempt.runId === runId);
+  const nextAttempts = index < 0
+    ? [...attempts, { runId, startedAt: marker.timestampMs, ...(terminal ? { endedAt: marker.timestampMs } : {}) }]
+    : attempts.map((attempt, position) => position !== index ? attempt
+      : {
+          ...attempt,
+          ...(!state.steps.length && !attempt.endedAt ? { startedAt: marker.timestampMs } : {}),
+          ...(terminal ? { endedAt: marker.timestampMs } : {}),
+        });
+  return {
+    ...withStamp(state, marker), runId, attempts: nextAttempts,
+    ...(runId !== state.runId ? { agentDone: false, terminalFailed: false, terminalCancelled: false, runEndedAt: undefined } : {}),
+  };
+}
+
+function completePreviousActiveSteps(state, marker, keep) {
+  return {
+    ...state,
+    steps: state.steps.map((step) => ['pending', 'active'].includes(step.status) && !keep(step)
+      ? { ...step, status: 'completed', completedAt: step.completedAt || marker.timestampMs, lastUpdateSequence: marker.sequence }
+      : step),
+  };
 }
 
 function isImageGenerationStep(step) {
@@ -85,15 +137,12 @@ function isImageGenerationStep(step) {
 }
 
 function needsAssetSettlement(steps) {
-  return steps.some((step) => (
-    step.toolName === 'generate_image'
-    || ASSET_STEP_PATTERN.test(step.stepId)
-    || ASSET_STEP_PATTERN.test(step.phase)
-  ));
+  return steps.some((step) => step.toolName === 'generate_image' || ASSET_STEP_PATTERN.test(step.stepId) || ASSET_STEP_PATTERN.test(step.phase));
 }
 
 function deriveOutcome(state) {
   if (state.terminalFailed) return 'failed';
+  if (state.terminalCancelled) return 'cancelled';
   if (state.steps.some((step) => step.status === 'waiting')) return 'waiting';
   if (!state.agentDone) return 'running';
   if (needsAssetSettlement(state.steps)) {
@@ -108,239 +157,190 @@ function withOutcome(state) {
   return { ...state, outcome: deriveOutcome(state) };
 }
 
-/**
- * @param {string} runId
- * @returns {import('./run-progress.types').AgentRunProgress}
- */
-export function createInitialAgentRunProgress(runId) {
-  const normalizedRunId = typeof runId === 'string' ? runId : '';
+function appendOrReplaceStep(state, nextStep, predicate) {
+  const existingIndex = state.steps.findIndex(predicate);
+  if (existingIndex < 0) return { steps: [...state.steps, nextStep], existing: null };
+  const existing = state.steps[existingIndex];
   return {
-    runId: normalizedRunId,
-    operationId: normalizedRunId,
-    intent: null,
-    lastSequence: 0,
-    steps: [],
-    agentDone: false,
-    terminalFailed: false,
-    assets: { expected: 0, settled: 0, succeeded: 0, failed: 0 },
-    outcome: 'running',
+    existing,
+    steps: state.steps.map((step, index) => index === existingIndex
+      ? { ...step, ...nextStep, sequence: existing.sequence, timestampMs: existing.timestampMs }
+      : step),
   };
 }
 
-export function reduceAgentRunProgress(state, event) {
-  if (!event || typeof event !== 'object') return state;
+function interactionId(event) {
+  return event.type === 'confirmation_required'
+    ? String(event.request?.confirmationId || 'confirmation')
+    : String(event.request?.id || event.activityId || 'clarification');
+}
+
+/** @param {string} runId @returns {import('./run-progress.types').AgentRunProgress} */
+export function createInitialAgentRunProgress(runId) {
+  const normalizedRunId = typeof runId === 'string' ? runId : '';
+  return createBaseState({ runId: normalizedRunId, operationId: normalizedRunId });
+}
+
+export function reduceAgentRunProgress(input, event) {
+  if (!event || typeof event !== 'object') return input;
+  const state = normalizeState(input, event);
 
   if (event.type === 'agent_activity_delta') {
-    if (!event.activityId || !event.delta) return state || createBaseState(event);
-    const base = state || createBaseState(event);
+    if (!event.activityId || !event.delta) return state;
+    const marker = stamp(state, event, true);
+    if (!marker) return state;
     const activityId = String(event.activityId);
-    const existingIndex = base.steps.findIndex((step) => step.activityId === activityId);
-    const existing = existingIndex >= 0 ? base.steps[existingIndex] : null;
-    const commentary = boundedCommentary(`${existing?.commentary || ''}${event.delta}`);
-    const nextStep = {
-      stepId: `activity:${activityId}`,
-      activityId,
-      kind: 'commentary',
-      phase: 'commentary',
-      status: 'active',
-      commentary,
-      label: commentary,
-    };
-    const steps = existingIndex === -1
-      ? boundedSteps([...base.steps, nextStep])
-      : base.steps.map((step, index) => index === existingIndex ? { ...step, ...nextStep } : step);
-    return withOutcome({ ...base, steps });
+    const sameActivity = (step) => step.activityId === activityId && (!event.runId || step.runId === event.runId);
+    const existing = state.steps.find(sameActivity);
+    const commentary = `${existing?.commentary || ''}${event.delta}`;
+    const marked = withAttempt(state, event, marker);
+    const sequential = existing ? marked : completePreviousActiveSteps(marked, marker, sameActivity);
+    const result = appendOrReplaceStep(sequential, {
+      stepId: `activity:${activityId}`, activityId, kind: 'commentary', phase: 'commentary', status: 'active',
+      commentary, label: commentary, runId: event.runId || marked.runId, sequence: marker.sequence, timestampMs: marker.timestampMs, lastUpdateSequence: marker.sequence,
+    }, sameActivity);
+    return withOutcome({ ...sequential, steps: result.steps });
   }
 
   if (event.type === 'agent_activity_commit') {
-    if (!state || !event.activityId) return state || null;
+    if (!event.activityId) return state;
+    const marker = stamp(state, event, true);
+    if (!marker) return state;
+    const marked = withAttempt(state, event, marker);
     const activityId = String(event.activityId);
-    if (event.disposition === 'final') {
-      return withOutcome({
-        ...state,
-        steps: state.steps.filter((step) => step.activityId !== activityId),
-      });
-    }
-    if (event.disposition !== 'commentary') return state;
-    return withOutcome({
-      ...state,
-      steps: state.steps.map((step) => step.activityId === activityId
-        ? { ...step, status: 'completed' }
-        : step),
-    });
+    if (event.disposition === 'final') return withOutcome({ ...marked, steps: marked.steps.filter((step) => step.activityId !== activityId || (event.runId && step.runId !== event.runId)) });
+    if (event.disposition !== 'commentary') return marked;
+    return withOutcome({ ...marked, steps: marked.steps.map((step) => step.activityId === activityId ? { ...step, status: 'completed', lastUpdateSequence: marker.sequence } : step) });
+  }
+
+  if (event.type === 'image_prompts_ready') {
+    const marker = stamp(state, event);
+    if (!marker) return state;
+    const marked = completePreviousActiveSteps(withAttempt(state, event, marker), marker, (step) => step.stepId === 'prompt_optimization' && step.toolCallId === event.toolCallId && (!event.runId || step.runId === event.runId));
+    const result = appendOrReplaceStep(marked, {
+      stepId: 'prompt_optimization', kind: 'execution', phase: 'optimizing', status: 'completed',
+      commentary: String(event.completedLabel || '最终图片提示词已准备'), label: String(event.completedLabel || '最终图片提示词已准备'),
+      ...(typeof event.completionSummary === 'string' && event.completionSummary.trim() ? { completionSummary: event.completionSummary.trim() } : {}),
+      ...(typeof event.toolCallId === 'string' ? { toolCallId: event.toolCallId } : {}),
+      ...(event.runId || marked.runId ? { runId: event.runId || marked.runId } : {}), sequence: marker.sequence, timestampMs: marker.timestampMs, lastUpdateSequence: marker.sequence,
+    }, (step) => step.stepId === 'prompt_optimization' && (event.toolCallId ? step.toolCallId === event.toolCallId : !step.toolCallId) && (!event.runId || step.runId === event.runId));
+    return withOutcome({ ...marked, steps: result.steps });
   }
 
   if (event.type === 'progress_update') {
-    const sequence = finiteCount(event.sequence);
-    if (state && sequence <= state.lastSequence) return state;
-
-    const base = state || createBaseState(event);
+    const marker = stamp(state, event);
+    if (!marker) return state;
     const toolName = typeof event.toolName === 'string' ? event.toolName : undefined;
     const nextStep = {
-      stepId: String(event.stepId || `step-${sequence}`),
-      kind: toolName ? 'tool' : 'status',
-      phase: String(event.phase || ''),
-      status: ['active', 'waiting', 'completed', 'failed'].includes(event.status)
-        ? event.status
-        : 'active',
-      commentary: boundedCommentary(event.label),
-      label: boundedCommentary(event.label),
+      stepId: String(event.stepId || `step-${marker.sequence}`), kind: 'execution', phase: String(event.phase || ''), status: normalStatus(event.status),
+      commentary: String(event.label || ''), label: String(event.label || ''), sequence: marker.sequence, timestampMs: marker.timestampMs, lastUpdateSequence: marker.sequence,
+      ...(typeof event.completionSummary === 'string' && event.completionSummary.trim() ? { completionSummary: event.completionSummary.trim() } : {}),
       ...(typeof event.toolCallId === 'string' ? { toolCallId: event.toolCallId } : {}),
-      ...(toolName ? { tool: toolName, toolName } : {}),
+      ...(toolName ? { tool: toolName, toolName } : {}), ...(event.detail ? { detail: event.detail } : {}), runId: event.runId || state.runId,
     };
-    const existingIndex = base.steps.findIndex((step) => (
-      step.stepId === nextStep.stepId
-      && (nextStep.toolCallId ? step.toolCallId === nextStep.toolCallId : !step.toolCallId)
-    ));
-    const existingStep = existingIndex >= 0 ? base.steps[existingIndex] : null;
+    const marked = withAttempt({ ...state, operationId: typeof event.operationId === 'string' ? event.operationId : state.operationId }, event, marker);
+    const matches = (step) => step.stepId === nextStep.stepId && (nextStep.toolCallId ? step.toolCallId === nextStep.toolCallId : !step.toolCallId) && (!event.runId || step.runId === event.runId);
+    const sequential = state.steps.some(matches) ? marked : completePreviousActiveSteps(marked, marker, matches);
+    const result = appendOrReplaceStep(sequential, nextStep, matches);
     if (isImageGenerationStep(nextStep)) {
-      const timestampMs = finiteTimestamp(event.timestampMs);
-      if (nextStep.status === 'active') {
-        nextStep.startedAt = existingStep?.status === 'active' && existingStep.startedAt
-          ? existingStep.startedAt
-          : timestampMs;
-        nextStep.completedAt = undefined;
-      } else if (nextStep.status === 'completed' || nextStep.status === 'failed') {
-        nextStep.startedAt = existingStep?.startedAt || timestampMs;
-        nextStep.completedAt = existingStep?.completedAt || timestampMs;
+      const target = result.steps.find((candidate) => candidate.sequence === (result.existing?.sequence || nextStep.sequence));
+      if (target && nextStep.status === 'active') {
+        target.startedAt = result.existing?.startedAt || marker.timestampMs;
+        target.completedAt = undefined;
+      } else if (target && ['completed', 'failed'].includes(nextStep.status)) {
+        target.startedAt = result.existing?.startedAt || marker.timestampMs;
+        target.completedAt = result.existing?.completedAt || marker.timestampMs;
       }
     }
-    const steps = existingIndex === -1
-      ? boundedSteps([...base.steps, nextStep])
-      : base.steps.map((step, index) => index === existingIndex ? { ...step, ...nextStep } : step);
-    return withOutcome({
-      ...base,
-      runId: typeof event.runId === 'string' ? event.runId : base.runId,
-      operationId: typeof event.operationId === 'string' ? event.operationId : base.operationId,
-      lastSequence: sequence,
-      steps,
-    });
+    return withOutcome({ ...sequential, steps: result.steps });
   }
 
-  if (!state) return null;
+  if (event.type === 'clarification_required' || event.type === 'confirmation_required') {
+    const marker = stamp(state, event);
+    if (!marker) return state;
+    const type = event.type === 'confirmation_required' ? 'confirmation' : 'clarification';
+    const id = interactionId(event);
+    const label = event.type === 'confirmation_required' ? String(event.request?.message || '此操作需要你的确认。') : String(event.message || event.request?.question || '需要补充信息。');
+    const marked = completePreviousActiveSteps(withAttempt(state, event, marker), marker, (step) => step.interactionId === id && step.interactionType === type);
+    const result = appendOrReplaceStep(marked, {
+      stepId: `interaction:${type}:${id}`, interactionId: id, interactionType: type, kind: 'interaction', phase: `waiting_${type}`, status: 'waiting',
+      label, commentary: label, runId: event.runId || marked.runId, sequence: marker.sequence, timestampMs: marker.timestampMs, lastUpdateSequence: marker.sequence,
+      ...(event.request?.toolName ? { toolName: event.request.toolName } : {}),
+    }, (step) => step.interactionId === id && step.interactionType === type);
+    return withOutcome({ ...marked, steps: result.steps });
+  }
 
   if (event.type === 'intent_resolved') {
-    const intent = ['chat', 'image', 'skill_action'].includes(event.intent)
-      ? event.intent
-      : state.intent;
+    const intent = ['chat', 'image', 'skill_action'].includes(event.intent) ? event.intent : state.intent;
     return intent === state.intent ? state : { ...state, intent };
   }
 
   if (event.type === 'confirmation_submitted') {
-    const targetIndex = state.steps.findLastIndex((step) => (
-      step.status === 'waiting'
-      && (!event.toolName || step.toolName === event.toolName || step.stepId === event.toolName)
-    ));
-    if (targetIndex < 0) return state;
+    const marker = stamp(state, event);
+    if (!marker) return state;
+    const marked = completePreviousActiveSteps(withAttempt(state, event, marker), marker, (step) => step.stepId === 'skill_job_assets');
+    const targetIndex = marked.steps.findLastIndex((step) => step.status === 'waiting' && (!event.toolName || step.toolName === event.toolName || step.stepId === event.toolName));
+    if (targetIndex < 0) return marked;
+    return withOutcome({ ...marked, steps: marked.steps.map((step, index) => index === targetIndex ? { ...step, status: 'completed', phase: 'confirmed', commentary: '已确认，正在启动任务', label: '已确认，正在启动任务', lastUpdateSequence: marker.sequence } : step) });
+  }
+
+  if (event.type === 'interaction_submitted') {
+    const marker = stamp(state, event);
+    if (!marker) return state;
+    const marked = withStamp(state, marker);
     return withOutcome({
-      ...state,
-      steps: state.steps.map((step, index) => index === targetIndex
-        ? { ...step, phase: 'confirming', commentary: '正在确认并启动任务', label: '正在确认并启动任务' }
-        : step),
+      ...marked,
+      steps: marked.steps.map((step) => (
+        step.interactionId === event.interactionId && step.interactionType === event.interactionType
+          ? { ...step, status: 'completed', phase: `resolved_${event.interactionType}`, commentary: event.label, label: event.label, lastUpdateSequence: marker.sequence }
+          : step
+      )),
     });
   }
 
   if (event.type === 'assets_pending') {
     const expected = finiteCount(event.count);
-    return withOutcome({
-      ...state,
-      assets: { expected, settled: 0, succeeded: 0, failed: 0 },
-    });
+    return withOutcome({ ...state, assets: { expected, settled: 0, succeeded: 0, failed: 0 } });
   }
 
-  if (event.type === 'assets_progress') {
-    const expected = finiteCount(event.total);
+  if (event.type === 'assets_progress' || event.type === 'assets_settled') {
+    const marker = stamp(state, event);
+    if (!marker) return state;
     const succeeded = finiteCount(event.succeeded);
     const failed = finiteCount(event.failed);
     const settled = succeeded + failed;
-    const nextStep = {
-      stepId: 'skill_job_assets',
-      kind: 'tool',
-      phase: 'generating',
-      status: settled >= expected && expected > 0 ? 'completed' : 'active',
-      label: settled >= expected && expected > 0
-        ? `素材生成完成（${settled}/${expected}）`
-        : `正在生成素材（${settled}/${expected || 0}）`,
-      toolName: 'start_skill_job',
-      tool: 'start_skill_job',
-    };
-    const existingIndex = state.steps.findIndex((step) => step.stepId === nextStep.stepId);
-    const steps = existingIndex === -1
-      ? boundedSteps([...state.steps, nextStep])
-      : state.steps.map((step, index) => index === existingIndex ? { ...step, ...nextStep } : step);
-    return withOutcome({
-      ...state,
-      steps,
-      assets: { expected, settled, succeeded, failed },
-    });
-  }
-
-  if (event.type === 'assets_settled') {
-    const succeeded = finiteCount(event.succeeded);
-    const failed = finiteCount(event.failed);
-    const settled = succeeded + failed;
-    return withOutcome({
-      ...state,
-      steps: state.steps.map((step) => step.stepId === 'skill_job_assets'
-        ? {
-            ...step,
-            status: failed > 0 && succeeded === 0 ? 'failed' : 'completed',
-            commentary: failed > 0
-              ? `素材生成结束（成功 ${succeeded}，失败 ${failed}）`
-              : `素材生成完成（${settled}/${Math.max(state.assets.expected, settled)}）`,
-            label: failed > 0
-              ? `素材生成结束（成功 ${succeeded}，失败 ${failed}）`
-              : `素材生成完成（${settled}/${Math.max(state.assets.expected, settled)}）`,
-          }
-        : step),
-      assets: {
-        expected: Math.max(state.assets.expected, settled),
-        settled,
-        succeeded,
-        failed,
-      },
-    });
+    const expected = event.type === 'assets_progress' ? finiteCount(event.total) : Math.max(state.assets.expected, settled);
+    const complete = settled >= expected && expected > 0;
+    const label = complete ? (failed > 0 ? `素材生成结束（成功 ${succeeded}，失败 ${failed}）` : `素材生成完成（${settled}/${expected}）`) : `正在生成素材（${settled}/${expected || 0}）`;
+    const marked = withStamp(state, marker);
+    const result = appendOrReplaceStep(marked, {
+      stepId: 'skill_job_assets', kind: 'execution', phase: 'generating', status: complete && failed > 0 && succeeded === 0 ? 'failed' : complete ? 'completed' : 'active',
+      label, commentary: label, toolName: 'start_skill_job', tool: 'start_skill_job', runId: event.runId || marked.runId, sequence: marker.sequence, timestampMs: marker.timestampMs, lastUpdateSequence: marker.sequence,
+    }, (step) => step.stepId === 'skill_job_assets' && (!event.runId || step.runId === event.runId));
+    return withOutcome({ ...marked, steps: result.steps, assets: { expected, settled, succeeded, failed } });
   }
 
   if (event.type === 'agent_done') {
-    return withOutcome({ ...state, agentDone: true });
+    const marker = stamp(state, event);
+    if (!marker) return state;
+    const marked = completePreviousActiveSteps(withAttempt(state, event, marker, true), marker, () => false);
+    return withOutcome({ ...marked, agentDone: true, runEndedAt: marker.timestampMs });
   }
 
-  if (event.type === 'agent_error') {
-    return {
-      ...state,
-      agentDone: true,
-      terminalFailed: true,
-      outcome: 'failed',
-      steps: state.steps.length > 0
-        ? state.steps.map((step, index) => index === state.steps.length - 1
-          ? { ...step, status: 'failed' }
-          : step)
-        : [{
-            stepId: 'agent-error',
-            kind: 'status',
-            phase: 'failed',
-            status: 'failed',
-            commentary: '任务执行失败',
-            label: '任务执行失败',
-          }],
-    };
-  }
-
-  if (event.type === 'agent_cancelled') {
-    const steps = state.steps.length > 0
-      ? state.steps.map((step, index) => index === state.steps.length - 1
-        ? { ...step, status: 'completed', phase: 'cancelled', commentary: '任务已终止', label: '任务已终止' }
-        : step)
-      : [{
-          stepId: 'agent-cancelled',
-          kind: 'status',
-          phase: 'cancelled',
-          status: 'completed',
-          commentary: '任务已终止',
-          label: '任务已终止',
-        }];
-    return { ...state, agentDone: true, outcome: 'cancelled', steps };
+  if (event.type === 'agent_error' || event.type === 'agent_cancelled') {
+    const marker = stamp(state, event);
+    if (!marker) return state;
+    const marked = withAttempt(state, event, marker, true);
+    const cancelled = event.type === 'agent_cancelled';
+    const label = cancelled ? '任务已终止' : '任务执行失败';
+    const activeIndex = marked.steps.findLastIndex((step) => ['pending', 'active'].includes(step.status));
+    const steps = activeIndex >= 0 ? marked.steps.map((step, index) => index === activeIndex ? { ...step, status: cancelled ? 'completed' : 'failed', phase: cancelled ? 'cancelled' : 'failed', commentary: label, label, completedAt: marker.timestampMs, lastUpdateSequence: marker.sequence } : step) : [...marked.steps, {
+      stepId: cancelled ? 'agent-cancelled' : 'agent-error', kind: 'execution', phase: cancelled ? 'cancelled' : 'failed', status: cancelled ? 'completed' : 'failed',
+      commentary: label, label, sequence: marker.sequence, timestampMs: marker.timestampMs, lastUpdateSequence: marker.sequence,
+    }];
+    return cancelled
+      ? { ...marked, agentDone: true, terminalCancelled: true, runEndedAt: marker.timestampMs, outcome: 'cancelled', steps }
+      : { ...marked, agentDone: true, terminalFailed: true, runEndedAt: marker.timestampMs, outcome: 'failed', steps };
   }
 
   return state;
@@ -348,6 +348,7 @@ export function reduceAgentRunProgress(state, event) {
 
 export function shouldShowAgentRunProgress(state) {
   if (!state?.steps?.length) return false;
+  if (state.timelineVersion === 2) return true;
   if (state.outcome !== 'completed') return true;
   if (state.intent !== 'chat') return true;
   return state.steps.some((step) => step.kind === 'tool' || step.tool || step.toolName);
@@ -362,52 +363,29 @@ export function routeAgentProgressEvent(router, event) {
   if (event?.type === 'intent_resolved') {
     const intent = event.intent === 'image' || event.intent === 'skill_action' ? event.intent : 'chat';
     if (current.intent === intent) return { router: current, events: [] };
-    return {
-      router: { intent, pending: [] },
-      events: current.pending,
-    };
+    return { router: { intent, pending: [] }, events: [] };
   }
   if (event?.type !== 'progress_update') return { router: current, events: [event] };
-  if (current.intent === 'chat' || current.intent === 'image' || current.intent === 'skill_action') {
-    return { router: current, events: [event] };
-  }
-  return {
-    router: { ...current, pending: [...current.pending, event] },
-    events: [],
-  };
+  return { router: current, events: [event] };
 }
 
 export function formatAgentProgressLabel(step) {
   const phase = String(step?.phase || '');
   const stepId = String(step?.stepId || '');
-  const emoji = PHASE_EMOJI_RULES.find(([pattern]) => pattern.test(phase))?.[1]
-    || PHASE_EMOJI_RULES.find(([pattern]) => pattern.test(stepId))?.[1]
-    || '⚙️';
-  const toolName = typeof step?.tool === 'string'
-    ? step.tool
-    : step?.tool?.name || step?.toolName || '';
+  const emoji = PHASE_EMOJI_RULES.find(([pattern]) => pattern.test(phase))?.[1] || PHASE_EMOJI_RULES.find(([pattern]) => pattern.test(stepId))?.[1] || '⚙️';
+  const toolName = typeof step?.tool === 'string' ? step.tool : step?.tool?.name || step?.toolName || '';
   const friendlyTool = TOOL_LABELS[toolName] || String(step?.tool?.label || toolName).replaceAll('_', ' ');
   const commentary = String(step?.commentary || step?.label || '').trim();
-  const label = commentary && commentary !== toolName
-    ? commentary
-    : friendlyTool
-      ? step?.status === 'completed'
-        ? `${friendlyTool}已完成`
-        : step?.status === 'failed'
-          ? `${friendlyTool}失败`
-          : step?.status === 'waiting'
-            ? `等待${friendlyTool}`
-            : `正在${friendlyTool}`
-      : '';
+  const label = commentary && commentary !== toolName ? commentary : friendlyTool ? step?.status === 'completed' ? `${friendlyTool}已完成` : step?.status === 'failed' ? `${friendlyTool}失败` : step?.status === 'waiting' ? `等待${friendlyTool}` : step?.status === 'pending' ? `准备${friendlyTool}` : `正在${friendlyTool}` : '';
   return `${emoji} ${label}`.trim();
 }
 
 export function getAgentProgressElapsedMs(step, now = Date.now()) {
   if (!isImageGenerationStep(step) || !Number.isFinite(Number(step?.startedAt))) return null;
-  const end = Number.isFinite(Number(step?.completedAt))
-    ? Number(step.completedAt)
-    : step?.status === 'active'
-      ? Number(now)
-      : null;
+  const end = Number.isFinite(Number(step?.completedAt)) ? Number(step.completedAt) : step?.status === 'active' ? Number(now) : null;
   return Number.isFinite(end) ? Math.max(0, end - Number(step.startedAt)) : null;
+}
+
+export function getAgentRunElapsedMs(progress, now = Date.now()) {
+  return (progress?.attempts || []).reduce((total, attempt) => total + Math.max(0, Number(attempt.endedAt || now) - Number(attempt.startedAt || now)), 0);
 }

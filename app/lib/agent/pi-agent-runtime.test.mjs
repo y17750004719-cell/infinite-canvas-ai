@@ -154,6 +154,75 @@ test('Pi runtime executes a sequential tool and continues to a final response', 
   assert.deepEqual(executed, [{ name: 'echo', args: { value: 'ok' }, toolCallId: 'call-1' }]);
 });
 
+test('Pi runtime emits a tool start before a delayed sequential tool resolves', async () => {
+  let requestCount = 0;
+  let toolResolved = false;
+  let releaseTool;
+  let resolveStart;
+  let resolveToolReady;
+  const started = new Promise((resolve) => { resolveStart = resolve; });
+  const toolReady = new Promise((resolve) => { resolveToolReady = resolve; });
+  const starts = [];
+  const results = [];
+  const run = runZFlowAgentBrain({
+    messages: [{ role: 'user', content: 'echo later' }],
+    providerId: 'provider-1',
+    model: 'test-model',
+    tools,
+    chatStream: () => {
+      requestCount += 1;
+      return requestCount === 1
+        ? toolStream([{ id: 'delayed-1', name: 'echo', args: { value: 'later' } }])()
+        : textStream('done')();
+    },
+    executeTool: async () => new Promise((resolve) => {
+      resolveToolReady();
+      releaseTool = () => {
+        toolResolved = true;
+        resolve({ modelResult: { ok: true }, publicResult: { ok: true } });
+      };
+    }),
+    onToolStart: (event) => {
+      starts.push(event);
+      resolveStart();
+    },
+    onToolResult: (event) => results.push(event),
+  });
+
+  const startedBeforeResult = await Promise.race([
+    started.then(() => true),
+    new Promise((resolve) => setTimeout(() => resolve(false), 50)),
+  ]);
+  await toolReady;
+  releaseTool();
+  const result = await run;
+
+  assert.equal(startedBeforeResult, true);
+  assert.equal(toolResolved, true);
+  assert.deepEqual(starts.map((event) => event.id), ['delayed-1']);
+  assert.deepEqual(results.map((event) => event.id), ['delayed-1']);
+  assert.equal(result.content, 'done');
+});
+
+test('Pi runtime does not announce a tool that pauses for user input', async () => {
+  const starts = [];
+  const pending = [];
+  const result = await runZFlowAgentBrain({
+    messages: [{ role: 'user', content: 'ask me' }],
+    providerId: 'provider-1',
+    model: 'test-model',
+    tools: [{ ...tools[0], name: 'request_choice', mayRequireConfirmation: true, readOnly: true }],
+    chatStream: () => toolStream([{ id: 'choice-1', name: 'request_choice', args: { value: 'one' } }])(),
+    executeTool: async () => ({ confirmationRequired: true, message: 'Which option?' }),
+    onToolPending: (event) => pending.push(event),
+    onToolStart: (event) => starts.push(event),
+  });
+
+  assert.equal(result.stopReason, 'confirmation_required');
+  assert.deepEqual(pending.map((event) => event.id), ['choice-1']);
+  assert.deepEqual(starts, []);
+});
+
 test('Pi runtime terminates on an explicit handoff without charging the query budget', async () => {
   const result = await runZFlowAgentBrain({
     messages: [{ role: 'user', content: 'finish' }],
@@ -306,6 +375,55 @@ test('Pi runtime preserves commentary, tool, and next-turn final event order', a
   ]);
 });
 
+test('Pi runtime commits the tool-turn commentary before pending and real tool execution', async () => {
+  let requestCount = 0;
+  const lifecycle = [];
+  await runZFlowAgentBrain({
+    messages: [{ role: 'user', content: 'inspect' }],
+    providerId: 'provider-1',
+    model: 'test-model',
+    tools: tools.map((tool) => ({ ...tool, readOnly: true })),
+    chatStream: () => {
+      requestCount += 1;
+      return requestCount === 1
+        ? commentaryToolStream('先读取上下文。', { id: 'read-1', name: 'echo', args: { value: 'context' } })()
+        : textStream('读取完成。')();
+    },
+    executeTool: async () => ({ modelResult: { loaded: true }, publicResult: { loaded: true } }),
+    onAssistantTurnComplete: ({ message, disposition }) => {
+      if (disposition === 'commentary') lifecycle.push(`commentary:${message.content[0].text}`);
+    },
+    onToolPending: ({ id }) => lifecycle.push(`pending:${id}`),
+    onToolStart: ({ id }) => lifecycle.push(`running:${id}`),
+    onToolResult: ({ id }) => lifecycle.push(`completed:${id}`),
+  });
+
+  assert.deepEqual(lifecycle, [
+    'commentary:先读取上下文。',
+    'pending:read-1',
+    'running:read-1',
+    'completed:read-1',
+  ]);
+});
+
+test('Pi runtime commits a tool-free assistant turn as the final response before agent completion', async () => {
+  const completions = [];
+  await runZFlowAgentBrain({
+    messages: [{ role: 'user', content: 'reply' }],
+    providerId: 'provider-1',
+    model: 'test-model',
+    tools,
+    chatStream: () => textStream('最终回答。')(),
+    executeTool: async () => ({}),
+    onAssistantTurnComplete: ({ message, disposition }) => completions.push({
+      disposition,
+      text: message.content[0]?.text,
+    }),
+  });
+
+  assert.deepEqual(completions, [{ disposition: 'final', text: '最终回答。' }]);
+});
+
 test('Pi provider bridge attaches validated visual tool results to the next model input', () => {
   const converted = convertPiMessagesToChatMessages([{
     role: 'toolResult',
@@ -358,6 +476,32 @@ test('Pi runtime uses one follow-up correction before returning execution_requir
 
   assert.equal(requests, 2);
   assert.equal(result.stopReason, 'execution_required');
+});
+
+test('Pi runtime keeps an external follow-up beside its internal correction', async () => {
+  let requests = 0;
+  const secondRequestMessages = [];
+  const result = await runZFlowAgentBrain({
+    messages: [{ role: 'user', content: 'execute' }],
+    providerId: 'provider-1',
+    model: 'test-model',
+    tools,
+    requireMutationTool: true,
+    getExternalFollowUpMessages: () => [{
+      role: 'user',
+      content: [{ type: 'text', text: '改成更明亮的版本。' }],
+      timestamp: Date.now(),
+    }],
+    chatStream: (request) => {
+      requests += 1;
+      if (requests === 2) secondRequestMessages.push(...request.messages);
+      return textStream(requests === 1 ? 'I will do it.' : 'Still no tool.')();
+    },
+    executeTool: async () => ({}),
+  });
+
+  assert.equal(result.stopReason, 'execution_required');
+  assert.match(JSON.stringify(secondRequestMessages), /改成更明亮的版本/);
 });
 
 test('Pi runtime fails closed on a truncated tool call without retrying it', async () => {
@@ -763,7 +907,7 @@ test('Pi runtime forces and terminates the isolated image routing stage', async 
         return toolStream([{
           id: 'operation-1',
           name: 'start_image_planning',
-          args: { operation: 'generate', requestedParameters: { outputCount: 1, aspectRatio: '3:4', deliveryMode: 'single' }, readiness: { goal: 'Generate a poster', targetIds: [], constraints: [], resolvedAmbiguities: [], blockingUnknowns: [] } },
+          args: { operation: 'generate', requestedParameters: { outputCount: 1, aspectRatio: '3:4', deliveryMode: 'single' }, readiness: { goal: 'Generate a poster', targetIds: [], constraints: [], resolvedAmbiguities: [], blockingUnknowns: [] }, publicProgress: { activeLabel: '开始图片规划', completedLabel: '图片规划已开始', completionSummary: '已进入图片规划。', failedLabel: '图片规划失败' } },
         }])();
       }
     },
@@ -798,7 +942,7 @@ test('Pi runtime retries a missed isolated image routing stage once', async () =
         return toolStream([{
           id: 'operation-1',
           name: 'start_image_planning',
-          args: { operation: 'generate', requestedParameters: { outputCount: 1, aspectRatio: '3:4', deliveryMode: 'single' }, readiness: { goal: 'Generate a poster', targetIds: [], constraints: [], resolvedAmbiguities: [], blockingUnknowns: [] } },
+          args: { operation: 'generate', requestedParameters: { outputCount: 1, aspectRatio: '3:4', deliveryMode: 'single' }, readiness: { goal: 'Generate a poster', targetIds: [], constraints: [], resolvedAmbiguities: [], blockingUnknowns: [] }, publicProgress: { activeLabel: '开始图片规划', completedLabel: '图片规划已开始', completionSummary: '已进入图片规划。', failedLabel: '图片规划失败' } },
         }])();
       }
     },

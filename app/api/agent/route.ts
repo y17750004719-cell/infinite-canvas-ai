@@ -56,6 +56,12 @@ import {
   startAgentImageGenerationHeartbeat,
 } from '../../lib/agent/agent-loop.mjs';
 import { runZFlowAgentBrain } from '../../lib/agent/pi-agent-runtime.mjs';
+import {
+  registerActiveAgentRun,
+  settleActiveAgentRun,
+  takeActiveAgentRunInputs,
+  updateActiveAgentRun,
+} from '../../lib/agent/active-run-registry.mjs';
 import { requireOriginalAsset } from '../../lib/agent/original-asset.mjs';
 import {
   claimConfirmationContinuation,
@@ -225,6 +231,14 @@ type AgentImagePromptCompilation = {
 
 type AgentSkillSource = 'manual_ui' | 'explicit_text' | 'user_confirmation' | 'recovery' | 'manual' | 'auto';
 
+type AgentPublicProgress = {
+  activeLabel?: string;
+  completedLabel?: string;
+  completionSummary?: string;
+  failedLabel?: string;
+  promptPreparation?: Omit<AgentPublicProgress, 'promptPreparation'>;
+};
+
 const isExplicitSkillSource = (source: AgentSkillSource | null | undefined) => Boolean(source && source !== 'auto');
 
 type ConfirmationRecord = {
@@ -259,6 +273,7 @@ type ConfirmationRecord = {
   imageTask?: AgentImageTask;
   visualContext?: AgentExecutionPlan['visualContext'];
   presentation?: AgentPlanPresentation;
+  publicProgress?: AgentPublicProgress;
   topicId?: string;
   taskId?: string;
   contractVersion?: number;
@@ -589,9 +604,11 @@ function buildCanonicalAgentReferenceContext({
 
 type AgentRequestBody = {
   runId?: string;
+  operationId?: string;
   topicId?: string;
   messages?: Array<{ id?: string; role: 'user' | 'assistant'; content: string }>;
   sourceUserMessageId?: string;
+  sourceAssistantMessageId?: string;
   recoveryTaskId?: string;
   activeSkillId?: string;
   intent?: 'chat' | 'image';
@@ -1114,6 +1131,7 @@ export async function POST(request: NextRequest) {
   }
   // Main Agent lifetime is bounded by provider completion, protocol budgets, or user cancellation.
   const runSignal = request.signal;
+  registerActiveAgentRun(runId);
   const stream = new ReadableStream({
     async start(controller) {
       let toolCalls = 0;
@@ -1265,7 +1283,7 @@ export async function POST(request: NextRequest) {
           activeVersions: [],
           ...(imagePlanning ? { imagePlanning: structuredClone(imagePlanning) } : {}),
         };
-        writeEvent(controller, { type: 'agent_task_checkpoint', taskSnapshot: structuredClone(taskSnapshot) });
+        writeEvent(controller, { type: 'agent_task_checkpoint', taskSnapshot: structuredClone(taskSnapshot), ...progressTracker.stamp() });
         return reservation;
       };
       const recordSucceededTaskIdentities = (identities: AgentPendingAssetIdentity[]) => {
@@ -1289,12 +1307,13 @@ export async function POST(request: NextRequest) {
           ...(agentAnalysis ? { agentAnalysis: structuredClone(agentAnalysis) } : {}),
           ...(imagePlanning ? { imagePlanning: structuredClone(imagePlanning) } : {}),
         };
-        writeEvent(controller, { type: 'agent_task_checkpoint', taskSnapshot: structuredClone(taskSnapshot) });
+        writeEvent(controller, { type: 'agent_task_checkpoint', taskSnapshot: structuredClone(taskSnapshot), ...progressTracker.stamp() });
       };
       const writeAgentDone = (stopReason: string) => writeEvent(controller, {
         type: 'agent_done',
         stopReason,
         ...(taskSnapshot ? { taskSnapshot: structuredClone(taskSnapshot) } : {}),
+        ...progressTracker.stamp(),
       });
       const sourceUserMessageId = typeof body.sourceUserMessageId === 'string' && body.sourceUserMessageId.trim()
         ? body.sourceUserMessageId.trim().slice(0, 200)
@@ -1402,7 +1421,20 @@ export async function POST(request: NextRequest) {
       };
       const progressTracker = createAgentProgressTracker({
         runId,
+        operationId: typeof body.operationId === 'string' && body.operationId.trim() ? body.operationId.trim().slice(0, 200) : runId,
         emit: (event) => writeEvent(controller, event as AgentEvent),
+      });
+      const getExternalSteeringMessages = () => takeActiveAgentRunInputs(runId, 'steer');
+      const getExternalFollowUpMessages = () => takeActiveAgentRunInputs(runId, 'follow_up');
+      const writeInteractionEvent = (event: AgentEvent) => writeEvent(controller, {
+        ...event,
+        ...progressTracker.stamp(),
+      } as AgentEvent);
+      const writeToolStartEvent = (toolCallId: string, toolName: string) => writeEvent(controller, {
+        type: 'tool_start',
+        toolCallId,
+        toolName,
+        ...progressTracker.stamp(),
       });
       const writeProgress = (input: {
         stepId: AgentProgressStepId;
@@ -1411,7 +1443,43 @@ export async function POST(request: NextRequest) {
         label: string;
         toolCallId?: string;
         toolName?: string;
+        detail?: string;
+        completionSummary?: string;
       }) => progressTracker.update(input);
+      const publicProgressByToolCallId = new Map<string, AgentPublicProgress>();
+      let imagePublicProgress: AgentPublicProgress | undefined;
+      const normalizePublicProgress = (value: unknown): AgentPublicProgress | undefined => {
+        if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
+        const raw = value as Record<string, unknown>;
+        const text = (key: string, maxLength: number) => typeof raw[key] === 'string'
+          ? raw[key].trim().slice(0, maxLength)
+          : '';
+        const progress = {
+          activeLabel: text('activeLabel', 120),
+          completedLabel: text('completedLabel', 120),
+          completionSummary: text('completionSummary', 500),
+          failedLabel: text('failedLabel', 120),
+        };
+        if (!Object.values(progress).some(Boolean)) return undefined;
+        const promptPreparation = normalizePublicProgress(raw.promptPreparation);
+        return promptPreparation ? { ...progress, promptPreparation } : progress;
+      };
+      const rememberToolPublicProgress = (toolCallId: string, toolName: string, args: unknown) => {
+        const progress = normalizePublicProgress((args as Record<string, unknown> | undefined)?.publicProgress);
+        if (!progress || !toolCallId) return undefined;
+        publicProgressByToolCallId.set(toolCallId, progress);
+        if (toolName === 'generate_image') imagePublicProgress = progress;
+        return progress;
+      };
+      const copyToolPublicProgress = (
+        toolCallId: string,
+        progress: AgentPublicProgress | undefined,
+        toolName = '',
+      ) => {
+        if (!toolCallId || !progress) return;
+        publicProgressByToolCallId.set(toolCallId, progress);
+        if (toolName === 'generate_image') imagePublicProgress = progress;
+      };
       let emittedIntent: AgentIntent | null = null;
       const emitIntentResolved = (nextIntent: AgentIntent) => {
         if (emittedIntent === nextIntent) return;
@@ -1428,114 +1496,259 @@ export async function POST(request: NextRequest) {
         imagegenHostContent = await loadSkillContent(IMAGEGEN_HOST_SKILL_ID, { includeInternal: true });
         return imagegenHostContent;
       };
+      const summarizePublicToolResult = (value: unknown) => {
+        if (typeof value === 'string') return value.trim().slice(0, 600);
+        if (!value || typeof value !== 'object' || Array.isArray(value)) return '';
+        const result = value as Record<string, unknown>;
+        for (const key of ['summary', 'message', 'detail', 'status']) {
+          const candidate = result[key];
+          if (typeof candidate === 'string' && candidate.trim()) return candidate.trim().slice(0, 600);
+        }
+        if (Array.isArray(result.assets)) return `已返回 ${result.assets.length} 个结果。`;
+        if (typeof result.total === 'number') return `共处理 ${result.total} 项。`;
+        return '';
+      };
+      let activitySequence = 0;
+      let currentActivity: { activityId: string; text: string; sequence?: number; timestampMs?: number } | null = null;
+      let finalAssistantTextEmitted = false;
+      let hasMutationEvidence = false;
+      const handledAssistantTurnKeys = new Set<string>();
+      const handledAssistantMessages = new WeakSet<object>();
+      const appendActivityText = (activityId: string, delta: string) => {
+        if (!delta) return;
+        const stamp = currentActivity?.sequence
+          ? { sequence: currentActivity.sequence, timestampMs: currentActivity.timestampMs }
+          : progressTracker.stamp();
+        currentActivity = {
+          activityId,
+          text: `${currentActivity?.text || ''}${delta}`,
+          ...stamp,
+        };
+        writeEvent(controller, {
+          type: 'agent_activity_delta',
+          activityId,
+          delta,
+          model: resolvedChatSelection.model,
+          ...stamp,
+        });
+      };
+      const commitCurrentActivity = (message: any, disposition?: 'commentary' | 'final') => {
+        const fullText = Array.isArray(message?.content)
+          ? message.content.filter((part: any) => part?.type === 'text').map((part: any) => part.text || '').join('')
+          : '';
+        if (!currentActivity && !fullText) return;
+        const activityId = currentActivity?.activityId || `${runId}-activity-${++activitySequence}`;
+        if (fullText && (currentActivity?.text || '').length < fullText.length) {
+          appendActivityText(activityId, fullText.slice(currentActivity?.text.length || 0));
+        }
+        if (currentActivity?.text) {
+          writeEvent(controller, {
+            type: 'agent_activity_commit',
+            activityId,
+            disposition: disposition || (message?.stopReason === 'error' || message?.stopReason === 'aborted' ? 'commentary' : 'final'),
+            ...(currentActivity.sequence ? { sequence: currentActivity.sequence, timestampMs: currentActivity.timestampMs } : progressTracker.stamp()),
+          });
+        }
+        currentActivity = null;
+      };
+      const emitFinalAssistantMessage = (message: any) => {
+        if (finalAssistantTextEmitted) return;
+        const fullText = Array.isArray(message?.content)
+          ? message.content.filter((part: any) => part?.type === 'text').map((part: any) => part.text || '').join('')
+          : '';
+        if (!fullText.trim()) return;
+        const proposal = parseAgentProposalBlock(fullText);
+        const safeContent = sanitizeAgentResponseContent(proposal.cleanContent, hasMutationEvidence);
+        if (proposal.proposal) writeEvent(controller, { type: 'proposal_presented', proposal: proposal.proposal });
+        if (safeContent) {
+          writeEvent(controller, {
+            type: 'assistant_delta',
+            delta: safeContent,
+            channel: 'content',
+            model: resolvedChatSelection.model,
+            ...progressTracker.stamp(),
+          });
+        }
+        finalAssistantTextEmitted = true;
+      };
+      const handleAssistantTurnComplete = ({ message, disposition }: { message: any; disposition?: 'commentary' | 'final' }) => {
+        if (message && typeof message === 'object' && handledAssistantMessages.has(message)) return;
+        if (message && typeof message === 'object') handledAssistantMessages.add(message);
+        const calls = Array.isArray(message?.content)
+          ? message.content.filter((part: any) => part?.type === 'toolCall')
+          : [];
+        const textContent = calls.length === 0
+          ? Array.isArray(message?.content)
+            ? message.content.filter((part: any) => part?.type === 'text').map((part: any) => part.text || '').join('')
+            : ''
+          : '';
+        const turnKey = calls.length > 0
+          ? `tool:${calls.map((call: any) => call.id).join(':')}`
+          : `final:${message?.timestamp || currentActivity?.activityId || ''}:${textContent}`;
+        if (handledAssistantTurnKeys.has(turnKey)) return;
+        handledAssistantTurnKeys.add(turnKey);
+        commitCurrentActivity(message, disposition || 'commentary');
+        if ((disposition || 'commentary') === 'final') emitFinalAssistantMessage(message);
+      };
+      const writeToolUpdateEvent = (id: string, message: string) => writeEvent(controller, {
+        type: 'tool_update',
+        toolCallId: id,
+        message,
+        ...progressTracker.stamp(),
+      } as AgentEvent);
+      const writeToolResultEvent = (id: string, name: string, result: unknown, isError = false) => writeEvent(controller, {
+        type: 'tool_result',
+        toolCallId: id,
+        toolName: name,
+        result,
+        isError,
+        ...progressTracker.stamp(),
+      } as AgentEvent);
+      const noteToolResult = (name: string, isError = false) => {
+        if (!isError && ['generate_image', 'start_skill_job'].includes(name)) hasMutationEvidence = true;
+      };
+      const writeStampedAgentEvent = (event: any) => {
+        const lifecycle = new Set(['tool_start', 'tool_update', 'tool_result', 'assistant_delta', 'agent_activity_delta', 'agent_activity_commit', 'agent_done']);
+        writeEvent(controller, lifecycle.has(event?.type) ? { ...event, ...progressTracker.stamp() } : event);
+      };
+      const emitMainAgentEvent = (event: any) => {
+        if (event?.type === 'message_start' && event.message?.role === 'assistant') {
+          currentActivity = { activityId: `${runId}-activity-${++activitySequence}`, text: '' };
+          return;
+        }
+        if (event?.type === 'message_update' && event.assistantMessageEvent?.type === 'text_delta') {
+          const activityId = currentActivity?.activityId || `${runId}-activity-${++activitySequence}`;
+          appendActivityText(activityId, String(event.assistantMessageEvent.delta || ''));
+          return;
+        }
+        if (event?.type !== 'turn_end' || event.message?.role !== 'assistant') return;
+        const hasToolCall = Array.isArray(event.message.content)
+          && event.message.content.some((part: any) => part?.type === 'toolCall');
+        if (hasToolCall && !currentActivity) return;
+        handleAssistantTurnComplete({ message: event.message, disposition: hasToolCall ? 'commentary' : 'final' });
+      };
       const writeToolProgress = (
         toolName: string,
-        status: 'active' | 'waiting' | 'completed' | 'failed',
+        status: 'pending' | 'active' | 'waiting' | 'completed' | 'failed',
         toolCallId: string,
+        detail = '',
       ) => {
+        updateActiveAgentRun(runId, {
+          phase: status === 'waiting' ? 'waiting' : status === 'active' ? 'executing' : 'reasoning',
+          nonInterruptible: status === 'active' && (toolName === 'generate_image' || toolName === 'start_skill_job'),
+        });
+        const publicProgress = publicProgressByToolCallId.get(toolCallId);
         const definitions: Record<string, {
           stepId: AgentProgressStepId;
           phase: AgentProgressPhase;
-          labels: Record<AgentProgressStatus, string>;
         }> = {
           generate_image: {
             stepId: 'generate_image',
             phase: 'generating',
-            labels: { active: '正在生成图片', waiting: '等待确认生成图片', completed: '图片生成完成', failed: '图片生成失败' },
           },
           get_canvas_context: {
             stepId: 'canvas_context',
             phase: 'reading',
-            labels: { active: '正在读取画布摘要', waiting: '等待读取画布', completed: '画布摘要读取完成', failed: '画布摘要读取失败' },
           },
           get_conversation_memory: {
             stepId: 'tool',
             phase: 'reading',
-            labels: { active: '正在读取对话记忆', waiting: '等待读取对话记忆', completed: '对话记忆读取完成', failed: '对话记忆读取失败' },
           },
           list_project_context: {
             stepId: 'tool',
             phase: 'reading',
-            labels: { active: '正在查看项目上下文', waiting: '等待项目上下文', completed: '项目上下文已读取', failed: '项目上下文读取失败' },
           },
           read_context_entity: {
             stepId: 'tool',
             phase: 'reading',
-            labels: { active: '正在读取上下文实体', waiting: '等待上下文实体', completed: '上下文实体已读取', failed: '上下文实体读取失败' },
           },
           load_visual_reference: {
             stepId: 'tool',
             phase: 'reading',
-            labels: { active: '正在加载视觉参考', waiting: '等待视觉参考', completed: '视觉参考已加载', failed: '视觉参考加载失败' },
           },
           update_conversation_memory: {
             stepId: 'tool',
             phase: 'executing',
-            labels: { active: '正在暂存对话记忆', waiting: '等待暂存对话记忆', completed: '对话记忆更新待提交', failed: '对话记忆更新失败' },
           },
           read_relevant_context: {
             stepId: 'tool',
             phase: 'reading',
-            labels: { active: '正在读取相关上下文', waiting: '等待上下文', completed: '相关上下文已读取', failed: '相关上下文读取失败' },
           },
           start_image_planning: {
             stepId: 'image_operation',
             phase: 'analyzing',
-            labels: { active: '正在识别生成或编辑', waiting: '等待图片规划', completed: '图片操作已识别', failed: '图片操作识别失败' },
           },
           resolve_failed_task_recovery: {
             stepId: 'routing',
             phase: 'resuming',
-            labels: { active: '正在定位上次任务', waiting: '等待恢复任务', completed: '已定位上次任务', failed: '无法恢复上次任务' },
           },
           request_main_agent_context: {
             stepId: 'tool',
             phase: 'reading',
-            labels: { active: '正在解锁所需上下文', waiting: '等待上下文授权', completed: '所需上下文已解锁', failed: '上下文解锁失败' },
           },
           classify_image_operation: {
             stepId: 'routing',
             phase: 'analyzing',
-            labels: { active: '正在判断图片操作', waiting: '等待确认图片操作', completed: '图片操作已识别', failed: '图片操作识别失败' },
           },
           read_imagegen_context: {
             stepId: 'skill_loading',
             phase: 'loading',
-            labels: { active: '正在读取 ImageGen 工作上下文', waiting: '等待读取 ImageGen 工作上下文', completed: '图像方法与视觉 Skill 已读取', failed: 'ImageGen 工作上下文读取失败' },
           },
           submit_image_execution_plan: {
             stepId: 'tool',
             phase: 'planning',
-            labels: { active: '正在提交图像合同', waiting: '等待合同校验', completed: '图像合同已通过', failed: '图像合同校验失败' },
           },
           request_context_selection: {
             stepId: 'tool',
             phase: 'waiting_input',
-            labels: { active: '正在准备引用候选', waiting: '等待选择引用', completed: '引用候选已确认', failed: '引用候选准备失败' },
           },
           start_skill_job: {
             stepId: 'skill_job',
             phase: 'starting',
-            labels: { active: '正在启动 Skill 任务', waiting: '等待确认 Skill 任务', completed: 'Skill 任务已启动', failed: 'Skill 任务启动失败' },
           },
           get_skill_job: {
             stepId: 'skill_job',
             phase: 'checking',
-            labels: { active: '正在查询 Skill 任务', waiting: '等待查询 Skill 任务', completed: 'Skill 任务状态已更新', failed: 'Skill 任务查询失败' },
           },
         };
         const definition = definitions[toolName] || {
           stepId: 'tool',
           phase: 'executing',
-          labels: { active: '正在执行工具', waiting: '等待确认工具', completed: '工具执行完成', failed: '工具执行失败' },
         };
+        const toolLabel = ({
+          generate_image: '生成图片',
+          read_context_entity: '读取上下文',
+          read_relevant_context: '读取相关上下文',
+          read_imagegen_context: '读取图片生成上下文',
+          load_visual_reference: '加载视觉参考',
+          start_skill_job: '启动 Skill 任务',
+          get_skill_job: '检查 Skill 任务',
+        } as Record<string, string>)[toolName] || toolName.replaceAll('_', ' ');
+        const fallbackLabel = status === 'pending'
+          ? `准备${toolLabel}`
+          : status === 'waiting'
+            ? `等待确认后${toolLabel}`
+            : status === 'completed'
+              ? `${toolLabel}已完成`
+              : status === 'failed'
+                ? `${toolLabel}失败`
+                : `正在${toolLabel}`;
+        const label = status === 'completed'
+          ? publicProgress?.completedLabel || fallbackLabel
+          : status === 'failed'
+            ? publicProgress?.failedLabel || fallbackLabel
+            : status === 'active'
+              ? publicProgress?.activeLabel || fallbackLabel
+              : fallbackLabel;
         writeProgress({
           stepId: definition.stepId,
           phase: definition.phase,
           status,
-          label: definition.labels[status],
+          label,
           toolCallId,
           toolName,
+          ...(detail ? { detail } : {}),
+          ...(status === 'completed' && publicProgress?.completionSummary ? { completionSummary: publicProgress.completionSummary } : {}),
         });
         if (status === 'active' && contextResolution.status === 'resolved') {
           void contextLogger.info('context.execution', 'Resolved context entered tool execution', {
@@ -1543,6 +1756,32 @@ export async function POST(request: NextRequest) {
             entityIds: contextResolution.entityIds,
           });
         }
+      };
+      const writeToolUpdate = ({ id, name, partialResult }: { id: string; name: string; partialResult: unknown }) => {
+        const detail = summarizePublicToolResult(partialResult);
+        writeToolUpdateEvent(id, detail);
+        if (detail) writeToolProgress(name, 'active', id, detail);
+      };
+      const writePromptPreparationProgress = (
+        status: 'active' | 'completed' | 'failed',
+        toolCallId?: string,
+      ) => {
+        const progress = (toolCallId ? publicProgressByToolCallId.get(toolCallId) : undefined)
+          || imagePublicProgress;
+        const promptPreparation = progress?.promptPreparation;
+        const label = status === 'completed'
+          ? promptPreparation?.completedLabel || '最终图片提示词已准备'
+          : status === 'failed'
+            ? promptPreparation?.failedLabel || '最终图片提示词准备失败'
+            : promptPreparation?.activeLabel || '正在准备最终图片提示词';
+        writeProgress({
+          stepId: 'prompt_optimization',
+          phase: 'optimizing',
+          status,
+          label,
+          ...(toolCallId ? { toolCallId, toolName: 'generate_image' } : {}),
+          ...(status === 'completed' && promptPreparation?.completionSummary ? { completionSummary: promptPreparation.completionSummary } : {}),
+        });
       };
       const generateImagePayload = async (
         sourcePrompt: string,
@@ -1661,6 +1900,10 @@ export async function POST(request: NextRequest) {
         if (requests.some((request) => Number(request?.n) !== 1)) {
           throw new Error('批量图片请求必须拆分为独立的 n:1 任务。');
         }
+        const heartbeatToolCallId = streamOptions?.toolCallId;
+        const imageProgress = (heartbeatToolCallId ? publicProgressByToolCallId.get(heartbeatToolCallId) : undefined)
+          || imagePublicProgress;
+        writePromptPreparationProgress('active', heartbeatToolCallId);
         requests.forEach((request, index) => {
           const prompt = request.messages?.[0]?.content;
           if (typeof prompt !== 'string' || !prompt) {
@@ -1671,9 +1914,16 @@ export async function POST(request: NextRequest) {
             index,
             label: effectiveGenerationItems[index]?.label || `图片 ${index + 1}`,
             prompt,
+            ...(heartbeatToolCallId ? {
+              toolCallId: heartbeatToolCallId,
+              completedLabel: imageProgress?.promptPreparation?.completedLabel,
+              completionSummary: imageProgress?.promptPreparation?.completionSummary,
+            } : {}),
+            ...progressTracker.stamp(),
             ...(promptCompilation ? { compilation: promptCompilation } : {}),
           });
         });
+        writePromptPreparationProgress('completed', heartbeatToolCallId);
         void contextLogger.info('image.requests_built', 'Agent image requests built', {
           requestedCount: payloadOutputCount,
           actualRequestCount: requests.length,
@@ -1706,18 +1956,13 @@ export async function POST(request: NextRequest) {
         let streamedSucceeded = 0;
         let streamedFailed = 0;
         let streamedPresentationSent = false;
-        const heartbeatToolCallId = streamOptions?.toolCallId;
+        if (heartbeatToolCallId) {
+          writeToolProgress('generate_image', 'active', heartbeatToolCallId);
+        }
         const stopImageGenerationHeartbeat = heartbeatToolCallId
           ? startAgentImageGenerationHeartbeat({
-          onPulse: (elapsedMs) => {
-            writeProgress({
-              stepId: 'generate_image',
-              phase: 'generating',
-              status: 'active',
-              label: `正在等待图片生成（${Math.ceil(elapsedMs / 1000)} 秒）`,
-              toolCallId: heartbeatToolCallId,
-              toolName: 'generate_image',
-            });
+          onPulse: () => {
+            writeToolProgress('generate_image', 'active', heartbeatToolCallId);
           },
         })
           : () => {};
@@ -1970,7 +2215,7 @@ export async function POST(request: NextRequest) {
         }
         if (result?.partialFailureMessage) updates.push(result.partialFailureMessage);
         for (const message of updates) {
-          writeEvent(controller, { type: 'tool_update', toolCallId, message });
+          writeEvent(controller, { type: 'tool_update', toolCallId, message, ...progressTracker.stamp() });
         }
       };
       const writeImageCompletionSummary = (result: any) => {
@@ -1994,7 +2239,7 @@ export async function POST(request: NextRequest) {
         });
       };
       try {
-        writeEvent(controller, { type: 'agent_start', runId });
+        writeEvent(controller, { type: 'agent_start', runId, ...progressTracker.stamp() });
         const requestedConfirmationId = body.confirmation?.confirmationId;
         if (requestedConfirmationId) {
           pruneConfirmationStore();
@@ -2059,7 +2304,6 @@ export async function POST(request: NextRequest) {
           });
           executionBrief = executionBriefData.plainText;
           intent = confirmationRecord.toolName === 'generate_image' ? 'image' : 'skill_action';
-          writeEvent(controller, { type: 'routing_start' });
           emitIntentResolved(intent);
           if (selectedSkill) {
             writeEvent(controller, {
@@ -2071,8 +2315,9 @@ export async function POST(request: NextRequest) {
           }
           const toolCallId = confirmationRecord.progressToolCallId
             || `${runId}-${confirmationRecord.toolName}-confirmed`;
+          copyToolPublicProgress(toolCallId, confirmationRecord.publicProgress, confirmationRecord.toolName);
           writeToolProgress(confirmationRecord.toolName, 'active', toolCallId);
-          writeEvent(controller, { type: 'tool_start', toolCallId, toolName: confirmationRecord.toolName });
+          writeToolStartEvent(toolCallId, confirmationRecord.toolName);
           if (!confirmationRecord.execution && !confirmationRecord.result) {
             confirmationRecord.execution = (async () => {
               if (confirmationRecord.toolName === 'generate_image') {
@@ -2140,6 +2385,7 @@ export async function POST(request: NextRequest) {
           if (confirmationRecord.toolName === 'generate_image') {
             writeResolvedImageOptionUpdate(toolCallId, result);
           }
+          writeToolProgress(confirmationRecord.toolName, 'completed', toolCallId);
           for (const event of enrichGeneratedAssetEvents(createAgentToolResultEvents({
             source: 'confirmed',
             runId,
@@ -2147,11 +2393,10 @@ export async function POST(request: NextRequest) {
             toolName: confirmationRecord.toolName,
             rawResult: result,
             includeAssets: !(result as any)?.streamedAssets,
-          }), result)) writeEvent(controller, event as AgentEvent);
+          }), result)) writeStampedAgentEvent(event);
           if (confirmationRecord.toolName === 'generate_image') {
             writeImageCompletionSummary(result);
           }
-          writeToolProgress(confirmationRecord.toolName, 'completed', toolCallId);
           updateTopicMemory({
             activeTask: {
               status: 'completed',
@@ -2213,7 +2458,7 @@ export async function POST(request: NextRequest) {
               }
               const succeeded = positiveInteger(requestStats.succeeded) || 0;
               const failed = positiveInteger(requestStats.failed) || 0;
-              writeEvent(controller, {
+              writeInteractionEvent({
                 type: 'confirmation_required',
                 request: {
                   confirmationId: nextConfirmationId,
@@ -2272,7 +2517,7 @@ export async function POST(request: NextRequest) {
                 });
               }
               const failed = positiveInteger((result as any)?.requestStats?.failed) || 0;
-              writeEvent(controller, {
+              writeInteractionEvent({
                 type: 'confirmation_required',
                 request: {
                   confirmationId: nextConfirmationId,
@@ -2359,20 +2604,29 @@ export async function POST(request: NextRequest) {
                 continuationRawResults.set(String(context.toolCallId || ''), rawResult);
                 return { ...rawResult as Record<string, unknown>, ...createAgentToolResultViews(toolName, rawResult) };
               },
-              onToolStart: ({ id, name }: any) => {
-                writeToolProgress(name, 'active', id);
-                writeEvent(controller, { type: 'tool_start', toolCallId: id, toolName: name });
+              onEvent: emitMainAgentEvent,
+              onAssistantTurnComplete: handleAssistantTurnComplete,
+              onToolPending: ({ id, name, args }: any) => {
+                rememberToolPublicProgress(id, name, args);
+                writeToolProgress(name, 'pending', id);
               },
+              onToolStart: ({ id, name, args }: any) => {
+                rememberToolPublicProgress(id, name, args);
+                writeToolProgress(name, 'active', id);
+                writeToolStartEvent(id, name);
+              },
+              onToolUpdate: writeToolUpdate,
               onToolResult: ({ id, name, result: publicResult, rawResult: runtimeRawResult, isError }: any) => {
                 const rawResult = continuationRawResults.get(id) ?? runtimeRawResult ?? publicResult;
+                noteToolResult(name, isError);
                 for (const event of enrichGeneratedAssetEvents(createAgentToolResultEvents({
                   source: 'loop',
                   runId,
                   toolCallId: id,
                   toolName: name,
                   rawResult,
-                }), rawResult)) writeEvent(controller, event as AgentEvent);
-                writeToolProgress(name, isError ? 'failed' : 'completed', id);
+                }), rawResult)) writeStampedAgentEvent(event);
+                writeToolProgress(name, isError ? 'failed' : 'completed', id, summarizePublicToolResult(publicResult));
               },
             });
             if (continuationResult.stopReason === 'error' || continuationResult.stopReason === 'aborted') {
@@ -2385,6 +2639,7 @@ export async function POST(request: NextRequest) {
                 stage: 'budget',
                 message: '工具调用预算已用尽，请缩小任务范围后重试',
                 recoveryRecord: buildRecoveryRecord({ stage: 'budget', message: '工具调用预算已用尽，请缩小任务范围后重试' }),
+                ...progressTracker.stamp(),
               });
               return;
             }
@@ -2419,6 +2674,7 @@ export async function POST(request: NextRequest) {
                 progressToolCallId: nextToolCallId,
                 toolName: nextToolName,
                 toolArgs: structuredClone(nextArgs),
+                publicProgress: normalizePublicProgress(nextArgs.publicProgress),
                 piTranscript: structuredClone(continuationResult.transcript),
                 assistantToolCallIds: nextBatch.map((call) => call.id),
                 progressSequence: checkpoint.lastSequence,
@@ -2440,8 +2696,9 @@ export async function POST(request: NextRequest) {
                 result: undefined,
                 expiresAt: Date.now() + CONFIRMATION_TTL_MS,
               });
+              copyToolPublicProgress(nextToolCallId, normalizePublicProgress(nextArgs.publicProgress), nextToolName);
               writeToolProgress(nextToolName, 'waiting', nextToolCallId);
-              writeEvent(controller, {
+              writeInteractionEvent({
                 type: 'confirmation_required',
                 request: {
                   confirmationId: nextConfirmationId,
@@ -2460,7 +2717,7 @@ export async function POST(request: NextRequest) {
             if (continuedProposal.proposal) {
               writeEvent(controller, { type: 'proposal_presented', proposal: continuedProposal.proposal });
             }
-            if (safeContinuedContent) {
+            if (safeContinuedContent && !finalAssistantTextEmitted) {
               writeEvent(controller, {
                 type: 'assistant_delta',
                 delta: safeContinuedContent,
@@ -2566,7 +2823,6 @@ export async function POST(request: NextRequest) {
           candidateIds: skillCandidateIds,
           skillContentLength: skillContent.length,
         });
-        writeEvent(controller, { type: 'routing_start' });
         const mainAgentStartedAt = Date.now();
         const allowedSkillIds = new Set(skillManifests.map((manifest) => manifest.id));
         const contextEntityById = new Map(contextEntities.map((entity) => [entity.id, entity]));
@@ -2673,13 +2929,30 @@ export async function POST(request: NextRequest) {
                 };
               }
             },
+            onEvent: emitMainAgentEvent,
+            onAssistantTurnComplete: handleAssistantTurnComplete,
+            onToolPending: ({ id, name, args }: any) => {
+              rememberToolPublicProgress(id, name, args);
+              writeToolProgress(name, 'pending', id);
+            },
+            onToolStart: ({ id, name, args }: any) => {
+              rememberToolPublicProgress(id, name, args);
+              writeToolProgress(name, 'active', id);
+              writeToolStartEvent(id, name);
+            },
+            onToolUpdate: writeToolUpdate,
+            onToolResult: ({ id, name, result, isError }: any) => {
+              noteToolResult(name, isError);
+              writeToolResultEvent(id, name, result, isError);
+              writeToolProgress(name, isError ? 'failed' : 'completed', id, summarizePublicToolResult(result));
+            },
           });
           if (result.terminal?.type === 'recovery_resolution') return result.terminal as Record<string, unknown>;
           if (result.terminal?.type === 'recovery_entry_error') {
             throw new Error(`失败任务处理失败：${String(result.terminal.message || '参数无效')}`);
           }
           const directResponse = String(result.content || '').trim();
-          if (directResponse) {
+          if (directResponse && !finalAssistantTextEmitted) {
             return {
               decision: 'direct_response',
               content: directResponse,
@@ -2786,7 +3059,7 @@ export async function POST(request: NextRequest) {
               allowProceed: false,
             };
             const checkpoint = progressTracker.snapshot();
-            writeEvent(controller, {
+            writeInteractionEvent({
               type: 'clarification_required',
               message: request.question,
               request,
@@ -2986,7 +3259,7 @@ export async function POST(request: NextRequest) {
             activeVersions: structuredClone(previous?.activeVersions || []),
             agentAnalysis: structuredClone(agentAnalysis),
           };
-          writeEvent(controller, { type: 'agent_task_checkpoint', taskSnapshot: structuredClone(taskSnapshot) });
+          writeEvent(controller, { type: 'agent_task_checkpoint', taskSnapshot: structuredClone(taskSnapshot), ...progressTracker.stamp() });
         };
         writeImagePlanningCheckpoint = () => {
           if (!imagePlanning) return;
@@ -3002,7 +3275,7 @@ export async function POST(request: NextRequest) {
             ...(agentAnalysis ? { agentAnalysis: structuredClone(agentAnalysis) } : {}),
             imagePlanning: structuredClone(imagePlanning),
           };
-          writeEvent(controller, { type: 'agent_task_checkpoint', taskSnapshot: structuredClone(taskSnapshot) });
+          writeEvent(controller, { type: 'agent_task_checkpoint', taskSnapshot: structuredClone(taskSnapshot), ...progressTracker.stamp() });
           void contextLogger.info('image_planning.checkpoint', 'Saved image planning checkpoint', {
             taskId: imagePlanning.taskId,
             runId: imagePlanning.runId,
@@ -3067,11 +3340,12 @@ export async function POST(request: NextRequest) {
               },
             };
           },
-          generateImage: async (args: Record<string, unknown>) => {
+          generateImage: async (args: Record<string, unknown>, context: { publicProgress?: unknown }) => {
             const operation = String(args.operation || '');
             if (operation !== 'generate' && operation !== 'edit') throw new Error('图片操作必须是 generate 或 edit');
             const prompt = String(args.prompt || '').trim();
             if (!prompt) throw new Error('最终图片提示词不能为空');
+            const publicProgress = normalizePublicProgress(context.publicProgress);
             const referenceIds = Array.from(new Set(
               (Array.isArray(args.referenceIds) ? args.referenceIds : []).map((value) => String(value).trim()).filter(Boolean),
             ));
@@ -3173,8 +3447,8 @@ export async function POST(request: NextRequest) {
                 mustPreserve: [],
               },
               presentation: {
-                title: operation === 'edit' ? '图片编辑' : '图片生成',
-                completionSummary: operation === 'edit' ? '图片编辑完成。' : '图片生成完成。',
+                title: publicProgress?.completedLabel || (operation === 'edit' ? '图片编辑' : '图片生成'),
+                completionSummary: publicProgress?.completionSummary || (operation === 'edit' ? '图片编辑完成。' : '图片生成完成。'),
               },
               brief: { deliverable: 'image', subject: prompt, style: [], literalCopy: [], constraints: [] },
               delivery: {
@@ -3801,58 +4075,6 @@ export async function POST(request: NextRequest) {
             throw new Error('Skill selection response does not match the pending Main Agent request');
           }
         }
-        let activitySequence = 0;
-        let currentActivity: { activityId: string; text: string } | null = null;
-        const appendActivityText = (activityId: string, delta: string, maxLength = 1200) => {
-          const remaining = maxLength - (currentActivity?.text.length || 0);
-          if (remaining <= 0 || !delta) return;
-          const boundedDelta = delta.slice(0, remaining);
-          if (!boundedDelta) return;
-          currentActivity = {
-            activityId,
-            text: `${currentActivity?.text || ''}${boundedDelta}`,
-          };
-          writeEvent(controller, {
-            type: 'agent_activity_delta',
-            activityId,
-            delta: boundedDelta,
-            model: resolvedChatSelection.model,
-          });
-        };
-        const emitMainAgentEvent = (event: any) => {
-          if (event?.type === 'message_start' && event.message?.role === 'assistant') {
-            currentActivity = { activityId: `${runId}-activity-${++activitySequence}`, text: '' };
-            return;
-          }
-          if (event?.type === 'message_update' && event.assistantMessageEvent?.type === 'text_delta') {
-            const activityId = currentActivity?.activityId || `${runId}-activity-${++activitySequence}`;
-            appendActivityText(activityId, String(event.assistantMessageEvent.delta || ''));
-            return;
-          }
-          if (event?.type !== 'turn_end' || event.message?.role !== 'assistant') return;
-          const activityId = currentActivity?.activityId || `${runId}-activity-${++activitySequence}`;
-          const hasToolCall = Array.isArray(event.message.content)
-            && event.message.content.some((part: any) => part?.type === 'toolCall');
-          const failed = event.message.stopReason === 'error' || event.message.stopReason === 'aborted';
-          const fullText = Array.isArray(event.message.content)
-            ? event.message.content.filter((part: any) => part?.type === 'text').map((part: any) => part.text || '').join('')
-            : '';
-          if (fullText && (currentActivity?.text || '').length < fullText.length) {
-            appendActivityText(
-              activityId,
-              fullText.slice(currentActivity?.text.length || 0),
-              failed || hasToolCall ? 1200 : Number.POSITIVE_INFINITY,
-            );
-          }
-          if (currentActivity?.text) {
-            writeEvent(controller, {
-              type: 'agent_activity_commit',
-              activityId,
-              disposition: failed || hasToolCall ? 'commentary' : 'final',
-            });
-          }
-          currentActivity = null;
-        };
         /* Retained only as migration history; the active flow is the background Image Planner below.
         const runLegacyStagedImagePlanning = async () => {
           if (!imagePlanning) throw new Error('Image planning state is unavailable');
@@ -4062,11 +4284,23 @@ export async function POST(request: NextRequest) {
                     budgets,
                   },
                 } : {}),
-                onToolStart: ({ id, name }) => {
-                  writeToolProgress(name, 'active', id);
-                  writeEvent(controller, { type: 'tool_start', toolCallId: id, toolName: name });
+                onEvent: emitMainAgentEvent,
+                onAssistantTurnComplete: handleAssistantTurnComplete,
+                onToolPending: ({ id, name, args }) => {
+                  rememberToolPublicProgress(id, name, args);
+                  writeToolProgress(name, 'pending', id);
                 },
-                onToolResult: ({ id, name, isError }) => writeToolProgress(name, isError ? 'failed' : 'completed', id),
+                onToolStart: ({ id, name, args }) => {
+                  rememberToolPublicProgress(id, name, args);
+                  writeToolProgress(name, 'active', id);
+                  writeToolStartEvent(id, name);
+                },
+                onToolUpdate: writeToolUpdate,
+                onToolResult: ({ id, name, result, isError }) => {
+                  noteToolResult(name, isError);
+                  writeToolResultEvent(id, name, result, isError);
+                  writeToolProgress(name, isError ? 'failed' : 'completed', id, summarizePublicToolResult(result));
+                },
               });
               const routingAdvancedToCompilation = stage === 'routing'
                 && imagePlanning.currentStage === 'compilation';
@@ -4097,7 +4331,7 @@ export async function POST(request: NextRequest) {
                   allowProceed: true,
                 };
                 const checkpoint = progressTracker.snapshot();
-                writeEvent(controller, {
+                writeInteractionEvent({
                   type: 'clarification_required',
                   message: request.question,
                   request,
@@ -4202,6 +4436,8 @@ export async function POST(request: NextRequest) {
           maxTurns: MAX_MAIN_AGENT_TURNS,
           maxToolCalls: MAX_MAIN_AGENT_TOOL_CALLS,
           reserveClosingTurn: true,
+          getExternalSteeringMessages,
+          getExternalFollowUpMessages,
           repairInvalidTerminalToolOnce: terminalContractResume ? 'submit_image_execution_plan' : '',
           repairInvalidTerminalToolsOnce: terminalContractResume
             ? []
@@ -4299,11 +4535,22 @@ export async function POST(request: NextRequest) {
               budgets: savedMainAgentLoop.budgets,
             },
           } : {}),
-          onToolStart: ({ id, name }) => {
-            writeToolProgress(name, 'active', id);
-            writeEvent(controller, { type: 'tool_start', toolCallId: id, toolName: name });
+          onAssistantTurnComplete: handleAssistantTurnComplete,
+          onToolUpdate: writeToolUpdate,
+          onToolPending: ({ id, name, args }) => {
+            rememberToolPublicProgress(id, name, args);
+            writeToolProgress(name, 'pending', id);
           },
-          onToolResult: ({ id, name, isError }) => writeToolProgress(name, isError ? 'failed' : 'completed', id),
+          onToolStart: ({ id, name, args }) => {
+            rememberToolPublicProgress(id, name, args);
+            if (name !== 'generate_image') writeToolProgress(name, 'active', id);
+            writeToolStartEvent(id, name);
+          },
+          onToolResult: ({ id, name, result, isError }) => {
+            noteToolResult(name, isError);
+            writeToolResultEvent(id, name, result, isError);
+            if (name !== 'generate_image') writeToolProgress(name, isError ? 'failed' : 'completed', id, summarizePublicToolResult(result));
+          },
           onEvent: emitMainAgentEvent,
           });
           rerunMainAgent = runMainAgentOnce;
@@ -4422,7 +4669,7 @@ export async function POST(request: NextRequest) {
             allowProceed: false,
           };
           const checkpoint = progressTracker.snapshot();
-          writeEvent(controller, {
+          writeInteractionEvent({
             type: 'clarification_required',
             message: request.question,
             request,
@@ -4490,7 +4737,7 @@ export async function POST(request: NextRequest) {
             allowProceed: false,
           };
           const checkpoint = progressTracker.snapshot();
-          writeEvent(controller, {
+          writeInteractionEvent({
             type: 'clarification_required',
             message: request.question,
             request,
@@ -4656,7 +4903,7 @@ export async function POST(request: NextRequest) {
           };
           writeProgress({ stepId: 'clarification', phase: 'waiting_input', status: 'waiting', label: '等待补充关键信息' });
           const checkpoint = progressTracker.snapshot();
-          writeEvent(controller, {
+          writeInteractionEvent({
             type: 'clarification_required',
             message: request.question,
             request,
@@ -4693,7 +4940,6 @@ export async function POST(request: NextRequest) {
           return;
         }
         if (!body.clarificationResponse && contextResolution.detected) {
-          writeProgress({ stepId: 'context_resolution', phase: 'resolving', status: 'active', label: '正在解析上下文引用' });
           if (contextResolution.status === 'resolved') {
             executionBriefData = executionPlan
               ? executionPlanToBrief(executionPlan, plannerUserMessage, contextEntities) as ExecutionBrief
@@ -4706,12 +4952,6 @@ export async function POST(request: NextRequest) {
             const resolvedIntent = contextResolution.candidates[0]?.intent;
             if (!executionPlan && (resolvedIntent === 'image' || resolvedIntent === 'skill_action')) intent = resolvedIntent;
             const labels = contextResolution.candidates.map((candidate) => candidate.label).filter(Boolean);
-            writeProgress({
-              stepId: 'context_resolution',
-              phase: 'resolving',
-              status: 'completed',
-              label: `已解析引用：${labels.join('、')}`,
-            });
             writeEvent(controller, {
               type: 'context_resolved',
               status: 'resolved',
@@ -4753,7 +4993,7 @@ export async function POST(request: NextRequest) {
             };
             writeProgress({ stepId: 'context_resolution', phase: 'resolving', status: 'waiting', label: '等待确认引用对象' });
             const checkpoint = progressTracker.snapshot();
-            writeEvent(controller, {
+            writeInteractionEvent({
               type: 'clarification_required',
               message: request.question,
               request,
@@ -4959,7 +5199,6 @@ export async function POST(request: NextRequest) {
           deliveryEvidence: imageDeliveryPlan.evidence,
           contextResolutionSkipped: !shouldResolveInitialContext,
         });
-        writeProgress({ stepId: 'routing', phase: 'routing', status: 'completed', label: '请求路由完成' });
         emitIntentResolved(intent);
         if (selectedSkill) {
           writeEvent(controller, {
@@ -5055,7 +5294,7 @@ export async function POST(request: NextRequest) {
               allowProceed: true,
             };
             writeProgress({ stepId: 'clarification', phase: 'waiting_input', status: 'waiting', label: '等待确认图片交付形式' });
-            writeEvent(controller, { type: 'clarification_required', message: question, request, state });
+            writeInteractionEvent({ type: 'clarification_required', message: question, request, state });
             writeAgentDone('image_delivery_scope_required');
             return;
           }
@@ -5149,7 +5388,7 @@ export async function POST(request: NextRequest) {
               allowCustom: true,
               allowProceed: true,
             };
-            writeEvent(controller, { type: 'clarification_required', message: question, request, state });
+            writeInteractionEvent({ type: 'clarification_required', message: question, request, state });
             writeAgentDone('output_count_required');
             return;
           }
@@ -5223,7 +5462,7 @@ export async function POST(request: NextRequest) {
               skillSource,
               lastSequence: failedCheckpoint.lastSequence,
             };
-            writeEvent(controller, {
+            writeInteractionEvent({
               type: 'clarification_required',
               message: failedRequest.question,
               request: failedRequest,
@@ -5262,7 +5501,7 @@ export async function POST(request: NextRequest) {
               skillSource,
               lastSequence: clarificationCheckpoint.lastSequence,
             };
-            writeEvent(controller, {
+            writeInteractionEvent({
               type: 'clarification_required',
               message: clarificationRequest.question,
               request: clarificationRequest,
@@ -5316,8 +5555,8 @@ export async function POST(request: NextRequest) {
               failed: true,
             };
             const failedCheckpoint = progressTracker.snapshot();
-            writeProgress({ stepId: 'routing', phase: 'planning', status: 'failed', label: '图片计划校验失败，已停止执行' });
-            writeEvent(controller, {
+            writeProgress({ stepId: 'agent_analysis', phase: 'analyzing', status: 'failed', label: '图片计划校验失败，已停止执行' });
+            writeInteractionEvent({
               type: 'clarification_required',
               message,
               request: failedRequest,
@@ -5355,6 +5594,7 @@ export async function POST(request: NextRequest) {
                 retryable: false,
                 resumeRoute: 'main_agent',
               }),
+              ...progressTracker.stamp(),
             });
             writeAgentDone('planner_failed');
             return;
@@ -5371,12 +5611,6 @@ export async function POST(request: NextRequest) {
             };
           }
           const imageBatchMode = imageDeliveryPlan.mode as AgentImageBatchMode;
-          writeProgress({
-            stepId: 'prompt_optimization',
-            phase: 'optimizing',
-            status: 'active',
-            label: '正在准备最终图片提示词',
-          });
           const finalGenerationPrompt = generation!.prompt;
           const plannerGenerationItems = generation!.items.map((item, index) => ({
             ...item,
@@ -5425,13 +5659,6 @@ export async function POST(request: NextRequest) {
                 : [],
             });
           }
-          writeProgress({
-            stepId: 'prompt_optimization',
-            phase: 'optimizing',
-            status: 'completed',
-            label: '最终图片提示词已准备',
-          });
-
           const requiresImageConfirmation = (
             (requestedImageCount > 1 && body.imageOptions?.autoConfirm !== true)
             || executionPlan?.execution.requiresConfirmation === true
@@ -5440,13 +5667,21 @@ export async function POST(request: NextRequest) {
             const previewPromptEntries = allGenerationItems.length > 0
               ? allGenerationItems
               : [{ id: 'image-1', index: 1, label: '图片 1', subject: 'image', prompt: finalGenerationPrompt }];
+            const progressToolCallId = `${runId}-generate-image-confirmation`;
+            copyToolPublicProgress(progressToolCallId, imagePublicProgress, 'generate_image');
+            writePromptPreparationProgress('active', progressToolCallId);
             previewPromptEntries.forEach((item, index) => writeEvent(controller, {
               type: 'image_prompts_ready',
               index,
               label: item.label || `图片 ${index + 1}`,
               prompt: item.prompt,
+              toolCallId: progressToolCallId,
+              completedLabel: imagePublicProgress?.promptPreparation?.completedLabel,
+              completionSummary: imagePublicProgress?.promptPreparation?.completionSummary,
+              ...progressTracker.stamp(),
               ...(promptCompilation ? { compilation: promptCompilation } : {}),
             }));
+            writePromptPreparationProgress('completed', progressToolCallId);
             const generationItems = allGenerationItems.slice(0, requestedImageCount);
             const resolvedImageSelection = resolveProviderModelSelection({
               providers,
@@ -5459,7 +5694,6 @@ export async function POST(request: NextRequest) {
             }
             const resolvedImageProvider = providers.find((provider) => provider.id === resolvedImageSelection.providerId);
             const confirmationId = randomUUID();
-            const progressToolCallId = `${runId}-generate-image-confirmation`;
             writeToolProgress('generate_image', 'waiting', progressToolCallId);
             const confirmationCheckpoint = progressTracker.snapshot();
             const confirmationTaskReservation = getTaskExecutionReservation({
@@ -5502,6 +5736,7 @@ export async function POST(request: NextRequest) {
               imageTask: executionPlan?.imageTask ? structuredClone(executionPlan.imageTask) : undefined,
               visualContext: executionPlan?.visualContext ? structuredClone(executionPlan.visualContext) : undefined,
               presentation: executionPlan?.presentation ? structuredClone(executionPlan.presentation) : undefined,
+              publicProgress: imagePublicProgress ? structuredClone(imagePublicProgress) : undefined,
               referenceContext: runReferenceContext ? structuredClone(runReferenceContext) : undefined,
               referenceImages: [...executionReferenceImages],
               canvasContext: body.canvasContext ? structuredClone(body.canvasContext) : undefined,
@@ -5519,7 +5754,7 @@ export async function POST(request: NextRequest) {
               remainingTaskIdentities: structuredClone(confirmationTaskReservation?.identities.slice(requestedImageCount) || []),
               expiresAt: Date.now() + CONFIRMATION_TTL_MS,
             });
-            writeEvent(controller, {
+            writeInteractionEvent({
               type: 'confirmation_required',
               request: {
                 confirmationId,
@@ -5538,9 +5773,9 @@ export async function POST(request: NextRequest) {
           }
           toolCalls += 1;
           const toolCallId = `${runId}-generate-image-1`;
+          copyToolPublicProgress(toolCallId, imagePublicProgress, 'generate_image');
           writeToolProgress('generate_image', 'active', toolCallId);
-          writeEvent(controller, { type: 'tool_start', toolCallId, toolName: 'generate_image' });
-          writeEvent(controller, { type: 'tool_update', toolCallId, message: '正在渲染高分辨率画面' });
+          writeToolStartEvent(toolCallId, 'generate_image');
 
           const toolRegistry = createAgentToolRegistry({
             generateImage: async (_args: Record<string, unknown>, context: { toolCallId?: string }) => generateImagePayload(
@@ -5566,19 +5801,19 @@ export async function POST(request: NextRequest) {
           const assets = generatedAssetsFromResult(generationPayload);
           if (assets.length === 0) throw new Error('Image generation returned no usable assets');
           writeResolvedImageOptionUpdate(toolCallId, generationPayload);
+          writeToolProgress('generate_image', 'completed', toolCallId);
           for (const event of enrichGeneratedAssetEvents(createAgentToolResultEvents({
             source: 'direct',
             runId,
             toolCallId,
             toolName: 'generate_image',
             rawResult: generationPayload,
-          }), generationPayload)) writeEvent(controller, event as AgentEvent);
+          }), generationPayload)) writeStampedAgentEvent(event);
           writeImageCompletionSummary(generationPayload);
           updateTopicMemory({
             activeTask: { status: 'completed', summary: executionPlan.presentation?.completionSummary || 'Image delivery completed.' },
             recentReferencedAssetIds: executionPlan.contextReferences,
           });
-          writeToolProgress('generate_image', 'completed', toolCallId);
           writeAgentDone('image_generated');
           return;
         }
@@ -5622,7 +5857,7 @@ export async function POST(request: NextRequest) {
             expiresAt: Date.now() + CONFIRMATION_TTL_MS,
           });
           writeToolProgress('start_skill_job', 'waiting', progressToolCallId);
-          writeEvent(controller, {
+          writeInteractionEvent({
             type: 'confirmation_required',
             request: {
               confirmationId,
@@ -5693,7 +5928,6 @@ export async function POST(request: NextRequest) {
         const routeAllowsTools = Boolean(executionPlan) || frontDoorResult?.route === 'planner';
         if (routeAllowsTools && modelTools.length > 0) {
           const rawToolResults = new Map<string, unknown>();
-          writeProgress({ stepId: 'composing', phase: 'planning', status: 'active', label: '正在规划下一步操作' });
           const loopResult = await runZFlowAgentBrain({
             messages: chatMessages,
             providerId: resolvedChatSelection.providerId,
@@ -5736,15 +5970,24 @@ export async function POST(request: NextRequest) {
               const views = createAgentToolResultViews(toolName, rawResult);
               return { ...rawResult as Record<string, unknown>, ...views };
             },
+            onEvent: emitMainAgentEvent,
+            onAssistantTurnComplete: handleAssistantTurnComplete,
             requireMutationTool: executionPlan
               ? Boolean(executionPlan.execution.tool)
               : intent === 'image' || intent === 'skill_action',
-            onToolStart: ({ id, name }) => {
-              writeToolProgress(name, 'active', id);
-              writeEvent(controller, { type: 'tool_start', toolCallId: id, toolName: name });
+            onToolPending: ({ id, name, args }) => {
+              rememberToolPublicProgress(id, name, args);
+              writeToolProgress(name, 'pending', id);
             },
+            onToolStart: ({ id, name, args }) => {
+              rememberToolPublicProgress(id, name, args);
+              writeToolProgress(name, 'active', id);
+              writeToolStartEvent(id, name);
+            },
+            onToolUpdate: writeToolUpdate,
             onToolResult: ({ id, name, result, rawResult: runtimeRawResult, isError }) => {
               const rawResult = rawToolResults.get(id) ?? runtimeRawResult;
+              noteToolResult(name, isError);
               if (name === 'generate_image') {
                 writeResolvedImageOptionUpdate(id, rawResult);
               }
@@ -5754,11 +5997,11 @@ export async function POST(request: NextRequest) {
                 toolCallId: id,
                 toolName: name,
                 rawResult: rawResult ?? result,
-              }), rawResult ?? result)) writeEvent(controller, event as AgentEvent);
+              }), rawResult ?? result)) writeStampedAgentEvent(event);
               if (name === 'generate_image') {
                 writeImageCompletionSummary(rawResult ?? result);
               }
-              writeToolProgress(name, isError ? 'failed' : 'completed', id);
+              writeToolProgress(name, isError ? 'failed' : 'completed', id, summarizePublicToolResult(result));
             },
           });
           if (loopResult.stopReason === 'error' || loopResult.stopReason === 'aborted') {
@@ -5771,10 +6014,10 @@ export async function POST(request: NextRequest) {
               stage: 'budget',
               message: '工具调用预算已用尽，请缩小任务范围后重试',
               recoveryRecord: buildRecoveryRecord({ stage: 'budget', message: '工具调用预算已用尽，请缩小任务范围后重试' }),
+              ...progressTracker.stamp(),
             });
             return;
           }
-          writeProgress({ stepId: 'composing', phase: 'planning', status: 'completed', label: '操作规划完成' });
           if (loopResult.stopReason === 'execution_required') {
             const taskId = rootTaskId();
             const request: AgentClarificationRequest = {
@@ -5801,7 +6044,7 @@ export async function POST(request: NextRequest) {
             };
             writeProgress({ stepId: 'clarification', phase: 'waiting_input', status: 'waiting', label: '等待确认真实启动生成' });
             const checkpoint = progressTracker.snapshot();
-            writeEvent(controller, {
+            writeInteractionEvent({
               type: 'clarification_required',
               message: request.question,
               request,
@@ -5867,6 +6110,8 @@ export async function POST(request: NextRequest) {
               imageTask: executionPlan?.imageTask,
               outputCount: confirmationToolName === 'generate_image' ? requestedTotalImageCount : 1,
             });
+            const confirmationPublicProgress = normalizePublicProgress(pendingArgs.publicProgress);
+            copyToolPublicProgress(progressToolCallId, confirmationPublicProgress, confirmationToolName);
             writeToolProgress(
               String(loopResult.confirmation?.toolName || 'start_skill_job'),
               'waiting',
@@ -5886,6 +6131,7 @@ export async function POST(request: NextRequest) {
               skillId: selectedSkill?.id || null,
               toolName: confirmationToolName,
               toolArgs: pendingArgs,
+              publicProgress: confirmationPublicProgress,
               allowedTools: [...allowedTools],
               userMessage: latestUserMessage,
               generationBrief: executionBrief,
@@ -5945,7 +6191,7 @@ export async function POST(request: NextRequest) {
               },
               expiresAt: Date.now() + CONFIRMATION_TTL_MS,
             });
-            writeEvent(controller, {
+            writeInteractionEvent({
               type: 'confirmation_required',
               request: {
                 confirmationId,
@@ -5956,7 +6202,6 @@ export async function POST(request: NextRequest) {
             writeAgentDone('awaiting_confirmation');
             return;
           }
-          writeProgress({ stepId: 'composing', phase: 'responding', status: 'active', label: '正在整理执行结果' });
           const loopProposal = parseAgentProposalBlock(loopResult.content);
           const safeLoopContent = sanitizeAgentResponseContent(
             loopProposal.cleanContent,
@@ -5965,7 +6210,7 @@ export async function POST(request: NextRequest) {
           if (loopProposal.proposal) {
             writeEvent(controller, { type: 'proposal_presented', proposal: loopProposal.proposal });
           }
-          if (safeLoopContent) {
+          if (safeLoopContent && !finalAssistantTextEmitted) {
             writeEvent(controller, {
               type: 'assistant_delta',
               delta: safeLoopContent,
@@ -5973,11 +6218,9 @@ export async function POST(request: NextRequest) {
               model,
             });
           }
-          writeProgress({ stepId: 'composing', phase: 'responding', status: 'completed', label: '执行结果已整理' });
           writeAgentDone(loopResult.stopReason);
           return;
         }
-        writeProgress({ stepId: 'composing', phase: 'responding', status: 'active', label: '正在组织回复' });
         let streamedContent = '';
         for await (const event of chatStream({
           providerId: resolvedChatSelection.providerId || undefined,
@@ -6003,7 +6246,6 @@ export async function POST(request: NextRequest) {
             model,
           });
         }
-        writeProgress({ stepId: 'composing', phase: 'responding', status: 'completed', label: '回复已完成' });
         writeAgentDone('completed');
       } catch (error) {
         if (clarificationSubmissionKey) {
@@ -6051,8 +6293,10 @@ export async function POST(request: NextRequest) {
           stage: failureStage,
           message: failureMessage,
           recoveryRecord,
+          ...progressTracker.stamp(),
         });
       } finally {
+        settleActiveAgentRun(runId);
         controller.close();
       }
     },

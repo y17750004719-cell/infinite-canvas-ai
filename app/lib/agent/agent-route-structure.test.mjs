@@ -42,7 +42,7 @@ test('Main Agent gates image execution on an explicit ImageGen-context read', ()
 
 test('image tasks submit one direct ImageGen contract before execution', () => {
   const source = read(routePath);
-  assert.match(source, /generateImage: async \(args: Record<string, unknown>\)/);
+  assert.match(source, /generateImage: async \(args: Record<string, unknown>, context: \{ publicProgress\?: unknown \}\)/);
   assert.match(source, /const prompt = String\(args\.prompt \|\| ''\)\.trim\(\)/);
   assert.match(source, /const directPlan: AgentExecutionPlan/);
   assert.match(source, /executionPlan = directPlan/);
@@ -118,7 +118,7 @@ test('local context code validates explicit stable IDs without semantic history 
 test('Runtime preserves direct ImageGen task identity locally', () => {
   const source = read(routePath);
   const mainAgentStart = source.indexOf('const mainAgentRegistry = createAgentToolRegistry');
-  const directStart = source.indexOf('generateImage: async (args: Record<string, unknown>)', mainAgentStart);
+  const directStart = source.indexOf('generateImage: async (args: Record<string, unknown>, context:', mainAgentStart);
   const directEnd = source.indexOf('getConversationMemory:', directStart);
   const direct = source.slice(directStart, directEnd);
   assert.match(direct, /referenceIds\.some\(\(id\) => !runtimeReferenceById\.has\(id\)\)/);
@@ -148,7 +148,7 @@ test('Main Agent reads ImageGen and the locked visual Skill together before writ
 test('direct ImageGen does not invoke Planner transport from the active route', () => {
   const routeSource = read(routePath);
   const mainAgentStart = routeSource.indexOf('const mainAgentRegistry = createAgentToolRegistry');
-  const directStart = routeSource.indexOf('generateImage: async (args: Record<string, unknown>)', mainAgentStart);
+  const directStart = routeSource.indexOf('generateImage: async (args: Record<string, unknown>, context:', mainAgentStart);
   const directEnd = routeSource.indexOf('getConversationMemory:', directStart);
   const activeSource = routeSource.slice(directStart, directEnd);
   assert.doesNotMatch(activeSource, /planAgentExecutionRequest|AGENT_PLANNER_PROVIDER_ID|AGENT_PLANNER_MODEL/);
@@ -245,7 +245,7 @@ test('long-running image supplier calls keep the Agent delivery stream active', 
   const settle = source.indexOf('await settleCanvasImageGenerationRequests', heartbeat);
   const stop = source.indexOf('stopImageGenerationHeartbeat()', settle);
   assert.ok(heartbeat >= 0 && settle > heartbeat && stop > settle);
-  assert.match(source, /onPulse:[\s\S]{0,300}stepId: 'generate_image'/);
+  assert.match(source, /onPulse:[\s\S]{0,180}writeToolProgress\('generate_image', 'active', heartbeatToolCallId\)/);
   assert.match(source, /const heartbeatToolCallId = streamOptions\?\.toolCallId/);
   assert.match(source, /toolCallId: heartbeatToolCallId/);
   assert.match(source, /canvasContext: body\.canvasContext,\n\s*toolCallId,/);
@@ -287,10 +287,59 @@ test('all chat modes use the Agent endpoint and preserve NDJSON progress and del
 test('Main Agent streams visible text activity without exposing reasoning and has no app wall-clock timeout', () => {
   const source = read(routePath);
   assert.match(source, /assistantMessageEvent\?\.type === 'text_delta'/);
-  assert.match(source, /disposition: failed \|\| hasToolCall \? 'commentary' : 'final'/);
+  assert.match(source, /const commitCurrentActivity =/);
+  assert.match(source, /onAssistantTurnComplete: handleAssistantTurnComplete/);
+  assert.match(source, /onToolUpdate:/);
+  assert.match(source, /onToolResult:/);
+  const activityStart = source.indexOf('const appendActivityText =');
+  const activityEnd = source.indexOf('const emitMainAgentEvent =', activityStart);
+  assert.ok(activityStart >= 0 && activityEnd > activityStart);
+  assert.doesNotMatch(source.slice(activityStart, activityEnd), /maxLength|boundedDelta|1200/);
   assert.match(source, /const runSignal = request\.signal/);
   assert.doesNotMatch(source, /AGENT_RUN_TIMEOUT_MS|timeoutSignal/);
   assert.doesNotMatch(source, /assistantMessageEvent\?\.type === 'thinking_delta'/);
+});
+
+test('every Pi run path uses the shared live event adapter', () => {
+  const source = read(routePath);
+  assert.equal((source.match(/runZFlowAgentBrain\(/g) || []).length, 5);
+  assert.equal((source.match(/onEvent: emitMainAgentEvent/g) || []).length, 5);
+  assert.equal((source.match(/onAssistantTurnComplete: handleAssistantTurnComplete/g) || []).length, 5);
+  assert.equal((source.match(/onToolUpdate: writeToolUpdate/g) || []).length, 5);
+});
+
+test('deterministic image execution keeps prompt and supplier stages tied to real work', () => {
+  const source = read(routePath);
+  assert.doesNotMatch(source, /正在等待模型规划/);
+  assert.match(source, /type: 'image_prompts_ready'[\s\S]{0,300}completedLabel: imageProgress\?\.promptPreparation\?\.completedLabel/);
+  assert.match(source, /completionSummary: imageProgress\?\.promptPreparation\?\.completionSummary/);
+  assert.match(source, /writePromptPreparationProgress\('active', heartbeatToolCallId\)/);
+  assert.match(source, /writeToolProgress\('generate_image', 'active', heartbeatToolCallId\)/);
+  assert.doesNotMatch(source, /正在提交图片生成请求|图片生成请求已提交|正在等待图片生成结果/);
+});
+
+test('Main Agent image contract does not create supplier-generation progress', () => {
+  const source = read(routePath);
+  const mainAgentStart = source.indexOf('const runMainAgentOnce =');
+  const mainAgentEnd = source.indexOf('rerunMainAgent = runMainAgentOnce;', mainAgentStart);
+  const mainAgentCallbacks = source.slice(mainAgentStart, mainAgentEnd);
+  assert.ok(mainAgentStart >= 0 && mainAgentEnd > mainAgentStart);
+  assert.match(mainAgentCallbacks, /rememberToolPublicProgress\(id, name, args\)/);
+  assert.match(mainAgentCallbacks, /onToolStart:[\s\S]{0,180}if \(name !== 'generate_image'\) writeToolProgress\(name, 'active', id\)/);
+  assert.match(mainAgentCallbacks, /onToolResult:[\s\S]{0,240}if \(name !== 'generate_image'\) writeToolProgress\(name, isError \? 'failed' : 'completed', id, summarizePublicToolResult\(result\)\)/);
+  assert.match(source, /const toolCallId = `\$\{runId\}-generate-image-1`;\n\s*copyToolPublicProgress\(toolCallId, imagePublicProgress, 'generate_image'\);\n\s*writeToolProgress\('generate_image', 'active', toolCallId\)/);
+});
+
+test('supplier completion is emitted before generated-asset delivery', () => {
+  const source = read(routePath);
+  const directStart = source.indexOf('const generationPayload = await executeAgentTool');
+  const directEnd = source.indexOf("writeAgentDone('image_generated')", directStart);
+  const direct = source.slice(directStart, directEnd);
+  assert.ok(direct.indexOf("writeToolProgress('generate_image', 'completed', toolCallId)") < direct.indexOf('createAgentToolResultEvents'));
+  const confirmedStart = source.indexOf('confirmationRecord.status = \'completed\';');
+  const confirmedEnd = source.indexOf('updateTopicMemory({', confirmedStart);
+  const confirmed = source.slice(confirmedStart, confirmedEnd);
+  assert.ok(confirmed.indexOf("writeToolProgress(confirmationRecord.toolName, 'completed', toolCallId)") < confirmed.indexOf('createAgentToolResultEvents'));
 });
 
 test('Main Agent prompt uses natural completion and direct ImageGen', () => {

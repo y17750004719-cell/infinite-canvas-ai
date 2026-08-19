@@ -12,7 +12,8 @@ Xiaomi 浏览器登录是专用凭证交换，不是标准 OAuth。平台返回�
 
 - **Main Agent Loop**：Pi Agent 的统一入口，可在最多 12 个模型回合内按需读取 Topic 记忆、上下文实体和历史视觉资产。没有后续 Tool Call 的非空普通文本自然成为最终回答；空响应失败关闭。它不直接调用任何图像变更工具。
 - **工作说明（Agent Commentary）**：复杂任务在读取上下文、调用重要工具、改变方向或遇到阻碍时显示的简短用户可见进展。工作说明不是 reasoning，不包含思维链、系统提示、工具参数、完整 Prompt 或内部诊断。
-- **活动时间线（Agent Activity Timeline）**：按实际发生顺序保存工作说明、友好工具状态和本地 Planner/执行状态。每条工作说明最多 1200 字符，每个任务最多持久化 24 条活动记录；简单聊天没有工作说明或工具时不显示时间线。
+- **活动时间线（Agent Activity Timeline）**：按实际发生顺序保存工作说明、友好工具状态和本地 Planner/执行状态。活动面包屑表示真实工具、执行阶段、等待输入或终态；递进任务任一时刻只有一个当前步骤，新步骤开始即固化旧步骤。简单聊天没有工作说明或工具时不显示时间线。
+- **尝试（Attempt）**：一次独立 Agent 运行；恢复重试在同一任务时间线内追加新的尝试，并保留各次最终 Prompt。
 - **最终回答（Final Response）**：Main Agent 没有后续 Tool Call 的普通文本。文本先作为当前活动流式显示，回合自然结束后原位升级为最终回答，不重复追加。
 - **Planner 交接（Planner Handoff）**：Main Agent 显式调用 `handoff_to_image_planner`，提交已验证的 Skill ID、稳定引用 ID和由当前视觉证据形成的 `visualSummary`，并立即结束 Main Agent Loop。图片动作不能用普通文本假装交接。
 - **只读上下文**：主 Agent 只按稳定 ID读取历史资产；本地不根据“上一张”“刚才那张”等文字自动选择图片。视觉资产通过 `load_visual_reference` 作为下一轮模型视觉输入加载，单次最多 4 张。

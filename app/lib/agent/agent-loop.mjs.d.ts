@@ -16,7 +16,9 @@ export function createAgentProgressTracker(input: {
     label: string;
     toolCallId?: string;
     toolName?: string;
+    detail?: string;
   }): AgentProgressUpdate;
+  stamp(): { sequence: number; timestampMs: number; runId: string; operationId: string };
   resume(input: { operationId?: string; lastSequence?: number }): void;
   settleActive(status?: Exclude<AgentProgressStatus, 'active'>, label?: string): void;
   snapshot(): { operationId: string; lastSequence: number };

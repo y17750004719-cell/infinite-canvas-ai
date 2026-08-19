@@ -55,6 +55,48 @@ const CLARIFICATION_SCHEMA = {
   additionalProperties: false,
 };
 
+const PUBLIC_PROGRESS_COPY_SCHEMA = {
+  type: 'object',
+  description: 'Optional public UI copy for this tool call. Do not include hidden reasoning, system instructions, Skill source text, raw arguments, or image prompt text.',
+  properties: {
+    activeLabel: { type: 'string', minLength: 1, maxLength: 120 },
+    completedLabel: { type: 'string', minLength: 1, maxLength: 120 },
+    completionSummary: { type: 'string', minLength: 1, maxLength: 500 },
+    failedLabel: { type: 'string', minLength: 1, maxLength: 120 },
+  },
+  required: [],
+  additionalProperties: false,
+};
+
+function getModelToolParameters(tool) {
+  const parameters = tool.parameters || { type: 'object', properties: {}, additionalProperties: false };
+  const publicProgress = {
+    ...PUBLIC_PROGRESS_COPY_SCHEMA,
+    properties: { ...PUBLIC_PROGRESS_COPY_SCHEMA.properties },
+  };
+  if (tool.name === 'generate_image') {
+    publicProgress.properties.promptPreparation = {
+      ...PUBLIC_PROGRESS_COPY_SCHEMA,
+      description: 'Public UI copy for preparing the final image prompt. Do not include the prompt itself.',
+      properties: { ...PUBLIC_PROGRESS_COPY_SCHEMA.properties },
+    };
+  }
+  return {
+    ...parameters,
+    properties: {
+      ...(parameters.properties || {}),
+      publicProgress,
+    },
+    required: [...(parameters.required || [])],
+  };
+}
+
+function stripPublicProgress(args) {
+  if (!args || typeof args !== 'object' || Array.isArray(args)) return args || {};
+  const { publicProgress: _publicProgress, ...toolArgs } = args;
+  return toolArgs;
+}
+
 function schemaTypeMatches(value, type) {
   if (type === 'object') return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
   if (type === 'array') return Array.isArray(value);
@@ -443,6 +485,7 @@ export function createAgentToolRegistry({
     ['request_user_decision', {
       name: 'request_user_decision',
       requiresConfirmation: false,
+      mayRequireConfirmation: true,
       readOnly: true,
       terminal: true,
       countAgainstToolBudget: false,
@@ -591,6 +634,7 @@ export function createAgentToolRegistry({
     ['request_image_clarification', {
       name: 'request_image_clarification',
       requiresConfirmation: false,
+      mayRequireConfirmation: true,
       readOnly: true,
       terminal: true,
       countAgainstToolBudget: false,
@@ -782,6 +826,7 @@ export function createAgentToolRegistry({
     ['request_context_selection', {
       name: 'request_context_selection',
       requiresConfirmation: false,
+      mayRequireConfirmation: true,
       readOnly: true,
       terminal: true,
       countAgainstToolBudget: false,
@@ -864,11 +909,12 @@ export function getAgentModelTools(registry, allowedTools = []) {
       function: {
         name: tool.name,
         description: tool.description,
-        parameters: tool.parameters,
+        parameters: getModelToolParameters(tool),
       },
       readOnly: tool.readOnly === true,
       terminal: tool.terminal === true,
       countAgainstToolBudget: tool.countAgainstToolBudget !== false,
+      mayRequireConfirmation: tool.mayRequireConfirmation === true,
     }));
 }
 
@@ -878,7 +924,9 @@ export async function executeAgentTool(registry, toolName, args, context = {}) {
   if (!Array.isArray(context.allowedTools) || !context.allowedTools.includes(toolName)) {
     throw new Error(`Tool is not allowed: ${toolName}`);
   }
-  validateAgentToolArguments(tool.parameters, args || {}, toolName);
+  const publicProgress = args?.publicProgress;
+  const toolArgs = stripPublicProgress(args);
+  validateAgentToolArguments(tool.parameters, toolArgs, toolName);
   if (tool.requiresConfirmation && context.confirmed !== true) {
     return {
       confirmationRequired: true,
@@ -886,5 +934,5 @@ export async function executeAgentTool(registry, toolName, args, context = {}) {
       message: `确认后执行 ${toolName}`,
     };
   }
-  return tool.execute(args || {}, context);
+  return tool.execute(toolArgs, { ...context, publicProgress });
 }

@@ -113,7 +113,7 @@ export type AgentProgressPhase =
   | 'planning'
   | 'responding';
 
-export type AgentProgressStatus = 'active' | 'waiting' | 'completed' | 'failed';
+export type AgentProgressStatus = 'pending' | 'active' | 'waiting' | 'completed' | 'failed';
 
 export type AgentPlannerFailureReason =
   | 'timeout'
@@ -422,6 +422,7 @@ export type AgentProgressUpdate = {
   label: string;
   toolCallId?: string;
   toolName?: string;
+  detail?: string;
 };
 
 export type AgentActivityDelta = {
@@ -429,16 +430,20 @@ export type AgentActivityDelta = {
   activityId: string;
   delta: string;
   model?: string;
+  sequence?: number;
+  timestampMs?: number;
 };
 
 export type AgentActivityCommit = {
   type: 'agent_activity_commit';
   activityId: string;
   disposition: 'commentary' | 'final';
+  sequence?: number;
+  timestampMs?: number;
 };
 
 export type AgentEvent =
-  | { type: 'agent_start'; runId: string }
+  | { type: 'agent_start'; runId: string; operationId?: string; sequence?: number; timestampMs?: number }
   | AgentProgressUpdate
   | { type: 'routing_start' }
   | { type: 'intent_resolved'; intent: AgentIntent }
@@ -468,6 +473,8 @@ export type AgentEvent =
       message: string;
       request: AgentClarificationRequest;
       state: AgentClarificationState;
+      sequence?: number;
+      timestampMs?: number;
     }
   | { type: 'prompt_optimization_start' }
   | { type: 'prompt_optimization_done'; summary: string; optimized: boolean }
@@ -476,6 +483,11 @@ export type AgentEvent =
       index: number;
       label: string;
       prompt: string;
+      completedLabel?: string;
+      completionSummary?: string;
+      toolCallId?: string;
+      sequence?: number;
+      timestampMs?: number;
       compilation?: {
         skillId: string | null;
         skillLabel: string | null;
@@ -488,12 +500,12 @@ export type AgentEvent =
         compiledAt: number;
       };
     }
-  | { type: 'tool_start'; toolCallId: string; toolName: string }
-  | { type: 'tool_update'; toolCallId: string; message: string }
-  | { type: 'tool_result'; toolCallId: string; result: unknown }
+  | { type: 'tool_start'; toolCallId: string; toolName: string; runId?: string; operationId?: string; sequence?: number; timestampMs?: number }
+  | { type: 'tool_update'; toolCallId: string; message: string; runId?: string; operationId?: string; sequence?: number; timestampMs?: number }
+  | { type: 'tool_result'; toolCallId: string; toolName?: string; result: unknown; isError?: boolean; runId?: string; operationId?: string; sequence?: number; timestampMs?: number }
   | AgentActivityDelta
   | AgentActivityCommit
-  | { type: 'assistant_delta'; delta: string; channel?: 'content' | 'reasoning'; model?: string }
+  | { type: 'assistant_delta'; delta: string; channel?: 'content' | 'reasoning'; model?: string; runId?: string; operationId?: string; sequence?: number; timestampMs?: number }
   | { type: 'agent_memory_updated'; memory: AgentConversationMemory }
   | { type: 'client_action'; action: AgentClientAction }
   | {
@@ -506,9 +518,9 @@ export type AgentEvent =
       failed: number;
       addedToCanvas: boolean;
     }
-  | { type: 'confirmation_required'; request: { confirmationId: string; toolName: string; message: string } }
-  | { type: 'agent_task_checkpoint'; taskSnapshot: AgentTaskSnapshot }
-  | { type: 'agent_done'; stopReason: string; taskSnapshot?: AgentTaskSnapshot }
+  | { type: 'confirmation_required'; request: { confirmationId: string; toolName: string; message: string }; sequence?: number; timestampMs?: number }
+  | { type: 'agent_task_checkpoint'; taskSnapshot: AgentTaskSnapshot; runId?: string; operationId?: string; sequence?: number; timestampMs?: number }
+  | { type: 'agent_done'; stopReason: string; taskSnapshot?: AgentTaskSnapshot; runId?: string; operationId?: string; sequence?: number; timestampMs?: number }
   | {
       type: 'agent_error';
       stage: string;
@@ -516,4 +528,8 @@ export type AgentEvent =
       reason?: AgentPlannerFailureReason;
       retryable?: boolean;
       recoveryRecord?: AgentRecoveryRecord;
+      runId?: string;
+      operationId?: string;
+      sequence?: number;
+      timestampMs?: number;
     };

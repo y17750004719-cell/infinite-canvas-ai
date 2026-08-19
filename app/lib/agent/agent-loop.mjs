@@ -208,7 +208,7 @@ export function createAgentToolResultEvents({
 } = {}) {
   if (rawResult?.confirmationRequired === true) return [];
   const { publicResult } = createAgentToolResultViews(toolName, rawResult);
-  const events = [{ type: 'tool_result', toolCallId, result: publicResult }];
+  const events = [{ type: 'tool_result', toolCallId, toolName, result: publicResult }];
   if (toolName === 'generate_image' && includeAssets) {
     const assets = extractAgentImageAssets(rawResult);
     if (assets.length > 0) {
@@ -263,6 +263,7 @@ export function createAgentProgressTracker({
    *   label: string,
    *   toolCallId?: string,
    *   toolName?: string,
+   *   detail?: string,
    * }} input
    */
   const update = (input) => {
@@ -280,6 +281,7 @@ export function createAgentProgressTracker({
       label: String(input.label || ''),
       ...(input.toolCallId ? { toolCallId: input.toolCallId } : {}),
       ...(input.toolName ? { toolName: input.toolName } : {}),
+      ...(input.detail ? { detail: input.detail } : {}),
     };
     const key = keyFor(event);
     if (event.status === 'active') active.set(key, event);
@@ -288,8 +290,16 @@ export function createAgentProgressTracker({
     return event;
   };
 
+  const stamp = () => ({
+    sequence: ++sequence,
+    timestampMs: Date.now(),
+    runId: runId || '',
+    operationId: currentOperationId,
+  });
+
   return {
     update,
+    stamp,
     resume(next = {}) {
       if (typeof next.operationId === 'string' && next.operationId) currentOperationId = next.operationId;
       sequence = Math.max(sequence, finiteCount(next.lastSequence));

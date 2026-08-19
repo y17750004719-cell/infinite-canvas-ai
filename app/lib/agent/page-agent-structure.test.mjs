@@ -109,7 +109,7 @@ test('failed clarification submissions preserve their structured retry context',
 });
 
 test('clarification answers resume without adding a duplicate user message', () => {
-  const submitStart = source.indexOf('const submitAgentClarification =');
+  const submitStart = source.indexOf('const submitAgentClarificationFor =');
   const retryStart = source.indexOf('const retryAgentClarification =', submitStart);
   const submitSource = source.slice(submitStart, retryStart);
   assert.match(submitSource, /handleGenerate\(\{[\s\S]*suppressUserMessage:\s*true/);
@@ -204,12 +204,13 @@ test('agent progress accumulates reached breadcrumbs without an assistant bubble
   assert.match(source, /routeAgentProgressEvent\(progressEventRouter, event\)/);
   assert.match(source, /event\.type === 'agent_done'/);
   assert.match(source, /getAgentProgressElapsedMs/);
-  assert.match(source, /hasActiveAgentImageGeneration/);
+  assert.match(source, /hasActiveAgentRunClock/);
   assert.match(source, /getAgentProgressDurationLabel\(step, generationClockMs\)/);
   assert.match(source, /timestampMs\?: number/);
   assert.match(source, /msg\.agentRunProgress\.steps\s*\.filter/);
   assert.match(source, /step\.stepId === 'generate_image'[\s\S]{0,120}\.map/);
   assert.match(source, /formatAgentProgressLabel\(step\)/);
+  assert.match(source, /const getAgentTimelineLabel =/);
   assert.match(source, /getAgentProgressCompletionLabel/);
   assert.match(source, /✍️ 回复已完成/);
   assert.match(source, /🖼️ 设计生成已完成/);
@@ -234,9 +235,22 @@ test('agent progress accumulates reached breadcrumbs without an assistant bubble
   assert.match(motionControllerSource, /gsap\.fromTo\(/);
 });
 
+test('timeline boundaries flush immediately without replaying commentary or animating progress', () => {
+  assert.match(source, /const updatePendingAssistantMessageImmediately =/);
+  assert.match(source, /event\.type === 'agent_activity_commit'[\s\S]{0,900}updatePendingAssistantMessageImmediately/);
+  assert.match(source, /event\.type === 'progress_update'[\s\S]{0,700}updatePendingAssistantMessageImmediately/);
+  assert.match(source, /event\.type === 'image_prompts_ready'[\s\S]{0,1300}updatePendingAssistantMessageImmediately/);
+  assert.doesNotMatch(source, /setTimeout\(reveal, 48\)/);
+  assert.doesNotMatch(source, /agent-timeline-shimmer/);
+  assert.match(source, /step\.status === 'active' \|\| step\.status === 'pending'/);
+});
+
 test('agent final image prompts persist on the progress message and expand on demand', () => {
   assert.match(source, /agentImagePrompts\?:\s*Array/);
   assert.match(source, /event\.type === 'image_prompts_ready'/);
+  assert.match(source, /promptRunId = event\.runId \|\| agentRunId/);
+  assert.match(source, /promptIdentity = `\$\{promptRunId\}:\$\{promptToolCallId\}:\$\{promptIndex\}`/);
+  assert.match(source, /entry\.runId \|\| 'legacy'/);
   assert.match(source, /agentImagePrompts:\s*\[/);
   assert.match(source, /step\.stepId === 'prompt_optimization'/);
   assert.match(source, /<details[\s\S]{0,300}<summary/);
@@ -285,6 +299,12 @@ test('agent batch assets render in completion order while retaining their origin
   assert.match(source, /failed:\s*generatedAssetFailureCount \+ generatedAssetPreloadFailureCount/);
 });
 
+test('generated asset preload failures always settle the agent delivery state', () => {
+  assert.match(source, /const settleGeneratedAssetDelivery = \(\) => \{/);
+  assert.match(source, /currentSessionIdRef\.current !== generationSessionId[\s\S]{0,900}generatedAssetPreloadFailureCount \+= freshAssets\.length[\s\S]{0,200}settleGeneratedAssetDelivery\(\)/);
+  assert.match(source, /Generated asset preload queue failed:[\s\S]{0,700}generatedAssetPreloadFailureCount \+= freshAssets\.length[\s\S]{0,800}settleGeneratedAssetDelivery\(\)/);
+});
+
 test('clarification and confirmation preserve waiting agent progress', () => {
   const clarificationStart = source.indexOf("event.type === 'clarification_required'");
   const confirmationStart = source.indexOf("event.type === 'confirmation_required'");
@@ -294,7 +314,7 @@ test('clarification and confirmation preserve waiting agent progress', () => {
   assert.doesNotMatch(source.slice(confirmationStart, toolResultStart), /agentRunProgress:\s*undefined/);
 });
 
-test('all agent decisions use one Codex-style popover above the composer', () => {
+test('legacy decisions retain the composer popover while v2 interactions stay inline', () => {
   assert.match(source, /setPendingAgentConfirmation\(confirmation\)/);
   assert.match(source, /setShowAgentConfirmationModal\(true\)/);
   assert.match(source, /showAgentConfirmationModal && pendingAgentConfirmation[\s\S]{0,220}<AgentDecisionPopover/);
@@ -309,10 +329,18 @@ test('all agent decisions use one Codex-style popover above the composer', () =>
   assert.doesNotMatch(source, /重新打开确认|重新回答|重新选择/);
   assert.doesNotMatch(source, /absolute inset-0 z-(?:20|30|40).*bg-black\//);
   assert.match(source, /openPendingAgentDecision\(msg\)/);
+  const inlineTimelineStart = source.indexOf('interactionContent={(step) => (');
+  const inlineTimeline = source.slice(inlineTimelineStart, inlineTimelineStart + 5_000);
+  assert.ok(inlineTimelineStart >= 0);
+  assert.match(inlineTimeline, /step\.interactionType === 'confirmation'/);
+  assert.match(inlineTimeline, /确认并继续/);
+  assert.match(inlineTimeline, /step\.interactionType === 'clarification'/);
+  assert.match(inlineTimeline, /补充你的要求/);
 });
 
-test('confirmation transitions stay in breadcrumbs without a nested message bubble', () => {
-  assert.match(source, /type: 'confirmation_submitted'/);
+test('confirmation transitions stay in the original interaction without a nested message bubble', () => {
+  assert.match(source, /type: 'interaction_submitted'/);
+  assert.match(source, /interactionId: confirmation\.confirmationId/);
   assert.match(source, /content: ''/);
   assert.doesNotMatch(source, /content: '正在确认并启动任务…'/);
   assert.match(source, /suppressAssistantContentForDecision/);
@@ -339,7 +367,7 @@ test('skill jobs, cancellation, and clarification recovery preserve progress sta
   const failureStart = source.indexOf("updateActiveStreamMessageStatus('failed'", abortStart);
   assert.ok(abortStart >= 0 && failureStart > abortStart);
   assert.doesNotMatch(source.slice(abortStart, failureStart), /agentRunProgress:\s*undefined/);
-  assert.match(source.slice(abortStart, failureStart), /updateAgentRunProgress\(msg, \{ type: 'agent_error' \}\)/);
+  assert.match(source, /updateAgentRunProgress\(msg, \{ type: 'agent_error'(?:, runId: agentRunId)? \}\)/);
 });
 
 test('right chat exposes adaptive chat and image provider model selectors', () => {
@@ -516,11 +544,15 @@ test('chat composer exposes disabled reasoning and one adaptive model preference
   assert.doesNotMatch(source, /aria-label="聊天框供应商与模型"/);
 });
 
-test('chat composer closes transient menus when a generation starts', () => {
+test('chat composer locks task settings while leaving attachment controls available during a generation', () => {
   assert.match(
     source,
-    /useEffect\(\(\) => \{\s*if \(!isGenerating\) return;\s*closeChatComposerPopovers\(\);\s*setSelectedChatHistoryAssetIds\(\[\]\);\s*\}, \[closeChatComposerPopovers, isGenerating\]\)/
+    /useEffect\(\(\) => \{\s*if \(!isGenerating\) return;\s*closeSkillMenu\(\);\s*setShowGenerationModeMenu\(false\);\s*setShowModelPreferencePopover\(false\);/
   );
+  const moreControl = source.slice(controlIndex('more'), controlIndex('skills'));
+  assert.doesNotMatch(moreControl, /disabled=\{isGenerating\}/);
+  assert.match(source, /data-chat-composer-control="skills"[\s\S]{0,2500}disabled=\{isGenerating\}/);
+  assert.match(source, /data-chat-composer-control="mode"[\s\S]{0,2500}disabled=\{isGenerating\}/);
 });
 
 test('canvas selection references render as compact composer tokens and submit annotation context', () => {
@@ -558,7 +590,7 @@ test('generated image result cards persist and render model-authored presentatio
   assert.match(source, /msg\.resultTitle \|\| msg\.imageName/);
   assert.match(source, /event\.type === 'agent_completion_summary'/);
   assert.match(source, /processedAgentCompletionSummariesRef/);
-  assert.match(source, /role: 'assistant',\s*content: event\.summary/);
+  assert.match(source, /updatePendingAssistantMessage\(\(msg\) => \(\{ \.\.\.msg, content: event\.summary \}\)\)/);
   const completionSummaryStart = source.indexOf("if (event.type === 'agent_completion_summary')");
   const completionSummarySource = source.slice(
     completionSummaryStart,
@@ -566,7 +598,7 @@ test('generated image result cards persist and render model-authored presentatio
   );
   assert.ok(
     completionSummarySource.indexOf('await generatedAssetPreloadChain;')
-      < completionSummarySource.indexOf('setChatMessages(prev => [...prev, {'),
+      < completionSummarySource.indexOf('updatePendingAssistantMessage((msg) => ({ ...msg, content: event.summary }));'),
   );
   assert.doesNotMatch(source, /generatedPresentationSummary/);
   assert.doesNotMatch(source, /resultSummary: event\.action\.presentation\.summary/);
@@ -621,4 +653,51 @@ test('chat composer keeps utility icons borderless and hides the Skills label', 
   const styles = fs.readFileSync(path.resolve(import.meta.dirname, '../../globals.css'), 'utf8');
   assert.match(styles, /\.workspace-chat-icon-control\s*\{[\s\S]*?border:\s*0;/);
   assert.match(styles, /\.workspace-chat-icon-control:hover:not\(:disabled\)[\s\S]*?background:\s*var\(--workspace-control-hover\)/);
+});
+
+test('timeline v2 renders an open interleaved Agent turn while retaining the legacy disclosure path', () => {
+  assert.match(source, /const isAgentTimelineV2 =/);
+  assert.match(source, /const AgentTurnTimeline = memo/);
+  assert.match(source, /const AgentTimelineCommentary = memo/);
+  assert.match(source, /<Icon size=\{16\} strokeWidth=\{1\.6\} className="shrink-0"/);
+  assert.match(source, /getAgentTimelineLabel\(step\)/);
+  assert.match(source, /<ChevronRight size=\{13\}/);
+  assert.match(source, /prefers-reduced-motion.*reduce/);
+  assert.match(source, /timelineVersion\) >= 2/);
+  assert.match(source, /isAgentTimelineV2Message && msg\.agentRunProgress/);
+  assert.match(source, /isAgentProgressMessage && !isAgentTimelineV2Message && msg\.agentRunProgress/);
+  assert.match(source, /step\.kind === 'commentary'/);
+  assert.match(source, /step\.kind === 'interaction'/);
+  assert.match(source, /<div key=\{key\}>\s*<details className="group">/);
+  assert.match(source, /处理中 \$\{elapsed\}/);
+  assert.match(source, /agent-timeline-running/);
+  assert.match(source, /prefers-reduced-motion: reduce/);
+  assert.match(source, /executionDetailContent/);
+  assert.match(source, /<AgentImagePromptDetails/);
+  assert.match(source, /type: 'image_prompts_ready'/);
+  assert.match(source, /const completionSummary = step\.status === 'completed' \? step\.completionSummary\?\.trim\(\) : ''/);
+  assert.match(source, /\{completionSummary\}/);
+});
+
+test('late assistant deltas do not replay committed public commentary', () => {
+  assert.match(source, /let committedCommentaryText = ''/);
+  assert.match(source, /const consumeCommittedCommentaryReplay =/);
+  assert.match(source, /event\.disposition === 'commentary' && activityText/);
+  assert.match(source, /consumePromotedFinalReplay\([\s\S]{0,120}consumeCommittedCommentaryReplay\(event\.delta\)/);
+});
+
+test('running composer uses one adaptive control and queues follow-ups without steering', () => {
+  assert.match(source, /const handleSubmitRunningAgentInput = async \(\)/);
+  assert.match(source, /fetch\('\/api\/agent\/steer'/);
+  assert.match(source, /delivery === 'follow_up' \? 'queued' : 'running'/);
+  assert.match(source, /const delivery = 'follow_up' as const/);
+  assert.doesNotMatch(source, /handleSubmitRunningAgentInput\('steer'\)/);
+  assert.doesNotMatch(source, /showRunningDeliveryMenu|选择发送方式|立即调整当前任务/);
+  assert.match(source, /isGenerating && !latestChatInputRef\.current\.trim\(\)[\s\S]{0,500}handleCancelGenerate/);
+  assert.match(source, /isGenerating && !latestChatInputRef\.current\.trim\(\)[\s\S]{0,900}<Square/);
+  assert.match(source, /void handleSubmitRunningAgentInput\(\);/);
+  const enterStart = source.indexOf("if (e.key === 'Enter' && !e.shiftKey && !e.altKey)");
+  const enterSource = source.slice(enterStart, enterStart + 500);
+  assert.match(enterSource, /handleSubmitRunningAgentInput\(\)/);
+  assert.doesNotMatch(enterSource, /handleCancelGenerate\(\)/);
 });
