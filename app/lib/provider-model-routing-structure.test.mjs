@@ -15,7 +15,7 @@ test('agent routes user-selected chat and image models independently', () => {
   assert.match(agentSource, /purpose:\s*'chat'/);
   assert.match(agentSource, /providerId:\s*resolvedChatSelection\.providerId/);
   assert.match(agentSource, /model:\s*resolvedChatSelection\.model/);
-  assert.match(agentSource, /requestedProviderId:\s*body\.chatOptions\?\.providerId/);
+  assert.match(agentSource, /requestedProviderId:\s*requestedChatProviderId/);
   assert.match(agentSource, /providerId:\s*resolvedChatSelection\.providerId\s*\|\|\s*undefined/);
   assert.match(agentSource, /referenceImages:\s*executionReferenceImages/);
   assert.match(
@@ -41,11 +41,17 @@ test('generate route resolves a valid provider and model pair for each purpose',
 
 test('agent validates default environment and request chat selections through one resolver', () => {
   assert.match(agentSource, /const resolvedChatSelection = resolveProviderModelSelection\(\{/);
-  assert.match(agentSource, /requestedProviderId:\s*body\.chatOptions\?\.providerId\s*\|\|\s*process\.env\.AGENT_CHAT_PROVIDER_ID/);
+  assert.match(agentSource, /const requestedChatProviderId = body\.chatOptions\?\.providerId\s*\|\|\s*process\.env\.AGENT_CHAT_PROVIDER_ID/);
   assert.match(agentSource, /requestedModel:\s*requestedChatModel/);
   assert.match(agentSource, /const requestedChatModel = body\.chatOptions\?\.model \|\| process\.env\.AGENT_CHAT_MODEL \|\| undefined/);
   assert.doesNotMatch(agentSource, /DEFAULT_AGENT_MODEL|gemini-3\.1-flash-lite-preview-thinking-medium/);
   assert.doesNotMatch(agentSource, /const resolvedChatSelection = hasRequestedChatSelection/);
+});
+
+test('agent sends reference-image requests to the selected model without local vision gating or fallback', () => {
+  assert.match(agentSource, /allowFallback:\s*!hasExplicitChatSelection/);
+  assert.doesNotMatch(agentSource, /resolvedChatCapabilities\.supportsVision/);
+  assert.doesNotMatch(agentSource, /不支持参考图输入，请切换支持视觉的规划模型/);
 });
 
 test('skill jobs persist and execute with the revalidated image selection', () => {

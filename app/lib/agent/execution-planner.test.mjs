@@ -1906,6 +1906,7 @@ test('planner classifies unsupported and unreadable multimodal inputs without pr
   assert.equal(unsupported.plan, null);
   assert.equal(unsupported.failureReason, 'vision_unsupported');
 
+  let noEndpointCalls = 0;
   const noEndpoint = await planAgentExecutionRequest({
     userMessage: '分析这张图',
     messages: [{ role: 'user', content: '分析这张图' }],
@@ -1914,11 +1915,13 @@ test('planner classifies unsupported and unreadable multimodal inputs without pr
     model: 'mimo-v2.5-pro',
     providerId: 'xiaomi',
     chatFn: async () => {
+      noEndpointCalls += 1;
       throw new Error('No endpoints found that support image input');
     },
   });
   assert.equal(noEndpoint.plan, null);
   assert.equal(noEndpoint.failureReason, 'vision_unsupported');
+  assert.equal(noEndpointCalls, 1);
 
   let unreadableCalls = 0;
   const unreadable = await planAgentExecutionRequest({

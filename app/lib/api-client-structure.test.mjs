@@ -79,7 +79,8 @@ test('api-client keeps Gemini native image routing behind the official helper pa
     true
   );
   assert.equal(
-    apiClientSource.includes('return generateGeminiOfficialImage({'),
+    apiClientSource.includes('return generateGeminiOfficialImage(normalizedRequest);') ||
+      apiClientSource.includes('return generateGeminiOfficialImage({'),
     true
   );
   const supportedGeminiSection = apiClientSource.match(/const SUPPORTED_GEMINI_OFFICIAL_IMAGE_MODELS = new Set\(\[(.*?)\]\);/s)?.[1] || '';
@@ -124,7 +125,8 @@ test('api-client also supports gpt-image-2 through the OpenAI compatible image p
     true
   );
   assert.equal(
-    apiClientSource.includes('return generateOpenAiCompatibleImage({'),
+    apiClientSource.includes('return generateOpenAiCompatibleImage(normalizedRequest);') ||
+      apiClientSource.includes('return generateOpenAiCompatibleImage({'),
     true
   );
 });
@@ -135,9 +137,21 @@ test('api-client normalizes provider-returned gpt-image-2 variants before routin
     true
   );
   assert.equal(
-    apiClientSource.includes('import { getGeminiImageSizeEnum, getImageModelCapability, normalizeImageModelCapabilityId, resolveImageRequestModel'),
+    apiClientSource.includes('normalizeImageModelCapabilityId') &&
+      apiClientSource.includes('resolveImageRequestModel') &&
+      apiClientSource.includes('image-model-capabilities.mjs'),
     true
   );
+});
+
+test('api-client resolves Nano Banana aliases before both image protocol request bodies', () => {
+  assert.equal(apiClientSource.includes('const alias = resolveImageModelAlias(requestedModel);'), true);
+  assert.equal(apiClientSource.includes('const normalizedModel = normalizeImageRequestModel(alias.model);'), true);
+  assert.equal(apiClientSource.includes('model: normalizedModel,'), true);
+  assert.equal(apiClientSource.includes('requestedModel,'), true);
+  assert.equal(apiClientSource.includes('model: requestedModel,'), true);
+  assert.equal(apiClientSource.includes('formData.set("model", model);'), true);
+  assert.equal(apiClientSource.includes('protocol: provider.protocol,'), true);
 });
 
 test('api-client uses opportunistic task polling for OpenAI compatible images without async submit URLs', () => {
@@ -536,6 +550,8 @@ test('api-client annotates Gemini image failures with failureClass retryability 
 test('api-client sends Gemini native reference images as inline_data parts and not as OpenAI-style image fields', () => {
   assert.equal(apiClientSource.includes('inline_data'), true);
   assert.equal(apiClientSource.includes('mime_type'), true);
+  assert.equal(apiClientSource.includes('inlineData: {'), true);
+  assert.equal(apiClientSource.includes('mimeType,'), true);
   assert.equal(apiClientSource.includes('contents:'), true);
   assert.equal(apiClientSource.includes('requestBody.image = request.reference_images;'), false);
 });

@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   listAlternativeProviderModelSelections,
+  resolveProviderModelCapabilities,
   resolveProviderModelSelection,
 } from './provider-model-selection.mjs';
 
@@ -145,5 +146,117 @@ test('lists consent-gated alternative chat models with primary provider first', 
       { providerId: 'primary', providerName: 'primary', model: 'primary-chat' },
       { providerId: 'secondary', providerName: 'secondary', model: 'shared-chat' },
     ],
+  );
+});
+
+test('derives Xiaomi MiMo vision capability from its configured protocol', () => {
+  const capabilities = resolveProviderModelCapabilities({ id: 'xiaomi', protocol: 'openai' }, 'mimo-v2.5');
+  assert.deepEqual(capabilities.input, ['text']);
+  assert.equal(capabilities.supportsVision, false);
+  assert.equal(capabilities.supportsToolCalling, true);
+  assert.equal(capabilities.supportsRequiredToolChoice, false);
+
+  const geminiCapabilities = resolveProviderModelCapabilities({
+    id: 'xiaomi',
+    protocol: 'openai',
+    modelProtocols: { 'mimo-v2.5': 'gemini' },
+  }, 'mimo-v2.5');
+  assert.deepEqual(geminiCapabilities.input, ['text', 'image']);
+  assert.equal(geminiCapabilities.supportsVision, true);
+  assert.equal(geminiCapabilities.supportsRequiredToolChoice, false);
+});
+
+test('uses per-model Gemini protocol overrides for reference-image planning', () => {
+  for (const model of [
+    'gemini-3.5-flash-thinking-minimal',
+    'gemini-3.6-flash',
+    'gemini-3.7-flash',
+  ]) {
+    const capabilities = resolveProviderModelCapabilities({
+      id: 'comfly',
+      protocol: 'openai',
+      modelProtocols: { [model]: 'gemini' },
+    }, model);
+    assert.deepEqual(capabilities.input, ['text', 'image']);
+    assert.equal(capabilities.supportsVision, true);
+  }
+});
+
+test('selects a per-model Gemini chat protocol as a visual planner', () => {
+  const result = resolveProviderModelSelection({
+    providers: [{
+      id: 'comfly',
+      protocol: 'openai',
+      chatModels: ['gemini-3.7-flash'],
+      modelProtocols: { 'gemini-3.7-flash': 'gemini' },
+    }],
+    purpose: 'chat',
+    requestedProviderId: 'comfly',
+    requestedModel: 'gemini-3.7-flash',
+    requiresToolCalling: true,
+    requiresRequiredToolChoice: true,
+  });
+  assert.deepEqual(result, {
+    providerId: 'comfly',
+    model: 'gemini-3.7-flash',
+    fallback: false,
+    reason: 'exact',
+  });
+});
+
+test('uses the configured protocol for unknown models', () => {
+  const capabilities = resolveProviderModelCapabilities({ id: 'comfly', protocol: 'openai' }, 'custom-chat');
+  assert.deepEqual(capabilities.input, ['text']);
+  assert.equal(capabilities.supportsVision, false);
+
+  const geminiCapabilities = resolveProviderModelCapabilities({
+    id: 'comfly',
+    protocol: 'openai',
+    modelProtocols: { 'custom-chat': 'gemini' },
+  }, 'custom-chat');
+  assert.deepEqual(geminiCapabilities.input, ['text', 'image']);
+  assert.equal(geminiCapabilities.supportsVision, true);
+});
+
+test('does not filter configured chat models by visual capability', () => {
+  const result = resolveProviderModelSelection({
+    providers: [
+      { id: 'provider-2', primary: true, chatModels: ['gpt-5.6'] },
+      { id: 'xiaomi', chatModels: ['mimo-v2.5'] },
+      {
+        id: 'provider-3',
+        chatModels: ['gpt-5.6-sol'],
+        modelProtocols: { 'gpt-5.6-sol': 'gemini' },
+      },
+    ],
+    purpose: 'chat',
+    excludeUnavailable: true,
+  });
+  assert.deepEqual(result, {
+    providerId: 'xiaomi',
+    model: 'mimo-v2.5',
+    fallback: true,
+    reason: 'first_capable_provider',
+  });
+});
+
+test('does not switch an explicitly selected model to a fallback', () => {
+  assert.deepEqual(
+    resolveProviderModelSelection({
+      providers: [
+        { id: 'xiaomi', chatModels: ['mimo-v2.5'] },
+        { id: 'comfly', chatModels: ['gemini-3.7-flash'] },
+      ],
+      purpose: 'chat',
+      requestedProviderId: 'xiaomi',
+      requestedModel: 'mimo-v2.5-pro',
+      allowFallback: false,
+    }),
+    {
+      providerId: null,
+      model: null,
+      fallback: false,
+      reason: 'no_capable_provider',
+    },
   );
 });

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { convertPiMessagesToChatMessages, runZFlowAgentBrain } from './pi-agent-runtime.mjs';
+import { convertChatMessagesToPiMessages, convertPiMessagesToChatMessages, runZFlowAgentBrain } from './pi-agent-runtime.mjs';
 import { createAgentToolRegistry, executeAgentTool, getAgentModelTools } from './tool-registry.mjs';
 
 const tools = [
@@ -32,7 +32,14 @@ function toolStream(calls) {
       const args = JSON.stringify(call.args);
       yield { type: 'tool_call_start', toolCallId: call.id, index, name: call.name };
       yield { type: 'tool_call_delta', toolCallId: call.id, index, argumentsDelta: args };
-      yield { type: 'tool_call_end', toolCallId: call.id, index, name: call.name, arguments: args };
+      yield {
+        type: 'tool_call_end',
+        toolCallId: call.id,
+        index,
+        name: call.name,
+        arguments: args,
+        ...(typeof call.thoughtSignature === 'string' ? { thoughtSignature: call.thoughtSignature } : {}),
+      };
     }
     yield { type: 'done' };
   };
@@ -152,6 +159,138 @@ test('Pi runtime executes a sequential tool and continues to a final response', 
   assert.equal(result.toolCalls, 1);
   assert.equal(result.mutationToolCalls, 1);
   assert.deepEqual(executed, [{ name: 'echo', args: { value: 'ok' }, toolCallId: 'call-1' }]);
+});
+
+test('Pi runtime preserves Gemini thought signatures on the next model turn', async () => {
+  const requests = [];
+  let requestCount = 0;
+  const signature = 'sig-read-imagegen-context-1';
+  const result = await runZFlowAgentBrain({
+    messages: [{ role: 'user', content: 'load image context' }],
+    providerId: 'provider-1',
+    model: 'test-model',
+    tools: [{ ...tools[0], name: 'read_imagegen_context', readOnly: true }],
+    chatStream: (request) => {
+      requests.push(request);
+      requestCount += 1;
+      return requestCount === 1
+        ? toolStream([{ id: 'gemini-tool-1', name: 'read_imagegen_context', args: {}, thoughtSignature: signature }])()
+        : textStream('done')();
+    },
+    executeTool: async () => ({ modelResult: { loaded: true }, publicResult: { loaded: true } }),
+  });
+
+  assert.equal(result.content, 'done');
+  const assistant = requests[1].messages.find((message) => message.role === 'assistant');
+  assert.equal(assistant.tool_calls[0].thoughtSignature, signature);
+});
+
+test('Pi runtime replays Gemini raw parts, order, signature, and function ID', async () => {
+  const requests = [];
+  let requestCount = 0;
+  const geminiParts = [
+    { text: 'thinking', thought: true, thoughtSignature: 'sig-thinking' },
+    { functionCall: { id: 'provider-call-1', name: 'read_imagegen_context', args: {} }, thoughtSignature: 'sig-call' },
+  ];
+  const result = await runZFlowAgentBrain({
+    messages: [{ role: 'user', content: 'load image context' }],
+    providerId: 'provider-1',
+    model: 'gemini-3.1-flash',
+    tools: [{ ...tools[0], name: 'read_imagegen_context', readOnly: true }],
+    chatStream: (request) => {
+      requests.push(request);
+      requestCount += 1;
+      if (requestCount === 1) {
+        return (async function* stream() {
+          yield { type: 'start', model: 'gemini-3.1-flash' };
+          yield { type: 'tool_call_start', toolCallId: 'provider-call-1', index: 0, name: 'read_imagegen_context' };
+          yield { type: 'tool_call_delta', toolCallId: 'provider-call-1', index: 0, argumentsDelta: '{}' };
+          yield { type: 'tool_call_end', toolCallId: 'provider-call-1', index: 0, name: 'read_imagegen_context', arguments: '{}', thoughtSignature: 'sig-call' };
+          yield { type: 'gemini_parts', parts: geminiParts };
+          yield { type: 'done' };
+        })();
+      }
+      return textStream('done')();
+    },
+    executeTool: async () => ({ modelResult: { loaded: true }, publicResult: { loaded: true } }),
+  });
+
+  assert.equal(result.content, 'done');
+  const assistant = requests[1].messages.find((message) => message.role === 'assistant');
+  assert.deepEqual(assistant.geminiParts, geminiParts);
+  assert.equal(assistant.tool_calls[0].id, 'provider-call-1');
+});
+
+test('Pi message conversions preserve thought signatures without inventing them', () => {
+  const signature = 'sig-round-trip';
+  const model = { api: 'test-api', provider: 'provider-1', id: 'test-model' };
+  const piMessages = convertChatMessagesToPiMessages([{
+    role: 'assistant',
+    content: '',
+    tool_calls: [{
+      id: 'call-1',
+      type: 'function',
+      thoughtSignature: signature,
+      function: { name: 'echo', arguments: '{}' },
+    }],
+  }], model);
+  assert.equal(piMessages[0].content[0].thoughtSignature, signature);
+  const chatMessages = convertPiMessagesToChatMessages(piMessages);
+  assert.equal(chatMessages[0].tool_calls[0].thoughtSignature, signature);
+});
+
+test('Pi provider bridge sends the system prompt on every turn with Skill tool results', async () => {
+  const requests = [];
+  const result = await runZFlowAgentBrain({
+    messages: [{ role: 'user', content: 'generate an image' }],
+    systemPrompt: 'USE_LOCKED_SKILL',
+    providerId: 'provider-1',
+    model: 'test-model',
+    tools: [{
+      name: 'read_imagegen_context',
+      parameters: { type: 'object', properties: {}, additionalProperties: false },
+      readOnly: true,
+    }],
+    chatStream: (request) => {
+      requests.push(request);
+      return requests.length === 1
+        ? toolStream([{ id: 'skill-1', name: 'read_imagegen_context', args: {} }])()
+        : textStream('done')();
+    },
+    executeTool: async () => ({
+      modelResult: { visualSkill: { content: 'SKILL_GUIDANCE' } },
+      publicResult: { loaded: true },
+    }),
+  });
+
+  assert.equal(result.content, 'done');
+  assert.deepEqual(requests[0].messages, [
+    { role: 'system', content: 'USE_LOCKED_SKILL' },
+    { role: 'user', content: [{ type: 'text', text: 'generate an image' }] },
+  ]);
+  assert.equal(requests[1].messages[0].role, 'system');
+  assert.equal(requests[1].messages[0].content, 'USE_LOCKED_SKILL');
+  assert.equal(requests[1].messages.at(-1).role, 'tool');
+  assert.match(requests[1].messages.at(-1).content, /SKILL_GUIDANCE/);
+});
+
+test('Pi provider bridge omits an empty system prompt', async () => {
+  let sentMessages;
+  await runZFlowAgentBrain({
+    messages: [{ role: 'user', content: 'hello' }],
+    systemPrompt: '   ',
+    providerId: 'provider-1',
+    model: 'test-model',
+    tools: [],
+    chatStream: (request) => {
+      sentMessages = request.messages;
+      return textStream('hello')();
+    },
+    executeTool: async () => ({}),
+  });
+
+  assert.equal(sentMessages[0].role, 'user');
+  assert.equal(sentMessages.some((message) => message.role === 'system'), false);
 });
 
 test('Pi runtime emits a tool start before a delayed sequential tool resolves', async () => {
@@ -291,6 +430,112 @@ test('Pi runtime forwards an explicitly required terminal tool choice', async ()
 
   assert.equal(result.stopReason, 'completed');
   assert.equal(result.terminal.type, 'recovery_resolution');
+});
+
+test('Pi provider bridge only forwards strict when the tool declares it', async () => {
+  let capturedTools;
+  const result = await runZFlowAgentBrain({
+    messages: [{ role: 'user', content: 'reply' }],
+    providerId: 'provider-1',
+    model: 'test-model',
+    tools: [
+      {
+        name: 'strict_tool',
+        description: 'Strict tool.',
+        strict: true,
+        parameters: { type: 'object', properties: {}, additionalProperties: false },
+        readOnly: true,
+      },
+      {
+        name: 'portable_tool',
+        description: 'Portable tool.',
+        parameters: { type: 'object', properties: {}, additionalProperties: false },
+        readOnly: true,
+      },
+    ],
+    maxTurns: 2,
+    chatStream: (request) => {
+      capturedTools = request.tools;
+      return textStream('done')();
+    },
+    executeTool: async () => ({}),
+  });
+
+  assert.equal(result.stopReason, 'completed');
+  assert.deepEqual(capturedTools, [
+    {
+      type: 'function',
+      function: {
+        name: 'strict_tool',
+        description: 'Strict tool.',
+        parameters: { type: 'object', properties: {}, additionalProperties: false },
+        strict: true,
+      },
+    },
+    {
+      type: 'function',
+      function: {
+        name: 'portable_tool',
+        description: 'Portable tool.',
+        parameters: { type: 'object', properties: {}, additionalProperties: false },
+      },
+    },
+  ]);
+});
+
+test('Pi runtime forces generate_image after read_imagegen_context completes', async () => {
+  let requests = 0;
+  const exposedTools = [];
+  const toolChoices = [];
+  const result = await runZFlowAgentBrain({
+    messages: [{ role: 'user', content: 'generate an image' }],
+    providerId: 'provider-1',
+    model: 'test-model',
+    tools: [
+      {
+        name: 'read_imagegen_context',
+        parameters: { type: 'object', properties: {}, additionalProperties: false },
+        readOnly: true,
+        countAgainstToolBudget: false,
+      },
+      {
+        name: 'generate_image',
+        parameters: { type: 'object', properties: {}, additionalProperties: false },
+        terminal: true,
+        countAgainstToolBudget: false,
+      },
+    ],
+    maxTurns: 4,
+    maxToolCalls: 2,
+    getRequiredTerminalToolName: () => 'generate_image',
+    chatStream: (request) => {
+      requests += 1;
+      exposedTools.push(request.tools.map((tool) => tool.function.name));
+      toolChoices.push(request.toolChoice);
+      if (requests === 1) {
+        return toolStream([{ id: 'context-1', name: 'read_imagegen_context', args: {} }])();
+      }
+      if (requests === 2) return textStream('准备生成。')();
+      return toolStream([{ id: 'image-1', name: 'generate_image', args: {} }])();
+    },
+    executeTool: async (name) => name === 'generate_image'
+      ? { terminate: true, type: 'image_generated' }
+      : { modelResult: { loaded: true }, publicResult: { loaded: true } },
+  });
+
+  assert.equal(result.stopReason, 'completed');
+  assert.equal(result.terminal.type, 'image_generated');
+  assert.equal(requests, 3);
+  assert.deepEqual(exposedTools, [
+    ['read_imagegen_context', 'generate_image'],
+    ['read_imagegen_context', 'generate_image'],
+    ['generate_image'],
+  ]);
+  assert.deepEqual(toolChoices, [
+    'auto',
+    'auto',
+    { type: 'function', function: { name: 'generate_image' } },
+  ]);
 });
 
 test('Pi runtime allows a terminal control on the final allowed model turn', async () => {

@@ -70,7 +70,7 @@ function createPiModel({ providerId, model, metadata = {} }) {
     provider: providerId,
     baseUrl: '',
     reasoning: metadata.reasoning === true,
-    input: Array.isArray(metadata.input) && metadata.input.length > 0 ? metadata.input : ['text', 'image'],
+    input: Array.isArray(metadata.input) && metadata.input.length > 0 ? metadata.input : ['text'],
     cost: metadata.cost || { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: Number.isFinite(Number(metadata.contextWindow)) ? Number(metadata.contextWindow) : 32_000,
     maxTokens: Number.isFinite(Number(metadata.maxTokens)) ? Number(metadata.maxTokens) : 4096,
@@ -138,6 +138,7 @@ function piMessageToChatMessage(message) {
         toolCalls.push({
           id: text(part.id),
           type: 'function',
+          ...(typeof part.thoughtSignature === 'string' ? { thoughtSignature: part.thoughtSignature } : {}),
           function: {
             name: text(part.name),
             arguments: JSON.stringify(part.arguments || {}),
@@ -150,6 +151,12 @@ function piMessageToChatMessage(message) {
       content: textParts.join(''),
       ...(reasoningParts.length > 0 ? { reasoning_content: reasoningParts.join('') } : {}),
       ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}),
+      ...(Array.isArray(message.geminiParts)
+        ? {
+            geminiParts: message.geminiParts,
+            geminiSourceModel: text(message.geminiSourceModel) || text(message.model),
+          }
+        : {}),
     };
   }
   return null;
@@ -209,6 +216,7 @@ export function convertChatMessagesToPiMessages(messages, model) {
           id: text(call?.id),
           name: text(call?.function?.name),
           arguments: args,
+          ...(typeof call?.thoughtSignature === 'string' ? { thoughtSignature: call.thoughtSignature } : {}),
         });
       }
       return [{
@@ -220,13 +228,16 @@ export function convertChatMessagesToPiMessages(messages, model) {
         usage: emptyUsage(),
         stopReason: content.some((part) => part.type === 'toolCall') ? 'toolUse' : 'stop',
         timestamp: Date.now(),
+        ...(Array.isArray(message.geminiParts)
+          ? { geminiParts: message.geminiParts, geminiSourceModel: text(message.geminiSourceModel) || text(message.model) }
+          : {}),
       }];
     }
     return [];
   });
 }
 
-function createAssistantMessage(model, content = [], stopReason = 'pending', errorMessage) {
+function createAssistantMessage(model, content = [], stopReason = 'pending', errorMessage, geminiParts) {
   return {
     role: 'assistant',
     content,
@@ -236,6 +247,7 @@ function createAssistantMessage(model, content = [], stopReason = 'pending', err
     usage: emptyUsage(),
     stopReason,
     ...(errorMessage ? { errorMessage } : {}),
+    ...(Array.isArray(geminiParts) ? { geminiParts, geminiSourceModel: model.id } : {}),
     timestamp: Date.now(),
   };
 }
@@ -247,23 +259,31 @@ function createProviderStreamFn({ chatStream, resolveToolChoice = () => 'auto' }
       const content = [];
       const toolCalls = new Map();
       const toolArgumentBuffers = new Map();
+      let geminiParts;
       let textIndex = -1;
       let thinkingIndex = -1;
       let malformedToolArguments = false;
-      let finalMessage = createAssistantMessage(model, content);
+      const makeAssistantMessage = (stopReason = 'pending', errorMessage) => (
+        createAssistantMessage(model, content, stopReason, errorMessage, geminiParts)
+      );
+      let finalMessage = makeAssistantMessage();
       const emit = (event) => stream.push(event);
       try {
         emit({ type: 'start', partial: finalMessage });
         const request = {
           providerId: model.provider,
           model: model.id,
-          messages: convertPiMessagesToChatMessages(context.messages),
+          messages: [
+            ...(text(context.systemPrompt).trim() ? [{ role: 'system', content: context.systemPrompt }] : []),
+            ...convertPiMessagesToChatMessages(context.messages),
+          ],
           tools: (Array.isArray(context.tools) ? context.tools : []).map((tool) => ({
             type: 'function',
             function: {
               name: tool.name,
               description: tool.description,
               parameters: tool.parameters,
+              ...(typeof tool.strict === 'boolean' ? { strict: tool.strict } : {}),
             },
           })),
           toolChoice: resolveToolChoice(),
@@ -278,7 +298,8 @@ function createProviderStreamFn({ chatStream, resolveToolChoice = () => 'auto' }
               emit({ type: 'text_start', contentIndex: textIndex, partial: finalMessage });
             }
             content[textIndex].text += event.content;
-            finalMessage = createAssistantMessage(model, content, 'pending');
+            if (typeof event.thoughtSignature === 'string') content[textIndex].textSignature = event.thoughtSignature;
+            finalMessage = makeAssistantMessage('pending');
             emit({ type: 'text_delta', contentIndex: textIndex, delta: event.content, partial: finalMessage });
           } else if (event.type === 'delta' && event.channel === 'reasoning') {
             if (thinkingIndex < 0) {
@@ -287,23 +308,25 @@ function createProviderStreamFn({ chatStream, resolveToolChoice = () => 'auto' }
               emit({ type: 'thinking_start', contentIndex: thinkingIndex, partial: finalMessage });
             }
             content[thinkingIndex].thinking += event.content;
-            finalMessage = createAssistantMessage(model, content, 'pending');
+            if (typeof event.thoughtSignature === 'string') content[thinkingIndex].thinkingSignature = event.thoughtSignature;
+            finalMessage = makeAssistantMessage('pending');
             emit({ type: 'thinking_delta', contentIndex: thinkingIndex, delta: event.content, partial: finalMessage });
           } else if (event.type === 'tool_call_start') {
             const block = { type: 'toolCall', id: event.toolCallId, name: event.name || '', arguments: {} };
             toolCalls.set(event.index, block);
             toolArgumentBuffers.set(event.index, '');
             content.push(block);
-            finalMessage = createAssistantMessage(model, content, 'toolUse');
+            finalMessage = makeAssistantMessage('toolUse');
             emit({ type: 'toolcall_start', contentIndex: content.length - 1, partial: finalMessage });
           } else if (event.type === 'tool_call_delta') {
             toolArgumentBuffers.set(event.index, `${toolArgumentBuffers.get(event.index) || ''}${event.argumentsDelta}`);
-            finalMessage = createAssistantMessage(model, content, 'toolUse');
+            finalMessage = makeAssistantMessage('toolUse');
             emit({ type: 'toolcall_delta', contentIndex: content.findIndex((part) => part === toolCalls.get(event.index)), delta: event.argumentsDelta, partial: finalMessage });
           } else if (event.type === 'tool_call_end') {
             const block = toolCalls.get(event.index);
             if (block) {
               block.name = event.name || block.name;
+              if (typeof event.thoughtSignature === 'string') block.thoughtSignature = event.thoughtSignature;
               try {
                 const parsed = JSON.parse(event.arguments || toolArgumentBuffers.get(event.index) || '{}');
                 if (!isObject(parsed)) throw new Error('Tool arguments must be an object');
@@ -312,9 +335,12 @@ function createProviderStreamFn({ chatStream, resolveToolChoice = () => 'auto' }
                 malformedToolArguments = true;
                 block.arguments = {};
               }
-              finalMessage = createAssistantMessage(model, content, malformedToolArguments ? 'length' : 'toolUse');
+              finalMessage = makeAssistantMessage(malformedToolArguments ? 'length' : 'toolUse');
               emit({ type: 'toolcall_end', contentIndex: content.findIndex((part) => part === block), toolCall: block, partial: finalMessage });
             }
+          } else if (event.type === 'gemini_parts') {
+            geminiParts = event.parts;
+            finalMessage = makeAssistantMessage(toolCalls.size > 0 ? 'toolUse' : 'pending');
           }
         }
         if (textIndex >= 0) {
@@ -328,14 +354,12 @@ function createProviderStreamFn({ chatStream, resolveToolChoice = () => 'auto' }
           : toolCalls.size > 0
             ? 'toolUse'
             : 'stop';
-        finalMessage = createAssistantMessage(model, content, stopReason);
+        finalMessage = makeAssistantMessage(stopReason);
         emit({ type: 'done', reason: stopReason, message: finalMessage });
         stream.end(finalMessage);
       } catch (error) {
         const aborted = options.signal?.aborted === true;
-        finalMessage = createAssistantMessage(
-          model,
-          content,
+        finalMessage = makeAssistantMessage(
           aborted ? 'aborted' : 'error',
           error instanceof Error ? error.message : String(error),
         );
@@ -363,6 +387,7 @@ function normalizeToolDefinition(entry) {
     requiresConfirmation: entry?.requiresConfirmation === true,
     mayRequireConfirmation: entry?.mayRequireConfirmation === true,
     confirmationMessage: text(entry?.confirmationMessage),
+    ...(typeof entry?.strict === 'boolean' ? { strict: entry.strict } : {}),
   };
 }
 
@@ -447,6 +472,7 @@ export async function runZFlowAgentBrain({
   repairInvalidTerminalToolsOnce = [],
   terminalToolContext = null,
   requireTerminalTool = '',
+  getRequiredTerminalToolName,
   requireMutationTool = false,
   signal,
   chatStream,
@@ -517,6 +543,7 @@ export async function runZFlowAgentBrain({
     name: entry.name,
     description: entry.description || entry.name,
     parameters: entry.parameters || { type: 'object', properties: {} },
+    ...(typeof entry.strict === 'boolean' ? { strict: entry.strict } : {}),
     executionMode: 'sequential',
     execute: async (toolCallId, args, toolSignal, onUpdate) => {
       let result;
@@ -590,8 +617,11 @@ export async function runZFlowAgentBrain({
     closingState.reason === 'terminal_tool_repair'
       ? closingState.toolName || repairInvalidTerminalToolOnce || requireTerminalTool
       : closingState.reason === 'terminal_tool_required'
-        ? requireTerminalTool
+        ? (typeof getRequiredTerminalToolName === 'function' ? getRequiredTerminalToolName() : requireTerminalTool)
         : ''
+  );
+  const resolveRequiredTerminalToolName = () => (
+    typeof getRequiredTerminalToolName === 'function' ? getRequiredTerminalToolName() : requireTerminalTool
   );
   const resolveClosingPiTools = () => {
     const requiredName = resolveClosingToolName();
@@ -770,12 +800,11 @@ export async function runZFlowAgentBrain({
         )
       ) activateClosingTurn();
       if (
-        requireTerminalTool
+        resolveRequiredTerminalToolName()
         && !closingState.active
         && !counters.terminal
         && !counters.pendingConfirmation
         && !usedTool
-        && hasText
         && !counters.terminalCorrectionUsed
       ) {
         counters.terminalCorrectionUsed = true;
@@ -848,7 +877,7 @@ export async function runZFlowAgentBrain({
           text: closingState.reason === 'terminal_tool_repair'
             ? `Your ${resolveClosingToolName() || 'terminal'} call was invalid. This is the only repair turn. Do not read more context or answer with prose. Call ${resolveClosingToolName() || 'the terminal tool'} with corrected arguments.${terminalContextSuffix}`
             : closingState.reason === 'terminal_tool_required'
-              ? `This task requires a structured terminal decision. Do not answer or ask questions with prose. Call ${requireTerminalTool} now with decision execute, or decision clarify when user input is required.${terminalContextSuffix}`
+              ? `This task requires a structured terminal decision. Do not answer or ask questions with prose. Call ${resolveRequiredTerminalToolName()} now with decision execute, or decision clarify when user input is required.${terminalContextSuffix}`
             : 'Context reading is finished. Do not call read or memory tools. Finish now with ordinary final text, submit_image_execution_plan, or request_context_selection. Do not return draft commentary without a final answer.',
         }],
         timestamp: Date.now(),

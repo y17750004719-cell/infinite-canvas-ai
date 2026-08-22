@@ -11,6 +11,7 @@ export function runZFlowAgentBrain(input: {
     name: string;
     description?: string;
     parameters?: Record<string, unknown>;
+    strict?: boolean;
     readOnly?: boolean;
     terminal?: boolean;
     countAgainstToolBudget?: boolean;
@@ -26,6 +27,7 @@ export function runZFlowAgentBrain(input: {
   repairInvalidTerminalToolsOnce?: string[];
   terminalToolContext?: Record<string, unknown> | null;
   requireTerminalTool?: string;
+  getRequiredTerminalToolName?: () => string;
   requireInitialTool?: string;
   initialToolNames?: string[];
   getNextTurnToolNames?: (input: Record<string, unknown>) => string[] | Promise<string[]>;

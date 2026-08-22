@@ -524,6 +524,8 @@ export type AgentEvent =
   | {
       type: 'agent_error';
       stage: string;
+      providerId?: string | null;
+      model?: string | null;
       message: string;
       reason?: AgentPlannerFailureReason;
       retryable?: boolean;

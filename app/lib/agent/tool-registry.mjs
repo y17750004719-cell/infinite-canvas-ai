@@ -910,6 +910,7 @@ export function getAgentModelTools(registry, allowedTools = []) {
         name: tool.name,
         description: tool.description,
         parameters: getModelToolParameters(tool),
+        ...(typeof tool.strict === 'boolean' ? { strict: tool.strict } : {}),
       },
       readOnly: tool.readOnly === true,
       terminal: tool.terminal === true,

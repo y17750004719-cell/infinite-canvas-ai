@@ -29,6 +29,14 @@ test('gemini chat maps function declarations calls and responses', () => {
   assert.match(source, /mode: 'ANY'/);
   assert.match(source, /allowedFunctionNames: \[toolChoice\.function\.name\]/);
   assert.match(source, /resolveGeminiFunctionCallingConfig\(request\.toolChoice\)/);
+  assert.match(source, /thoughtSignature\?: string/);
+  assert.match(source, /extractGeminiToolCalls/);
+  assert.match(source, /geminiToolCallToPart/);
+  assert.match(source, /geminiParts\?: GeminiContentPart\[\]/);
+  assert.match(source, /geminiSourceModel\?: string/);
+  assert.match(source, /functionResponse:[\s\S]{0,320}isSyntheticGeminiToolCallId/);
+  assert.match(source, /replayGeminiParts\(msg\.geminiParts/);
+  assert.match(source, /stripGeminiThoughtSignatures/);
 });
 
 test('Gemini chat drops empty messages and OpenAI compatibility retries only a missing flat tool choice', () => {

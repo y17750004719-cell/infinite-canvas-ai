@@ -1120,15 +1120,43 @@ export async function POST(request: NextRequest) {
   const providerImageOptionProfiles = buildProviderImageOptionProfiles(providers);
   const requestedInterfaceImageCount = normalizeAgentImageCount(body.imageOptions?.count);
   const requestedChatModel = body.chatOptions?.model || process.env.AGENT_CHAT_MODEL || undefined;
+  const requestedChatProviderId = body.chatOptions?.providerId || process.env.AGENT_CHAT_PROVIDER_ID;
+  const hasReferenceInput = (
+    (Array.isArray(body.referenceImages) && body.referenceImages.some((value) => typeof value === 'string' && value.trim()))
+    || (Array.isArray(body.referenceContext?.references) && body.referenceContext.references.some((reference) => typeof reference?.src === 'string' && reference.src.trim()))
+  );
+  const imagePlanningRequest = body.intent === 'image' || Boolean(body.activeSkillId) || hasReferenceInput;
+  const hasExplicitChatSelection = Boolean(body.chatOptions?.providerId || body.chatOptions?.model);
   const resolvedChatSelection = resolveProviderModelSelection({
     providers,
     purpose: 'chat',
-    requestedProviderId: body.chatOptions?.providerId || process.env.AGENT_CHAT_PROVIDER_ID,
+    requestedProviderId: requestedChatProviderId,
     requestedModel: requestedChatModel,
+    allowFallback: !hasExplicitChatSelection,
+    excludeUnavailable: true,
   });
   if (!resolvedChatSelection.model || !resolvedChatSelection.providerId) {
-    return NextResponse.json({ error: 'No enabled chat provider and model are configured' }, { status: 400 });
+    return NextResponse.json({
+      error: 'No enabled chat provider and model are configured',
+      reason: 'model_unavailable',
+      retryable: false,
+    }, { status: 400 });
   }
+  const resolvedChatProvider = providers.find((provider) => provider.id === resolvedChatSelection.providerId) || null;
+  const resolvedChatModelMetadata = {
+    ...(resolvedChatProvider || {}),
+  };
+  const isRetryablePlannerProviderError = (error: unknown) => {
+    const candidate = error as { statusCode?: unknown; cause?: { code?: unknown } };
+    const statusCode = Number(candidate?.statusCode);
+    const message = error instanceof Error ? error.message.toLowerCase() : String(error).toLowerCase();
+    const causeCode = typeof candidate?.cause?.code === 'string' ? candidate.cause.code.toUpperCase() : '';
+    return statusCode === 524
+      || message.includes('no enabled channel for model')
+      || causeCode === 'EPIPE'
+      || message.includes('write epipe')
+      || message === 'fetch failed';
+  };
   // Main Agent lifetime is bounded by provider completion, protocol budgets, or user cancellation.
   const runSignal = request.signal;
   registerActiveAgentRun(runId);
@@ -2905,7 +2933,7 @@ export async function POST(request: NextRequest) {
             }),
             providerId: resolvedChatSelection.providerId!,
             model: resolvedChatSelection.model!,
-            modelMetadata: providers.find((provider) => provider.id === resolvedChatSelection.providerId),
+            modelMetadata: resolvedChatModelMetadata,
             tools: recoveryTools,
             toolChoice: 'auto',
             maxTurns: 2,
@@ -4226,7 +4254,7 @@ export async function POST(request: NextRequest) {
                 messages: buildLoopMessages(),
                 providerId: resolvedChatSelection.providerId!,
                 model: resolvedChatSelection.model!,
-                modelMetadata: providers.find((provider) => provider.id === resolvedChatSelection.providerId),
+                modelMetadata: resolvedChatModelMetadata,
                 tools: mainAgentTools,
                 toolChoice: 'required',
                 initialToolNames: allowedStageTools,
@@ -4425,7 +4453,7 @@ export async function POST(request: NextRequest) {
           messages: buildLoopMessages(),
           providerId: resolvedChatSelection.providerId!,
           model: resolvedChatSelection.model!,
-          modelMetadata: providers.find((provider) => provider.id === resolvedChatSelection.providerId),
+          modelMetadata: resolvedChatModelMetadata,
           tools: mainAgentTools,
           toolChoice: terminalContractResume
             ? { type: 'function', function: { name: 'submit_image_execution_plan' } }
@@ -4459,6 +4487,9 @@ export async function POST(request: NextRequest) {
             forbiddenTopLevelFields: ['version'],
           },
           requireTerminalTool: terminalContractResume ? 'submit_image_execution_plan' : '',
+          getRequiredTerminalToolName: imagePlanningRequest
+            ? () => mainAgentLoopState.skillRead ? 'generate_image' : ''
+            : undefined,
           signal: runSignal,
           chatStream,
           executeTool: async (toolName, args, context) => {
@@ -4606,7 +4637,17 @@ export async function POST(request: NextRequest) {
               contextScopes: [...mainAgentLoopState.contextScopes],
             };
             void contextLogger.warn('image_contract.checkpoint_saved', 'Image contract checkpoint saved for retry', {
-              taskId: rootTaskId(), runId, skillId: selectedSkill?.id || null, imageOperation,
+              taskId: rootTaskId(),
+              runId,
+              providerId: resolvedChatSelection.providerId,
+              model: resolvedChatSelection.model,
+              skillId: selectedSkill?.id || null,
+              imageOperation,
+              stopReason: loopResult.stopReason,
+              failureStage: loopResult.failureStage || 'terminal_contract',
+              errorMessage: loopResult.errorMessage || null,
+              toolCalls: loopResult.toolCalls,
+              turns: loopResult.turns,
             });
             throw new Error('图像合同未完成，任务状态已保留，可继续重试');
           }
@@ -5932,7 +5973,7 @@ export async function POST(request: NextRequest) {
             messages: chatMessages,
             providerId: resolvedChatSelection.providerId,
             model,
-            modelMetadata: providers.find((provider) => provider.id === resolvedChatSelection.providerId),
+            modelMetadata: resolvedChatModelMetadata,
             tools: modelTools,
             maxTurns: MAX_AGENT_TURNS,
             maxToolCalls: MAX_TOOL_CALLS,
@@ -6291,7 +6332,10 @@ export async function POST(request: NextRequest) {
         writeEvent(controller, {
           type: 'agent_error',
           stage: failureStage,
+          providerId: resolvedChatSelection.providerId,
+          model: resolvedChatSelection.model,
           message: failureMessage,
+          ...(isRetryablePlannerProviderError(error) ? { reason: 'transport', retryable: true } : {}),
           recoveryRecord,
           ...progressTracker.stamp(),
         });

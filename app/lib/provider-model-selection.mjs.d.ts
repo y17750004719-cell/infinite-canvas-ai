@@ -42,4 +42,5 @@ export function resolveProviderModelSelection(options?: {
   purpose?: ProviderModelPurpose;
   requestedProviderId?: string;
   requestedModel?: string;
+  allowFallback?: boolean;
 }): ProviderModelSelection;

@@ -1,6 +1,9 @@
 import path from 'node:path';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { classifyModel } from './provider-models.ts';
+import { effectiveProviderProtocol } from './provider-protocol.mjs';
+
+export { effectiveProviderProtocol } from './provider-protocol.mjs';
 
 const DEFAULT_PROVIDER_ID = 'comfly';
 const DEFAULT_PROVIDER_UPDATED_AT = new Date(0).toISOString();
@@ -513,15 +516,6 @@ export function providerEndpointUrl(provider, key, defaultPath) {
     }
   }
   return `${trimmedBaseUrl}${defaultPath}`;
-}
-
-export function effectiveProviderProtocol(provider, model) {
-  const modelId = normalizeText(model);
-  const modelProtocol = provider?.modelProtocols?.[modelId];
-  if (SUPPORTED_PROVIDER_PROTOCOLS.has(modelProtocol)) {
-    return modelProtocol;
-  }
-  return normalizeProtocol(provider?.protocol);
 }
 
 export function getPrimaryProvider(providers) {
