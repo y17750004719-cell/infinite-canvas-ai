@@ -8,6 +8,49 @@ import type {
 
 export type AgentIntent = 'chat' | 'image' | 'skill_action';
 
+export type AgentItemStatus =
+  | 'in_progress'
+  | 'waiting'
+  | 'completed'
+  | 'failed'
+  | 'declined'
+  | 'cancelled';
+
+export type AgentItemType =
+  | 'agent_message'
+  | 'commentary'
+  | 'reasoning_summary'
+  | 'tool_call'
+  | 'skill'
+  | 'image_generation'
+  | 'approval'
+  | 'clarification'
+  | 'asset_delivery'
+  | 'error';
+
+export type AgentItem = {
+  itemId: string;
+  turnId: string;
+  type: AgentItemType;
+  status: AgentItemStatus;
+  sequence: number;
+  parentItemId?: string;
+  commentaryItemId?: string;
+  toolCallId?: string;
+  executionId?: string;
+  title: string;
+  summary?: string;
+  detail?: string;
+  startedAt?: number;
+  completedAt?: number;
+  retryability?: 'retryable' | 'requires_change' | 'unknown';
+  providerMetadata?: {
+    provider: string;
+    sourceModel?: string;
+    providerCallId?: string;
+  };
+};
+
 export type AgentConversationMemory = {
   version: 1;
   recentRawConversation: Array<{ role: 'user' | 'assistant'; content: string }>;
@@ -137,6 +180,7 @@ export type AgentPromptTrace = {
 export type AgentClarificationOption = {
   id: string;
   label: string;
+  completionSummary?: string;
   answer: string;
   description?: string;
 };
@@ -420,8 +464,13 @@ export type AgentProgressUpdate = {
   phase: AgentProgressPhase;
   status: AgentProgressStatus;
   label: string;
+  completionSummary?: string;
   toolCallId?: string;
   toolName?: string;
+  itemId?: string;
+  executionId?: string;
+  parentItemId?: string;
+  retryability?: 'retryable' | 'requires_change' | 'unknown';
   detail?: string;
 };
 
@@ -473,6 +522,8 @@ export type AgentEvent =
       message: string;
       request: AgentClarificationRequest;
       state: AgentClarificationState;
+      itemId?: string;
+      parentItemId?: string;
       sequence?: number;
       timestampMs?: number;
     }
@@ -500,9 +551,9 @@ export type AgentEvent =
         compiledAt: number;
       };
     }
-  | { type: 'tool_start'; toolCallId: string; toolName: string; runId?: string; operationId?: string; sequence?: number; timestampMs?: number }
-  | { type: 'tool_update'; toolCallId: string; message: string; runId?: string; operationId?: string; sequence?: number; timestampMs?: number }
-  | { type: 'tool_result'; toolCallId: string; toolName?: string; result: unknown; isError?: boolean; runId?: string; operationId?: string; sequence?: number; timestampMs?: number }
+  | { type: 'tool_start'; toolCallId: string; toolName: string; itemId?: string; executionId?: string; parentItemId?: string; runId?: string; operationId?: string; sequence?: number; timestampMs?: number }
+  | { type: 'tool_update'; toolCallId: string; message: string; itemId?: string; executionId?: string; parentItemId?: string; runId?: string; operationId?: string; sequence?: number; timestampMs?: number }
+  | { type: 'tool_result'; toolCallId: string; toolName?: string; result: unknown; isError?: boolean; itemId?: string; executionId?: string; parentItemId?: string; retryability?: 'retryable' | 'requires_change' | 'unknown'; runId?: string; operationId?: string; sequence?: number; timestampMs?: number }
   | AgentActivityDelta
   | AgentActivityCommit
   | { type: 'assistant_delta'; delta: string; channel?: 'content' | 'reasoning'; model?: string; runId?: string; operationId?: string; sequence?: number; timestampMs?: number }
@@ -518,7 +569,7 @@ export type AgentEvent =
       failed: number;
       addedToCanvas: boolean;
     }
-  | { type: 'confirmation_required'; request: { confirmationId: string; toolName: string; message: string }; sequence?: number; timestampMs?: number }
+  | { type: 'confirmation_required'; request: { confirmationId: string; toolName: string; message: string }; itemId?: string; parentItemId?: string; sequence?: number; timestampMs?: number }
   | { type: 'agent_task_checkpoint'; taskSnapshot: AgentTaskSnapshot; runId?: string; operationId?: string; sequence?: number; timestampMs?: number }
   | { type: 'agent_done'; stopReason: string; taskSnapshot?: AgentTaskSnapshot; runId?: string; operationId?: string; sequence?: number; timestampMs?: number }
   | {

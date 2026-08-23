@@ -15,3 +15,9 @@ test('workspace session controller wraps setSessions so sessionsRef stays curren
   assert.equal(controllerSource.includes('sessionsRef.current = nextSessions;'), true);
   assert.equal(controllerSource.includes('setSessionsState(nextSessions);'), true);
 });
+
+test('workspace session recovery clears interrupted active runs and persists the cleared marker', () => {
+  assert.match(controllerSource, /if \(session\.activeAgentRun\?\.status === 'running'\)/);
+  assert.match(controllerSource, /activeAgentRun: undefined/);
+  assert.match(controllerSource, /enqueueCoalescedSessionPersistence\(recoveredSession\)/);
+});

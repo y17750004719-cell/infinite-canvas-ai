@@ -253,7 +253,7 @@ export function createAgentProgressTracker({
   let sequence = finiteCount(lastSequence);
   const active = new Map();
   const emitEvent = typeof emit === 'function' ? emit : () => {};
-  const keyFor = (update) => `${update.stepId || 'run'}:${update.toolCallId || ''}`;
+  const keyFor = (update) => update.itemId || `${update.stepId || 'run'}:${update.toolCallId || ''}`;
 
   /**
    * @param {{
@@ -261,8 +261,13 @@ export function createAgentProgressTracker({
    *   phase: import('./events').AgentProgressPhase,
    *   status: import('./events').AgentProgressStatus,
    *   label: string,
+   *   completionSummary?: string,
    *   toolCallId?: string,
    *   toolName?: string,
+   *   itemId?: string,
+   *   executionId?: string,
+   *   parentItemId?: string,
+   *   retryability?: 'retryable' | 'requires_change' | 'unknown',
    *   detail?: string,
    * }} input
    */
@@ -279,8 +284,13 @@ export function createAgentProgressTracker({
       phase: String(input.phase || 'running'),
       status: input.status || 'active',
       label: String(input.label || ''),
+      ...(input.completionSummary ? { completionSummary: String(input.completionSummary) } : {}),
       ...(input.toolCallId ? { toolCallId: input.toolCallId } : {}),
       ...(input.toolName ? { toolName: input.toolName } : {}),
+      ...(input.itemId ? { itemId: input.itemId } : {}),
+      ...(input.executionId ? { executionId: input.executionId } : {}),
+      ...(input.parentItemId ? { parentItemId: input.parentItemId } : {}),
+      ...(input.retryability ? { retryability: input.retryability } : {}),
       ...(input.detail ? { detail: input.detail } : {}),
     };
     const key = keyFor(event);
@@ -314,6 +324,10 @@ export function createAgentProgressTracker({
           label: label || event.label,
           toolCallId: event.toolCallId,
           toolName: event.toolName,
+          itemId: event.itemId,
+          executionId: event.executionId,
+          parentItemId: event.parentItemId,
+          retryability: event.retryability,
         });
       }
     },

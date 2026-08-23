@@ -14,8 +14,13 @@ export function createAgentProgressTracker(input: {
     phase: AgentProgressPhase;
     status: AgentProgressStatus;
     label: string;
+    completionSummary?: string;
     toolCallId?: string;
     toolName?: string;
+    itemId?: string;
+    executionId?: string;
+    parentItemId?: string;
+    retryability?: 'retryable' | 'requires_change' | 'unknown';
     detail?: string;
   }): AgentProgressUpdate;
   stamp(): { sequence: number; timestampMs: number; runId: string; operationId: string };

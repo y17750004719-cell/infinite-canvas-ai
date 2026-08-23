@@ -73,7 +73,7 @@ test('api-client keeps the Gemini official image helper available as a non-defau
   );
 });
 
-test('api-client keeps Gemini native image routing behind the official helper path and supports gemini-3.1 flash image as a live request model', () => {
+test('api-client routes any Gemini-protocol image model through the official helper path', () => {
   assert.equal(
     apiClientSource.includes('export function shouldUseExactImageSizeApi(model?: string, size?: string): boolean {'),
     true
@@ -87,25 +87,19 @@ test('api-client keeps Gemini native image routing behind the official helper pa
   assert.equal(supportedGeminiSection.includes('"gemini-2.5-flash-image"'), true);
   assert.equal(supportedGeminiSection.includes('"gemini-3-pro-image-preview"'), true);
   assert.equal(supportedGeminiSection.includes('"gemini-3.1-flash-image-preview"'), true);
-  assert.equal(
-    apiClientSource.includes('if (protocol === "gemini" && isGeminiOfficialImageModel(normalizedModel)) {'),
-    true
-  );
+  assert.equal(apiClientSource.includes('if (protocol === "gemini") {'), true);
   assert.equal(
     apiClientSource.includes('return editImage({'),
     false
   );
 });
 
-test('api-client keeps gemini-3.1 flash image preview as an official Gemini image request model', () => {
+test('api-client retains the canonical Gemini model catalog for explicit selections', () => {
   assert.equal(apiClientSource.includes('SUPPORTED_GEMINI_OFFICIAL_IMAGE_MODELS'), true);
   const supportedGeminiSection = apiClientSource.match(/const SUPPORTED_GEMINI_OFFICIAL_IMAGE_MODELS = new Set\(\[(.*?)\]\);/s)?.[1] || '';
   assert.equal(supportedGeminiSection.includes('"gemini-2.5-flash-image"'), true);
   assert.equal(supportedGeminiSection.includes('"gemini-3.1-flash-image-preview"'), true);
-  assert.equal(
-    apiClientSource.includes('return normalizedModel.length > 0 && SUPPORTED_GEMINI_OFFICIAL_IMAGE_MODELS.has(normalizedModel);'),
-    true
-  );
+  assert.equal(apiClientSource.includes('return normalizedModel.length > 0 && SUPPORTED_GEMINI_OFFICIAL_IMAGE_MODELS.has(normalizedModel);'), false);
 });
 
 test('api-client also supports gpt-image-2 through the OpenAI compatible image path', () => {
@@ -144,9 +138,9 @@ test('api-client normalizes provider-returned gpt-image-2 variants before routin
   );
 });
 
-test('api-client resolves Nano Banana aliases before both image protocol request bodies', () => {
-  assert.equal(apiClientSource.includes('const alias = resolveImageModelAlias(requestedModel);'), true);
-  assert.equal(apiClientSource.includes('const normalizedModel = normalizeImageRequestModel(alias.model);'), true);
+test('api-client preserves supplier model IDs in both image protocol request bodies', () => {
+  assert.equal(apiClientSource.includes('const alias = resolveImageModelAlias(requestedModel);'), false);
+  assert.equal(apiClientSource.includes('const normalizedModel = normalizeImageRequestModel(requestedModel);'), true);
   assert.equal(apiClientSource.includes('model: normalizedModel,'), true);
   assert.equal(apiClientSource.includes('requestedModel,'), true);
   assert.equal(apiClientSource.includes('model: requestedModel,'), true);
@@ -598,7 +592,7 @@ test('api-client also sends Gemini official imageSize config for gemini-2.5 flas
   );
 });
 
-test('api-client resolves the 4k gemini request model variant before building the supplier endpoint', () => {
+test('api-client preserves the selected Gemini request model before building the supplier endpoint', () => {
   assert.equal(
     apiClientSource.includes('const resolvedRequestModel = resolveImageRequestModel(model, request.size);'),
     true

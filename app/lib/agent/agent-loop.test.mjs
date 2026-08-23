@@ -89,6 +89,25 @@ test('progress tracker resumes one operation with strictly increasing sequence a
   assert.ok(resumedEvents.every((event) => event.operationId === 'operation-1'));
 });
 
+test('progress tracker keeps one stable item identity across tool updates', () => {
+  const events = [];
+  const tracker = agentLoopModule.createAgentProgressTracker({
+    runId: 'run-items',
+    emit: (event) => events.push(event),
+  });
+  tracker.update({
+    stepId: 'tool', phase: 'executing', status: 'active', label: '正在读取',
+    toolCallId: 'call-1', toolName: 'read_imagegen_context', itemId: 'run-items:tool:call-1', executionId: 'run-items:execution:call-1',
+  });
+  tracker.update({
+    stepId: 'tool', phase: 'executing', status: 'completed', label: '读取完成',
+    toolCallId: 'call-1', toolName: 'read_imagegen_context', itemId: 'run-items:tool:call-1', executionId: 'run-items:execution:call-1',
+  });
+
+  assert.deepEqual(events.map((event) => event.itemId), ['run-items:tool:call-1', 'run-items:tool:call-1']);
+  assert.deepEqual(events.map((event) => event.executionId), ['run-items:execution:call-1', 'run-items:execution:call-1']);
+});
+
 test('image generation heartbeat emits while a supplier request is pending and stops cleanly', () => {
   const pulses = [];
   let timerCallback;

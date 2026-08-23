@@ -1,6 +1,3 @@
-import { normalizeImageModelCapabilityId } from './image-model-capabilities.mjs';
-import { resolveImageCardModel } from './workspace-session-view.mjs';
-
 const DEFAULT_IMAGE_MODEL = 'gemini-2.5-flash-image';
 const ALLOWED_ASPECT_RATIOS = new Set([
   '1:1',
@@ -56,10 +53,7 @@ export function aspectRatioFromSize(size) {
 
 export function resolveGenerateImageModel(requestedModel, fallbackModel = DEFAULT_IMAGE_MODEL) {
   const normalizedModel = typeof requestedModel === 'string' ? requestedModel.trim() : '';
-  if (normalizeImageModelCapabilityId(normalizedModel) === 'gpt-image-2') {
-    return normalizedModel;
-  }
-  return resolveImageCardModel(requestedModel, fallbackModel);
+  return normalizedModel || fallbackModel;
 }
 
 export function resolveGenerateImageModelFromAllowedModels(

@@ -1419,6 +1419,27 @@ test('Pi runtime emits a failed public tool result when execution throws', async
   assert.deepEqual(toolResults[0].rawResult, { error: 'tool exploded' });
 });
 
+test('Pi runtime stops after a failed image generation instead of retrying the supplier call', async () => {
+  let requests = 0;
+  const result = await runZFlowAgentBrain({
+    messages: [{ role: 'user', content: 'generate an image' }],
+    providerId: 'provider-1',
+    model: 'test-model',
+    tools: [{ ...tools[0], name: 'generate_image' }],
+    chatStream: () => {
+      requests += 1;
+      return toolStream([{ id: `image-${requests}`, name: 'generate_image', args: { value: 'poster' } }])();
+    },
+    executeTool: async () => {
+      throw new Error('no enabled channel for model');
+    },
+  });
+
+  assert.equal(requests, 1);
+  assert.equal(result.stopReason, 'error');
+  assert.match(result.errorMessage, /no enabled channel/);
+});
+
 test('Pi runtime resumes a confirmed call with source-ordered batch results', async () => {
   const requestedMessages = [];
   const result = await runZFlowAgentBrain({

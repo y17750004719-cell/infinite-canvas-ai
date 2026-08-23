@@ -107,6 +107,107 @@ test('keeps a real commentary-tool-final lifecycle in event order', () => {
   assert.equal(state.steps.filter((step) => ['pending', 'active'].includes(step.status)).length, 0);
 });
 
+test('merges tool lifecycle events into one user-visible tool step', () => {
+  let state = createInitialAgentRunProgress('run-tool-events');
+  state = reduceAgentRunProgress(state, {
+    type: 'tool_start',
+    runId: 'run-tool-events',
+    toolCallId: 'read-1',
+    toolName: 'read_imagegen_context',
+    sequence: 1,
+    timestampMs: 10,
+  });
+  state = reduceAgentRunProgress(state, {
+    type: 'tool_update',
+    runId: 'run-tool-events',
+    toolCallId: 'read-1',
+    message: '正在读取视觉上下文',
+    sequence: 2,
+    timestampMs: 20,
+  });
+  state = reduceAgentRunProgress(state, {
+    type: 'tool_result',
+    runId: 'run-tool-events',
+    toolCallId: 'read-1',
+    toolName: 'read_imagegen_context',
+    result: { summary: '视觉上下文已加载' },
+    sequence: 3,
+    timestampMs: 30,
+  });
+
+  assert.equal(state.steps.length, 1);
+  assert.equal(state.steps[0].kind, 'tool');
+  assert.equal(state.steps[0].toolName, 'read_imagegen_context');
+  assert.equal(state.steps[0].status, 'completed');
+  assert.equal(state.steps[0].sequence, 1);
+  assert.equal(state.steps[0].lastUpdateSequence, 3);
+  assert.equal(state.steps[0].completionSummary, '视觉上下文已加载');
+});
+
+test('marks a tool lifecycle step failed without exposing raw result data', () => {
+  let state = reduceAgentRunProgress(createInitialAgentRunProgress('run-tool-failure'), {
+    type: 'tool_start',
+    runId: 'run-tool-failure',
+    toolCallId: 'generate-1',
+    toolName: 'generate_image',
+    sequence: 1,
+  });
+  state = reduceAgentRunProgress(state, {
+    type: 'tool_result',
+    runId: 'run-tool-failure',
+    toolCallId: 'generate-1',
+    isError: true,
+    result: { imageData: 'secret-pixels', message: '上游失败' },
+    sequence: 2,
+  });
+
+  assert.equal(state.steps.length, 1);
+  assert.equal(state.steps[0].status, 'failed');
+  assert.equal(state.steps[0].toolName, 'generate_image');
+  assert.equal(state.steps[0].detail, '上游失败');
+  assert.doesNotMatch(JSON.stringify(state.steps[0]), /secret-pixels/);
+});
+
+test('promotes an agent error into a redacted retryable error item', () => {
+  const state = reduceAgentRunProgress(createInitialAgentRunProgress('run-error-item'), {
+    type: 'agent_error',
+    runId: 'run-error-item',
+    message: '供应商连接超时，已保留任务状态',
+    retryable: true,
+    sequence: 1,
+    timestampMs: 100,
+  });
+
+  assert.equal(state.outcome, 'failed');
+  assert.equal(state.steps.length, 1);
+  assert.equal(state.steps[0].itemType, 'error');
+  assert.equal(state.steps[0].retryability, 'retryable');
+  assert.equal(state.steps[0].detail, '供应商连接超时，已保留任务状态');
+});
+
+test('associates asset delivery with the latest image generation item', () => {
+  let state = reduceAgentRunProgress(createInitialAgentRunProgress('run-assets'), {
+    type: 'tool_start',
+    runId: 'run-assets',
+    toolCallId: 'image-1',
+    toolName: 'generate_image',
+    itemId: 'run-assets:tool:image-1',
+    sequence: 1,
+  });
+  state = reduceAgentRunProgress(state, {
+    type: 'assets_progress',
+    runId: 'run-assets',
+    total: 2,
+    succeeded: 1,
+    failed: 0,
+    sequence: 2,
+  });
+
+  const assetStep = state.steps.find((step) => step.itemType === 'asset_delivery');
+  assert.equal(assetStep?.parentItemId, 'run-assets:tool:image-1');
+  assert.equal(state.assets.settled, 1);
+});
+
 test('continues a recovered attempt without replacing earlier breadcrumbs or elapsed time', () => {
   let state = reduceAgentRunProgress(createInitialAgentRunProgress('run-1'), progress(1, {
     runId: 'run-1', stepId: 'generate_image', toolCallId: 'image-1', timestampMs: 100,
@@ -288,7 +389,17 @@ test('image prompt events expose a stable expandable preparation node', () => {
   });
 
   assert.equal(state.steps.length, 1);
-  assert.deepEqual(state.steps[0], {
+  assert.deepEqual({
+    stepId: state.steps[0].stepId,
+    kind: state.steps[0].kind,
+    phase: state.steps[0].phase,
+    status: state.steps[0].status,
+    commentary: state.steps[0].commentary,
+    label: state.steps[0].label,
+    sequence: state.steps[0].sequence,
+    timestampMs: state.steps[0].timestampMs,
+    lastUpdateSequence: state.steps[0].lastUpdateSequence,
+  }, {
     stepId: 'prompt_optimization',
     kind: 'execution',
     phase: 'optimizing',
@@ -299,6 +410,9 @@ test('image prompt events expose a stable expandable preparation node', () => {
     timestampMs: 2_000,
     lastUpdateSequence: 3,
   });
+  assert.equal(state.steps[0].itemType, 'image_generation');
+  assert.equal(state.steps[0].itemStatus, 'completed');
+  assert.ok(state.steps[0].itemId);
 });
 
 test('keeps model-authored completion descriptions on their completed step', () => {
@@ -585,6 +699,42 @@ test('agent errors terminalize the run for retry rendering', () => {
   assert.equal(state.steps.at(-1).status, 'failed');
 });
 
+test('coalesces repeated agent errors into one failed item', () => {
+  let state = reduceAgentRunProgress(null, {
+    type: 'agent_error',
+    runId: 'duplicate-error-run',
+    message: '上游第一次错误',
+    sequence: 1,
+    timestampMs: 1_000,
+  });
+  state = reduceAgentRunProgress(state, {
+    type: 'agent_error',
+    runId: 'duplicate-error-run',
+    message: '上游最终错误',
+    sequence: 2,
+    timestampMs: 2_000,
+  });
+
+  assert.equal(state.steps.length, 1);
+  assert.equal(state.steps[0].itemType, 'error');
+  assert.equal(state.steps[0].detail, '上游最终错误');
+  assert.equal(state.outcome, 'failed');
+});
+
+test('cleans duplicate persisted error rows during state normalization', () => {
+  const state = reduceAgentRunProgress({
+    ...createInitialAgentRunProgress('persisted-error-run'),
+    steps: [
+      { stepId: 'agent-error', runId: 'persisted-error-run', itemType: 'error', status: 'failed', phase: 'failed', label: '旧错误', sequence: 1 },
+      { stepId: 'agent-error', runId: 'persisted-error-run', itemType: 'error', status: 'failed', phase: 'failed', label: '最新错误', sequence: 2 },
+      { stepId: 'legacy-failure', runId: 'persisted-error-run', itemType: 'agent_message', status: 'failed', phase: 'failed', label: '旧格式错误', sequence: 3 },
+    ],
+  }, { type: 'intent_resolved', intent: 'image' });
+
+  assert.equal(state.steps.length, 1);
+  assert.equal(state.steps[0].label, '旧格式错误');
+});
+
 test('late asset settlement cannot reopen a cancelled run', () => {
   let state = reduceAgentRunProgress(null, progress(1, {
     stepId: 'generate_image',
@@ -645,7 +795,7 @@ test('a later assistant delta does not clear accumulated progress', () => {
   assert.equal(afterDelta.steps.length, 1);
 });
 
-test('completed ordinary chat retains its v2 timeline', () => {
+test('completed ordinary chat hides its internal-only timeline', () => {
   const routing = reduceAgentRunProgress(null, progress(1, {
     stepId: 'routing',
     phase: 'routing',
@@ -659,7 +809,7 @@ test('completed ordinary chat retains its v2 timeline', () => {
 
   assert.equal(completed.intent, 'chat');
   assert.equal(completed.steps.length, 1);
-  assert.equal(shouldShowAgentRunProgress(completed), true);
+  assert.equal(shouldShowAgentRunProgress(completed), false);
 });
 
 test('completed chat keeps a timeline when it used a tool', () => {
@@ -842,6 +992,52 @@ test('freezes a persisted run duration at the terminal event', () => {
   assert.equal(state.runEndedAt - state.runStartedAt, 8_000);
 });
 
+test('final assistant activity freezes the run when the explicit done event is missing', () => {
+  let state = reduceAgentRunProgress(null, {
+    type: 'agent_activity_delta',
+    runId: 'final-run',
+    activityId: 'final-1',
+    delta: '结果已完成',
+    sequence: 1,
+    timestampMs: 1_000,
+  });
+  state = reduceAgentRunProgress(state, {
+    type: 'agent_activity_commit',
+    runId: 'final-run',
+    activityId: 'final-1',
+    disposition: 'final',
+    sequence: 2,
+    timestampMs: 9_000,
+  });
+
+  assert.equal(state.agentDone, true);
+  assert.equal(state.outcome, 'completed');
+  assert.equal(state.runEndedAt, 9_000);
+  assert.equal(getAgentRunElapsedMs(state, 99_000), 8_000);
+});
+
+test('completion summaries freeze image runs before client asset settlement', () => {
+  let state = reduceAgentRunProgress(null, progress(1, {
+    runId: 'summary-run',
+    stepId: 'generate_image',
+    toolCallId: 'image-1',
+    toolName: 'generate_image',
+    timestampMs: 1_000,
+  }));
+  state = reduceAgentRunProgress(state, {
+    type: 'agent_completion_summary',
+    runId: 'summary-run',
+    summary: '已生成图片',
+    sequence: 2,
+    timestampMs: 9_000,
+  });
+
+  assert.equal(state.agentDone, true);
+  assert.equal(state.runEndedAt, 9_000);
+  assert.equal(state.outcome, 'waiting');
+  assert.equal(getAgentRunElapsedMs(state, 99_000), 8_000);
+});
+
 test('terminal errors leave completed history intact and only fail the active part', () => {
   let state = reduceAgentRunProgress(null, progress(1, {
     stepId: 'read', status: 'completed', timestampMs: 1_000,
@@ -872,4 +1068,16 @@ test('upgrades an old reducer state without changing its prior order', () => {
   assert.deepEqual(state.steps.map((step) => [step.stepId, step.kind, step.sequence]), [
     ['first', 'execution', 1], ['second', 'execution', 2], ['third', 'execution', 3],
   ]);
+});
+
+test('fills missing item metadata in an existing v2 timeline', () => {
+  const state = reduceAgentRunProgress({
+    ...createInitialAgentRunProgress('v2-run'),
+    steps: [{ stepId: 'read', kind: 'tool', phase: 'reading', status: 'completed', label: '已读取' }],
+  }, { type: 'intent_resolved', intent: 'chat' });
+
+  assert.equal(state.steps[0].itemId, 'v2-run:tool_call:read');
+  assert.equal(state.steps[0].turnId, 'v2-run');
+  assert.equal(state.steps[0].itemType, 'tool_call');
+  assert.equal(state.steps[0].itemStatus, 'completed');
 });

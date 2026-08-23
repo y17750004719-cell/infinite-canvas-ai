@@ -44,6 +44,7 @@ export type AgentRunProgressEvent =
   | { type: 'assets_pending'; count: number }
   | { type: 'assets_progress'; total: number; succeeded: number; failed: number }
   | { type: 'assets_settled'; succeeded: number; failed: number }
+  | { type: 'agent_completion_summary'; runId?: string; summary?: string }
   | { type: 'agent_done' }
   | { type: 'agent_error' }
   | { type: 'confirmation_submitted'; toolName?: string }

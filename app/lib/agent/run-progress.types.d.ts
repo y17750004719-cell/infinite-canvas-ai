@@ -3,6 +3,9 @@ export type AgentRunOutcome = 'running' | 'waiting' | 'completed' | 'warning' | 
 export type AgentRunIntent = 'chat' | 'image' | 'skill_action';
 export type AgentRunStepKind = 'status' | 'tool' | 'commentary' | 'execution' | 'interaction';
 
+export type AgentItemStatus = 'in_progress' | 'waiting' | 'completed' | 'failed' | 'declined' | 'cancelled';
+export type AgentItemType = 'agent_message' | 'commentary' | 'reasoning_summary' | 'tool_call' | 'skill' | 'image_generation' | 'approval' | 'clarification' | 'asset_delivery' | 'error';
+
 export interface AgentRunProgressStep {
   stepId: string;
   sequence?: number;
@@ -12,6 +15,14 @@ export interface AgentRunProgressStep {
   interactionId?: string;
   interactionType?: 'clarification' | 'confirmation';
   kind?: AgentRunStepKind;
+  itemId?: string;
+  turnId?: string;
+  itemType?: AgentItemType;
+  itemStatus?: AgentItemStatus;
+  parentItemId?: string;
+  commentaryItemId?: string;
+  executionId?: string;
+  retryability?: 'retryable' | 'requires_change' | 'unknown';
   phase: string;
   status: AgentRunStepStatus;
   label: string;
@@ -59,6 +70,45 @@ export function getAgentRunElapsedMs(progress: AgentRunProgress, now?: number): 
 
 export type AgentRunProgressEvent =
   | {
+      type: 'tool_start';
+      toolCallId: string;
+      toolName: string;
+      itemId?: string;
+      executionId?: string;
+      parentItemId?: string;
+      runId?: string;
+      operationId?: string;
+      sequence?: number;
+      timestampMs?: number;
+    }
+  | {
+      type: 'tool_update';
+      toolCallId: string;
+      message: string;
+      itemId?: string;
+      executionId?: string;
+      parentItemId?: string;
+      runId?: string;
+      operationId?: string;
+      sequence?: number;
+      timestampMs?: number;
+    }
+  | {
+      type: 'tool_result';
+      toolCallId: string;
+      toolName?: string;
+      result?: unknown;
+      isError?: boolean;
+      itemId?: string;
+      executionId?: string;
+      parentItemId?: string;
+      retryability?: 'retryable' | 'requires_change' | 'unknown';
+      runId?: string;
+      operationId?: string;
+      sequence?: number;
+      timestampMs?: number;
+    }
+  | {
       type: 'progress_update';
       runId?: string;
       operationId?: string;
@@ -71,13 +121,18 @@ export type AgentRunProgressEvent =
       completionSummary?: string;
       toolCallId?: string;
       toolName?: string;
+      itemId?: string;
+      executionId?: string;
+      parentItemId?: string;
+      retryability?: 'retryable' | 'requires_change' | 'unknown';
       detail?: unknown;
     }
   | { type: 'assets_pending'; count: number; sequence?: number; timestampMs?: number }
   | { type: 'assets_progress'; total: number; succeeded: number; failed: number; sequence?: number; timestampMs?: number }
   | { type: 'assets_settled'; succeeded: number; failed: number; sequence?: number; timestampMs?: number }
+  | { type: 'agent_completion_summary'; runId?: string; summary?: string; sequence?: number; timestampMs?: number }
   | { type: 'agent_done'; runId?: string; sequence?: number; timestampMs?: number }
-  | { type: 'agent_error'; runId?: string; sequence?: number; timestampMs?: number }
+  | { type: 'agent_error'; runId?: string; sequence?: number; timestampMs?: number; message?: string; retryable?: boolean }
   | { type: 'agent_cancelled'; runId?: string; sequence?: number; timestampMs?: number }
   | { type: 'agent_activity_delta'; runId?: string; activityId: string; delta: string; model?: string; sequence?: number; timestampMs?: number }
   | { type: 'agent_activity_commit'; runId?: string; activityId: string; disposition: 'commentary' | 'final'; sequence?: number; timestampMs?: number }
@@ -95,7 +150,9 @@ export type AgentRunProgressEvent =
     }
   | { type: 'interaction_submitted'; interactionId: string; interactionType: 'clarification' | 'confirmation'; label: string; sequence?: number; timestampMs?: number }
   | { type: 'confirmation_submitted'; toolName?: string; sequence?: number; timestampMs?: number }
-  | { type: 'confirmation_required'; request?: { confirmationId?: string; toolName?: string; message?: string }; sequence?: number; timestampMs?: number }
-  | { type: 'clarification_required'; message?: string; request?: { id?: string; question?: string; toolName?: string }; sequence?: number; timestampMs?: number }
+  | { type: 'confirmation_required'; request?: { confirmationId?: string; toolName?: string; message?: string }; itemId?: string; parentItemId?: string; sequence?: number; timestampMs?: number }
+  | { type: 'clarification_required'; message?: string; request?: { id?: string; question?: string; toolName?: string }; itemId?: string; parentItemId?: string; sequence?: number; timestampMs?: number }
   | { type: 'intent_resolved'; intent: 'chat' | 'image' | 'skill_action' }
+  | { type: 'skill_selected'; skillId: string; label: string; sequence?: number; timestampMs?: number; runId?: string }
+  | { type: 'active_skill_changed'; skill: { id: string; label: string } | null; sequence?: number; timestampMs?: number; runId?: string }
   | { type: string; [key: string]: unknown };

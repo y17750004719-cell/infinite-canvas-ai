@@ -1454,14 +1454,35 @@ export async function POST(request: NextRequest) {
       });
       const getExternalSteeringMessages = () => takeActiveAgentRunInputs(runId, 'steer');
       const getExternalFollowUpMessages = () => takeActiveAgentRunInputs(runId, 'follow_up');
-      const writeInteractionEvent = (event: AgentEvent) => writeEvent(controller, {
-        ...event,
-        ...progressTracker.stamp(),
-      } as AgentEvent);
+      const writeInteractionEvent = (event: AgentEvent) => {
+        const request = 'request' in event && event.request && typeof event.request === 'object'
+          ? event.request as Record<string, unknown>
+          : undefined;
+        const identity = event.type === 'confirmation_required'
+          ? String(request?.confirmationId || 'confirmation')
+          : event.type === 'clarification_required'
+            ? String(request?.id || 'clarification')
+            : '';
+        return writeEvent(controller, {
+          ...event,
+          ...(identity && (event.type === 'confirmation_required' || event.type === 'clarification_required')
+            ? { itemId: `${runId}:${event.type === 'confirmation_required' ? 'approval' : 'clarification'}:${identity}` }
+            : {}),
+          ...progressTracker.stamp(),
+        } as AgentEvent);
+      };
+      const toolItemId = (toolCallId: string) => `${runId}:tool:${toolCallId}`;
+      const toolExecutionId = (toolCallId: string) => `${runId}:execution:${toolCallId}`;
+      const toolEventMetadata = (toolCallId: string) => ({
+        itemId: toolItemId(toolCallId),
+        executionId: toolExecutionId(toolCallId),
+        ...(lastCommentaryItemId ? { parentItemId: lastCommentaryItemId } : {}),
+      });
       const writeToolStartEvent = (toolCallId: string, toolName: string) => writeEvent(controller, {
         type: 'tool_start',
         toolCallId,
         toolName,
+        ...toolEventMetadata(toolCallId),
         ...progressTracker.stamp(),
       });
       const writeProgress = (input: {
@@ -1471,9 +1492,16 @@ export async function POST(request: NextRequest) {
         label: string;
         toolCallId?: string;
         toolName?: string;
+        itemId?: string;
+        executionId?: string;
+        parentItemId?: string;
+        retryability?: 'retryable' | 'requires_change' | 'unknown';
         detail?: string;
         completionSummary?: string;
-      }) => progressTracker.update(input);
+      }) => progressTracker.update({
+        ...input,
+        ...(input.toolCallId ? toolEventMetadata(input.toolCallId) : {}),
+      });
       const publicProgressByToolCallId = new Map<string, AgentPublicProgress>();
       let imagePublicProgress: AgentPublicProgress | undefined;
       const normalizePublicProgress = (value: unknown): AgentPublicProgress | undefined => {
@@ -1538,6 +1566,7 @@ export async function POST(request: NextRequest) {
       };
       let activitySequence = 0;
       let currentActivity: { activityId: string; text: string; sequence?: number; timestampMs?: number } | null = null;
+      let lastCommentaryItemId = '';
       let finalAssistantTextEmitted = false;
       let hasMutationEvidence = false;
       const handledAssistantTurnKeys = new Set<string>();
@@ -1570,6 +1599,7 @@ export async function POST(request: NextRequest) {
           appendActivityText(activityId, fullText.slice(currentActivity?.text.length || 0));
         }
         if (currentActivity?.text) {
+          lastCommentaryItemId = `commentary:${runId}:${activityId}`;
           writeEvent(controller, {
             type: 'agent_activity_commit',
             activityId,
@@ -1622,16 +1652,22 @@ export async function POST(request: NextRequest) {
         type: 'tool_update',
         toolCallId: id,
         message,
+        ...toolEventMetadata(id),
         ...progressTracker.stamp(),
       } as AgentEvent);
-      const writeToolResultEvent = (id: string, name: string, result: unknown, isError = false) => writeEvent(controller, {
-        type: 'tool_result',
-        toolCallId: id,
-        toolName: name,
-        result,
-        isError,
-        ...progressTracker.stamp(),
-      } as AgentEvent);
+      const writeToolResultEvent = (id: string, name: string, result: unknown, isError = false) => {
+        const metadata = toolEventMetadata(id);
+        lastCommentaryItemId = '';
+        return writeEvent(controller, {
+          type: 'tool_result',
+          toolCallId: id,
+          toolName: name,
+          result,
+          isError,
+          ...metadata,
+          ...progressTracker.stamp(),
+        } as AgentEvent);
+      };
       const noteToolResult = (name: string, isError = false) => {
         if (!isError && ['generate_image', 'start_skill_job'].includes(name)) hasMutationEvidence = true;
       };
@@ -2243,7 +2279,7 @@ export async function POST(request: NextRequest) {
         }
         if (result?.partialFailureMessage) updates.push(result.partialFailureMessage);
         for (const message of updates) {
-          writeEvent(controller, { type: 'tool_update', toolCallId, message, ...progressTracker.stamp() });
+          writeToolUpdateEvent(toolCallId, message);
         }
       };
       const writeImageCompletionSummary = (result: any) => {

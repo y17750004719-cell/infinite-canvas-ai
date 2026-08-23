@@ -442,6 +442,60 @@ body {
   color: var(--workspace-message-user-fg);
 }
 
+.agent-item-cell {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--workspace-text-primary);
+  padding: 0.125rem 0;
+}
+
+.agent-commentary-item {
+  padding-left: 0;
+  padding-right: 0;
+}
+
+.agent-commentary-item:hover {
+  background: transparent;
+}
+
+.agent-tool-call,
+.agent-execution-item,
+.agent-interaction-item {
+  transition: color 120ms ease;
+}
+
+.agent-item-cell[data-status='completed'] {
+  background: transparent;
+  color: var(--workspace-text-muted);
+}
+
+.agent-item-cell[data-status='failed'] {
+  background: transparent;
+  color: color-mix(in srgb, #dc2626 76%, var(--workspace-text-primary));
+}
+
+.agent-item-cell[data-status='waiting'] {
+  background: transparent;
+}
+
+.agent-item-cell summary:hover {
+  background: transparent;
+}
+
+.agent-item-spinner {
+  transform-origin: center;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-item-cell,
+  .agent-item-cell summary,
+  .agent-item-cell svg.agent-item-spinner {
+    transition: none !important;
+    animation: none !important;
+  }
+}
+
 .workspace-token-chip:hover {
   background: var(--workspace-control-hover);
 }

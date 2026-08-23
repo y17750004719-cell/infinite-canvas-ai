@@ -180,7 +180,18 @@ export function useWorkspaceSessionController<TResolvedSessionState>({
     }
     skipNextSessionAutoSaveRef.current = true;
     applySessionState(session);
-  }, [applySessionState, interruptSessionPersistence]);
+    if (session.activeAgentRun?.status === 'running') {
+      const recoveredSession: ProjectSession = {
+        ...session,
+        activeAgentRun: undefined,
+        updatedAt: Date.now(),
+      };
+      setSessions((previous) => previous.map((entry) => (
+        entry.id === recoveredSession.id ? recoveredSession : entry
+      )));
+      enqueueCoalescedSessionPersistence(recoveredSession);
+    }
+  }, [applySessionState, enqueueCoalescedSessionPersistence, interruptSessionPersistence, setSessions]);
 
   const captureWorkspaceUiSnapshot = useCallback((): WorkspaceUiSnapshot => {
     const currentSession = sessionsRef.current.find((session) => session.id === currentSessionIdRef.current) || null;

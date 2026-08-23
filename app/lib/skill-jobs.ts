@@ -57,7 +57,6 @@ export interface SkillJob {
   updatedAt: number;
 }
 
-const IMAGE_MODEL = "gemini-3.1-flash-image-preview";
 const DEFAULT_CONCURRENCY = 3;
 const ALLOWED_ASPECT_RATIOS = new Set([
   "1:1", "1:4", "1:8", "2:3", "3:2", "3:4", "4:1", "4:3", "4:5", "5:4", "8:1", "9:16", "16:9", "21:9",
@@ -628,29 +627,19 @@ async function processJob(jobId: string): Promise<void> {
   let selection: { providerId: string | null; model: string };
   try {
     const registry = await readProviderRegistry();
-    const requested = job.metadata.modelSelectionRequested === true;
     const requestedProviderId = normalizeOptionalText(job.metadata.providerId);
     const requestedModel = normalizeOptionalText(job.metadata.model);
     const resolved = resolveProviderModelSelection({
       providers: registry.providers,
       purpose: "image",
       requestedProviderId,
-      requestedModel: requestedModel || IMAGE_MODEL,
+      requestedModel: requestedModel || undefined,
     });
 
-    if (requested) {
-      if (!resolved.providerId || !resolved.model) {
-        throw new Error("No enabled image provider and model are configured");
-      }
-      selection = { providerId: resolved.providerId, model: resolved.model };
-    } else {
-      const primaryProvider = registry.providers.find((provider) => provider.enabled !== false && provider.primary)
-        || registry.providers.find((provider) => provider.enabled !== false);
-      selection = {
-        providerId: resolved.model === IMAGE_MODEL ? resolved.providerId : primaryProvider?.id || null,
-        model: IMAGE_MODEL,
-      };
+    if (!resolved.providerId || !resolved.model) {
+      throw new Error("No enabled image provider and model are configured");
     }
+    selection = { providerId: resolved.providerId, model: resolved.model };
 
     job.metadata.providerId = selection.providerId;
     job.metadata.model = selection.model;

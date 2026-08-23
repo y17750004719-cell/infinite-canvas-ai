@@ -27,44 +27,6 @@ const DEFAULT_IMAGE_MODEL_CAPABILITY = {
   sizeOptions: undefined,
 };
 
-const NANO_BANANA_ALIAS_RULES = [
-  { pattern: /^nano-banana(?:-1)?(?:-(1k|2k|4k))?$/i, model: 'gemini-2.5-flash-image' },
-  { pattern: /^nano-banana-2(?:-(1k|2k|4k))?$/i, model: 'gemini-3.1-flash-image' },
-  { pattern: /^nano-banana-2-lite(?:-(1k|2k|4k))?$/i, model: 'gemini-3.1-flash-lite-image' },
-  { pattern: /^nano-banana-pro(?:-(1k|2k|4k))?$/i, model: 'gemini-3-pro-image' },
-];
-
-function normalizeImageModelAliasKey(modelId) {
-  return (typeof modelId === 'string' ? modelId.trim() : '')
-    .toLowerCase()
-    .replace(/[\s_]+/g, '-')
-    .replace(/-+/g, '-');
-}
-
-export function resolveImageModelAlias(modelId) {
-  const requestedModel = typeof modelId === 'string' ? modelId.trim() : '';
-  const normalizedModel = normalizeImageModelAliasKey(requestedModel);
-  for (const rule of NANO_BANANA_ALIAS_RULES) {
-    const match = rule.pattern.exec(normalizedModel);
-    if (match) {
-      return {
-        requestedModel,
-        model: rule.model,
-        resolution: match[1] ? match[1].toUpperCase() : '',
-      };
-    }
-  }
-  return { requestedModel, model: requestedModel, resolution: '' };
-}
-
-export function imageSizeForResolution(resolution) {
-  return {
-    '1K': '1024x1024',
-    '2K': '2048x2048',
-    '4K': '4096x4096',
-  }[typeof resolution === 'string' ? resolution.trim().toUpperCase() : ''] || '';
-}
-
 export const IMAGE_MODEL_CAPABILITIES = {
   'gemini-3.1-flash-image-preview': {
     supportsAspectRatio: true,
@@ -113,16 +75,8 @@ export const IMAGE_MODEL_CAPABILITIES = {
   },
 };
 
-function normalizeGeminiImageProviderVariant(modelId) {
-  const normalizedModelId = typeof modelId === 'string' ? modelId.trim() : '';
-  if (/^gemini-3\.1-flash-image-preview(?:[-_](?:1k|2k|4k))?$/i.test(normalizedModelId)) {
-    return 'gemini-3.1-flash-image-preview';
-  }
-  return normalizedModelId;
-}
-
 export function normalizeImageModelCapabilityId(modelId) {
-  const normalizedModelId = normalizeGeminiImageProviderVariant(resolveImageModelAlias(modelId).model);
+  const normalizedModelId = typeof modelId === 'string' ? modelId.trim() : '';
   if (/^gpt-image-2(?:[-_].*)?$/i.test(normalizedModelId)) {
     return 'gpt-image-2';
   }
@@ -317,19 +271,7 @@ export function supportsImageModelImageSizeConfig(modelId) {
 
 export function resolveImageRequestModel(modelId, requestedSize) {
   const requestedModelId = typeof modelId === 'string' ? modelId.trim() : '';
-  const alias = resolveImageModelAlias(requestedModelId);
-  const normalizedModelId = normalizeImageModelCapabilityId(alias.model);
-  if (requestedModelId && requestedModelId !== normalizedModelId && normalizedModelId.startsWith('gemini-')) {
-    return alias.model === requestedModelId ? requestedModelId : normalizedModelId;
-  }
-  const normalizedSize = typeof requestedSize === 'string' ? requestedSize.trim() : '';
-  const capability = getImageModelCapability(normalizedModelId);
-  const mappedModelId =
-    normalizedSize && capability.requestModelBySize && capability.requestModelBySize[normalizedSize]
-      ? capability.requestModelBySize[normalizedSize]
-      : normalizedModelId;
-
-  return mappedModelId || normalizedModelId;
+  return requestedModelId;
 }
 
 export function getImageSizeLabel(modelId, sizeId) {

@@ -5,7 +5,7 @@ import {
   extractGeminiImageOutputs,
   summarizeGeminiImagePayload,
 } from "./gemini-image-response.mjs";
-import { getGeminiImageSizeEnum, getImageModelCapability, imageSizeForResolution, normalizeImageModelCapabilityId, resolveImageModelAlias, resolveImageRequestModel, getGptImage2SizeValidationError, supportsImageModelImageSizeConfig, supportsImageModelRequestedSize } from "./image-model-capabilities.mjs";
+import { getGeminiImageSizeEnum, getImageModelCapability, normalizeImageModelCapabilityId, resolveImageRequestModel, getGptImage2SizeValidationError, supportsImageModelImageSizeConfig, supportsImageModelRequestedSize } from "./image-model-capabilities.mjs";
 import { effectiveProviderProtocol, getProviderById, providerEndpointUrl, readProviderRegistry, resolveProviderRequestTargets } from "./provider-config.mjs";
 import {
   materializeChatMessageImages,
@@ -415,11 +415,6 @@ function resolveImageCapabilityModelId(model?: string): string {
 
 function isGptImage2Model(model?: string): boolean {
   return resolveImageCapabilityModelId(model) === "gpt-image-2";
-}
-
-function isGeminiOfficialImageModel(model?: string): boolean {
-  const normalizedModel = resolveImageCapabilityModelId(model);
-  return normalizedModel.length > 0 && SUPPORTED_GEMINI_OFFICIAL_IMAGE_MODELS.has(normalizedModel);
 }
 
 function isOpenAiCompatibleImageModel(model?: string): boolean {
@@ -957,12 +952,8 @@ async function generateGeminiOfficialImage(request: UnifiedImageRequest): Promis
     throw new ImageGenerationError("Please configure a supplier API Key in settings or environment");
   }
 
-  const model = normalizeImageRequestModel(request.model);
+  const model = normalizeImageRequestModel(requestedModel);
   const capabilityModelId = resolveImageCapabilityModelId(model);
-  if (!isGeminiOfficialImageModel(model)) {
-    throw new ImageGenerationError(`Gemini official image request failed: model "${request.model}" is not supported`, 400);
-  }
-
   const resolvedRequestModel = resolveImageRequestModel(model, request.size);
   const endpoint = `${getGeminiOfficialApiBaseUrl(providerTargets)}/v1beta/models/${resolvedRequestModel}:generateContent`;
   const aspectRatio = normalizeAspectRatio(request.aspect_ratio) || toAspectRatio(request.size);
@@ -1797,14 +1788,13 @@ async function pollOpenAiCompatibleImageTask({
 export async function runImageTask(request: UnifiedImageRequest): Promise<GenerationResponse> {
   const images = Array.isArray(request.images) ? request.images.filter(Boolean) : [];
   const requestedModel = typeof request.model === "string" ? request.model.trim() : "";
-  const alias = resolveImageModelAlias(requestedModel);
-  const normalizedModel = normalizeImageRequestModel(alias.model);
+  const normalizedModel = normalizeImageRequestModel(requestedModel);
   const normalizedRequest = {
     ...request,
     model: normalizedModel,
     requestedModel,
     images,
-    ...(request.size || !alias.resolution ? {} : { size: imageSizeForResolution(alias.resolution) }),
+    ...(request.size ? { size: request.size } : {}),
   };
   const { protocol } = await getProviderTransport({
     providerId: request.providerId,
@@ -1812,7 +1802,7 @@ export async function runImageTask(request: UnifiedImageRequest): Promise<Genera
     purpose: "image",
   });
 
-  if (protocol === "gemini" && isGeminiOfficialImageModel(normalizedModel)) {
+  if (protocol === "gemini") {
     return generateGeminiOfficialImage(normalizedRequest);
   }
 

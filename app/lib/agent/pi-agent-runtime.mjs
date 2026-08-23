@@ -512,6 +512,7 @@ export async function runZFlowAgentBrain({
     executionRequired: false,
     invalidToolArguments: '',
     lastToolError: '',
+    lastToolErrorToolName: '',
     truncatedToolCall: false,
     closingError: '',
     pendingConfirmation: null,
@@ -551,6 +552,7 @@ export async function runZFlowAgentBrain({
         result = await executeTool(entry.name, args, { toolCallId, signal: toolSignal, onUpdate });
       } catch (error) {
         counters.lastToolError = error instanceof Error ? error.message : String(error);
+        counters.lastToolErrorToolName = entry.name;
         if (repairableTerminalTools.has(entry.name) && !closingState.active) {
           activateClosingTurn('terminal_tool_repair', entry.name);
         }
@@ -831,6 +833,7 @@ export async function runZFlowAgentBrain({
         return true;
       }
       if (counters.budgetExceeded) return true;
+      if (counters.lastToolErrorToolName === 'generate_image') return true;
       if (counters.invalidToolArguments) return true;
       if (counters.pendingConfirmation) return true;
       if (counters.terminal) return true;
@@ -976,6 +979,8 @@ export async function runZFlowAgentBrain({
       ? 'execution_required'
       : counters.initialToolError
         ? 'error'
+      : counters.lastToolErrorToolName === 'generate_image'
+        ? 'error'
       : counters.invalidToolArguments
         ? 'error'
       : counters.truncatedToolCall
@@ -1000,12 +1005,12 @@ export async function runZFlowAgentBrain({
     budgetedToolCalls: counters.budgetedToolCallCount,
     mutationToolCalls: counters.mutationToolCallCount,
     stopReason,
-    ...(counters.invalidToolArguments || counters.truncatedToolCall || counters.initialToolError || counters.closingError || assistant?.errorMessage
+    ...(counters.invalidToolArguments || counters.truncatedToolCall || counters.initialToolError || counters.lastToolError || counters.closingError || assistant?.errorMessage
       ? {
         errorMessage: counters.invalidToolArguments
           || (counters.truncatedToolCall
             ? 'Model returned an incomplete tool call; the tool was not executed.'
-            : counters.initialToolError || counters.closingError || assistant.errorMessage),
+            : counters.initialToolError || counters.lastToolError || counters.closingError || assistant.errorMessage),
       }
       : {}),
     ...(['terminal_tool_repair', 'terminal_tool_required'].includes(closingState.reason) && stopReason === 'error'

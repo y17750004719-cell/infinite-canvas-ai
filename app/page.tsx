@@ -11,7 +11,7 @@ import { useGSAP } from '@gsap/react';
 import { 
   MousePointer2, Type, Image as ImageIcon,
   Share2, History, Settings, Paperclip,
-  Send, Sparkles, X, ChevronDown, ChevronLeft, ChevronRight, Trash2, Edit3, ArrowLeft, Plus, SlidersHorizontal, Copy, Check, Video, Pencil, Package2, Workflow, Clock3, Eye, EyeOff, Moon, Sun, MessageCircle,
+  Send, Sparkles, X, ChevronDown, ChevronLeft, ChevronRight, Trash2, Edit3, ArrowLeft, Plus, SlidersHorizontal, Copy, Check, CheckCircle2, XCircle, Loader2, CircleDashed, Video, Pencil, Package2, Workflow, Clock3, Eye, EyeOff, Moon, Sun, MessageCircle,
   MoreHorizontal, Upload, Library, Search, BrainCircuit, Settings2, ArrowUp, ArrowDown, Square, Pin
 } from 'lucide-react';
 import { GeneratedImageHistoryEntry, ProjectSession } from './lib/db';
@@ -569,6 +569,8 @@ const getTimelineExecutionDetail = (step: AgentTimelineStep) => {
 
 const getAgentTimelineIcon = (step: AgentTimelineStep) => {
   const value = `${step.toolName || ''} ${step.phase || ''}`.toLowerCase();
+  if (step.itemType === 'reasoning_summary') return BrainCircuit;
+  if (step.itemType === 'error' || step.status === 'failed') return XCircle;
   if (step.kind === 'interaction' || step.status === 'waiting') return MessageCircle;
   if (value.includes('image') || value.includes('asset') || value.includes('render')) return ImageIcon;
   if (value.includes('skill')) return Sparkles;
@@ -639,11 +641,146 @@ const AgentTimelineCommentary = memo(function AgentTimelineCommentary({
   return <>{text}</>;
 });
 
+const getToolLifecycleStatusLabel = (status: AgentTimelineStep['status']) => {
+  if (status === 'completed') return '已完成';
+  if (status === 'failed') return '失败';
+  if (status === 'waiting') return '等待中';
+  if (status === 'pending') return '准备调用';
+  return '正在调用';
+};
+
+const AgentItemStatusIcon = memo(function AgentItemStatusIcon({
+  step,
+  fallback: Fallback = Workflow,
+}: {
+  step: AgentTimelineStep;
+  fallback?: React.ComponentType<{ size?: number; strokeWidth?: number; className?: string; 'aria-hidden'?: boolean | 'true' | 'false' }>;
+}) {
+  if (step.status === 'active' || step.status === 'pending') {
+    return <Loader2 size={14} strokeWidth={1.8} className="agent-item-spinner animate-spin shrink-0" aria-hidden="true" />;
+  }
+  if (step.status === 'completed') {
+    return <CheckCircle2 size={14} strokeWidth={1.7} className="shrink-0 text-[var(--workspace-text-muted)]" aria-hidden="true" />;
+  }
+  if (step.status === 'failed') {
+    return <XCircle size={14} strokeWidth={1.8} className="shrink-0" aria-hidden="true" />;
+  }
+  if (step.status === 'waiting') {
+    return <CircleDashed size={14} strokeWidth={1.7} className="shrink-0" aria-hidden="true" />;
+  }
+  return <Fallback size={14} strokeWidth={1.7} className="shrink-0 text-[var(--workspace-text-muted)]" aria-hidden="true" />;
+});
+
+const AgentToolCallBlock = memo(function AgentToolCallBlock({
+  step,
+  commentary,
+}: {
+  step: AgentTimelineStep;
+  commentary?: string;
+}) {
+  const [isOpen, setIsOpen] = useState(step.status !== 'completed');
+  const toolName = step.toolName || (typeof step.tool === 'string' ? step.tool : step.tool?.name) || '工具';
+  const statusLabel = getToolLifecycleStatusLabel(step.status);
+  const failed = step.status === 'failed';
+  const detail = getTimelineExecutionDetail(step);
+  useEffect(() => {
+    setIsOpen(step.status !== 'completed');
+  }, [step.itemId, step.status]);
+  return (
+    <details
+      className="agent-item-cell agent-tool-call group text-[12px] leading-5"
+      data-status={failed ? 'failed' : step.status}
+      data-agent-item-type="tool_call"
+      open={isOpen}
+      onToggle={(event) => setIsOpen(event.currentTarget.open)}
+      aria-live={step.status === 'active' || step.status === 'pending' ? 'polite' : undefined}
+    >
+      {commentary ? (
+        <p className="mb-2 whitespace-pre-wrap break-words text-[13px] leading-5 text-[var(--workspace-text-primary)]">
+          <AgentTimelineCommentary text={commentary} />
+        </p>
+      ) : null}
+      <summary className="flex min-h-6 cursor-pointer list-none items-center gap-2 rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-border-strong)] [&::-webkit-details-marker]:hidden">
+        <AgentItemStatusIcon step={step} />
+        <span className="text-[var(--workspace-text-muted)]">{statusLabel}</span>
+        <code className="min-w-0 break-all font-mono text-[12px]">{toolName}</code>
+        {(detail || step.completionSummary) ? <ChevronRight size={13} className="ml-auto shrink-0 transition-transform group-open:rotate-90 motion-reduce:transition-none" aria-hidden="true" /> : null}
+      </summary>
+      {detail || step.completionSummary ? (
+        <p className="mt-1.5 whitespace-pre-wrap break-words border-l border-[var(--workspace-border)] pl-5 text-[11px] text-[var(--workspace-text-muted)]">
+          {step.completionSummary || detail}
+        </p>
+      ) : null}
+    </details>
+  );
+});
+
+const AgentExecutionItem = memo(function AgentExecutionItem({
+  step,
+  now,
+  detailContent,
+}: {
+  step: AgentTimelineStep;
+  now: number;
+  detailContent?: React.ReactNode;
+}) {
+  const [isOpen, setIsOpen] = useState(step.status !== 'completed');
+  const Icon = getAgentTimelineIcon(step);
+  const detail = getTimelineExecutionDetail(step);
+  const completionSummary = step.status === 'completed' ? step.completionSummary?.trim() : '';
+  const hasDetails = Boolean(detail || detailContent || completionSummary);
+  const duration = getAgentProgressDurationLabel(step, now);
+  useEffect(() => setIsOpen(step.status !== 'completed'), [step.itemId, step.status]);
+  const content = (
+    <>
+      <AgentItemStatusIcon step={step} fallback={Icon} />
+      <span className="min-w-0 flex-1 break-words">{getAgentTimelineLabel(step)}</span>
+      {duration ? <span className="shrink-0 text-[11px] text-[var(--workspace-text-muted)]">{duration}</span> : null}
+      {hasDetails ? <ChevronRight size={13} className="shrink-0 transition-transform group-open:rotate-90 motion-reduce:transition-none" aria-hidden="true" /> : null}
+    </>
+  );
+  const className = `agent-item-cell agent-execution-item text-[12px] leading-5 ${
+    step.status === 'active' || step.status === 'pending' ? 'agent-timeline-running' : ''
+  }`;
+  if (!hasDetails) {
+    return (
+      <div
+        className={className}
+        data-status={step.status}
+        data-agent-item-type={step.itemType || 'agent_message'}
+        aria-live={step.status === 'active' || step.status === 'pending' ? 'polite' : undefined}
+      >
+        <div className="flex min-h-6 items-center gap-2">{content}</div>
+      </div>
+    );
+  }
+  return (
+    <details
+      className={`${className} group`}
+      data-status={step.status}
+      data-agent-item-type={step.itemType || 'agent_message'}
+      open={isOpen}
+      onToggle={(event) => setIsOpen(event.currentTarget.open)}
+      aria-live={step.status === 'active' || step.status === 'pending' ? 'polite' : undefined}
+    >
+      <summary className="flex min-h-6 cursor-pointer list-none items-center gap-2 rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-border-strong)] [&::-webkit-details-marker]:hidden">
+        {content}
+      </summary>
+      <div className="ml-5 mt-1.5 whitespace-pre-wrap break-words border-l border-[var(--workspace-border)] pl-3 text-[11px] leading-5 text-[var(--workspace-text-muted)]">
+        {detailContent || detail}
+        {completionSummary ? <p className="mt-1">{completionSummary}</p> : null}
+      </div>
+    </details>
+  );
+});
+
 const AgentTurnTimeline = memo(function AgentTurnTimeline({
   progress,
   now,
   fallbackStartedAt,
   finalContent,
+  sourceModel,
+  recoveryContent,
   interactionContent,
   executionDetailContent,
 }: {
@@ -651,6 +788,8 @@ const AgentTurnTimeline = memo(function AgentTurnTimeline({
   now: number;
   fallbackStartedAt?: number;
   finalContent?: React.ReactNode;
+  sourceModel?: string;
+  recoveryContent?: React.ReactNode;
   interactionContent?: (step: AgentTimelineStep) => React.ReactNode;
   executionDetailContent?: (step: AgentTimelineStep) => React.ReactNode;
 }) {
@@ -671,82 +810,68 @@ const AgentTurnTimeline = memo(function AgentTurnTimeline({
     .map((step) => step as AgentTimelineStep)
     .sort((left, right) => timelineTimestamp(left) - timelineTimestamp(right));
   return (
-    <section className="agent-turn-timeline max-w-[760px] py-1 text-[13px] leading-5" aria-live="polite">
-      <div className="mb-3 flex items-center gap-2 border-b border-[var(--workspace-border)] pb-2 text-[11px] text-[var(--workspace-text-muted)]">
-        <Clock3 size={12} aria-hidden="true" />
+    <section className="agent-turn-timeline max-w-[760px] py-1 text-[13px] leading-5">
+      <div className="mb-3 flex min-h-6 items-center gap-2 border-b border-[var(--workspace-border)] pb-2 text-[11px] text-[var(--workspace-text-muted)]" role="status">
+        {progress.outcome === 'running' ? <Loader2 size={12} className="agent-item-spinner" aria-hidden="true" /> : <Clock3 size={12} aria-hidden="true" />}
         <span>{header}</span>
+        {sourceModel ? <span className="ml-auto max-w-[45%] truncate">{sourceModel}</span> : null}
       </div>
       <div className="space-y-2.5">
         {steps.map((step, index) => {
-          const key = `${step.stepId}:${step.toolCallId || ''}:${index}`;
+          const key = step.itemId || `${step.stepId}:${step.toolCallId || ''}:${index}`;
           const isCommentary = step.kind === 'commentary';
           const isInteraction = step.kind === 'interaction';
+          const nextStep = steps[index + 1];
+          const associatedTool = isCommentary
+            ? steps.find((candidate) => candidate.kind === 'tool' && candidate.parentItemId === step.itemId)
+            : undefined;
+          const groupsNextTool = isCommentary && (associatedTool || (nextStep?.kind === 'tool' && Boolean(nextStep.toolCallId)));
+          const previousStep = steps[index - 1];
+          const groupedWithPreviousCommentary = step.kind === 'tool'
+            && Boolean(step.toolCallId)
+            && ((step.parentItemId && steps.some((candidate) => candidate.itemId === step.parentItemId && candidate.kind === 'commentary'))
+              || (previousStep?.kind === 'commentary' && previousStep === steps[index - 1]));
+          if (groupsNextTool) {
+            const groupedTool = associatedTool || nextStep;
+            return groupedTool ? (
+              <AgentToolCallBlock key={key} step={groupedTool} commentary={step.commentary || step.label} />
+            ) : null;
+          }
+          if (groupedWithPreviousCommentary) return null;
+          if (step.kind === 'tool') {
+            return <AgentToolCallBlock key={key} step={step} />;
+          }
           if (isCommentary) {
             return (
-              <p key={key} className="agent-progress-enter whitespace-pre-wrap break-words text-[var(--workspace-text-primary)]">
+              <div key={key} className="agent-progress-enter agent-item-cell agent-commentary-item whitespace-pre-wrap break-words text-[var(--workspace-text-primary)]" data-agent-item-type="commentary" data-status={step.status}>
                 <AgentTimelineCommentary
                   text={step.commentary || step.label}
                 />
-              </p>
+              </div>
             );
           }
           if (isInteraction) {
             return (
-              <div key={key} className="agent-progress-enter border-l-2 border-[var(--workspace-border)] pl-3">
-                {interactionContent?.(step) || <span>{step.label || '等待你的选择'}</span>}
+              <div
+                key={key}
+                className="agent-item-cell agent-interaction-item"
+                data-status={step.status}
+                data-agent-item-type={step.itemType || 'clarification'}
+                role="status"
+              >
+                <div className="flex items-start gap-2">
+                  <AgentItemStatusIcon step={step} fallback={MessageCircle} />
+                  <div className="min-w-0 flex-1">{interactionContent?.(step) || <span>{step.label || '等待你的选择'}</span>}</div>
+                </div>
               </div>
             );
           }
-          const Icon = getAgentTimelineIcon(step);
-          const detail = getTimelineExecutionDetail(step);
           const detailContent = executionDetailContent?.(step);
-          const completionSummary = step.status === 'completed' ? step.completionSummary?.trim() : '';
-          const content = (
-            <>
-              <Icon size={16} strokeWidth={1.6} className="shrink-0" aria-hidden="true" />
-              <span className="min-w-0 flex-1 break-words">{getAgentTimelineLabel(step)}</span>
-              {getAgentProgressDurationLabel(step, now) ? (
-                <span className="shrink-0 text-[11px] text-[var(--workspace-text-muted)]">
-                  {getAgentProgressDurationLabel(step, now)}
-                </span>
-              ) : null}
-            </>
-          );
-          const className = `agent-progress-enter flex min-h-7 items-center gap-2 text-left ${
-            step.status === 'active' || step.status === 'pending'
-              ? 'agent-timeline-running'
-              : 'text-[var(--workspace-text-muted)]'
-          } ${step.status === 'failed' ? 'text-red-600 dark:text-red-300' : ''}`;
-          return detail || detailContent ? (
-            <div key={key}>
-              <details className="group">
-                <summary className={`${className} cursor-pointer list-none [&::-webkit-details-marker]:hidden`}>
-                  {content}
-                  <ChevronRight size={13} className="shrink-0 transition-transform group-open:rotate-90" aria-hidden="true" />
-                </summary>
-                <div className="ml-5 mt-1 whitespace-pre-wrap break-words border-l border-[var(--workspace-border)] pl-3 text-[12px] leading-5 text-[var(--workspace-text-muted)]">
-                  {detailContent || detail}
-                </div>
-              </details>
-              {completionSummary ? (
-                <p className="ml-5 mt-0.5 whitespace-pre-wrap break-words text-[12px] leading-5 text-[var(--workspace-text-muted)]">
-                  {completionSummary}
-                </p>
-              ) : null}
-            </div>
-          ) : (
-              <div key={key}>
-                <div className={className}>{content}</div>
-              {completionSummary ? (
-                <p className="ml-5 mt-0.5 whitespace-pre-wrap break-words text-[12px] leading-5 text-[var(--workspace-text-muted)]">
-                  {completionSummary}
-                </p>
-              ) : null}
-            </div>
-          );
+          return <AgentExecutionItem key={key} step={step} now={now} detailContent={detailContent} />;
         })}
       </div>
-      {finalContent ? <div className="agent-timeline-final mt-3">{finalContent}</div> : null}
+      {recoveryContent ? <div className="mt-2">{recoveryContent}</div> : null}
+      {finalContent ? <div className="agent-timeline-final mt-4 border-t border-[var(--workspace-border)] pt-3" data-agent-item-type="agent_message">{finalContent}</div> : null}
     </section>
   );
 });
@@ -14725,6 +14850,7 @@ export default function AIWorkspace() {
               status?: 'pending' | 'active' | 'waiting' | 'completed' | 'failed';
               toolCallId?: string;
               toolName?: string;
+              isError?: boolean;
               activityId?: string;
               disposition?: 'commentary' | 'final';
               action?: {
@@ -14817,6 +14943,7 @@ export default function AIWorkspace() {
                 status?: 'pending' | 'active' | 'waiting' | 'completed' | 'failed';
                 toolCallId?: string;
                 toolName?: string;
+                isError?: boolean;
                 activityId?: string;
                 disposition?: 'commentary' | 'final';
                 action?: {
@@ -14971,6 +15098,21 @@ export default function AIWorkspace() {
               continue;
             }
 
+            if (event.type === 'tool_start' || event.type === 'tool_update') {
+              updatePendingAssistantMessageImmediately((msg) => updateAgentRunProgress(msg, {
+                ...event,
+                runId: event.runId || agentRunId,
+              } as AgentRunProgressEvent));
+              continue;
+            }
+
+            if (event.type === 'tool_result') {
+              updatePendingAssistantMessageImmediately((msg) => updateAgentRunProgress(msg, {
+                ...event,
+                runId: event.runId || agentRunId,
+              } as AgentRunProgressEvent));
+            }
+
             if (event.type === 'intent_resolved') {
               const intent = event.intent || 'chat';
               const routed = routeAgentProgressEvent(progressEventRouter, {
@@ -14993,6 +15135,15 @@ export default function AIWorkspace() {
             }
 
             if (event.type === 'active_skill_changed') {
+              if (event.skill?.id) {
+                updatePendingAssistantMessageImmediately((msg) => updateAgentRunProgress(msg, {
+                  type: 'active_skill_changed',
+                  skill: event.skill,
+                  runId: agentRunId,
+                  sequence: event.sequence,
+                  timestampMs: event.timestampMs,
+                } as AgentRunProgressEvent));
+              }
               continue;
             }
 
@@ -15041,11 +15192,21 @@ export default function AIWorkspace() {
               continue;
             }
 
-            if (event.type === 'skill_selected' && event.label && !currentSkill) {
+            if (event.type === 'skill_selected' && event.label) {
               const selectedSkill = { id: event.skillId || 'auto', label: event.label || 'Skill' };
-              setChatMessages((messages) => messages.map((message) => (
-                message.id === userMessage.id ? { ...message, skill: selectedSkill } : message
-              )));
+              if (!currentSkill) {
+                setChatMessages((messages) => messages.map((message) => (
+                  message.id === userMessage.id ? { ...message, skill: selectedSkill } : message
+                )));
+              }
+              updatePendingAssistantMessageImmediately((msg) => updateAgentRunProgress(msg, {
+                type: 'skill_selected',
+                skillId: selectedSkill.id,
+                label: selectedSkill.label,
+                runId: agentRunId,
+                sequence: event.sequence,
+                timestampMs: event.timestampMs,
+              } as AgentRunProgressEvent));
               continue;
             }
 
@@ -15206,6 +15367,8 @@ export default function AIWorkspace() {
               flushQueuedChatMessageUpdates();
               continue;
             }
+
+            if (event.type === 'tool_result') continue;
 
             if (event.type === 'assistant_delta' && event.delta) {
               if (event.channel === 'reasoning') {
@@ -15443,6 +15606,11 @@ export default function AIWorkspace() {
                 && !processedAgentCompletionSummariesRef.current.has(summaryRunId)
               ) {
                 processedAgentCompletionSummariesRef.current.add(summaryRunId);
+                updatePendingAssistantMessageImmediately((msg) => updateAgentRunProgress(msg, {
+                  type: 'agent_completion_summary',
+                  runId: summaryRunId,
+                  summary: event.summary,
+                } as AgentRunProgressEvent));
                 await generatedAssetPreloadChain;
                 flushQueuedChatMessageUpdates();
                 updatePendingAssistantMessage((msg) => ({ ...msg, content: event.summary }));
@@ -15457,7 +15625,7 @@ export default function AIWorkspace() {
                 const failedClarificationOwnsMessage = msg.agentClarification?.request.failed === true;
                 return {
                   ...updateAgentRunProgress(msg, {
-                    type: 'agent_error', runId: event.runId || agentRunId, sequence: event.sequence, timestampMs: event.timestampMs,
+                    type: 'agent_error', runId: event.runId || agentRunId, sequence: event.sequence, timestampMs: event.timestampMs, message: publicFailureMessage, retryable: event.retryable,
                   }),
                   taskStatus: 'failed',
                   ...(event.recoveryRecord ? { agentRecovery: event.recoveryRecord } : {}),
@@ -15469,7 +15637,7 @@ export default function AIWorkspace() {
               if (event.stage === 'planning' && event.retryable) {
                 continue;
               }
-              throw new Error(publicFailureMessage);
+              return;
             }
 
             if (event.type === 'agent_task_checkpoint' && event.taskSnapshot) {
@@ -16261,18 +16429,22 @@ export default function AIWorkspace() {
     const interruptedRun = resolvedState.normalizedSession?.activeAgentRun?.status === 'running'
       ? resolvedState.normalizedSession.activeAgentRun as NonNullable<ProjectSession['activeAgentRun']>
       : null;
-    const resolvedChatMessages = (resolvedState.chatMessages || []).map((message: ChatMessage) => (
-      interruptedRun && message.id === interruptedRun.assistantMessageId
-        ? {
-            ...message,
-            taskStatus: 'failed' as const,
-            content: message.content || '上次任务因页面异常中断，请重试。',
-            agentRunProgress: message.agentRunProgress
-              ? reduceAgentRunProgress(message.agentRunProgress, { type: 'agent_error' }) || undefined
-              : undefined,
-          }
-        : message
-    ));
+    const resolvedChatMessages = (resolvedState.chatMessages || []).map((message: ChatMessage) => {
+      const normalizedProgress = message.agentRunProgress
+        ? reduceAgentRunProgress(message.agentRunProgress, { type: 'session_hydrate' }) || undefined
+        : undefined;
+      if (!interruptedRun || message.id !== interruptedRun.assistantMessageId) {
+        return normalizedProgress ? { ...message, agentRunProgress: normalizedProgress } : message;
+      }
+      return {
+        ...message,
+        taskStatus: 'failed' as const,
+        content: message.content || '上次任务因页面异常中断，请重试。',
+        agentRunProgress: normalizedProgress
+          ? reduceAgentRunProgress(normalizedProgress, { type: 'agent_error' }) || undefined
+          : undefined,
+      };
+    });
     activeAgentRunMarkerRef.current = undefined;
     setActiveAgentRunMarker(undefined);
     setInterruptedRunRecoveryPending(Boolean(interruptedRun));
@@ -20427,7 +20599,7 @@ export default function AIWorkspace() {
                   {msg.role === 'user' ? (
                     <div className="flex flex-col items-end max-w-[90%]">
                       <div
-                        className="workspace-message-user panel-scrollbar overflow-y-auto rounded-[20px] px-3.5 py-2.5"
+                        className="workspace-message-user panel-scrollbar overflow-y-auto rounded-[14px] px-3.5 py-2.5"
                         style={{ maxHeight: '240px' }}
                       >
                         <div className="text-sm leading-7 whitespace-pre-wrap break-words">
@@ -20492,7 +20664,7 @@ export default function AIWorkspace() {
                       </button>
                     </div>
                   ) : (
-                    <div className={`group relative max-w-[90%] ${isAgentProgressMessage ? 'py-1' : 'workspace-message-assistant rounded-[22px] px-3.5 py-3'}`} data-gsap-hover-root="true" data-gsap-no-scale="true">
+                    <div className={`group relative max-w-[90%] ${isAgentProgressMessage ? 'py-0.5' : 'workspace-message-assistant px-1 py-1'}`} data-gsap-hover-root="true" data-gsap-no-scale="true">
                       {!isAgentProgressMessage && msg.content && !(msg.content === '...' && msg.taskStatus === 'running') && (
                         <button
                           type="button"
@@ -20537,6 +20709,7 @@ export default function AIWorkspace() {
                         <AgentTurnTimeline
                           progress={msg.agentRunProgress}
                           now={generationClockMs}
+                          sourceModel={msg.model}
                           fallbackStartedAt={activeAgentRunMarker?.runId === msg.agentRunProgress.runId
                             ? activeAgentRunMarker.startedAt
                             : undefined}
@@ -20618,6 +20791,32 @@ export default function AIWorkspace() {
                               />
                             ) : null
                           )}
+                          recoveryContent={(['failed', 'cancelled', 'warning'].includes(msg.agentRunProgress.outcome) && msg.agentRecovery) ? (
+                            <div className="flex items-center gap-2 text-[12px] text-[var(--workspace-text-muted)]">
+                              <span>{msg.agentRunProgress.outcome === 'warning' ? '部分完成，可继续处理' : msg.agentRunProgress.outcome === 'cancelled' ? '任务已终止' : '任务失败'}</span>
+                              <button
+                                type="button"
+                                className="workspace-control-chip rounded-md px-2 py-0.5 text-[11px]"
+                                disabled={isGenerating}
+                                onClick={() => {
+                                  const clickedRecovery = msg.agentRecovery;
+                                  const recovery = clickedRecovery
+                                    ? getLatestAgentRecoveryForTask(chatMessages, clickedRecovery.taskId) as AgentRecoveryRecord | null || clickedRecovery
+                                    : null;
+                                  if (recovery && !isGenerating) {
+                                    void handleGenerate({
+                                      input: recovery.originalRequest,
+                                      recoveryTaskId: recovery.taskId,
+                                      recoveryRecord: recovery,
+                                      suppressUserMessage: true,
+                                    });
+                                  }
+                                }}
+                              >
+                                {msg.agentRecovery.completedAssetCount ? '继续任务' : msg.agentRunProgress.intent === 'image' ? '重试生成' : '重试'}
+                              </button>
+                            </div>
+                          ) : null}
                           finalContent={msg.content ? (
                             <MarkdownMessage
                               content={msg.content}
@@ -20806,7 +21005,7 @@ export default function AIWorkspace() {
                         </AgentProgressDetails>
                       )}
                       {isAgentProgressMessage && !isAgentTimelineV2Message && msg.content && (
-                        <div className="workspace-message-assistant mt-2 rounded-[22px] px-3.5 py-3">
+                        <div className="workspace-message-assistant mt-2 px-1 py-1">
                           <MarkdownMessage
                             content={msg.content}
                             onPointerDown={handleAssistantSelectablePointerDown}

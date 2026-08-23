@@ -9,39 +9,22 @@ import {
   getGptImage2SizeValidationError,
   isValidGptImage2Size,
   normalizeImageModelCapabilityId,
-  resolveImageModelAlias,
-  imageSizeForResolution,
   supportsImageModelRequestedSize,
   supportsImageModelImageSizeConfig,
 } from './image-model-capabilities.mjs';
 
-test('resolves Nano Banana aliases to current Gemini model IDs for every supplier', () => {
-  assert.deepEqual(resolveImageModelAlias('nano-banana'), {
-    requestedModel: 'nano-banana',
-    model: 'gemini-2.5-flash-image',
-    resolution: '',
-  });
-  assert.equal(resolveImageModelAlias('NANO_BANANA_2').model, 'gemini-3.1-flash-image');
-  assert.equal(resolveImageModelAlias('nano-banana-2-lite').model, 'gemini-3.1-flash-lite-image');
-  assert.equal(resolveImageModelAlias('nano-banana-pro').model, 'gemini-3-pro-image');
-  assert.equal(normalizeImageModelCapabilityId('nano-banana-2'), 'gemini-3.1-flash-image');
+test('preserves supplier model IDs without Nano Banana aliases', () => {
+  assert.equal(normalizeImageModelCapabilityId('nano-banana-2'), 'nano-banana-2');
 });
 
-test('keeps Nano Banana resolution suffixes as request hints instead of model IDs', () => {
-  assert.deepEqual(resolveImageModelAlias('nano-banana-2-2k'), {
-    requestedModel: 'nano-banana-2-2k',
-    model: 'gemini-3.1-flash-image',
-    resolution: '2K',
-  });
-  assert.equal(resolveImageModelAlias('nano-banana-2-4k').resolution, '4K');
-  assert.equal(imageSizeForResolution('4k'), '4096x4096');
-  assert.equal(resolveImageRequestModel('nano-banana-2-4k', '4096x4096'), 'gemini-3.1-flash-image');
+test('preserves Nano Banana resolution suffixes as supplier model IDs', () => {
+  assert.equal(resolveImageRequestModel('nano-banana-2-4k', '4096x4096'), 'nano-banana-2-4k');
 });
 
 test('preserves canonical and legacy preview Gemini IDs', () => {
-  assert.equal(resolveImageModelAlias('gemini-3.1-flash-image').model, 'gemini-3.1-flash-image');
-  assert.equal(resolveImageModelAlias('gemini-3.1-flash-image-preview').model, 'gemini-3.1-flash-image-preview');
-  assert.equal(resolveImageModelAlias('gemini-3-pro-image-preview').model, 'gemini-3-pro-image-preview');
+  assert.equal(normalizeImageModelCapabilityId('gemini-3.1-flash-image'), 'gemini-3.1-flash-image');
+  assert.equal(normalizeImageModelCapabilityId('gemini-3.1-flash-image-preview'), 'gemini-3.1-flash-image-preview');
+  assert.equal(normalizeImageModelCapabilityId('gemini-3-pro-image-preview'), 'gemini-3-pro-image-preview');
 });
 
 test('image model capabilities expose fixed size support for current image models including gpt-image-2', () => {
@@ -67,10 +50,10 @@ test('resolveSupportedImageSize keeps a supported 2K request intact for Gemini i
   assert.equal(resolveSupportedImageSize('gemini-2.5-flash-image', '2048x2048'), '2048x2048');
 });
 
-test('resolveImageRequestModel upgrades gemini 3.1 flash image preview to the 4k variant for 4096 output requests', () => {
+test('resolveImageRequestModel preserves the selected Gemini model for 4k requests', () => {
   assert.equal(
     resolveImageRequestModel('gemini-3.1-flash-image-preview', '4096x4096'),
-    'gemini-3.1-flash-image-preview-4k'
+    'gemini-3.1-flash-image-preview'
   );
 });
 
@@ -81,14 +64,14 @@ test('resolveImageRequestModel keeps the base gemini 3.1 flash image preview mod
   );
 });
 
-test('gemini provider variants normalize to the base capability model while preserving the selected request model', () => {
+test('Gemini provider variants remain distinct supplier model IDs', () => {
   assert.equal(
     normalizeImageModelCapabilityId('gemini-3.1-flash-image-preview-2k'),
-    'gemini-3.1-flash-image-preview'
+    'gemini-3.1-flash-image-preview-2k'
   );
   assert.equal(
     normalizeImageModelCapabilityId('gemini-3.1-flash-image-preview-4k'),
-    'gemini-3.1-flash-image-preview'
+    'gemini-3.1-flash-image-preview-4k'
   );
   assert.equal(
     resolveImageRequestModel('gemini-3.1-flash-image-preview-2k', '2048x2048'),

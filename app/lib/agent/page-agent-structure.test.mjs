@@ -183,7 +183,10 @@ test('server-selected Skills annotate the sent message without repopulating the 
   const skillSelectedStart = source.indexOf("if (event.type === 'skill_selected'", activeSkillChangeStart);
   assert.ok(activeSkillChangeStart >= 0 && skillSelectedStart > activeSkillChangeStart);
   assert.doesNotMatch(source.slice(activeSkillChangeStart, skillSelectedStart), /setActiveSkillForCurrentTopic/);
-  assert.match(source, /event\.type === 'skill_selected' && event\.label && !currentSkill/);
+  assert.match(source, /event\.type === 'skill_selected' && event\.label/);
+  assert.match(source, /if \(!currentSkill\)/);
+  assert.match(source, /type: 'skill_selected'/);
+  assert.match(source, /updatePendingAssistantMessageImmediately\(\(msg\) => updateAgentRunProgress/);
   assert.match(source, /message\.id === userMessage\.id \? \{ \.\.\.message, skill: selectedSkill \}/);
   assert.match(source, /setChatInput\(''\);\s*setActiveSkillForCurrentTopic\(null\);/);
   assert.match(source, /pendingAgentClarification\.request\.dimension !== 'skill_selection'/);
@@ -195,6 +198,8 @@ test('agent progress accumulates reached breadcrumbs without an assistant bubble
   assert.match(source, /agentProgressMode:\s*usesAgentRequest[\s\S]{0,120}generationMode === 'image' \? 'compact' : 'full'/);
   assert.match(source, /reduceAgentRunProgress/);
   assert.match(source, /event\.type === 'progress_update'/);
+  assert.match(source, /event\.type === 'tool_start' \|\| event\.type === 'tool_update'/);
+  assert.match(source, /event\.type === 'tool_result'/);
   assert.match(source, /event\.type === 'agent_activity_delta'/);
   assert.match(source, /event\.type === 'agent_activity_commit'/);
   assert.match(source, /disposition === 'final'/);
@@ -222,14 +227,14 @@ test('agent progress accumulates reached breadcrumbs without an assistant bubble
   assert.match(source, /outcome === 'warning'/);
   assert.match(source, /outcome === 'failed'/);
   assert.match(source, /\['completed', 'warning', 'failed', 'cancelled'\]\.includes\(msg\.agentRunProgress\.outcome\)/);
-  assert.match(source, /isAgentProgressMessage\s*\?\s*'py-1'/);
+  assert.match(source, /isAgentProgressMessage\s*\?\s*'py-0\.5'/);
   assert.match(source, /shouldShowAgentRunProgress\(msg\.agentRunProgress\)/);
   assert.match(source, /const AgentProgressDetails = memo/);
   assert.match(source, /useState\(outcome !== 'completed'\)/);
   assert.match(source, /onToggle=\{\(event\) => setIsOpen\(event\.currentTarget\.open\)\}/);
   assert.doesNotMatch(source, /模型推理/);
   assert.doesNotMatch(source, /animate-pulse/);
-  assert.doesNotMatch(globalStyles, /@keyframes/);
+  assert.match(globalStyles, /prefers-reduced-motion:\s*reduce/);
   assert.match(motionControllerSource, /'\.agent-progress-enter'/);
   assert.match(motionControllerSource, /prefers-reduced-motion: reduce/);
   assert.match(motionControllerSource, /gsap\.fromTo\(/);
@@ -659,7 +664,13 @@ test('timeline v2 renders an open interleaved Agent turn while retaining the leg
   assert.match(source, /const isAgentTimelineV2 =/);
   assert.match(source, /const AgentTurnTimeline = memo/);
   assert.match(source, /const AgentTimelineCommentary = memo/);
-  assert.match(source, /<Icon size=\{16\} strokeWidth=\{1\.6\} className="shrink-0"/);
+  assert.match(source, /const AgentToolCallBlock = memo/);
+  assert.match(source, /<code className="min-w-0 break-all font-mono/);
+  assert.match(source, /getToolLifecycleStatusLabel/);
+  assert.match(source, /aria-live="polite"/);
+  assert.match(source, /const AgentExecutionItem = memo/);
+  assert.match(source, /<AgentItemStatusIcon step=\{step\}/);
+  assert.match(source, /data-agent-item-type="tool_call"/);
   assert.match(source, /getAgentTimelineLabel\(step\)/);
   assert.match(source, /<ChevronRight size=\{13\}/);
   assert.match(source, /prefers-reduced-motion.*reduce/);
@@ -668,7 +679,11 @@ test('timeline v2 renders an open interleaved Agent turn while retaining the leg
   assert.match(source, /isAgentProgressMessage && !isAgentTimelineV2Message && msg\.agentRunProgress/);
   assert.match(source, /step\.kind === 'commentary'/);
   assert.match(source, /step\.kind === 'interaction'/);
-  assert.match(source, /<div key=\{key\}>\s*<details className="group">/);
+  assert.match(source, /<AgentExecutionItem key=\{key\}/);
+  assert.match(source, /data-agent-item-type="agent_message"/);
+  assert.match(source, /data-agent-item-type="commentary"/);
+  assert.match(source, /sourceModel=\{msg\.model\}/);
+  assert.match(source, /recoveryContent=/);
   assert.match(source, /处理中 \$\{elapsed\}/);
   assert.match(source, /agent-timeline-running/);
   assert.match(source, /prefers-reduced-motion: reduce/);
@@ -676,7 +691,21 @@ test('timeline v2 renders an open interleaved Agent turn while retaining the leg
   assert.match(source, /<AgentImagePromptDetails/);
   assert.match(source, /type: 'image_prompts_ready'/);
   assert.match(source, /const completionSummary = step\.status === 'completed' \? step\.completionSummary\?\.trim\(\) : ''/);
-  assert.match(source, /\{completionSummary\}/);
+  assert.match(source, /completionSummary \? <p className="mt-1">\{completionSummary\}<\/p>/);
+});
+
+test('assistant chat content uses the Codex-style content axis while user messages keep compact bubbles', () => {
+  assert.match(source, /workspace-message-user panel-scrollbar overflow-y-auto rounded-\[14px\]/);
+  assert.match(source, /isAgentProgressMessage \? 'py-0\.5' : 'workspace-message-assistant px-1 py-1'/);
+  assert.doesNotMatch(source, /workspace-message-assistant rounded-\[18px\]/);
+  assert.match(globalStyles, /\.agent-item-cell \{\s*border: 0;\s*border-radius: 0;\s*background: transparent;/);
+  assert.doesNotMatch(globalStyles, /\.agent-item-cell \{\s*border: 1px solid/);
+});
+
+test('session hydration normalizes persisted Agent timelines before rendering them', () => {
+  assert.match(source, /type: 'session_hydrate'/);
+  assert.match(source, /const normalizedProgress = message\.agentRunProgress/);
+  assert.match(source, /reduceAgentRunProgress\(normalizedProgress, \{ type: 'agent_error' \}\)/);
 });
 
 test('late assistant deltas do not replay committed public commentary', () => {
