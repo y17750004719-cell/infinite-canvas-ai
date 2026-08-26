@@ -84,3 +84,21 @@ export function toGeminiSchema(schema, path = 'schema') {
 
   return result;
 }
+
+const FORBIDDEN_GEMINI_SCHEMA_FIELDS = new Set([
+  'additionalProperties', 'minLength', 'maxLength', 'minimum', 'maximum', 'pattern', 'oneOf', 'anyOf', 'allOf', '$schema', '$ref',
+]);
+
+export function assertGeminiSchemaCompatible(schema, path = 'schema') {
+  if (!schema || typeof schema !== 'object' || Array.isArray(schema)) return true;
+  for (const key of Object.keys(schema)) {
+    if (FORBIDDEN_GEMINI_SCHEMA_FIELDS.has(key)) throw new Error(`Unsupported Gemini schema field at ${path}: ${key}`);
+  }
+  if (schema.properties && typeof schema.properties === 'object' && !Array.isArray(schema.properties)) {
+    for (const [key, child] of Object.entries(schema.properties)) {
+      assertGeminiSchemaCompatible(child, `${path}.properties.${key}`);
+    }
+  }
+  if (schema.items) assertGeminiSchemaCompatible(schema.items, `${path}.items`);
+  return true;
+}

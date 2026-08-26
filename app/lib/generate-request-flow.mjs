@@ -114,6 +114,7 @@ export function buildGenerateRouteErrorMeta(error, ImageGenerationErrorClass) {
     isImageGenerationError,
     statusCode: isImageGenerationError && error.statusCode ? error.statusCode : 500,
     failureClass: isImageGenerationError && error.failureClass ? error.failureClass : 'unknown',
+    ...(isImageGenerationError && error.failureCode ? { failureCode: error.failureCode } : {}),
     isRetryable: isImageGenerationError ? Boolean(error.isRetryable) : false,
     retryAttempt: isImageGenerationError && typeof error.retryAttempt === 'number' ? error.retryAttempt : null,
   };

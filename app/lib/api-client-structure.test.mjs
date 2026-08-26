@@ -354,13 +354,21 @@ test('api-client keeps openai-json mode on generations and sends response_format
 test('api-client mirrors Infinite-Canvas fallback requests for OpenAI-compatible image routes', () => {
   assert.equal(apiClientSource.includes('function imagesApiUnsupportedText(text: string): boolean {'), true);
   assert.equal(apiClientSource.includes('response = await postImageRequest(\n            imageEditUrl,'), true);
-  assert.equal(apiClientSource.includes('const buildEditsFallbackPayload = async () => {'), true);
+  assert.equal(apiClientSource.includes('const buildEditsPayload = async (stream = false) => {'), true);
   assert.equal(apiClientSource.includes('const referenceBlobs = await Promise.all(referenceImages.map((image) => referenceToBlob(image, request.signal)));'), true);
   assert.equal(apiClientSource.includes('formData.append("image", blob, `reference-${index + 1}.${mimeTypeToFileExtension(mimeType)}`);'), true);
   assert.equal(apiClientSource.includes('} else if (usesImageEditsApi && !isGptImage2Model(model)) {'), true);
   assert.equal(apiClientSource.includes('response = await postImageRequest(\n            imageGenerationUrl,'), true);
   assert.equal(apiClientSource.includes('image: referenceImages,'), true);
   assert.equal(apiClientSource.includes('n: 1,'), true);
+});
+
+test('api-client keeps partial-image streaming scoped to direct OpenAI image transport', () => {
+  assert.equal(apiClientSource.includes('const shouldRequestImageStream = provider.imageRequestMode === "openai" && executionMode === "sync";'), true);
+  assert.equal(apiClientSource.includes('body.partial_images = 1;'), true);
+  assert.equal(apiClientSource.includes('formData.set("partial_images", "1");'), true);
+  assert.equal(apiClientSource.includes('readOpenAiImageStream(response)'), true);
+  assert.equal(apiClientSource.includes('await retryWithoutStream("empty_stream")'), true);
 });
 
 test('api-client keeps image edits synchronous and recognizes Infinite-Canvas task statuses', () => {
@@ -539,6 +547,13 @@ test('api-client annotates Gemini image failures with failureClass retryability 
     apiClientSource.includes('retryAttempt: attempt'),
     true
   );
+});
+
+test('api-client distinguishes unavailable image provider capacity from retryable transport failures', () => {
+  assert.match(apiClientSource, /classifyImageProviderHttpFailure/);
+  assert.match(apiClientSource, /no enabled channel for model/);
+  assert.match(apiClientSource, /no available compatible accounts/);
+  assert.match(apiClientSource, /failureCode: "provider_unavailable"/);
 });
 
 test('api-client sends Gemini native reference images as inline_data parts and not as OpenAI-style image fields', () => {

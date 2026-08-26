@@ -164,6 +164,8 @@ export function getRecentFailedAgentTask(messages) {
     return createAgentRecoveryRecord({
       taskId: assistant.taskSnapshot?.taskId || clarificationState?.taskId || progress?.runId || assistant.id,
       runId: progress?.runId || assistant.id,
+      operationId: progress?.operationId || clarificationState?.operationId || progress?.runId || assistant.id,
+      lastSequence: Number.isFinite(Number(progress?.lastSequence)) ? Number(progress.lastSequence) : 0,
       topicId: assistant.taskSnapshot?.topicId || 'default',
       sourceUserMessageId: planning?.sourceUserMessageId || clarificationState?.sourceUserMessageId || source.id,
       status: cancelled ? 'cancelled' : 'failed',
@@ -182,6 +184,7 @@ export function getRecentFailedAgentTask(messages) {
       contextEntityIds: visualReferenceIds,
       visualReferenceIds,
       taskSnapshot: assistant.taskSnapshot,
+      referenceContext,
       completedAssetCount: assistant.taskSnapshot?.activeVersions?.length || progress?.assets?.succeeded || 0,
     });
   }

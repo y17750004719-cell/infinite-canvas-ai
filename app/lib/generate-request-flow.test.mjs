@@ -93,3 +93,25 @@ test('buildGenerateRouteErrorMeta mirrors route ImageGenerationError handling', 
     retryAttempt: null,
   });
 });
+
+test('buildGenerateRouteErrorMeta exposes structured provider availability failures', () => {
+  class TestImageGenerationError extends Error {
+    statusCode = 503;
+    failureClass = 'upstream_http';
+    failureCode = 'provider_unavailable';
+    isRetryable = false;
+    retryAttempt = 1;
+  }
+
+  assert.deepEqual(
+    buildGenerateRouteErrorMeta(new TestImageGenerationError('No available compatible accounts'), TestImageGenerationError),
+    {
+      isImageGenerationError: true,
+      statusCode: 503,
+      failureClass: 'upstream_http',
+      failureCode: 'provider_unavailable',
+      isRetryable: false,
+      retryAttempt: 1,
+    },
+  );
+});

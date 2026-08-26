@@ -89,6 +89,13 @@ test('progress tracker resumes one operation with strictly increasing sequence a
   assert.ok(resumedEvents.every((event) => event.operationId === 'operation-1'));
 });
 
+test('progress tracker rejects resuming a different operation', () => {
+  const tracker = agentLoopModule.createAgentProgressTracker({ runId: 'run-1', operationId: 'operation-1' });
+  assert.throws(() => tracker.resume({ operationId: 'operation-2' }), (error) => (
+    error.code === 'stale_operation' && error.statusCode === 409
+  ));
+});
+
 test('progress tracker keeps one stable item identity across tool updates', () => {
   const events = [];
   const tracker = agentLoopModule.createAgentProgressTracker({

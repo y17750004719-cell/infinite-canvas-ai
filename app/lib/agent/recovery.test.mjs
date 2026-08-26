@@ -10,17 +10,46 @@ import {
 
 test('recovery records are bounded and keep stable task state', () => {
   const record = createAgentRecoveryRecord({
-    taskId: 'task-1', runId: 'run-1', topicId: 'topic-1', sourceUserMessageId: 'user-1',
+    taskId: 'task-1', runId: 'run-1', operationId: 'operation-1', lastSequence: 0, topicId: 'topic-1', sourceUserMessageId: 'user-1',
     status: 'failed', resumeRoute: 'image_planner', intent: 'image', originalRequest: '生成海报',
     failureStage: 'image_pipeline', failureMessage: '504 upstream timeout https://private.test/x',
     skillId: 'poster', contextEntityIds: ['a', 'a'], visualReferenceIds: ['v'],
     completedAssetCount: 2,
+    referenceContext: {
+      references: [{ id: 'ref-1', src: '/image.png', label: '参考图', source: 'history', role: 'reference', sourceTaskId: 'task-1', sourceVersionId: 'version-1' }],
+      composerSegments: [{ type: 'reference', referenceId: 'ref-1' }],
+    },
   });
   assert.equal(record.failure.kind, 'timeout');
   assert.equal(record.failure.retryability, 'retryable');
+  assert.equal(record.operationId, 'operation-1');
+  assert.equal(record.lastSequence, 0);
   assert.doesNotMatch(record.failure.message, /https?:/);
   assert.deepEqual(record.contextEntityIds, ['a']);
   assert.equal(record.completedAssetCount, 2);
+  assert.equal(record.referenceContext.references[0].sourceVersionId, 'version-1');
+});
+
+test('legacy recovery records receive identity defaults at the read boundary', () => {
+  const record = normalizeAgentRecoveryRecord({
+    version: 1,
+    taskId: 'task-legacy',
+    runId: 'run-legacy',
+    topicId: 'topic-1',
+    sourceUserMessageId: 'user-1',
+    status: 'failed',
+    resumeRoute: 'main_agent',
+    intent: 'chat',
+    originalRequest: '继续任务',
+    failure: { stage: 'unknown', kind: 'unknown', message: '失败', retryability: 'unknown' },
+    skillId: null,
+    contextEntityIds: [],
+    visualReferenceIds: [],
+    completedAssetCount: 0,
+    createdAt: 1,
+  });
+  assert.equal(record.operationId, 'run-legacy');
+  assert.equal(record.lastSequence, 0);
 });
 
 test('terminal contract recovery retains the operation lock and resumable Main Agent transcript', () => {

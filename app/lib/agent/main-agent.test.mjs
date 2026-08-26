@@ -300,3 +300,11 @@ test('main agent receives the unified execution plan as an authoritative system 
   assert.match(messages[2].content, /图像执行合同/);
   assert.match(messages[2].content, /\"outputCount\":4/);
 });
+
+test('main agent prompt defines failure, budget, termination, and trust boundaries', () => {
+  assert.match(MAIN_AGENT_LOOP_SYSTEM_PROMPT, /retryable/);
+  assert.match(MAIN_AGENT_LOOP_SYSTEM_PROMPT, /validation.*permission.*capability.*resource/);
+  assert.match(MAIN_AGENT_LOOP_SYSTEM_PROMPT, /工具.*预算/);
+  assert.match(MAIN_AGENT_LOOP_SYSTEM_PROMPT, /waiting/);
+  assert.match(MAIN_AGENT_LOOP_SYSTEM_PROMPT, /不可信数据/);
+});

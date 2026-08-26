@@ -8,6 +8,26 @@ import type {
 
 export type AgentIntent = 'chat' | 'image' | 'skill_action';
 
+export type AgentLifecycleIdentity = {
+  taskId: string;
+  operationId: string;
+  runId: string;
+  sequence: number;
+  timestampMs: number;
+};
+
+export type AgentConflictCode = 'stale_operation' | 'stale_sequence' | 'agent_run_settled' | 'invalid_identity';
+
+export type LegacyAgentEvent = {
+  type: string;
+  taskId?: string;
+  runId?: string;
+  operationId?: string;
+  sequence?: number;
+  timestampMs?: number;
+  [key: string]: unknown;
+};
+
 export type AgentItemStatus =
   | 'in_progress'
   | 'waiting'
@@ -80,6 +100,8 @@ export type AgentRecoveryRecord = {
   version: 1;
   taskId: string;
   runId: string;
+  operationId?: string;
+  lastSequence?: number;
   topicId: string;
   sourceUserMessageId: string;
   status: 'failed' | 'cancelled';
@@ -97,6 +119,26 @@ export type AgentRecoveryRecord = {
   targetReferenceId?: string;
   contextEntityIds: string[];
   visualReferenceIds: string[];
+  referenceContext?: {
+    references: Array<{
+      id: string;
+      src: string;
+      plannerPreviewSrc?: string;
+      label: string;
+      source: 'upload' | 'history' | 'canvas';
+      role: 'reference' | 'edit_target' | 'annotation_bundle' | 'region_target';
+      canvasItemId?: string;
+      regionId?: string;
+      candidateId?: string;
+      confirmationStatus?: 'pending' | 'confirmed';
+      sourceTaskId?: string;
+      sourceVersionId?: string;
+      targetPoint?: { x: number; y: number };
+      targetBox?: { x: number; y: number; width: number; height: number };
+    }>;
+    composerSegments: Array<{ type: 'text'; text: string } | { type: 'reference'; referenceId: string }>;
+    evidenceImages?: Array<{ id: string; referenceId: string; src: string; kind: 'annotation_composite' | 'region_crop' }>;
+  };
   visualSummary?: AgentVisualSummary;
   taskSnapshot?: AgentTaskSnapshot;
   mainAgentLoop?: {
@@ -280,6 +322,8 @@ export type AgentClarificationState = {
 export type AgentClarificationRequest = {
   id: string;
   taskId: string;
+  operationId?: string;
+  lastSequence?: number;
   question: string;
   dimension: string;
   options: AgentClarificationOption[];
@@ -430,6 +474,9 @@ export type AgentAnalysisSnapshot = {
 export type AgentTaskSnapshot = {
   topicId: string;
   taskId: string;
+  /** Optional only for legacy persisted snapshots. New checkpoints include both fields. */
+  operationId?: string;
+  lastSequence?: number;
   contractVersion: number;
   contract?: AgentTaskContract;
   agentAnalysis?: AgentAnalysisSnapshot;
@@ -454,12 +501,13 @@ export type AgentTaskSnapshot = {
 };
 
 export type AgentProgressUpdate = {
+  taskId: string;
   type: 'progress_update';
   version: 1;
   runId: string;
   operationId: string;
   sequence: number;
-  timestampMs?: number;
+  timestampMs: number;
   stepId: AgentProgressStepId;
   phase: AgentProgressPhase;
   status: AgentProgressStatus;
@@ -475,24 +523,30 @@ export type AgentProgressUpdate = {
 };
 
 export type AgentActivityDelta = {
+  taskId: string;
+  runId: string;
+  operationId: string;
+  sequence: number;
+  timestampMs: number;
   type: 'agent_activity_delta';
   activityId: string;
   delta: string;
   model?: string;
-  sequence?: number;
-  timestampMs?: number;
 };
 
 export type AgentActivityCommit = {
+  taskId: string;
+  runId: string;
+  operationId: string;
+  sequence: number;
+  timestampMs: number;
   type: 'agent_activity_commit';
   activityId: string;
   disposition: 'commentary' | 'final';
-  sequence?: number;
-  timestampMs?: number;
 };
 
 export type AgentEvent =
-  | { type: 'agent_start'; runId: string; operationId?: string; sequence?: number; timestampMs?: number }
+  | (AgentLifecycleIdentity & { type: 'agent_start' })
   | AgentProgressUpdate
   | { type: 'routing_start' }
   | { type: 'intent_resolved'; intent: AgentIntent }
@@ -522,10 +576,13 @@ export type AgentEvent =
       message: string;
       request: AgentClarificationRequest;
       state: AgentClarificationState;
+      taskId: string;
+      runId: string;
+      operationId: string;
       itemId?: string;
       parentItemId?: string;
-      sequence?: number;
-      timestampMs?: number;
+      sequence: number;
+      timestampMs: number;
     }
   | { type: 'prompt_optimization_start' }
   | { type: 'prompt_optimization_done'; summary: string; optimized: boolean }
@@ -551,17 +608,21 @@ export type AgentEvent =
         compiledAt: number;
       };
     }
-  | { type: 'tool_start'; toolCallId: string; toolName: string; itemId?: string; executionId?: string; parentItemId?: string; runId?: string; operationId?: string; sequence?: number; timestampMs?: number }
-  | { type: 'tool_update'; toolCallId: string; message: string; itemId?: string; executionId?: string; parentItemId?: string; runId?: string; operationId?: string; sequence?: number; timestampMs?: number }
-  | { type: 'tool_result'; toolCallId: string; toolName?: string; result: unknown; isError?: boolean; itemId?: string; executionId?: string; parentItemId?: string; retryability?: 'retryable' | 'requires_change' | 'unknown'; runId?: string; operationId?: string; sequence?: number; timestampMs?: number }
+  | (AgentLifecycleIdentity & { type: 'tool_start'; toolCallId: string; toolName: string; itemId?: string; executionId?: string; parentItemId?: string })
+  | (AgentLifecycleIdentity & { type: 'tool_update'; toolCallId: string; message: string; itemId?: string; executionId?: string; parentItemId?: string })
+  | (AgentLifecycleIdentity & { type: 'tool_result'; toolCallId: string; toolName?: string; result: unknown; isError?: boolean; itemId?: string; executionId?: string; parentItemId?: string; retryability?: 'retryable' | 'requires_change' | 'unknown' })
   | AgentActivityDelta
   | AgentActivityCommit
-  | { type: 'assistant_delta'; delta: string; channel?: 'content' | 'reasoning'; model?: string; runId?: string; operationId?: string; sequence?: number; timestampMs?: number }
+  | (AgentLifecycleIdentity & { type: 'assistant_delta'; delta: string; channel?: 'content' | 'reasoning'; model?: string })
   | { type: 'agent_memory_updated'; memory: AgentConversationMemory }
   | { type: 'client_action'; action: AgentClientAction }
   | {
       type: 'agent_completion_summary';
+      taskId: string;
       runId: string;
+      operationId: string;
+      sequence: number;
+      timestampMs: number;
       title: string;
       summary: string;
       operation: 'generate' | 'edit';
@@ -569,20 +630,23 @@ export type AgentEvent =
       failed: number;
       addedToCanvas: boolean;
     }
-  | { type: 'confirmation_required'; request: { confirmationId: string; toolName: string; message: string }; itemId?: string; parentItemId?: string; sequence?: number; timestampMs?: number }
-  | { type: 'agent_task_checkpoint'; taskSnapshot: AgentTaskSnapshot; runId?: string; operationId?: string; sequence?: number; timestampMs?: number }
-  | { type: 'agent_done'; stopReason: string; taskSnapshot?: AgentTaskSnapshot; runId?: string; operationId?: string; sequence?: number; timestampMs?: number }
+  | (AgentLifecycleIdentity & { type: 'confirmation_required'; request: { confirmationId: string; toolName: string; message: string; taskId: string; operationId: string; expectedSequence: number }; itemId?: string; parentItemId?: string })
+  | (AgentLifecycleIdentity & { type: 'agent_task_checkpoint'; taskSnapshot: AgentTaskSnapshot })
+  | (AgentLifecycleIdentity & { type: 'agent_done'; stopReason: string; taskSnapshot?: AgentTaskSnapshot })
   | {
       type: 'agent_error';
+      taskId: string;
+      runId: string;
+      operationId: string;
+      sequence: number;
+      timestampMs: number;
       stage: string;
       providerId?: string | null;
       model?: string | null;
       message: string;
+      code?: 'invalid_reference' | 'invalid_tool_arguments' | 'invalid_plan' | 'terminal_contract' | 'provider_unavailable' | 'provider_http' | 'provider_timeout' | 'transport' | 'budget_exceeded';
       reason?: AgentPlannerFailureReason;
       retryable?: boolean;
       recoveryRecord?: AgentRecoveryRecord;
-      runId?: string;
-      operationId?: string;
-      sequence?: number;
-      timestampMs?: number;
-    };
+    }
+  | (AgentLifecycleIdentity & { type: 'agent_cancelled'; message?: string });

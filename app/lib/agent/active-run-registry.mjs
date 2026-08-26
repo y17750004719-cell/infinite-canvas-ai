@@ -1,14 +1,21 @@
 const globals = globalThis;
 
-/** @type {Map<string, { phase: 'reasoning' | 'waiting' | 'executing' | 'settled', nonInterruptible: boolean, steerQueue: any[], followUpQueue: any[] }>} */
+/** @type {Map<string, { taskId: string, operationId: string, phase: 'reasoning' | 'waiting' | 'executing' | 'settled', nonInterruptible: boolean, steerQueue: any[], followUpQueue: any[] }>} */
 const runs = globals.__agentActiveRunRegistry || new Map();
 globals.__agentActiveRunRegistry = runs;
 
 const validPhase = new Set(['reasoning', 'waiting', 'executing', 'settled']);
 
-export function registerActiveAgentRun(runId) {
+export function registerActiveAgentRun(runId, identity = {}) {
   if (!runId) return null;
-  const run = { phase: 'reasoning', nonInterruptible: false, steerQueue: [], followUpQueue: [] };
+  const run = {
+    taskId: String(identity.taskId || runId).trim().slice(0, 200),
+    operationId: String(identity.operationId || runId).trim().slice(0, 200),
+    phase: 'reasoning',
+    nonInterruptible: false,
+    steerQueue: [],
+    followUpQueue: [],
+  };
   runs.set(runId, run);
   return run;
 }
@@ -18,6 +25,8 @@ export function updateActiveAgentRun(runId, update = {}) {
   if (!run) return null;
   if (validPhase.has(update.phase)) run.phase = update.phase;
   if (typeof update.nonInterruptible === 'boolean') run.nonInterruptible = update.nonInterruptible;
+  if (typeof update.taskId === 'string' && update.taskId.trim()) run.taskId = update.taskId.trim().slice(0, 200);
+  if (typeof update.operationId === 'string' && update.operationId.trim()) run.operationId = update.operationId.trim().slice(0, 200);
   return run;
 }
 
@@ -32,6 +41,9 @@ export function settleActiveAgentRun(runId) {
 export function enqueueActiveAgentRunInput(runId, input) {
   const run = runs.get(runId);
   if (!run || run.phase === 'settled') return { accepted: false, reason: 'settled' };
+  if (input?.operationId && input.operationId !== run.operationId) {
+    return { accepted: false, reason: 'stale_operation', operationId: run.operationId };
+  }
   const delivery = input?.delivery === 'follow_up' || (run.phase === 'executing' && run.nonInterruptible)
     ? 'follow_up'
     : 'steer';

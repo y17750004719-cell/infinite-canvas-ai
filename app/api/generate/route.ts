@@ -718,6 +718,7 @@ export async function POST(request: NextRequest) {
           routeErrorMeta.isImageGenerationError && error instanceof ImageGenerationError
             ? {
                 failureClass: error.failureClass,
+                failureCode: error.failureCode,
                 isRetryable: error.isRetryable,
                 retryAttempt: error.retryAttempt,
               }
@@ -1013,6 +1014,7 @@ export async function POST(request: NextRequest) {
       status: 'error',
       error: errorMessage,
       failureClass,
+      code: routeErrorMeta.failureCode,
       stack: process.env.NODE_ENV === 'development' ? errorStack : undefined,
     }, { status: statusCode });
   }

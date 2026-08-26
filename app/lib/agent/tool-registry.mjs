@@ -174,13 +174,10 @@ export function createAgentToolRegistry({
   readRelevantContext,
   submitAgentAnalysisCheckpoint,
   requestUserDecision,
-  startImagePlanning,
   rewindAgentAnalysis,
   resolveFailedTaskRecovery,
   requestMainAgentContext,
   requestImageClarification,
-  submitImageExecutionPlan,
-  handoffToImagePlanner,
   requestContextSelection,
 } = {}) {
   const registry = new Map([
@@ -521,48 +518,6 @@ export function createAgentToolRegistry({
         return requestUserDecision(args, context);
       },
     }],
-    ['start_image_planning', {
-      name: 'start_image_planning',
-      requiresConfirmation: false,
-      readOnly: true,
-      terminal: true,
-      countAgainstToolBudget: false,
-      description: 'Start staged image planning after deciding that the user explicitly wants image generation or editing.',
-      parameters: {
-        type: 'object',
-        properties: {
-          operation: { type: 'string', enum: ['generate', 'edit'] },
-          requestedParameters: {
-            type: 'object',
-            properties: {
-              outputCount: { type: 'integer', minimum: 1, maximum: 100 },
-              aspectRatio: { type: 'string', enum: AGENT_IMAGE_ASPECT_RATIO_IDS },
-              deliveryMode: { type: 'string', enum: ['single', 'variants', 'series', 'composite'] },
-              panelCount: { type: 'integer', minimum: 2, maximum: 100 },
-            },
-            additionalProperties: false,
-          },
-          readiness: {
-            type: 'object',
-            properties: {
-              goal: { type: 'string', minLength: 1, maxLength: 2000 },
-              targetIds: { type: 'array', maxItems: 20, items: { type: 'string', minLength: 1, maxLength: 200 } },
-              constraints: { type: 'array', maxItems: 32, items: { type: 'string', minLength: 1, maxLength: 1000 } },
-              resolvedAmbiguities: { type: 'array', maxItems: 32, items: { type: 'string', minLength: 1, maxLength: 1000 } },
-              blockingUnknowns: { type: 'array', maxItems: 0, items: { type: 'string' } },
-            },
-            required: ['goal', 'targetIds', 'constraints', 'resolvedAmbiguities', 'blockingUnknowns'],
-            additionalProperties: false,
-          },
-        },
-        required: ['operation', 'requestedParameters', 'readiness'],
-        additionalProperties: false,
-      },
-      execute: async (args, context) => {
-        if (typeof startImagePlanning !== 'function') throw new Error('start_image_planning is unavailable');
-        return startImagePlanning(args, context);
-      },
-    }],
     ['rewind_agent_analysis', {
       name: 'rewind_agent_analysis',
       requiresConfirmation: false,
@@ -654,173 +609,6 @@ export function createAgentToolRegistry({
       execute: async (args, context) => {
         if (typeof requestImageClarification !== 'function') throw new Error('request_image_clarification is unavailable');
         return requestImageClarification(args, context);
-      },
-    }],
-    ['submit_image_execution_plan', {
-      name: 'submit_image_execution_plan',
-      requiresConfirmation: false,
-      readOnly: true,
-      terminal: true,
-      countAgainstToolBudget: false,
-      description: 'Submit the complete image execution draft. This ends semantic planning but does not execute an external image action.',
-      parameters: {
-        type: 'object',
-        properties: {
-          decision: { type: 'string', enum: ['execute', 'clarify'] },
-          confidence: CONFIDENCE_SCHEMA,
-          clarification: CLARIFICATION_SCHEMA,
-          contextEntityIds: { type: 'array', maxItems: 8, items: { type: 'string', minLength: 1 } },
-          visualReferenceIds: { type: 'array', maxItems: 4, items: { type: 'string', minLength: 1 } },
-          visualSummary: VISUAL_SUMMARY_SCHEMA,
-          referenceRoles: {
-            type: 'array', maxItems: 4,
-            items: {
-              type: 'object',
-              properties: {
-                referenceId: { type: 'string', minLength: 1 },
-                role: VISUAL_REFERENCE_ROLE_SCHEMA,
-              },
-              required: ['referenceId', 'role'],
-              additionalProperties: false,
-            },
-          },
-          targetSelectionReason: { type: ['string', 'null'] },
-          targetSelectionConfidence: { type: ['string', 'null'], enum: ['high', 'medium', 'low', null] },
-          imageTask: {
-            type: ['object', 'null'],
-            properties: {
-              operation: { type: 'string', enum: ['generate', 'edit'] },
-              targetReferenceId: { type: ['string', 'null'] },
-              sourceReferenceId: { type: ['string', 'null'] },
-              supportingReferenceIds: { type: 'array', maxItems: 4, items: { type: 'string', minLength: 1 } },
-              targetRegionIds: { type: 'array', items: { type: 'string', minLength: 1 } },
-              instruction: { type: 'string', minLength: 1 },
-              mustChange: { type: 'array', items: { type: 'string', minLength: 1 } },
-              mustPreserve: { type: 'array', items: { type: 'string', minLength: 1 } },
-            },
-            required: ['operation', 'targetReferenceId', 'supportingReferenceIds', 'instruction', 'mustChange', 'mustPreserve'],
-            additionalProperties: false,
-          },
-          brief: {
-            type: 'object',
-            properties: {
-              deliverable: { type: 'string', minLength: 1 },
-              subject: { type: 'string', minLength: 1 },
-              style: { type: 'array', items: { type: 'string', minLength: 1 } },
-              literalCopy: { type: 'array', items: { type: 'string' } },
-              constraints: { type: 'array', items: { type: 'string', minLength: 1 } },
-            },
-            required: ['deliverable', 'subject', 'style', 'literalCopy', 'constraints'],
-            additionalProperties: false,
-          },
-          delivery: {
-            type: 'object',
-            properties: {
-              mode: { type: 'string', enum: ['single', 'series', 'variants', 'composite'] },
-              outputCount: { type: 'integer', minimum: 1, maximum: 100 },
-              panelCount: { type: ['integer', 'null'], minimum: 2 },
-              variationAxes: { type: 'array', items: { type: 'string', minLength: 1 } },
-              sharedInvariants: { type: 'array', items: { type: 'string', minLength: 1 } },
-              distinctPerItem: { type: 'array', items: { type: 'string', minLength: 1 } },
-              items: {
-                type: 'array', maxItems: 100,
-                items: {
-                  type: 'object',
-                  properties: {
-                    index: { type: 'integer', minimum: 1 },
-                    label: { type: 'string', minLength: 1 },
-                    subject: { type: 'string', minLength: 1 },
-                    variation: { type: 'string' },
-                  },
-                  required: ['index', 'label', 'subject', 'variation'],
-                  additionalProperties: false,
-                },
-              },
-            },
-            required: ['mode', 'outputCount', 'panelCount', 'variationAxes', 'sharedInvariants', 'distinctPerItem', 'items'],
-            additionalProperties: false,
-          },
-          generation: {
-            type: ['object', 'null'],
-            properties: {
-              aspectRatio: { type: 'string', enum: AGENT_IMAGE_ASPECT_RATIO_IDS },
-              promptFormat: { type: 'string', enum: ['text', 'json-text'] },
-              prompt: { type: 'string', minLength: 1 },
-              items: {
-                type: 'array', maxItems: 100,
-                items: {
-                  type: 'object',
-                  properties: {
-                    index: { type: 'integer', minimum: 1 },
-                    label: { type: 'string', minLength: 1 },
-                    prompt: { type: 'string', minLength: 1 },
-                  },
-                  required: ['index', 'label', 'prompt'],
-                  additionalProperties: false,
-                },
-              },
-            },
-            required: ['aspectRatio', 'promptFormat', 'prompt', 'items'],
-            additionalProperties: false,
-          },
-        },
-        required: [
-          'decision', 'confidence', 'clarification', 'contextEntityIds', 'visualReferenceIds',
-          'visualSummary', 'referenceRoles', 'targetSelectionReason', 'targetSelectionConfidence',
-          'imageTask', 'brief', 'delivery', 'generation',
-        ],
-        additionalProperties: false,
-      },
-      execute: async (args, context) => {
-        if (typeof submitImageExecutionPlan !== 'function') throw new Error('submit_image_execution_plan is unavailable');
-        return submitImageExecutionPlan(args, context);
-      },
-    }],
-    ['handoff_to_image_planner', {
-      name: 'handoff_to_image_planner',
-      requiresConfirmation: false,
-      readOnly: true,
-      terminal: true,
-      countAgainstToolBudget: false,
-      description: 'Hand off an image action using stable references and bounded visual evidence. Do not include a rewritten brief or final image prompt.',
-      parameters: {
-        type: 'object',
-        properties: {
-          skillId: { type: ['string', 'null'] },
-          contextEntityIds: { type: 'array', items: { type: 'string', minLength: 1 } },
-          visualReferenceIds: { type: 'array', maxItems: 4, items: { type: 'string', minLength: 1 } },
-          visualSummary: {
-            type: ['object', 'null'],
-            properties: {
-              version: { type: 'integer', enum: [1] },
-              references: {
-                type: 'array',
-                maxItems: 4,
-                items: {
-                  type: 'object',
-                  properties: {
-                    referenceId: { type: 'string', minLength: 1 },
-                    description: { type: 'string', minLength: 1, maxLength: 2000 },
-                    salientSubjects: { type: 'array', maxItems: 24, items: { type: 'string', maxLength: 500 } },
-                    visibleText: { type: 'array', maxItems: 24, items: { type: 'string', maxLength: 500 } },
-                  },
-                  required: ['referenceId', 'description', 'salientSubjects', 'visibleText'],
-                  additionalProperties: false,
-                },
-              },
-            },
-            required: ['version', 'references'],
-            additionalProperties: false,
-          },
-          confidence: { type: 'string', enum: ['high', 'medium', 'low'] },
-          resumeTaskId: { type: ['string', 'null'] },
-        },
-        required: ['skillId', 'contextEntityIds', 'visualReferenceIds', 'visualSummary', 'confidence'],
-        additionalProperties: false,
-      },
-      execute: async (args) => {
-        if (typeof handoffToImagePlanner !== 'function') throw new Error('handoff_to_image_planner is unavailable');
-        return handoffToImagePlanner(args);
       },
     }],
     ['request_context_selection', {

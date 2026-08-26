@@ -1,3 +1,5 @@
+import { classifyAgentEvent } from './event-contract.mjs';
+
 const ASSET_STEP_PATTERN = /(?:image|asset|render|generat)/i;
 
 const TOOL_LABELS = {
@@ -88,7 +90,9 @@ function dedupePersistedErrorSteps(steps) {
       result.push(step);
       continue;
     }
-    const key = `${step.runId || ''}:agent-error`;
+    const key = step.operationId || step.itemId
+      ? `${step.operationId || ''}:${step.sequence || ''}:${step.itemId || step.runId || 'agent-error'}:agent-error`
+      : `legacy:${step.runId || 'agent'}:agent-error`;
     const existingIndex = positions.get(key);
     if (existingIndex === undefined) {
       positions.set(key, result.length);
@@ -111,6 +115,7 @@ function createBaseState(event = {}) {
   const startedAt = finiteTimestamp(event.timestampMs);
   return {
     timelineVersion: 2,
+    taskId: typeof event.taskId === 'string' ? event.taskId : (typeof event.runId === 'string' ? event.runId : ''),
     runId: typeof event.runId === 'string' ? event.runId : '',
     operationId: typeof event.operationId === 'string' ? event.operationId : '',
     intent: null,
@@ -132,11 +137,16 @@ function normalizeState(input, event = {}) {
   const now = finiteTimestamp(event.timestampMs);
   const existingSteps = Array.isArray(base.steps) ? base.steps : [];
   if (base.timelineVersion === 2) {
-    const steps = dedupePersistedErrorSteps(existingSteps.map((step) => {
+    const steps = dedupePersistedErrorSteps(existingSteps).map((step) => {
       const needsMetadata = !step?.itemId || !step?.turnId || !step?.itemType || !step?.itemStatus;
       return needsMetadata ? withItemMetadata(step, base.runId) : step;
-    }));
-    return steps.every((step, index) => step === existingSteps[index]) ? base : { ...base, steps };
+    });
+    const taskId = typeof base.taskId === 'string' && base.taskId
+      ? base.taskId
+      : (typeof base.runId === 'string' ? base.runId : '');
+    return steps.every((step, index) => step === existingSteps[index]) && taskId === base.taskId
+      ? base
+      : { ...base, taskId, steps };
   }
   let sequence = Math.max(0, finiteCount(base.lastSequence) - (base.steps?.length || 0));
   const steps = Array.isArray(base.steps) ? base.steps.map((step) => {
@@ -154,6 +164,7 @@ function normalizeState(input, event = {}) {
   return {
     ...base,
     timelineVersion: 2,
+    taskId: typeof base.taskId === 'string' && base.taskId ? base.taskId : base.runId,
     runStartedAt: finiteTimestamp(base.runStartedAt, normalizedSteps[0]?.timestampMs || now),
     attempts: Array.isArray(base.attempts) && base.attempts.length ? base.attempts : (base.runId ? [{ runId: base.runId, startedAt: finiteTimestamp(base.runStartedAt, now), ...(base.runEndedAt ? { endedAt: finiteTimestamp(base.runEndedAt, now) } : {}) }] : []),
     lastSequence: Math.max(finiteCount(base.lastSequence), sequence),
@@ -191,6 +202,7 @@ function withAttempt(state, event, marker, terminal = false) {
         });
   return {
     ...withStamp(state, marker), runId, attempts: nextAttempts,
+    ...(typeof event.taskId === 'string' && event.taskId ? { taskId: event.taskId } : {}),
     ...(runId !== state.runId ? { agentDone: false, terminalFailed: false, terminalCancelled: false, runEndedAt: undefined } : {}),
   };
 }
@@ -313,12 +325,30 @@ function interactionId(event) {
 /** @param {string} runId @returns {import('./run-progress.types').AgentRunProgress} */
 export function createInitialAgentRunProgress(runId) {
   const normalizedRunId = typeof runId === 'string' ? runId : '';
-  return createBaseState({ runId: normalizedRunId, operationId: normalizedRunId });
+  return createBaseState({ taskId: normalizedRunId, runId: normalizedRunId, operationId: normalizedRunId });
 }
 
-export function reduceAgentRunProgress(input, event) {
-  if (!event || typeof event !== 'object') return input;
-  const state = normalizeState(input, event);
+export function reduceAgentRunProgress(input, inputEvent) {
+  if (!inputEvent || typeof inputEvent !== 'object') return input;
+  const state = normalizeState(input, inputEvent);
+
+  const eventClassification = classifyAgentEvent(inputEvent, {
+    taskId: state.taskId,
+    operationId: state.operationId,
+    lastSequence: state.lastSequence,
+    allowLegacy: true,
+  });
+  if (!eventClassification.accepted && inputEvent.type !== 'agent_start') return state;
+  const event = eventClassification.identity && !eventClassification.identity.legacy
+    ? { ...inputEvent, ...eventClassification.identity }
+    : inputEvent;
+
+  if (event.type === 'agent_start') {
+    if (event.operationId && state.operationId && event.operationId !== state.operationId) return createBaseState(event);
+    const marker = stamp(state, event);
+    if (!marker) return state;
+    return withOutcome(withAttempt(state, event, marker));
+  }
 
   if (event.type === 'tool_start' || event.type === 'tool_update' || event.type === 'tool_result') {
     return reduceToolLifecycleEvent(state, event);
@@ -468,9 +498,8 @@ export function reduceAgentRunProgress(input, event) {
   }
 
   if (event.type === 'confirmation_submitted') {
-    const marker = stamp(state, event);
-    if (!marker) return state;
-    const marked = completePreviousActiveSteps(withAttempt(state, event, marker), marker, (step) => step.stepId === 'skill_job_assets');
+    const marker = { sequence: Number.isFinite(Number(event.sequence)) ? Number(event.sequence) : state.lastSequence, timestampMs: finiteTimestamp(event.timestampMs) };
+    const marked = completePreviousActiveSteps(withAttempt(state, event, { ...marker, sequence: state.lastSequence }), marker, (step) => step.stepId === 'skill_job_assets');
     const targetIndex = marked.steps.findLastIndex((step) => step.status === 'waiting' && (!event.toolName || step.toolName === event.toolName || step.stepId === event.toolName));
     if (targetIndex < 0) return marked;
     return withOutcome({ ...marked, steps: marked.steps.map((step, index) => index === targetIndex
@@ -479,9 +508,8 @@ export function reduceAgentRunProgress(input, event) {
   }
 
   if (event.type === 'interaction_submitted') {
-    const marker = stamp(state, event);
-    if (!marker) return state;
-    const marked = withStamp(state, marker);
+    const marker = { sequence: Number.isFinite(Number(event.sequence)) ? Number(event.sequence) : state.lastSequence, timestampMs: finiteTimestamp(event.timestampMs) };
+    const marked = withAttempt(state, event, { ...marker, sequence: state.lastSequence });
     return withOutcome({
       ...marked,
       steps: marked.steps.map((step) => (
@@ -557,7 +585,7 @@ export function reduceAgentRunProgress(input, event) {
       completedAt: marker.timestampMs,
       lastUpdateSequence: marker.sequence,
     }, marked.runId) : step) : [...marked.steps, withItemMetadata({
-      stepId: cancelled ? 'agent-cancelled' : 'agent-error', kind: 'execution', phase: cancelled ? 'cancelled' : 'failed', status: cancelled ? 'completed' : 'failed', runId: marked.runId,
+      stepId: cancelled ? 'agent-cancelled' : 'agent-error', kind: 'execution', phase: cancelled ? 'cancelled' : 'failed', status: cancelled ? 'completed' : 'failed', runId: marked.runId, operationId: marked.operationId,
       itemType: cancelled ? undefined : 'error',
       commentary: label, label, ...(errorDetail ? { detail: errorDetail, completionSummary: errorDetail } : {}), ...(retryability ? { retryability } : {}), sequence: marker.sequence, timestampMs: marker.timestampMs, lastUpdateSequence: marker.sequence,
     }, marked.runId)];

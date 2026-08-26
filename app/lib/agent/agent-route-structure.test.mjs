@@ -38,14 +38,15 @@ test('Main Agent gates image execution on an explicit ImageGen-context read', ()
   assert.match(source, /!mainAgentLoopState\.skillRead \? 'read_imagegen_context' : 'generate_image'/);
   assert.match(source, /skillRead: hasExplicitImagegenContextTranscript\(restoredMainAgentLoop\)/);
   assert.match(source, /manifests: selectedSkill \? \[selectedSkill\] : \[\]/);
+  assert.doesNotMatch(source, /submit_image_execution_plan|image_execution_plan/);
 });
 
 test('image tasks submit one direct ImageGen contract before execution', () => {
   const source = read(routePath);
   assert.match(source, /generateImage: async \(args: Record<string, unknown>, context: \{ publicProgress\?: unknown \}\)/);
   assert.match(source, /const prompt = String\(args\.prompt \|\| ''\)\.trim\(\)/);
-  assert.match(source, /const directPlan: AgentExecutionPlan/);
-  assert.match(source, /executionPlan = directPlan/);
+  assert.match(source, /assertImageExecutionContract\(/);
+  assert.match(source, /lockedImageToolArgs = imageExecutionContract/);
   assert.match(source, /completeImagePlanningStage\(imagePlanning, 'routing', 'execution'\)/);
   assert.doesNotMatch(source, /loopResult = await runStagedImagePlanning\(\)/);
   assert.doesNotMatch(source, /validateSkillPromptAssertions|missingCompiledPromptLiterals/);
@@ -59,25 +60,43 @@ test('image recovery keeps stable references and does not restore six-stage hand
   const recoveryEnd = source.indexOf("} else if (recoveryResolution.route === 'local_delivery')", recoveryStart);
   const recoveryBranch = source.slice(recoveryStart, recoveryEnd);
   assert.match(recoveryBranch, /runtimeReferenceContext/);
+  assert.match(recoveryBranch, /runtimeReferenceById\.clear\(\)/);
+  assert.match(recoveryBranch, /executionReferenceImages = runReferenceContext\.references\.map/);
   assert.doesNotMatch(recoveryBranch, /mainAgentReferenceImages = \[\]/);
 
   assert.doesNotMatch(source, /submitImageContextAnalysis|submitImageBrief|submitImagePromptCompilation|classifyImageOperation/);
+});
+
+test('provider availability failures are non-retryable Agent failures', () => {
+  const source = read(routePath);
+  assert.match(source, /provider_unavailable/);
+  assert.match(source, /no enabled channel for model/);
+  assert.match(source, /no available compatible accounts/);
+  const retryClassifier = source.slice(source.indexOf('const isRetryablePlannerProviderError'), source.indexOf('const classifyAgentFailureCode'));
+  assert.doesNotMatch(retryClassifier, /no enabled channel for model/);
 });
 
 test('Main Agent naturally completes with text and direct ImageGen keeps stable IDs', () => {
   const source = read(routePath);
   assert.match(source, /Main Agent returned an empty response/);
   assert.doesNotMatch(source, /Main Agent ended without a valid terminal tool/);
-  assert.match(source, /type: 'image_execution_plan'/);
+  assert.match(source, /type: 'image_execution'/);
   assert.match(source, /referenceIds\.some\(\(id\) => !runtimeReferenceById\.has\(id\)\)/);
   assert.match(source, /targetReferenceId = operation === 'edit' \? requestedTargetReferenceId : null/);
-  assert.match(source, /type: 'image_execution_plan'/);
+  assert.match(source, /type: 'image_execution'/);
+});
+
+test('legacy image Planner tools are absent from the production route', () => {
+  const source = read(routePath);
+  assert.doesNotMatch(source, /submit_image_execution_plan|image_execution_plan/);
+  assert.match(source, /type: 'image_execution'/);
+  assert.match(source, /contract: imageExecutionContract/);
 });
 
 test('ordinary text cannot trigger an image mutation when the model misses Planner handoff', () => {
   const source = read(routePath);
   const naturalStart = source.indexOf('if (!terminal) {');
-  const naturalEnd = source.indexOf("if (terminal.type !== 'image_execution_plan'", naturalStart);
+  const naturalEnd = source.indexOf("if (terminal.type !== 'image_execution'", naturalStart);
   const naturalBranch = source.slice(naturalStart, naturalEnd);
   assert.match(naturalBranch, /writeAgentDone\('completed'\)/);
   assert.doesNotMatch(naturalBranch, /generate_image|start_skill_job|planAgentExecutionRequest/);
@@ -123,9 +142,8 @@ test('Runtime preserves direct ImageGen task identity locally', () => {
   const direct = source.slice(directStart, directEnd);
   assert.match(direct, /referenceIds\.some\(\(id\) => !runtimeReferenceById\.has\(id\)\)/);
   assert.match(direct, /requestedAspectRatio \|\| imagePlanningDefaults\.aspectRatio \|\| selectedSkill\?\.aspectRatio/);
-  assert.match(direct, /deliveryMode === 'series' && generationItems\.length !== outputCount/);
-  assert.match(direct, /generation: \{ aspectRatio, promptFormat: 'text', prompt, items: generationItems \}/);
-  assert.match(direct, /lockedImageToolArgs = \{/);
+  assert.match(direct, /assertImageExecutionContract\(/);
+  assert.match(direct, /lockedImageToolArgs = imageExecutionContract/);
   assert.match(direct, /emitIntentResolved\('image'\)/);
   assert.doesNotMatch(direct, /executionPlanToImageDeliveryPlan|executionPlanToBrief/);
 });
@@ -152,7 +170,7 @@ test('direct ImageGen does not invoke Planner transport from the active route', 
   const directEnd = routeSource.indexOf('getConversationMemory:', directStart);
   const activeSource = routeSource.slice(directStart, directEnd);
   assert.doesNotMatch(activeSource, /planAgentExecutionRequest|AGENT_PLANNER_PROVIDER_ID|AGENT_PLANNER_MODEL/);
-  assert.match(activeSource, /executionPlan = directPlan/);
+  assert.match(activeSource, /lockedImageToolArgs = imageExecutionContract/);
 });
 
 test('direct image execution and confirmation reuse the complete locked tool arguments', () => {
@@ -224,7 +242,7 @@ test('failed tasks stay passive until the lightweight entry explicitly resumes t
 test('explicit image UI requests stay in the image domain without forcing an entry tool', () => {
   const route = read(routePath);
   assert.match(route, /body\.intent === 'image'/);
-  assert.match(route, /toolChoice:[\s\S]{0,100}terminalContractResume[\s\S]{0,160}'auto'/);
+  assert.match(route, /toolChoice:\s*'auto'/);
   assert.match(route, /requireInitialTool: ''/);
   assert.doesNotMatch(route, /explicitImageEntryRequired/);
 });
@@ -284,6 +302,19 @@ test('all chat modes use the Agent endpoint and preserve NDJSON progress and del
   }
 });
 
+test('server owns run identity and stale interactions have a recovery path', () => {
+  const route = read(routePath);
+  const page = read(pagePath);
+  assert.match(route, /clientRunId\?: string/);
+  assert.match(route, /const runId = randomUUID\(\)/);
+  assert.match(route, /registerActiveAgentRun\(runId, initialAgentIdentity\)/);
+  assert.match(route, /writeLifecycleEvent/);
+  assert.match(route, /code: 'stale_operation'/);
+  assert.match(page, /clientRunId:\s*agentRunId/);
+  assert.match(page, /agentInteractionStale/);
+  assert.match(page, /重新打开任务/);
+});
+
 test('Main Agent streams visible text activity without exposing reasoning and has no app wall-clock timeout', () => {
   const source = read(routePath);
   assert.match(source, /assistantMessageEvent\?\.type === 'text_delta'/);
@@ -302,10 +333,10 @@ test('Main Agent streams visible text activity without exposing reasoning and ha
 
 test('every Pi run path uses the shared live event adapter', () => {
   const source = read(routePath);
-  assert.equal((source.match(/runZFlowAgentBrain\(/g) || []).length, 5);
-  assert.equal((source.match(/onEvent: emitMainAgentEvent/g) || []).length, 5);
-  assert.equal((source.match(/onAssistantTurnComplete: handleAssistantTurnComplete/g) || []).length, 5);
-  assert.equal((source.match(/onToolUpdate: writeToolUpdate/g) || []).length, 5);
+  assert.equal((source.match(/runZFlowAgentBrain\(/g) || []).length, 4);
+  assert.equal((source.match(/onEvent: emitMainAgentEvent/g) || []).length, 4);
+  assert.equal((source.match(/onAssistantTurnComplete: handleAssistantTurnComplete/g) || []).length, 4);
+  assert.equal((source.match(/onToolUpdate: writeToolUpdate/g) || []).length, 4);
 });
 
 test('deterministic image execution keeps prompt and supplier stages tied to real work', () => {

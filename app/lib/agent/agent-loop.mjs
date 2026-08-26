@@ -2,6 +2,10 @@ function finiteCount(value, fallback = 0) {
   return Number.isFinite(Number(value)) ? Math.max(0, Math.floor(Number(value))) : fallback;
 }
 
+function normalizeIdentity(value, fallback = '') {
+  return typeof value === 'string' && value.trim() ? value.trim().slice(0, 200) : fallback;
+}
+
 function jobCounts(value) {
   const items = Array.isArray(value?.items) ? value.items : [];
   return {
@@ -237,6 +241,7 @@ export function createAgentToolResultEvents({
 
 /**
  * @param {{
+ *   taskId?: string,
  *   runId?: string,
  *   operationId?: string,
  *   lastSequence?: number,
@@ -244,11 +249,14 @@ export function createAgentToolResultEvents({
  * }} input
  */
 export function createAgentProgressTracker({
+  taskId,
   runId,
   operationId = runId,
   lastSequence = 0,
   emit,
 } = {}) {
+  let currentTaskId = normalizeIdentity(taskId, normalizeIdentity(operationId, normalizeIdentity(runId)));
+  let currentRunId = normalizeIdentity(runId);
   let currentOperationId = operationId || runId || '';
   let sequence = finiteCount(lastSequence);
   const active = new Map();
@@ -276,7 +284,8 @@ export function createAgentProgressTracker({
     const event = {
       type: 'progress_update',
       version: 1,
-      runId: runId || '',
+      taskId: currentTaskId,
+      runId: currentRunId,
       operationId: currentOperationId,
       sequence,
       timestampMs: Date.now(),
@@ -303,7 +312,8 @@ export function createAgentProgressTracker({
   const stamp = () => ({
     sequence: ++sequence,
     timestampMs: Date.now(),
-    runId: runId || '',
+    taskId: currentTaskId,
+    runId: currentRunId,
     operationId: currentOperationId,
   });
 
@@ -311,6 +321,14 @@ export function createAgentProgressTracker({
     update,
     stamp,
     resume(next = {}) {
+      if (typeof next.operationId === 'string' && next.operationId && currentOperationId && next.operationId !== currentOperationId) {
+        const error = new Error('Agent operation is stale');
+        error.code = 'stale_operation';
+        error.statusCode = 409;
+        throw error;
+      }
+      if (typeof next.taskId === 'string' && next.taskId.trim()) currentTaskId = next.taskId.trim().slice(0, 200);
+      if (typeof next.runId === 'string' && next.runId.trim()) currentRunId = next.runId.trim().slice(0, 200);
       if (typeof next.operationId === 'string' && next.operationId) currentOperationId = next.operationId;
       sequence = Math.max(sequence, finiteCount(next.lastSequence));
       active.clear();
@@ -332,7 +350,12 @@ export function createAgentProgressTracker({
       }
     },
     snapshot() {
-      return { operationId: currentOperationId, lastSequence: sequence };
+      return {
+        taskId: currentTaskId,
+        operationId: currentOperationId,
+        runId: currentRunId,
+        lastSequence: sequence,
+      };
     },
   };
 }

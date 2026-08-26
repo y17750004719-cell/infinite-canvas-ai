@@ -46,6 +46,7 @@ test('image planning failures are presented as stage-specific recoverable Chines
   assert.match(source, /prompt: '生图 Prompt 未完成，任务状态已保留，可继续重试'/);
   assert.match(source, /closing turn ended\|final response or terminal control/i);
   assert.match(source, /图像合同未完成，任务状态已保留，可继续重试/);
+  assert.match(source, /provider_unavailable: '图片供应商当前没有可用模型通道或账户/);
 });
 
 test('direct image and canvas image requests use the Planner-backed agent route', () => {
@@ -331,7 +332,7 @@ test('legacy decisions retain the composer popover while v2 interactions stay in
   assert.match(decisionPopoverSource, /option\.recommended/);
   assert.match(decisionPopoverSource, /onClick=\{\(\) => onSelect\(option\.id\)\}/);
   assert.match(source, /暂不执行/);
-  assert.doesNotMatch(source, /重新打开确认|重新回答|重新选择/);
+  assert.match(source, /重新打开任务|重新选择参考图/);
   assert.doesNotMatch(source, /absolute inset-0 z-(?:20|30|40).*bg-black\//);
   assert.match(source, /openPendingAgentDecision\(msg\)/);
   const inlineTimelineStart = source.indexOf('interactionContent={(step) => (');
@@ -373,6 +374,14 @@ test('skill jobs, cancellation, and clarification recovery preserve progress sta
   assert.ok(abortStart >= 0 && failureStart > abortStart);
   assert.doesNotMatch(source.slice(abortStart, failureStart), /agentRunProgress:\s*undefined/);
   assert.match(source, /updateAgentRunProgress\(msg, \{ type: 'agent_error'(?:, runId: agentRunId)? \}\)/);
+});
+
+test('stale interactions close the prompt and expose explicit recovery', () => {
+  assert.match(source, /\['stale_operation', 'stale_sequence', 'agent_run_settled'\]\.includes\(conflictCode\)/);
+  assert.match(source, /setPendingAgentConfirmation\(null\)/);
+  assert.match(source, /setPendingAgentClarification\(null\)/);
+  assert.match(source, /agentInteractionStale:\s*true/);
+  assert.match(source, /重新打开任务/);
 });
 
 test('right chat exposes adaptive chat and image provider model selectors', () => {

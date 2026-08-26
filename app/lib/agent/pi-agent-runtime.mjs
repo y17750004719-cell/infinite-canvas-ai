@@ -881,7 +881,7 @@ export async function runZFlowAgentBrain({
             ? `Your ${resolveClosingToolName() || 'terminal'} call was invalid. This is the only repair turn. Do not read more context or answer with prose. Call ${resolveClosingToolName() || 'the terminal tool'} with corrected arguments.${terminalContextSuffix}`
             : closingState.reason === 'terminal_tool_required'
               ? `This task requires a structured terminal decision. Do not answer or ask questions with prose. Call ${resolveRequiredTerminalToolName()} now with decision execute, or decision clarify when user input is required.${terminalContextSuffix}`
-            : 'Context reading is finished. Do not call read or memory tools. Finish now with ordinary final text, submit_image_execution_plan, or request_context_selection. Do not return draft commentary without a final answer.',
+            : 'Context reading is finished. Do not call read or memory tools. Finish now with ordinary final text, generate_image, or request_context_selection. Do not return draft commentary without a final answer.',
         }],
         timestamp: Date.now(),
       }];

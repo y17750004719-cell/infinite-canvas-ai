@@ -13,7 +13,8 @@ import {
   ReferenceImageUnavailableError,
 } from "./reference-image-source.mjs";
 import { createChatStreamEventDecoder } from "./chat-stream-events.mjs";
-import { toGeminiSchema } from "./gemini-schema.mjs";
+import { readOpenAiImageStream } from "./openai-image-stream.mjs";
+import { assertGeminiSchemaCompatible, toGeminiSchema } from "./gemini-schema.mjs";
 import { extractGeminiToolCalls, geminiToolCallToPart, isSyntheticGeminiToolCallId, normalizeGeminiParts, replayGeminiParts } from "./gemini-tool-calls.mjs";
 const LOG_LEVEL = (process.env.LOG_LEVEL || "basic").toLowerCase();
 const LOG_ENABLED = LOG_LEVEL !== "off";
@@ -113,6 +114,7 @@ function getErrorDiagnostics(error: unknown) {
     errorName: error.name,
     errorMessage: error.message,
     failureClass: error instanceof ImageGenerationError ? error.failureClass || null : null,
+    failureCode: error instanceof ImageGenerationError ? error.failureCode || null : null,
     isRetryable: error instanceof ImageGenerationError ? error.isRetryable ?? null : null,
     causeName: typeof cause?.name === "string" ? cause.name : null,
     causeMessage: typeof cause?.message === "string" ? cause.message : null,
@@ -225,6 +227,7 @@ export interface UnifiedImageRequest {
 
 export class ImageGenerationError extends Error {
   failureClass?: "transport" | "timeout" | "upstream_http" | "payload" | "unknown";
+  failureCode?: "provider_unavailable" | "provider_http" | "provider_timeout" | "transport" | "invalid_tool_arguments";
   isRetryable?: boolean;
   retryAttempt?: number;
 
@@ -233,6 +236,7 @@ export class ImageGenerationError extends Error {
     public statusCode?: number,
     meta?: {
       failureClass?: "transport" | "timeout" | "upstream_http" | "payload" | "unknown";
+      failureCode?: "provider_unavailable" | "provider_http" | "provider_timeout" | "transport" | "invalid_tool_arguments";
       isRetryable?: boolean;
       retryAttempt?: number;
     }
@@ -240,6 +244,7 @@ export class ImageGenerationError extends Error {
     super(message);
     this.name = "ImageGenerationError";
     this.failureClass = meta?.failureClass;
+    this.failureCode = meta?.failureCode;
     this.isRetryable = meta?.isRetryable;
     this.retryAttempt = meta?.retryAttempt;
   }
@@ -522,6 +527,21 @@ function classifyGeminiImageTransportFailure(error: unknown): {
   };
 }
 
+function classifyImageProviderHttpFailure(status: number, errorText: string): {
+  failureClass: "upstream_http";
+  failureCode: "provider_unavailable" | "provider_http" | "invalid_tool_arguments";
+  isRetryable: boolean;
+} {
+  const normalized = errorText.toLowerCase();
+  if (normalized.includes('no enabled channel for model') || normalized.includes('no available compatible accounts')) {
+    return { failureClass: "upstream_http", failureCode: "provider_unavailable", isRetryable: false };
+  }
+  if (status === 400 || status === 422) {
+    return { failureClass: "upstream_http", failureCode: "invalid_tool_arguments", isRetryable: false };
+  }
+  return { failureClass: "upstream_http", failureCode: "provider_http", isRetryable: false };
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -715,6 +735,11 @@ function imageEntryBase64DataUrl(obj: Record<string, unknown>): string | null {
 function imagesApiUnsupportedText(text: string): boolean {
   const normalized = text.toLowerCase();
   return normalized.includes("images api is not supported") || normalized.includes("not supported for this platform");
+}
+
+function imageStreamUnsupportedText(text: string): boolean {
+  const normalized = text.toLowerCase();
+  return /partial[ _-]?images?|stream|event-stream|sse/.test(normalized);
 }
 
 function summarizePayloadKeys(payload: unknown, depth = 0): unknown {
@@ -1271,6 +1296,7 @@ async function generateOpenAiCompatibleImage(request: UnifiedImageRequest): Prom
   const shouldSendTopLevelResponseFormat = !usesImageEditsApi && provider.imageRequestMode !== "openai-json" && !mirrorsInfiniteCanvasGptImage2TextToImage;
   const defaultOpenAiImageResponseFormat = { response_format: "url" };
   const maxAttempts = 2;
+  const shouldRequestImageStream = provider.imageRequestMode === "openai" && executionMode === "sync";
   const requestBody: Record<string, unknown> = {
     model,
     prompt,
@@ -1311,9 +1337,7 @@ async function generateOpenAiCompatibleImage(request: UnifiedImageRequest): Prom
     requestBody.image = referenceImages;
   }
 
-  let requestPayload: string | FormData;
-  let requestHeaders: Record<string, string>;
-  if (usesImageEditsApi) {
+  const buildEditsPayload = async (stream = false) => {
     const formData = new FormData();
     formData.set("model", model);
     if (prompt) {
@@ -1328,36 +1352,26 @@ async function generateOpenAiCompatibleImage(request: UnifiedImageRequest): Prom
     if (supportsAspectRatio && aspectRatio) {
       formData.set("aspect_ratio", aspectRatio);
     }
+    if (stream) {
+      formData.set("stream", "true");
+      formData.set("partial_images", "1");
+    }
 
     const referenceBlobs = await Promise.all(referenceImages.map((image) => referenceToBlob(image, request.signal)));
     referenceBlobs.forEach(({ blob, mimeType }, index) => {
       formData.append("image", blob, `reference-${index + 1}.${mimeTypeToFileExtension(mimeType)}`);
     });
 
-    requestPayload = formData;
-    requestHeaders = {
-      Authorization: bearerAuthorizationHeader(apiKey),
-    };
-  } else {
-    requestPayload = JSON.stringify(requestBody);
-    requestHeaders = {
-      "Content-Type": "application/json",
-      Authorization: bearerAuthorizationHeader(apiKey),
-    };
-  }
-
-  const buildEditsFallbackPayload = async () => {
-    const formData = new FormData();
-    formData.set("model", model);
-    if (prompt) formData.set("prompt", prompt);
-    if (imageSize) formData.set("size", imageSize);
-    if (imageQuality) formData.set("quality", imageQuality);
-    if (supportsAspectRatio && aspectRatio) formData.set("aspect_ratio", aspectRatio);
-    const referenceBlobs = await Promise.all(referenceImages.map((image) => referenceToBlob(image, request.signal)));
-    referenceBlobs.forEach(({ blob, mimeType }, index) => {
-      formData.append("image", blob, `reference-${index + 1}.${mimeTypeToFileExtension(mimeType)}`);
-    });
     return formData;
+  };
+
+  const buildGenerationsPayload = (stream = false) => {
+    const body = { ...requestBody };
+    if (stream) {
+      body.stream = true;
+      body.partial_images = 1;
+    }
+    return JSON.stringify(body);
   };
 
   const buildGenerationsFallbackPayload = () => {
@@ -1371,6 +1385,28 @@ async function generateOpenAiCompatibleImage(request: UnifiedImageRequest): Prom
     if (imageSize) body.size = imageSize;
     if (imageQuality) body.quality = imageQuality;
     return JSON.stringify(body);
+  };
+
+  let streamRequested = shouldRequestImageStream;
+  let streamFallbackUsed = false;
+  let requestPayload: string | FormData = usesImageEditsApi
+    ? await buildEditsPayload(streamRequested)
+    : buildGenerationsPayload(streamRequested);
+  let requestHeaders: Record<string, string> = usesImageEditsApi
+    ? { Authorization: bearerAuthorizationHeader(apiKey) }
+    : { "Content-Type": "application/json", Authorization: bearerAuthorizationHeader(apiKey) };
+
+  const retryWithoutStream = async (reason: string) => {
+    if (!streamRequested || streamFallbackUsed || request.signal?.aborted) return false;
+    streamRequested = false;
+    streamFallbackUsed = true;
+    requestPayload = usesImageEditsApi ? await buildEditsPayload() : buildGenerationsPayload();
+    basicLog("[SUPPLIER][IMAGE_STREAM_FALLBACK]", {
+      mode: "openai_compatible_image",
+      providerId: provider.id,
+      reason,
+    });
+    return true;
   };
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
@@ -1405,6 +1441,7 @@ async function generateOpenAiCompatibleImage(request: UnifiedImageRequest): Prom
           aspectRatio,
           referenceCount: referenceImages.length,
           usesImageEditsApi: nextUsesImageEditsApi,
+          streamRequested,
           providerId: provider.id,
           attempt,
           maxAttempts,
@@ -1449,12 +1486,14 @@ async function generateOpenAiCompatibleImage(request: UnifiedImageRequest): Prom
 
       if (!response.ok) {
         const errorText = await response.text();
-        if (!usesImageEditsApi && imagesApiUnsupportedText(errorText)) {
+        if (response.status >= 400 && response.status < 500 && imageStreamUnsupportedText(errorText) && await retryWithoutStream("unsupported")) {
+          continue;
+        } else if (!usesImageEditsApi && imagesApiUnsupportedText(errorText)) {
           response = await postImageRequest(
             imageEditUrl,
             "/images/edits",
             true,
-            await buildEditsFallbackPayload(),
+            await buildEditsPayload(),
             { Authorization: bearerAuthorizationHeader(apiKey) }
           );
         } else if (usesImageEditsApi && !isGptImage2Model(model)) {
@@ -1469,12 +1508,12 @@ async function generateOpenAiCompatibleImage(request: UnifiedImageRequest): Prom
             }
           );
         } else {
+          const failure = classifyImageProviderHttpFailure(response.status, errorText || response.statusText);
           throw new ImageGenerationError(
             `OpenAI compatible image request failed: ${errorText || response.statusText}`,
             response.status,
             {
-              failureClass: "upstream_http",
-              isRetryable: false,
+              ...failure,
               retryAttempt: attempt,
             }
           );
@@ -1483,19 +1522,24 @@ async function generateOpenAiCompatibleImage(request: UnifiedImageRequest): Prom
 
       if (!response.ok) {
         const errorText = await response.text();
+        const failure = classifyImageProviderHttpFailure(response.status, errorText || response.statusText);
         throw new ImageGenerationError(
           `OpenAI compatible image request failed: ${errorText || response.statusText}`,
           response.status,
           {
-            failureClass: "upstream_http",
-            isRetryable: false,
+            ...failure,
             retryAttempt: attempt,
           }
         );
       }
 
-      const payload = await response.json();
-      const outputs = toImageEntries(payload);
+      const streamResult = streamRequested
+        ? await readOpenAiImageStream(response)
+        : { transport: "json", completedPayload: await response.json(), partialPayload: null };
+      const completedOutputs = toImageEntries(streamResult.completedPayload);
+      const partialOutputs = completedOutputs.length > 0 ? [] : toImageEntries(streamResult.partialPayload);
+      const outputs = completedOutputs.length > 0 ? completedOutputs : partialOutputs;
+      const payload = streamResult.completedPayload || streamResult.partialPayload || {};
 
       basicLog("[SUPPLIER][PARSE]", {
         endpoint: responseEndpointPath,
@@ -1506,6 +1550,8 @@ async function generateOpenAiCompatibleImage(request: UnifiedImageRequest): Prom
         aspectRatio,
         referenceCount: referenceImages.length,
         usesImageEditsApi: responseUsesImageEditsApi,
+        streamTransport: streamResult.transport,
+        streamOutcome: streamResult.completedPayload ? "completed" : streamResult.partialPayload ? "partial" : "empty",
       });
 
       if (outputs.length > 0) {
@@ -1545,6 +1591,9 @@ async function generateOpenAiCompatibleImage(request: UnifiedImageRequest): Prom
       }
 
       if (outputs.length === 0) {
+        if (await retryWithoutStream("empty_stream")) {
+          continue;
+        }
         basicLog("[SUPPLIER][PARSE_EMPTY]", {
           endpoint: responseEndpointPath,
           mode: "openai_compatible_image",
@@ -1589,6 +1638,16 @@ async function generateOpenAiCompatibleImage(request: UnifiedImageRequest): Prom
         }),
         ...getErrorDiagnostics(error),
       });
+
+      if (
+        (!(error instanceof ImageGenerationError)
+          || failureState.failureClass === "transport"
+          || failureState.failureClass === "timeout"
+          || failureState.failureClass === "payload")
+        && await retryWithoutStream("interrupted")
+      ) {
+        continue;
+      }
 
       if (failureState.isRetryable && attempt < maxAttempts) {
         debugWarn("Retrying retryable OpenAI compatible image transport failure", {
@@ -2169,12 +2228,15 @@ function strictToolSchemaError(errorText: string, tools?: ChatToolDefinition[]):
 
 function chatHttpFailureMeta(status: number, errorText: string): {
   failureClass: 'upstream_http';
+  failureCode: 'provider_unavailable' | 'provider_http';
   isRetryable: boolean;
 } {
   const normalized = errorText.toLowerCase();
+  const unavailable = normalized.includes('no enabled channel for model') || normalized.includes('no available compatible accounts');
   return {
     failureClass: 'upstream_http',
-    isRetryable: status === 524 || (status === 404 && normalized.includes('no enabled channel for model')),
+    failureCode: unavailable ? 'provider_unavailable' : 'provider_http',
+    isRetryable: status === 524 && !unavailable,
   };
 }
 
@@ -2272,6 +2334,7 @@ export async function chat(
       (requestBody as { messages: ChatRequest["messages"] }).messages = stripGeminiThoughtSignatures(requestMessages);
     }
     if (isGeminiModel) {
+      request.tools?.forEach((tool) => assertGeminiSchemaCompatible(toGeminiSchema(tool.function.parameters || { type: "object", properties: {} })));
       const geminiContents = (requestBody as { contents: Array<{ role: string; parts: Array<Record<string, unknown>> }> }).contents;
       validateGeminiContents(geminiContents);
       basicLog("[SUPPLIER][GEMINI_PARTS]", { mode: "chat", contents: summarizeGeminiContents(geminiContents) });
@@ -2462,6 +2525,7 @@ export async function* chatStream(
       (requestBody as { messages: ChatRequest["messages"] }).messages = stripGeminiThoughtSignatures(requestMessages);
     }
     if (isGeminiModel) {
+      request.tools?.forEach((tool) => assertGeminiSchemaCompatible(toGeminiSchema(tool.function.parameters || { type: "object", properties: {} })));
       const geminiContents = (requestBody as { contents: Array<{ role: string; parts: Array<Record<string, unknown>> }> }).contents;
       validateGeminiContents(geminiContents);
       basicLog("[SUPPLIER][GEMINI_PARTS]", { mode: "chat_stream", contents: summarizeGeminiContents(geminiContents) });

@@ -278,6 +278,13 @@ test('deduplicates progress updates by sequence', () => {
   assert.equal(duplicate.steps[0].label, 'Step 1');
 });
 
+test('drops stale events without reading an uninitialized event binding', () => {
+  const state = reduceAgentRunProgress(null, progress(2, { runId: 'tdz-run' }));
+  const stale = reduceAgentRunProgress(state, progress(1, { runId: 'tdz-run', label: 'stale' }));
+
+  assert.equal(stale, state);
+});
+
 test('accumulates dynamic progress steps in first-seen order', () => {
   let state = reduceAgentRunProgress(null, progress(1, {
     stepId: 'understand',

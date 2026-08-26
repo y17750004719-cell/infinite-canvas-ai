@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 
 import { createAgentToolRegistry, executeAgentTool, getAgentModelTools } from './tool-registry.mjs';
 
-test('tool registry exposes the direct image tool and legacy recovery tools', () => {
+test('tool registry exposes the direct image tool and current recovery tools', () => {
   const registry = createAgentToolRegistry({
     createSkillJob: () => ({ id: 'job-1' }),
     getSkillJob: () => null,
@@ -12,10 +12,9 @@ test('tool registry exposes the direct image tool and legacy recovery tools', ()
     'read_imagegen_context', 'generate_image', 'get_canvas_context', 'get_conversation_memory', 'list_project_context',
     'read_context_entity', 'load_visual_reference', 'update_conversation_memory',
     'handle_failed_task', 'read_relevant_context', 'submit_agent_analysis_checkpoint',
-    'request_user_decision', 'start_image_planning', 'rewind_agent_analysis', 'resolve_failed_task_recovery',
+    'request_user_decision', 'rewind_agent_analysis', 'resolve_failed_task_recovery',
     'request_main_agent_context',
-    'request_image_clarification', 'submit_image_execution_plan',
-    'handoff_to_image_planner', 'request_context_selection', 'start_skill_job', 'get_skill_job',
+    'request_image_clarification', 'request_context_selection', 'start_skill_job', 'get_skill_job',
   ]);
   assert.equal(registry.get('start_skill_job').requiresConfirmation, true);
   assert.equal(registry.get('get_canvas_context').requiresConfirmation, false);
@@ -33,15 +32,12 @@ test('tool registry exposes the direct image tool and legacy recovery tools', ()
   assert.equal(registry.get('read_relevant_context').terminal, undefined);
   assert.equal(registry.get('submit_agent_analysis_checkpoint').terminal, true);
   assert.equal(registry.get('request_user_decision').terminal, true);
-  assert.equal(registry.get('start_image_planning').terminal, true);
   assert.equal(registry.get('rewind_agent_analysis').terminal, true);
   assert.equal(registry.get('request_main_agent_context').terminal, undefined);
   assert.equal(registry.get('request_main_agent_context').readOnly, true);
   assert.equal(registry.get('request_main_agent_context').countAgainstToolBudget, false);
   assert.equal(registry.has('submit_image_compilation'), false);
-  assert.equal(registry.get('submit_image_execution_plan').terminal, true);
-  assert.equal(registry.get('submit_image_execution_plan').readOnly, true);
-  assert.equal(registry.get('submit_image_execution_plan').countAgainstToolBudget, false);
+  assert.equal(registry.has('submit_image_execution_plan'), false);
 });
 
 test('read_imagegen_context reads the locked host and visual Skills without model arguments', async () => {
@@ -162,29 +158,18 @@ test('entry tools validate lazy routing contracts and forward runtime context', 
   const registry = createAgentToolRegistry({
     handleFailedTask: (args, context) => calls.push(['failed', args, context.runId]),
     readRelevantContext: (args, context) => calls.push(['context', args, context.runId]),
-    startImagePlanning: (args, context) => calls.push(['image', args, context.runId]),
   });
   const context = {
-    allowedTools: ['handle_failed_task', 'read_relevant_context', 'start_image_planning'],
+    allowedTools: ['handle_failed_task', 'read_relevant_context'],
     runId: 'run-1',
   };
   await executeAgentTool(registry, 'handle_failed_task', { action: 'inspect' }, context);
   await executeAgentTool(registry, 'handle_failed_task', { action: 'resume', revision: '背景改成蓝色' }, context);
   await executeAgentTool(registry, 'read_relevant_context', { scope: 'canvas', ids: ['canvas:1'] }, context);
-  const imageEntry = {
-    operation: 'edit',
-    requestedParameters: { outputCount: 1, aspectRatio: '1:1', deliveryMode: 'single' },
-    readiness: {
-      goal: 'Edit the selected image', targetIds: ['canvas:1'], constraints: [],
-      resolvedAmbiguities: ['The selected image is the edit target'], blockingUnknowns: [],
-    },
-  };
-  await executeAgentTool(registry, 'start_image_planning', imageEntry, context);
   assert.deepEqual(calls, [
     ['failed', { action: 'inspect' }, 'run-1'],
     ['failed', { action: 'resume', revision: '背景改成蓝色' }, 'run-1'],
     ['context', { scope: 'canvas', ids: ['canvas:1'] }, 'run-1'],
-    ['image', imageEntry, 'run-1'],
   ]);
   await assert.rejects(
     () => executeAgentTool(registry, 'handle_failed_task', { action: 'retry' }, context),
@@ -192,10 +177,6 @@ test('entry tools validate lazy routing contracts and forward runtime context', 
   );
   await assert.rejects(
     () => executeAgentTool(registry, 'read_relevant_context', { scope: 'memory' }, context),
-    /allowed value/,
-  );
-  await assert.rejects(
-    () => executeAgentTool(registry, 'start_image_planning', { ...imageEntry, operation: 'describe' }, context),
     /allowed value/,
   );
 });
@@ -280,96 +261,11 @@ test('Main Agent context remains the only exposed auxiliary read operation', asy
   );
 });
 
-test('submit_image_execution_plan is a strict terminal draft and performs no mutation itself', async () => {
-  const drafts = [];
-  const registry = createAgentToolRegistry({
-    submitImageExecutionPlan: (args) => {
-      drafts.push(args);
-      return { terminate: true, type: 'image_execution_plan', draft: args };
-    },
-  });
-  const draft = {
-    decision: 'execute',
-    confidence: 'high',
-    clarification: null,
-    contextEntityIds: Array.from({ length: 8 }, (_, index) => `entity-${index}`),
-    visualReferenceIds: ['reference-1'],
-    visualSummary: {
-      version: 1,
-      references: [{
-        referenceId: 'reference-1',
-        description: 'A red poster.',
-        salientSubjects: ['poster'],
-        visibleText: ['SALE'],
-      }],
-    },
-    referenceRoles: [{ referenceId: 'reference-1', role: 'edit_target' }],
-    targetSelectionReason: 'The user selected this image.',
-    targetSelectionConfidence: 'high',
-    imageTask: {
-      operation: 'edit',
-      targetReferenceId: 'reference-1',
-      supportingReferenceIds: [],
-      targetRegionIds: [],
-      instruction: 'Replace SALE with OPEN.',
-      mustChange: ['visible text'],
-      mustPreserve: ['layout'],
-    },
-    brief: {
-      deliverable: 'One edited poster',
-      subject: 'Red poster',
-      style: ['minimal'],
-      literalCopy: ['OPEN'],
-      constraints: ['preserve layout'],
-    },
-    delivery: {
-      mode: 'single',
-      outputCount: 1,
-      panelCount: null,
-      variationAxes: [],
-      sharedInvariants: [],
-      distinctPerItem: [],
-      items: [],
-    },
-    generation: { aspectRatio: '2:3', promptFormat: 'text', prompt: 'Edit the red poster.', items: [] },
-  };
-  const result = await executeAgentTool(
-    registry,
-    'submit_image_execution_plan',
-    draft,
-    { allowedTools: ['submit_image_execution_plan'] },
-  );
-  assert.equal(result.terminate, true);
-  assert.deepEqual(drafts, [draft]);
-
-  await assert.rejects(
-    () => executeAgentTool(registry, 'submit_image_execution_plan', {
-      ...draft,
-      contextEntityIds: [...draft.contextEntityIds, 'entity-8'],
-    }, { allowedTools: ['submit_image_execution_plan'] }),
-    /too many items/,
-  );
-  await assert.rejects(
-    () => executeAgentTool(registry, 'submit_image_execution_plan', {
-      ...draft,
-      visualReferenceIds: ['a', 'b', 'c', 'd', 'e'],
-    }, { allowedTools: ['submit_image_execution_plan'] }),
-    /too many items/,
-  );
-  await assert.rejects(
-    () => executeAgentTool(registry, 'submit_image_execution_plan', {
-      ...draft,
-      delivery: { ...draft.delivery, outputCount: 0 },
-    }, { allowedTools: ['submit_image_execution_plan'] }),
-    /too small/,
-  );
-  await assert.rejects(
-    () => executeAgentTool(registry, 'submit_image_execution_plan', {
-      ...draft,
-      generation: { ...draft.generation, aspectRatio: '7:5' },
-    }, { allowedTools: ['submit_image_execution_plan'] }),
-    /allowed value/,
-  );
+test('legacy image planning tools are not registered', () => {
+  const registry = createAgentToolRegistry();
+  assert.equal(registry.has('submit_image_execution_plan'), false);
+  assert.equal(registry.has('start_image_planning'), false);
+  assert.equal(registry.has('handoff_to_image_planner'), false);
 });
 
 test('recovery gate tool terminates without accepting rewritten task content', async () => {
@@ -413,33 +309,6 @@ test('every model-visible tool accepts optional public progress without changing
   assert.equal(registry.get('get_canvas_context').parameters.properties.publicProgress, undefined);
   assert.equal(definitions.find((tool) => tool.function.name === 'generate_image')
     .function.parameters.properties.publicProgress.properties.promptPreparation.type, 'object');
-});
-
-test('Image Planner handoff can select one validated failed task without rewriting its request', async () => {
-  const calls = [];
-  const registry = createAgentToolRegistry({
-    handoffToImagePlanner: (args) => {
-      calls.push(args);
-      return { terminate: true, type: 'planner_handoff', ...args };
-    },
-  });
-  const result = await executeAgentTool(
-    registry,
-    'handoff_to_image_planner',
-    {
-      skillId: null,
-      contextEntityIds: [],
-      visualReferenceIds: [],
-      visualSummary: null,
-      confidence: 'high',
-      resumeTaskId: 'agent-run-1',
-    },
-    { allowedTools: ['handoff_to_image_planner'] },
-  );
-  assert.equal(result.resumeTaskId, 'agent-run-1');
-  assert.equal(Object.hasOwn(calls[0], 'prompt'), false);
-  assert.equal(Object.hasOwn(calls[0], 'brief'), false);
-  assert.equal(Object.hasOwn(calls[0], 'generationPrompt'), false);
 });
 
 test('executeAgentTool enforces skill allowlists and confirmation', async () => {

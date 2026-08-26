@@ -15,6 +15,51 @@ const ids = (value, limit = 20) => Array.isArray(value)
   : [];
 const nonNegativeInt = (value, max = 100) => Math.min(max, Math.max(0, Math.floor(Number(value) || 0)));
 
+function normalizeReferenceContext(value) {
+  if (!record(value)) return null;
+  const references = Array.isArray(value.references) ? value.references.flatMap((entry) => {
+    if (!record(entry)) return [];
+    const id = bounded(entry.id, 200);
+    const src = bounded(entry.src, 20_000);
+    const label = bounded(entry.label, 200);
+    const source = ['upload', 'history', 'canvas'].includes(entry.source) ? entry.source : null;
+    const role = ['reference', 'edit_target', 'annotation_bundle', 'region_target'].includes(entry.role) ? entry.role : null;
+    if (!id || !src || !label || !source || !role) return [];
+    return [{
+      id, src, label, source, role,
+      ...(bounded(entry.plannerPreviewSrc, 20_000) ? { plannerPreviewSrc: bounded(entry.plannerPreviewSrc, 20_000) } : {}),
+      ...(bounded(entry.canvasItemId, 200) ? { canvasItemId: bounded(entry.canvasItemId, 200) } : {}),
+      ...(bounded(entry.regionId, 200) ? { regionId: bounded(entry.regionId, 200) } : {}),
+      ...(bounded(entry.candidateId, 200) ? { candidateId: bounded(entry.candidateId, 200) } : {}),
+      ...(entry.confirmationStatus === 'confirmed' || entry.confirmationStatus === 'pending' ? { confirmationStatus: entry.confirmationStatus } : {}),
+      ...(bounded(entry.sourceTaskId, 200) ? { sourceTaskId: bounded(entry.sourceTaskId, 200) } : {}),
+      ...(bounded(entry.sourceVersionId, 200) ? { sourceVersionId: bounded(entry.sourceVersionId, 200) } : {}),
+      ...(entry.targetPoint && Number.isFinite(Number(entry.targetPoint.x)) && Number.isFinite(Number(entry.targetPoint.y))
+        ? { targetPoint: { x: Number(entry.targetPoint.x), y: Number(entry.targetPoint.y) } } : {}),
+      ...(entry.targetBox && ['x', 'y', 'width', 'height'].every((key) => Number.isFinite(Number(entry.targetBox[key])))
+        ? { targetBox: { x: Number(entry.targetBox.x), y: Number(entry.targetBox.y), width: Number(entry.targetBox.width), height: Number(entry.targetBox.height) } } : {}),
+    }];
+  }).slice(0, 14) : [];
+  const ids = new Set(references.map((reference) => reference.id));
+  const composerSegments = Array.isArray(value.composerSegments) ? value.composerSegments.flatMap((entry) => {
+    if (!record(entry)) return [];
+    if (entry.type === 'text' && typeof entry.text === 'string') return [{ type: 'text', text: entry.text.slice(0, 4000) }];
+    if (entry.type === 'reference' && ids.has(entry.referenceId)) return [{ type: 'reference', referenceId: entry.referenceId }];
+    return [];
+  }).slice(0, 64) : [];
+  const evidenceImages = Array.isArray(value.evidenceImages) ? value.evidenceImages.flatMap((entry) => {
+    if (!record(entry)) return [];
+    const id = bounded(entry.id, 200);
+    const referenceId = bounded(entry.referenceId, 200);
+    const src = bounded(entry.src, 20_000);
+    if (!id || !referenceId || !src || !ids.has(referenceId) || !['annotation_composite', 'region_crop'].includes(entry.kind)) return [];
+    return [{ id, referenceId, src, kind: entry.kind }];
+  }).slice(0, 14) : [];
+  return references.length > 0 || composerSegments.length > 0 || evidenceImages.length > 0
+    ? { references, composerSegments, ...(evidenceImages.length ? { evidenceImages } : {}) }
+    : null;
+}
+
 function normalizeMainAgentLoop(value) {
   const input = record(value);
   if (!input || !Array.isArray(input.transcript)) return null;
@@ -85,6 +130,8 @@ export function normalizeAgentRecoveryRecord(value) {
   if (!input || !failure || Number(input.version) !== 1) return null;
   const taskId = bounded(input.taskId, 200);
   const runId = bounded(input.runId, 200);
+  const operationId = bounded(input.operationId, 200) || runId;
+  const lastSequence = nonNegativeInt(input.lastSequence, Number.MAX_SAFE_INTEGER);
   const topicId = bounded(input.topicId, 200);
   const sourceUserMessageId = bounded(input.sourceUserMessageId, 200);
   const originalRequest = bounded(input.originalRequest, 4000);
@@ -94,6 +141,7 @@ export function normalizeAgentRecoveryRecord(value) {
   const retryability = RETRYABILITY.has(failure.retryability) ? failure.retryability : 'unknown';
   const snapshot = record(input.taskSnapshot);
   const visualSummary = normalizeAgentVisualSummary(input.visualSummary);
+  const referenceContext = normalizeReferenceContext(input.referenceContext);
   const mainAgentLoop = normalizeMainAgentLoop(input.mainAgentLoop);
   const imageOperation = input.imageOperation === 'generate' || input.imageOperation === 'edit'
     ? input.imageOperation
@@ -102,6 +150,8 @@ export function normalizeAgentRecoveryRecord(value) {
     version: 1,
     taskId,
     runId,
+    operationId,
+    lastSequence,
     topicId,
     sourceUserMessageId,
     status: input.status === 'cancelled' ? 'cancelled' : 'failed',
@@ -119,6 +169,7 @@ export function normalizeAgentRecoveryRecord(value) {
     ...(bounded(input.targetReferenceId, 200) ? { targetReferenceId: bounded(input.targetReferenceId, 200) } : {}),
     contextEntityIds: ids(input.contextEntityIds),
     visualReferenceIds: ids(input.visualReferenceIds),
+    ...(referenceContext ? { referenceContext } : {}),
     ...(visualSummary ? { visualSummary } : {}),
     ...(snapshot ? { taskSnapshot: structuredClone(snapshot) } : {}),
     ...(mainAgentLoop ? { mainAgentLoop } : {}),
@@ -128,6 +179,12 @@ export function normalizeAgentRecoveryRecord(value) {
 }
 
 export function createAgentRecoveryRecord(input = {}) {
+  const taskId = input.taskId || input.runId;
+  const runId = input.runId || input.taskId;
+  const operationId = input.operationId || runId || taskId;
+  const lastSequence = input.lastSequence === undefined
+    ? 0
+    : input.lastSequence;
   const classified = classifyAgentFailure({
     stage: input.failureStage,
     reason: input.failureReason,
@@ -136,8 +193,10 @@ export function createAgentRecoveryRecord(input = {}) {
   });
   return normalizeAgentRecoveryRecord({
     version: 1,
-    taskId: input.taskId || input.runId,
-    runId: input.runId || input.taskId,
+    taskId,
+    runId,
+    operationId,
+    lastSequence,
     topicId: input.topicId,
     sourceUserMessageId: input.sourceUserMessageId,
     status: input.status === 'cancelled' ? 'cancelled' : 'failed',
@@ -155,6 +214,7 @@ export function createAgentRecoveryRecord(input = {}) {
     targetReferenceId: input.targetReferenceId,
     contextEntityIds: input.contextEntityIds || [],
     visualReferenceIds: input.visualReferenceIds || [],
+    referenceContext: input.referenceContext,
     visualSummary: input.visualSummary,
     taskSnapshot: input.taskSnapshot,
     mainAgentLoop: input.mainAgentLoop,

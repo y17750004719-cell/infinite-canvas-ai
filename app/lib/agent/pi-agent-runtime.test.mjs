@@ -1131,73 +1131,30 @@ test('Pi runtime converts prose into one restricted terminal-tool correction tur
   ]);
 });
 
-test('Pi runtime forces and terminates the isolated image routing stage', async () => {
+test('Pi runtime accepts the direct generate_image terminal tool', async () => {
   let requests = 0;
-  const registry = createAgentToolRegistry({
-    startImagePlanning: () => ({ terminate: true, type: 'image_planning_started' }),
-  });
   const result = await runZFlowAgentBrain({
     messages: [{ role: 'user', content: 'generate a poster' }],
     providerId: 'provider-1',
     model: 'test-model',
-    tools: getAgentModelTools(registry, ['start_image_planning']),
-    initialToolNames: ['start_image_planning'],
-    requireInitialTool: 'start_image_planning',
-    requireTerminalTool: 'start_image_planning',
+    tools: [{
+      name: 'generate_image',
+      parameters: { type: 'object', properties: {}, additionalProperties: false },
+      readOnly: false,
+      terminal: true,
+      countAgainstToolBudget: false,
+    }],
+    initialToolNames: ['generate_image'],
     chatStream: (request) => {
       requests += 1;
-      if (requests === 1) {
-        assert.deepEqual(request.tools.map((tool) => tool.function.name), ['start_image_planning']);
-        assert.deepEqual(request.toolChoice, { type: 'function', function: { name: 'start_image_planning' } });
-        return toolStream([{
-          id: 'operation-1',
-          name: 'start_image_planning',
-          args: { operation: 'generate', requestedParameters: { outputCount: 1, aspectRatio: '3:4', deliveryMode: 'single' }, readiness: { goal: 'Generate a poster', targetIds: [], constraints: [], resolvedAmbiguities: [], blockingUnknowns: [] }, publicProgress: { activeLabel: '开始图片规划', completedLabel: '图片规划已开始', completionSummary: '已进入图片规划。', failedLabel: '图片规划失败' } },
-        }])();
-      }
+      assert.deepEqual(request.tools.map((tool) => tool.function.name), ['generate_image']);
+      return toolStream([{ id: 'image-1', name: 'generate_image', args: {} }])();
     },
-    executeTool: (name, args, context) => executeAgentTool(registry, name, args, {
-      allowedTools: ['start_image_planning'],
-      toolCallId: context.toolCallId,
-    }),
+    executeTool: async () => ({ terminate: true, type: 'image_execution', contract: {} }),
   });
   assert.equal(result.stopReason, 'completed');
+  assert.equal(result.terminal.type, 'image_execution');
   assert.equal(requests, 1);
-});
-
-test('Pi runtime retries a missed isolated image routing stage once', async () => {
-  let requests = 0;
-  const registry = createAgentToolRegistry({
-    startImagePlanning: () => ({ terminate: true, type: 'image_planning_started' }),
-  });
-  const result = await runZFlowAgentBrain({
-    messages: [{ role: 'user', content: 'generate a poster' }],
-    providerId: 'provider-1',
-    model: 'test-model',
-    tools: getAgentModelTools(registry, ['start_image_planning']),
-    initialToolNames: ['start_image_planning'],
-    requireInitialTool: 'start_image_planning',
-    requireTerminalTool: 'start_image_planning',
-    chatStream: (request) => {
-      requests += 1;
-      if (requests === 1) return textStream('I will inspect the reference first.')();
-      if (requests === 2) {
-        assert.deepEqual(request.tools.map((tool) => tool.function.name), ['start_image_planning']);
-        assert.equal(request.toolChoice, 'required');
-        return toolStream([{
-          id: 'operation-1',
-          name: 'start_image_planning',
-          args: { operation: 'generate', requestedParameters: { outputCount: 1, aspectRatio: '3:4', deliveryMode: 'single' }, readiness: { goal: 'Generate a poster', targetIds: [], constraints: [], resolvedAmbiguities: [], blockingUnknowns: [] }, publicProgress: { activeLabel: '开始图片规划', completedLabel: '图片规划已开始', completionSummary: '已进入图片规划。', failedLabel: '图片规划失败' } },
-        }])();
-      }
-    },
-    executeTool: (name, args, context) => executeAgentTool(registry, name, args, {
-      allowedTools: ['start_image_planning'],
-      toolCallId: context.toolCallId,
-    }),
-  });
-  assert.equal(result.stopReason, 'completed');
-  assert.equal(requests, 2);
 });
 
 test('Pi runtime includes the locked contract snapshot in the forced repair turn', async () => {

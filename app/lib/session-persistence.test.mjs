@@ -182,7 +182,7 @@ test('buildPersistedSession keeps task snapshots only on their owning assistant 
   }];
   const agentRecovery = {
     version: 1,
-    taskId: 'task-1', runId: 'run-1', topicId: 'topic-1', sourceUserMessageId: 'user-1',
+    taskId: 'task-1', runId: 'run-1', operationId: 'run-1', lastSequence: 0, topicId: 'topic-1', sourceUserMessageId: 'user-1',
     status: 'failed', resumeRoute: 'image_planner', intent: 'image', originalRequest: '生成海报',
     failure: { stage: 'planning', kind: 'transport', message: '连接中断', retryability: 'retryable' },
     skillId: null, contextEntityIds: [], visualReferenceIds: [], completedAssetCount: 0, createdAt: 1,

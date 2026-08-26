@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { toGeminiSchema } from './gemini-schema.mjs';
+import { assertGeminiSchemaCompatible, toGeminiSchema } from './gemini-schema.mjs';
 
 test('converts nested JSON Schema into Gemini Schema', () => {
   assert.deepEqual(toGeminiSchema({
@@ -64,4 +64,12 @@ test('drops non-string enum values unsupported by Gemini Schema', () => {
     toGeminiSchema({ type: 'integer', enum: [1] }),
     { type: 'INTEGER' },
   );
+});
+
+test('Gemini compatibility assertion rejects OpenAI-only schema fields recursively', () => {
+  assert.throws(
+    () => assertGeminiSchemaCompatible({ type: 'OBJECT', properties: { value: { type: 'STRING', additionalProperties: false } } }),
+    /additionalProperties/,
+  );
+  assert.equal(assertGeminiSchemaCompatible(toGeminiSchema({ type: 'object', additionalProperties: false, properties: { value: { type: 'string', minLength: 1 } } })), true);
 });

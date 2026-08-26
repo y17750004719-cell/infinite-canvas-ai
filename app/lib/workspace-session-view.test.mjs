@@ -115,6 +115,8 @@ test('getRecentFailedAgentTask preserves the original request and failure stage 
     version: 1,
     taskId: 'agent-run-1',
     runId: 'agent-run-1',
+    operationId: 'agent-run-1',
+    lastSequence: 0,
     topicId: 'default',
     sourceUserMessageId: 'user-1',
     status: 'failed',
@@ -130,6 +132,10 @@ test('getRecentFailedAgentTask preserves the original request and failure stage 
     skillId: 'poster',
     contextEntityIds: ['history-image:1'],
     visualReferenceIds: ['history-image:1'],
+    referenceContext: {
+      references: [{ id: 'history-image:1', src: '/image.png', label: '参考图', source: 'history', role: 'reference' }],
+      composerSegments: [{ type: 'reference', referenceId: 'history-image:1' }],
+    },
     completedAssetCount: 0,
     createdAt: result.createdAt,
   });

@@ -113,6 +113,8 @@ export interface ChatMessage {
     request: {
       id: string;
       taskId: string;
+      operationId?: string;
+      lastSequence?: number;
       question: string;
       dimension: string;
       options: Array<{ id: string; label: string; answer: string; description?: string }>;
@@ -249,6 +251,9 @@ export interface TaskSnapshotActiveVersion {
 export interface TaskSnapshot {
   topicId: string;
   taskId: string;
+  /** Added in the identity protocol; absent only on legacy persisted snapshots. */
+  operationId?: string;
+  lastSequence?: number;
   contractVersion: number;
   contract?: AgentTaskContract;
   agentAnalysis?: AgentAnalysisSnapshot;
@@ -287,7 +292,10 @@ export interface ProjectSession {
   imageModelId?: string;
   generatedImageHistory?: GeneratedImageHistoryEntry[];
   activeAgentRun?: {
+    taskId?: string;
     runId: string;
+    operationId?: string;
+    lastSequence?: number;
     userMessageId: string;
     assistantMessageId: string;
     startedAt: number;

@@ -10,13 +10,18 @@ import {
 
 test('non-interruptible execution defers steering until the current result is retained', () => {
   const runId = 'registry-test-image';
-  registerActiveAgentRun(runId);
+  registerActiveAgentRun(runId, { taskId: 'task-1', operationId: 'operation-1' });
   updateActiveAgentRun(runId, { phase: 'executing', nonInterruptible: true });
 
   assert.deepEqual(enqueueActiveAgentRunInput(runId, { delivery: 'steer', input: '把背景调亮' }), {
     accepted: true,
     delivery: 'follow_up',
     phase: 'executing',
+  });
+  assert.deepEqual(enqueueActiveAgentRunInput(runId, { operationId: 'old-operation', input: '过期输入' }), {
+    accepted: false,
+    reason: 'stale_operation',
+    operationId: 'operation-1',
   });
   assert.equal(takeActiveAgentRunInputs(runId, 'steer').length, 0);
   assert.equal(takeActiveAgentRunInputs(runId, 'follow_up')[0].content[0].text, '把背景调亮');
