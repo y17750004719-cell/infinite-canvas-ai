@@ -368,14 +368,14 @@ test('Pi runtime terminates on an explicit handoff without charging the query bu
     providerId: 'provider-1',
     model: 'test-model',
     tools: [{
-      name: 'handoff_to_image_planner',
+      name: 'generate_image',
       parameters: { type: 'object', properties: {}, additionalProperties: false },
       readOnly: true,
       terminal: true,
       countAgainstToolBudget: false,
     }],
     maxToolCalls: 0,
-    chatStream: () => toolStream([{ id: 'handoff-1', name: 'handoff_to_image_planner', args: {} }])(),
+    chatStream: () => toolStream([{ id: 'handoff-1', name: 'generate_image', args: {} }])(),
     executeTool: async () => ({ terminate: true, type: 'planner_handoff' }),
   });
   assert.equal(result.stopReason, 'completed');
@@ -813,7 +813,7 @@ test('Pi runtime reserves a final text turn after the query budget is consumed',
     tools: [
       { ...tools[0], readOnly: true },
       {
-        name: 'handoff_to_image_planner',
+        name: 'generate_image',
         parameters: { type: 'object', properties: {}, additionalProperties: false },
         readOnly: true,
         terminal: true,
@@ -837,8 +837,8 @@ test('Pi runtime reserves a final text turn after the query budget is consumed',
   assert.equal(result.turns, 2);
   assert.equal(result.budgetedToolCalls, 1);
   assert.deepEqual(exposedTools, [
-    ['echo', 'handoff_to_image_planner'],
-    ['handoff_to_image_planner'],
+    ['echo', 'generate_image'],
+    ['generate_image'],
   ]);
 });
 
@@ -852,7 +852,7 @@ test('Pi runtime reserves the last model turn when query tools are still active'
     tools: [
       { ...tools[0], readOnly: true },
       {
-        name: 'handoff_to_image_planner',
+        name: 'generate_image',
         parameters: { type: 'object', properties: {}, additionalProperties: false },
         readOnly: true,
         terminal: true,
@@ -865,7 +865,7 @@ test('Pi runtime reserves the last model turn when query tools are still active'
     chatStream: (request) => {
       requests += 1;
       if (requests === 3) {
-        assert.deepEqual(request.tools.map((tool) => tool.function.name), ['handoff_to_image_planner']);
+        assert.deepEqual(request.tools.map((tool) => tool.function.name), ['generate_image']);
         return textStream('wrapped up')();
       }
       return toolStream([{ id: `read-${requests}`, name: 'echo', args: { value: `context-${requests}` } }])();
@@ -891,7 +891,7 @@ test('Pi runtime fails closed when the closing turn calls a hidden query tool', 
     tools: [
       { ...tools[0], readOnly: true },
       {
-        name: 'handoff_to_image_planner',
+        name: 'generate_image',
         parameters: { type: 'object', properties: {}, additionalProperties: false },
         readOnly: true,
         terminal: true,
@@ -925,7 +925,7 @@ test('Pi runtime allows a non-budgeted terminal control during the closing turn'
     tools: [
       { ...tools[0], readOnly: true },
       {
-        name: 'handoff_to_image_planner',
+        name: 'generate_image',
         parameters: { type: 'object', properties: {}, additionalProperties: false },
         readOnly: true,
         terminal: true,
@@ -939,9 +939,9 @@ test('Pi runtime allows a non-budgeted terminal control during the closing turn'
       requests += 1;
       return requests === 1
         ? toolStream([{ id: 'read-1', name: 'echo', args: { value: 'context' } }])()
-        : toolStream([{ id: 'handoff-1', name: 'handoff_to_image_planner', args: {} }])();
+        : toolStream([{ id: 'handoff-1', name: 'generate_image', args: {} }])();
     },
-    executeTool: async (name, args) => name === 'handoff_to_image_planner'
+    executeTool: async (name, args) => name === 'generate_image'
       ? { terminate: true, type: 'planner_handoff' }
       : { modelResult: args, publicResult: args },
   });
@@ -956,7 +956,7 @@ test('Pi runtime gives one restricted repair turn after an invalid handoff', asy
   let executions = 0;
   const exposedTools = [];
   const handoff = {
-    name: 'handoff_to_image_planner',
+    name: 'generate_image',
     parameters: {
       type: 'object',
       properties: { confidence: { type: 'string', enum: ['high'] } },
@@ -975,13 +975,13 @@ test('Pi runtime gives one restricted repair turn after an invalid handoff', asy
     maxTurns: 3,
     maxToolCalls: 3,
     reserveClosingTurn: true,
-    repairInvalidTerminalToolOnce: 'handoff_to_image_planner',
+    repairInvalidTerminalToolOnce: 'generate_image',
     chatStream: (request) => {
       requests += 1;
       exposedTools.push(request.tools.map((tool) => tool.function.name));
       return requests === 1
-        ? toolStream([{ id: 'bad-handoff', name: 'handoff_to_image_planner', args: {} }])()
-        : toolStream([{ id: 'fixed-handoff', name: 'handoff_to_image_planner', args: { confidence: 'high' } }])();
+        ? toolStream([{ id: 'bad-handoff', name: 'generate_image', args: {} }])()
+        : toolStream([{ id: 'fixed-handoff', name: 'generate_image', args: { confidence: 'high' } }])();
     },
     executeTool: async () => {
       executions += 1;
@@ -993,8 +993,8 @@ test('Pi runtime gives one restricted repair turn after an invalid handoff', asy
   assert.equal(requests, 2);
   assert.equal(executions, 1);
   assert.deepEqual(exposedTools, [
-    ['echo', 'handoff_to_image_planner'],
-    ['handoff_to_image_planner'],
+    ['echo', 'generate_image'],
+    ['generate_image'],
   ]);
 });
 
@@ -1038,7 +1038,7 @@ test('Pi runtime fails once when the restricted handoff repair is still invalid'
     providerId: 'provider-1',
     model: 'test-model',
     tools: [{
-      name: 'handoff_to_image_planner',
+      name: 'generate_image',
       parameters: {
         type: 'object',
         properties: { confidence: { type: 'string', enum: ['high'] } },
@@ -1052,11 +1052,11 @@ test('Pi runtime fails once when the restricted handoff repair is still invalid'
     maxTurns: 4,
     maxToolCalls: 4,
     reserveClosingTurn: true,
-    repairInvalidTerminalToolOnce: 'handoff_to_image_planner',
+    repairInvalidTerminalToolOnce: 'generate_image',
     chatStream: () => {
       requests += 1;
       return requests === 1
-        ? toolStream([{ id: 'bad-handoff-1', name: 'handoff_to_image_planner', args: {} }])()
+        ? toolStream([{ id: 'bad-handoff-1', name: 'generate_image', args: {} }])()
         : textStream('I will keep investigating')();
     },
     executeTool: async () => ({ terminate: true, type: 'planner_handoff' }),
@@ -1276,7 +1276,7 @@ test('Pi runtime does not add a closing request after a terminal penultimate tur
     providerId: 'provider-1',
     model: 'test-model',
     tools: [{
-      name: 'handoff_to_image_planner',
+      name: 'generate_image',
       parameters: { type: 'object', properties: {}, additionalProperties: false },
       readOnly: true,
       terminal: true,
@@ -1287,7 +1287,7 @@ test('Pi runtime does not add a closing request after a terminal penultimate tur
     reserveClosingTurn: true,
     chatStream: () => {
       requests += 1;
-      return toolStream([{ id: 'handoff-1', name: 'handoff_to_image_planner', args: {} }])();
+      return toolStream([{ id: 'handoff-1', name: 'generate_image', args: {} }])();
     },
     executeTool: async () => ({ terminate: true, type: 'planner_handoff' }),
   });

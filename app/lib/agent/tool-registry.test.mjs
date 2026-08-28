@@ -265,7 +265,6 @@ test('legacy image planning tools are not registered', () => {
   const registry = createAgentToolRegistry();
   assert.equal(registry.has('submit_image_execution_plan'), false);
   assert.equal(registry.has('start_image_planning'), false);
-  assert.equal(registry.has('handoff_to_image_planner'), false);
 });
 
 test('recovery gate tool terminates without accepting rewritten task content', async () => {

@@ -277,6 +277,7 @@ test('every chat-generated image is materialized in both chat and the canvas', (
   assert.match(source, /const canvasItems = loadedAssets\.map/);
   assert.match(source, /recordCurrentCanvasUndoSnapshot\(\);\s*setItems\(prev => \[\.\.\.prev, \.\.\.canvasItems\]\)/);
   assert.match(source, /type: 'assets_settled'/);
+  assert.match(source, /type: 'assets_settled',[\s\S]{0,80}origin: 'client'/);
   assert.match(source, /setImageCount\(\(prev\) => prev \+ loadedAssets\.length\)/);
   assert.match(source, /if \(msg\.imageUrl && !content\) return \[\]/);
   assert.doesNotMatch(source, /\[Generated image\$\{/);
@@ -287,6 +288,7 @@ test('every chat-generated image is materialized in both chat and the canvas', (
   assert.match(source, /pendingAssistantMessageIdRef\.current === assistantPlaceholderId/);
   assert.match(source, /activeSkillJobMessageIdRef\.current = assistantId/);
   assert.match(source, /type: 'assets_progress'/);
+  assert.match(source, /type: 'assets_progress',[\s\S]{0,80}origin: 'client'/);
   assert.match(source, /updateChatMessageById\(skillJobMessageId/);
   assert.doesNotMatch(source, /agentReadOnlySkillJobIdsRef/);
   assert.doesNotMatch(source, /if \(!isAgentReadOnlyJob\)/);

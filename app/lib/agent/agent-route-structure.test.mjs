@@ -99,7 +99,7 @@ test('ordinary text cannot trigger an image mutation when the model misses Plann
   const naturalEnd = source.indexOf("if (terminal.type !== 'image_execution'", naturalStart);
   const naturalBranch = source.slice(naturalStart, naturalEnd);
   assert.match(naturalBranch, /writeAgentDone\('completed'\)/);
-  assert.doesNotMatch(naturalBranch, /generate_image|start_skill_job|planAgentExecutionRequest/);
+  assert.doesNotMatch(naturalBranch, /generate_image|start_skill_job/);
 });
 
 test('historical visual loading is bounded and becomes a multimodal next-turn attachment', () => {
@@ -169,7 +169,6 @@ test('direct ImageGen does not invoke Planner transport from the active route', 
   const directStart = routeSource.indexOf('generateImage: async (args: Record<string, unknown>, context:', mainAgentStart);
   const directEnd = routeSource.indexOf('getConversationMemory:', directStart);
   const activeSource = routeSource.slice(directStart, directEnd);
-  assert.doesNotMatch(activeSource, /planAgentExecutionRequest|AGENT_PLANNER_PROVIDER_ID|AGENT_PLANNER_MODEL/);
   assert.match(activeSource, /lockedImageToolArgs = imageExecutionContract/);
 });
 

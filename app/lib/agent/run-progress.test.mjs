@@ -577,6 +577,88 @@ test('agent_done before image assets settle does not complete the run', () => {
   assert.equal(state.outcome, 'waiting');
 });
 
+test('client asset updates do not consume lifecycle sequence or reopen a settled run', () => {
+  let state = reduceAgentRunProgress(null, progress(1, {
+    runId: 'client-assets',
+    stepId: 'generate_image',
+    toolName: 'generate_image',
+    status: 'completed',
+    phase: 'generating',
+    timestampMs: 1_000,
+  }));
+  state = reduceAgentRunProgress(state, { type: 'assets_pending', count: 1, origin: 'client' });
+  state = reduceAgentRunProgress(state, {
+    type: 'assets_settled',
+    succeeded: 1,
+    failed: 0,
+    origin: 'client',
+    timestampMs: 2_000,
+  });
+
+  assert.equal(state.lastSequence, 1);
+  state = reduceAgentRunProgress(state, {
+    type: 'agent_completion_summary',
+    runId: 'client-assets',
+    operationId: 'operation-1',
+    sequence: 2,
+    timestampMs: 3_000,
+    summary: '图片生成完成',
+  });
+  assert.equal(state.runEndedAt, 3_000);
+  assert.equal(state.outcome, 'completed');
+
+  state = reduceAgentRunProgress(state, {
+    type: 'assets_settled',
+    succeeded: 1,
+    failed: 0,
+    origin: 'client',
+    timestampMs: 9_000,
+  });
+  assert.equal(state.runEndedAt, 3_000);
+  assert.equal(getAgentRunElapsedMs(state, 99_000), 2_000);
+});
+
+test('repairs a persisted running image state only when all terminal evidence is present', () => {
+  const repaired = reduceAgentRunProgress({
+    timelineVersion: 2,
+    taskId: 'persisted-task',
+    runId: 'persisted-run',
+    operationId: 'persisted-operation',
+    intent: 'image',
+    lastSequence: 4,
+    runStartedAt: 1_000,
+    attempts: [{ runId: 'persisted-run', startedAt: 1_000 }],
+    steps: [{
+      stepId: 'generate_image',
+      toolName: 'generate_image',
+      phase: 'generating',
+      status: 'completed',
+      label: '图片生成完成',
+      completedAt: 4_000,
+    }],
+    agentDone: false,
+    terminalFailed: false,
+    assets: { expected: 1, settled: 1, succeeded: 1, failed: 0 },
+    outcome: 'running',
+  }, { type: 'session_hydrate', timestampMs: 99_000 });
+  assert.equal(repaired.outcome, 'completed');
+  assert.equal(repaired.agentDone, true);
+  assert.equal(repaired.runEndedAt, 4_000);
+  assert.equal(repaired.attempts[0].endedAt, 4_000);
+  assert.equal(getAgentRunElapsedMs(repaired, 99_000), 3_000);
+
+  const active = reduceAgentRunProgress({
+    ...repaired,
+    agentDone: false,
+    runEndedAt: undefined,
+    outcome: 'running',
+    steps: [{ ...repaired.steps[0], status: 'active', completedAt: undefined }],
+  }, { type: 'session_hydrate', timestampMs: 99_000 });
+  assert.equal(active.outcome, 'running');
+  assert.equal(active.agentDone, false);
+  assert.equal(active.runEndedAt, undefined);
+});
+
 test('settling all announced assets completes an agent run', () => {
   let state = reduceAgentRunProgress(null, progress(1, {
     stepId: 'generate_image',

@@ -1317,11 +1317,7 @@ export async function POST(request: NextRequest) {
             }
           : {}),
       };
-      const legacyExecutionPlanDetected = Boolean(activeClarificationState?.executionPlan);
-      if (legacyExecutionPlanDetected && activeClarificationState) {
-        activeClarificationState.executionPlan = undefined;
-      }
-      // Historical executionPlan snapshots are read for compatibility only; new runs always re-enter Main Agent.
+      // Persisted execution plans are not reactivated; every run enters Main Agent.
       let executionPlan: AgentExecutionPlan | null = null;
       let lockedImageToolArgs: Record<string, unknown> | null = null;
       if (executionPlan?.generation?.aspectRatio) {
@@ -4693,7 +4689,6 @@ export async function POST(request: NextRequest) {
               || body.clarificationRequest.dimension === 'planner_model_switch'
               || body.clarificationRequest.dimension === 'image_operation'
               || body.clarificationRequest.dimension === 'recovery_scope'
-              || legacyExecutionPlanDetected
               || activeClarificationState.executionPlan?.needsClarification === true
             )
           ) {

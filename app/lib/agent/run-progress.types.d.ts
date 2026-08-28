@@ -169,9 +169,9 @@ export type AgentRunProgressEvent =
       retryability?: 'retryable' | 'requires_change' | 'unknown';
       detail?: unknown;
     }
-  | { type: 'assets_pending'; count: number; taskId?: string; operationId?: string; runId?: string; sequence?: number; timestampMs?: number }
-  | { type: 'assets_progress'; total: number; succeeded: number; failed: number; sequence?: number; timestampMs?: number }
-  | { type: 'assets_settled'; succeeded: number; failed: number; sequence?: number; timestampMs?: number }
+  | { type: 'assets_pending'; count: number; taskId?: string; operationId?: string; runId?: string; sequence?: number; timestampMs?: number; origin?: 'server' | 'client' }
+  | { type: 'assets_progress'; total: number; succeeded: number; failed: number; sequence?: number; timestampMs?: number; origin?: 'server' | 'client' }
+  | { type: 'assets_settled'; succeeded: number; failed: number; sequence?: number; timestampMs?: number; origin?: 'server' | 'client' }
   | { type: 'agent_completion_summary'; taskId?: string; runId?: string; operationId?: string; summary?: string; sequence?: number; timestampMs?: number }
   | { type: 'agent_done'; taskId?: string; runId?: string; operationId?: string; sequence?: number; timestampMs?: number }
   | { type: 'agent_error'; taskId?: string; runId?: string; operationId?: string; sequence?: number; timestampMs?: number; message?: string; retryable?: boolean; code?: string }

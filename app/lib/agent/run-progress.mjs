@@ -15,7 +15,6 @@ const TOOL_LABELS = {
   start_image_planning: '启动图片规划',
   rewind_agent_analysis: '按修订回退任务',
   resolve_failed_task_recovery: '定位上次任务',
-  handoff_to_image_planner: '交给 Image Planner',
   request_context_selection: '等待选择引用',
   request_image_clarification: '等待补充信息',
   generate_image: '生成图片',
@@ -144,9 +143,10 @@ function normalizeState(input, event = {}) {
     const taskId = typeof base.taskId === 'string' && base.taskId
       ? base.taskId
       : (typeof base.runId === 'string' ? base.runId : '');
-    return steps.every((step, index) => step === existingSteps[index]) && taskId === base.taskId
+    const normalized = steps.every((step, index) => step === existingSteps[index]) && taskId === base.taskId
       ? base
       : { ...base, taskId, steps };
+    return repairPersistedTerminalState(normalized, now);
   }
   let sequence = Math.max(0, finiteCount(base.lastSequence) - (base.steps?.length || 0));
   const steps = Array.isArray(base.steps) ? base.steps.map((step) => {
@@ -161,7 +161,7 @@ function normalizeState(input, event = {}) {
     }, base.runId);
   }) : [];
   const normalizedSteps = dedupePersistedErrorSteps(steps);
-  return {
+  const normalized = {
     ...base,
     timelineVersion: 2,
     taskId: typeof base.taskId === 'string' && base.taskId ? base.taskId : base.runId,
@@ -170,6 +170,7 @@ function normalizeState(input, event = {}) {
     lastSequence: Math.max(finiteCount(base.lastSequence), sequence),
     steps: normalizedSteps,
   };
+  return repairPersistedTerminalState(normalized, now);
 }
 
 function stamp(state, event = {}, allowCurrentSequence = false) {
@@ -239,6 +240,25 @@ function deriveOutcome(state) {
 
 function withOutcome(state) {
   return { ...state, outcome: deriveOutcome(state) };
+}
+
+function repairPersistedTerminalState(state, now) {
+  if (state.outcome !== 'running' || state.agentDone || state.terminalFailed || state.terminalCancelled) return state;
+  if (state.steps.some((step) => ['pending', 'active', 'waiting'].includes(step.status))) return state;
+  if (!(state.assets?.expected > 0 && state.assets.settled >= state.assets.expected)) return state;
+  if (!state.steps.some((step) => (
+    isImageGenerationStep(step)
+    || step.itemType === 'asset_delivery'
+    || step.stepId === 'skill_job_assets'
+  ) && step.status === 'completed')) return state;
+  const endedAt = state.steps.reduce((latest, step) => Math.max(
+    latest,
+    finiteTimestamp(step.completedAt, finiteTimestamp(step.timestampMs, 0)),
+  ), finiteTimestamp(state.runStartedAt, finiteTimestamp(now)));
+  const attempts = Array.isArray(state.attempts) && state.attempts.length
+    ? state.attempts.map((attempt) => attempt.endedAt ? attempt : { ...attempt, endedAt })
+    : state.runId ? [{ runId: state.runId, startedAt: finiteTimestamp(state.runStartedAt, endedAt), endedAt }] : [];
+  return withOutcome({ ...state, agentDone: true, runEndedAt: endedAt, attempts });
 }
 
 function appendOrReplaceStep(state, nextStep, predicate) {
@@ -522,25 +542,46 @@ export function reduceAgentRunProgress(input, inputEvent) {
 
   if (event.type === 'assets_pending') {
     const expected = finiteCount(event.count);
+    if (event.origin === 'client') {
+      return withOutcome({ ...state, assets: {
+        expected: Math.max(state.assets.expected, expected),
+        settled: state.assets.settled,
+        succeeded: state.assets.succeeded,
+        failed: state.assets.failed,
+      } });
+    }
     return withOutcome({ ...state, assets: { expected, settled: 0, succeeded: 0, failed: 0 } });
   }
 
   if (event.type === 'assets_progress' || event.type === 'assets_settled') {
-    const marker = stamp(state, event);
-    if (!marker) return state;
     const succeeded = finiteCount(event.succeeded);
     const failed = finiteCount(event.failed);
-    const settled = succeeded + failed;
-    const expected = event.type === 'assets_progress' ? finiteCount(event.total) : Math.max(state.assets.expected, settled);
+    const clientOrigin = event.origin === 'client';
+    const marker = clientOrigin
+      ? { sequence: state.lastSequence, timestampMs: finiteTimestamp(event.timestampMs) }
+      : stamp(state, event);
+    if (!marker) return state;
+    const settled = clientOrigin ? Math.max(state.assets.settled, succeeded + failed) : succeeded + failed;
+    const expected = event.type === 'assets_progress'
+      ? (clientOrigin ? Math.max(state.assets.expected, finiteCount(event.total)) : finiteCount(event.total))
+      : Math.max(state.assets.expected, settled);
     const complete = settled >= expected && expected > 0;
     const label = complete ? (failed > 0 ? `素材生成结束（成功 ${succeeded}，失败 ${failed}）` : `素材生成完成（${settled}/${expected}）`) : `正在生成素材（${settled}/${expected || 0}）`;
-    const marked = withStamp(state, marker);
+    const marked = clientOrigin ? state : withStamp(state, marker);
     const parentItemId = [...marked.steps].reverse().find((step) => step.toolName === 'generate_image')?.itemId;
     const result = appendOrReplaceStep(marked, {
       stepId: 'skill_job_assets', itemId: `asset-delivery:${event.runId || marked.runId}`, parentItemId, kind: 'execution', itemType: 'asset_delivery', phase: 'generating', status: complete && failed > 0 && succeeded === 0 ? 'failed' : complete ? 'completed' : 'active',
       label, commentary: label, toolName: 'start_skill_job', tool: 'start_skill_job', runId: event.runId || marked.runId, sequence: marker.sequence, timestampMs: marker.timestampMs, lastUpdateSequence: marker.sequence,
     }, (step) => step.stepId === 'skill_job_assets' && (!event.runId || step.runId === event.runId));
-    return withOutcome({ ...marked, steps: result.steps, assets: { expected, settled, succeeded, failed } });
+    const assets = clientOrigin
+      ? {
+          expected,
+          settled,
+          succeeded: Math.max(state.assets.succeeded, succeeded),
+          failed: Math.max(state.assets.failed, failed),
+        }
+      : { expected, settled, succeeded, failed };
+    return withOutcome({ ...marked, steps: result.steps, assets });
   }
 
   if (event.type === 'agent_completion_summary') {

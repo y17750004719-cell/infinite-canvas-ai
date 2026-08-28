@@ -14798,6 +14798,7 @@ export default function AIWorkspace() {
         const settleGeneratedAssetDelivery = () => {
           updateChatMessageById(assistantId, (msg) => updateAgentRunProgress(msg, {
             type: 'assets_settled',
+            origin: 'client',
             succeeded: generatedAssetSucceededCount,
             failed: generatedAssetFailureCount + generatedAssetPreloadFailureCount,
           }));
@@ -15415,8 +15416,8 @@ export default function AIWorkspace() {
                 taskStatus: 'running',
                 agentConfirmation: undefined,
               }, [
-                { type: 'assets_pending', count: total },
-                { type: 'assets_progress', total, succeeded: completed, failed },
+                { type: 'assets_pending', count: total, origin: 'client' },
+                { type: 'assets_progress', total, succeeded: completed, failed, origin: 'client' },
               ]));
               flushQueuedChatMessageUpdates();
               continue;
@@ -15437,11 +15438,13 @@ export default function AIWorkspace() {
                 generatedAssetExpectedCount = requestedAssetCount;
                 updateChatMessageById(assistantId, (msg) => updateAgentRunProgress(msg, {
                   type: 'assets_pending',
+                  origin: 'client',
                   count: generatedAssetExpectedCount,
                 }));
               }
               updateChatMessageById(assistantId, (msg) => updateAgentRunProgress(msg, {
                 type: 'assets_settled',
+                origin: 'client',
                 succeeded: generatedAssetSucceededCount,
                 failed: generatedAssetFailureCount + generatedAssetPreloadFailureCount,
               }));
@@ -15523,6 +15526,7 @@ export default function AIWorkspace() {
                 generatedAssetExpectedCount = batchTotal;
                 updateChatMessageById(assistantId, (msg) => updateAgentRunProgress(msg, {
                   type: 'assets_pending',
+                  origin: 'client',
                   count: generatedAssetExpectedCount,
                 }));
               }
@@ -15541,6 +15545,7 @@ export default function AIWorkspace() {
                   generatedAssetExpectedCount = freshAssets.length + generatedAssetFailureCount;
                   updateChatMessageById(assistantId, (msg) => updateAgentRunProgress(msg, {
                     type: 'assets_pending',
+                    origin: 'client',
                     count: generatedAssetExpectedCount,
                   }));
                 }
@@ -18640,6 +18645,7 @@ export default function AIWorkspace() {
         if (skillJobMessageId) {
           updateChatMessageById(skillJobMessageId, (msg) => updateAgentRunProgress(msg, {
             type: 'assets_progress',
+            origin: 'client',
             total: data.total,
             succeeded: data.completed,
             failed: data.failed,
@@ -18757,6 +18763,7 @@ export default function AIWorkspace() {
             updateChatMessageById(skillJobMessageId, (msg) => ({
               ...updateAgentRunProgress(msg, {
                 type: 'assets_settled',
+                origin: 'client',
                 succeeded: data.completed,
                 failed: Math.max(data.failed, data.total - data.completed - data.failed),
               }),
