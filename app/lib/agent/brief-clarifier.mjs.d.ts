@@ -24,6 +24,7 @@ export interface AgentClarificationState {
   taskId: string;
   operationId?: string;
   skillSource?: 'manual_ui' | 'explicit_text' | 'user_confirmation' | 'recovery' | 'manual' | 'auto' | null;
+  skillContentHash?: string;
   lastSequence?: number;
   intent: 'image' | 'skill_action';
   skillId?: string;

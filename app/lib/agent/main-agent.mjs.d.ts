@@ -20,6 +20,9 @@ export function buildMainAgentMessages(input?: {
   referenceContext?: AgentPlannerReferenceContext;
   resolvedBrief?: string;
   executionPlan?: Record<string, unknown>;
+  lockedSkillId?: string | null;
+  skillContent?: string;
+  imagegenHostContent?: string;
 }): MainAgentMessage[];
 
 export function buildMainAgentLoopMessages(input?: {
@@ -29,6 +32,8 @@ export function buildMainAgentLoopMessages(input?: {
   manifests?: Array<Record<string, unknown>>;
   manualSkillId?: string | null;
   lockedSkillId?: string | null;
+  skillContent?: string;
+  imagegenHostContent?: string;
   pendingTask?: Record<string, unknown> | null;
   recentFailedTask?: Record<string, unknown> | null;
   memory?: Record<string, unknown> | null;

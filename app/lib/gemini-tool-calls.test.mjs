@@ -8,7 +8,7 @@ test('non-stream Gemini tool responses preserve thought signatures', () => {
   const calls = extractGeminiToolCalls([
     { text: 'thinking', thought: true },
     {
-      functionCall: { name: 'read_imagegen_context', args: {} },
+      functionCall: { name: 'read_relevant_context', args: {} },
       thoughtSignature: signature,
     },
   ]);
@@ -17,10 +17,10 @@ test('non-stream Gemini tool responses preserve thought signatures', () => {
     id: 'gemini-tool-2',
     type: 'function',
     thoughtSignature: signature,
-    function: { name: 'read_imagegen_context', arguments: '{}' },
+    function: { name: 'read_relevant_context', arguments: '{}' },
   }]);
   assert.deepEqual(geminiToolCallToPart(calls[0]), {
-    functionCall: { name: 'read_imagegen_context', args: {} },
+    functionCall: { name: 'read_relevant_context', args: {} },
     thoughtSignature: signature,
   });
 });

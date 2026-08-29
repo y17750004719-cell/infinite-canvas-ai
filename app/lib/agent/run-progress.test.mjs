@@ -113,7 +113,7 @@ test('merges tool lifecycle events into one user-visible tool step', () => {
     type: 'tool_start',
     runId: 'run-tool-events',
     toolCallId: 'read-1',
-    toolName: 'read_imagegen_context',
+    toolName: 'read_relevant_context',
     sequence: 1,
     timestampMs: 10,
   });
@@ -129,7 +129,7 @@ test('merges tool lifecycle events into one user-visible tool step', () => {
     type: 'tool_result',
     runId: 'run-tool-events',
     toolCallId: 'read-1',
-    toolName: 'read_imagegen_context',
+    toolName: 'read_relevant_context',
     result: { summary: '视觉上下文已加载' },
     sequence: 3,
     timestampMs: 30,
@@ -137,7 +137,7 @@ test('merges tool lifecycle events into one user-visible tool step', () => {
 
   assert.equal(state.steps.length, 1);
   assert.equal(state.steps[0].kind, 'tool');
-  assert.equal(state.steps[0].toolName, 'read_imagegen_context');
+  assert.equal(state.steps[0].toolName, 'read_relevant_context');
   assert.equal(state.steps[0].status, 'completed');
   assert.equal(state.steps[0].sequence, 1);
   assert.equal(state.steps[0].lastUpdateSequence, 3);
@@ -686,7 +686,7 @@ test('settling all announced assets completes an agent run', () => {
 test('recovered tool failures do not override a successful image delivery', () => {
   let state = null;
   let sequence = 0;
-  const progressEvent = (toolCallId, status, label, toolName = 'read_imagegen_context') => ({
+  const progressEvent = (toolCallId, status, label, toolName = 'read_relevant_context') => ({
     type: 'progress_update',
     runId: 'run-recovered-tool',
     operationId: 'run-recovered-tool',

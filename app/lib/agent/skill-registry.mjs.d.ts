@@ -19,7 +19,6 @@ export const IMAGEGEN_HOST_SKILL_ID: 'imagegen';
 export function listSkillManifests(options?: { projectRoot?: string; includeInternal?: boolean }): Promise<SkillManifest[]>;
 export function getSkillManifest(skillId: string, options?: { projectRoot?: string; includeInternal?: boolean }): Promise<SkillManifest>;
 export function loadSkillContent(skillId: string, options?: { projectRoot?: string; includeInternal?: boolean }): Promise<string>;
-export function resolveLockedSkillReadId(requestedSkillId: unknown, lockedSkillId?: unknown): string;
 export function selectSkillForPrompt(prompt: string, manifests: SkillManifest[]): SkillManifest | null;
 export function findDirectSkillMatches(prompt: string, manifests: SkillManifest[]): Array<{
   manifest: SkillManifest;

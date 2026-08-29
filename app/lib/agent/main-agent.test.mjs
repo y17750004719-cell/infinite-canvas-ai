@@ -142,7 +142,7 @@ test('Main Agent Loop restores bounded history and project context only after un
   assert.match(MAIN_AGENT_LOOP_SYSTEM_PROMPT, /read_relevant_context/);
   assert.match(MAIN_AGENT_LOOP_SYSTEM_PROMPT, /generate_image/);
   assert.doesNotMatch(MAIN_AGENT_LOOP_SYSTEM_PROMPT, /后台 Image Planner/);
-  assert.match(MAIN_AGENT_LOOP_SYSTEM_PROMPT, /先调用 read_imagegen_context/);
+  assert.match(MAIN_AGENT_LOOP_SYSTEM_PROMPT, /运行时先加载 ImageGen 方法/);
   assert.match(MAIN_AGENT_LOOP_SYSTEM_PROMPT, /公开执行反馈/);
   assert.match(MAIN_AGENT_LOOP_SYSTEM_PROMPT, /publicProgress/);
   assert.match(MAIN_AGENT_LOOP_SYSTEM_PROMPT, /promptPreparation/);
@@ -223,7 +223,7 @@ test('Main Agent receives only locked Skill identity and reads its content throu
   assert.deepEqual(context.lockedSkill, { id: 'poster' });
   const allContent = messages.map((message) => String(message.content)).join('\n');
   assert.doesNotMatch(allContent, /LOCKED SKILL CONTENT|Use sparse zine poster composition/);
-  assert.match(allContent, /先调用 read_imagegen_context/);
+  assert.match(allContent, /运行时先加载 ImageGen 方法/);
   assert.equal(messages.filter((message) => String(message.content).includes(originalRequest)).length, 1);
   assert.doesNotMatch(JSON.stringify(context), /generationContract|promptFormat|originalRequest/);
   assert.match(allContent, /generate_image/);
@@ -236,6 +236,30 @@ test('Main Agent receives only locked Skill identity and reads its content throu
     lockedSkillId: 'poster',
   });
   assert.deepEqual(JSON.parse(unloaded[1].content).lockedSkill, { id: 'poster' });
+});
+
+test('Main Agent accepts host-loaded non-image Skill instructions without ImageGen context', () => {
+  const messages = buildMainAgentLoopMessages({
+    messages: [{ role: 'user', content: '分析这份 API 文档' }],
+    manifests: [{ id: 'api-helper', name: 'API 助手', description: 'API rules', enabled: true }],
+    lockedSkillId: 'api-helper',
+    skillContent: '# API helper\nPreserve documented authentication requirements.',
+  });
+  const content = messages.map((message) => String(message.content)).join('\n');
+  assert.match(content, /Preserve documented authentication requirements/);
+  assert.doesNotMatch(content, /ImageGen 方法已由运行时加载/);
+});
+
+test('Main Agent keeps ImageGen host and visual Skill instructions separate', () => {
+  const messages = buildMainAgentLoopMessages({
+    messages: [{ role: 'user', content: '生成一张杂志封面' }],
+    lockedSkillId: 'magazine-poster',
+    skillContent: '# Magazine poster\nUse the editorial contract.',
+    imagegenHostContent: '# ImageGen Host\nCompile the final prompt before execution.',
+  });
+  const content = messages.map((message) => String(message.content)).join('\n');
+  assert.match(content, /Use the editorial contract/);
+  assert.match(content, /Compile the final prompt before execution/);
 });
 
 test('a started image task keeps its direct ImageGen contract locked', () => {

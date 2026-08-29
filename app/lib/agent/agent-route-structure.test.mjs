@@ -21,7 +21,7 @@ test('agent route uses one Pi Main Agent Loop instead of an independent Front Do
   assert.match(source, /reserveClosingTurn:\s*true/);
 });
 
-test('Main Agent gates image execution on an explicit ImageGen-context read', () => {
+test('Main Agent gates image execution on host-loaded ImageGen context', () => {
   const source = read(routePath);
   const namesStart = source.indexOf('const standardMainAgentToolNames = [');
   const namesEnd = source.indexOf('];', namesStart);
@@ -33,10 +33,8 @@ test('Main Agent gates image execution on an explicit ImageGen-context read', ()
   assert.doesNotMatch(names, /submit_image_context_analysis|submit_image_brief|submit_image_prompt_compilation|submit_image_execution_plan/);
   assert.match(source, /relevantContextCandidateIds\.size >= 2 \? \['request_context_selection'\] : \[\]/);
   const modelToolNames = source.slice(source.indexOf('const mainAgentToolNames = ['), source.indexOf('];', source.indexOf('const mainAgentToolNames = [')));
-  assert.match(modelToolNames, /read_imagegen_context/);
   assert.match(modelToolNames, /generate_image/);
-  assert.match(source, /!mainAgentLoopState\.skillRead \? 'read_imagegen_context' : 'generate_image'/);
-  assert.match(source, /skillRead: hasExplicitImagegenContextTranscript\(restoredMainAgentLoop\)/);
+  assert.match(source, /const imageExecutionToolName = \(\) => imagePlanningRequest \? 'generate_image' : ''/);
   assert.match(source, /manifests: selectedSkill \? \[selectedSkill\] : \[\]/);
   assert.doesNotMatch(source, /submit_image_execution_plan|image_execution_plan/);
 });
@@ -151,14 +149,9 @@ test('Runtime preserves direct ImageGen task identity locally', () => {
 test('Main Agent reads ImageGen and the locked visual Skill together before writing the prompt', () => {
   const source = read(routePath);
   const mainAgent = read(mainAgentPath);
-  assert.match(source, /readImagegenContext: async \(\) => \{/);
-  assert.match(source, /const context = await loadImagegenContext\(\{ source: 'model' \}\)/);
-  assert.match(source, /modelResult: context/);
-  assert.match(source, /publicResult: \{/);
-  assert.match(source, /hostSkill: \{ id: context\.hostSkill\.id, contentHash: context\.hostSkill\.contentHash \}/);
   assert.match(source, /hostSkill: \{ id: IMAGEGEN_HOST_SKILL_ID, content: hostContent, contentHash: hostContentHash \}/);
   assert.doesNotMatch(source, /lockedSkillContract:/);
-  assert.match(mainAgent, /先调用 read_imagegen_context/);
+  assert.match(mainAgent, /运行时先加载 ImageGen 方法/);
   assert.match(mainAgent, /ImageGen 方法负责 Prompt 组织/);
   assert.doesNotMatch(source, /validateSkillPromptAssertions|missingCompiledPromptLiterals/);
 });
@@ -379,10 +372,10 @@ test('Main Agent prompt uses natural completion and direct ImageGen', () => {
   assert.match(source, /submit_agent_analysis_checkpoint/);
   assert.match(source, /request_user_decision/);
   assert.match(source, /generate_image/);
-  assert.match(source, /获得 ImageGen 方法和可选的已选视觉 Skill；再结合用户需求和稳定参考图写出最终 Prompt/);
+  assert.match(source, /运行时先加载 ImageGen 方法和可选的已选视觉 Skill；主 Agent 再结合用户需求和稳定参考图写出最终 Prompt/);
   assert.doesNotMatch(source, /submit_image_context_analysis|submit_image_brief|submit_image_prompt_compilation/);
   assert.doesNotMatch(source, /调用 submit_image_execution_plan/);
-  assert.match(source, /先调用 read_imagegen_context/);
+  assert.match(source, /运行时先加载 ImageGen 方法/);
   assert.match(source, /不得声称已执行尚未发生的生成或变更/);
 });
 

@@ -164,17 +164,17 @@ test('Pi runtime executes a sequential tool and continues to a final response', 
 test('Pi runtime preserves Gemini thought signatures on the next model turn', async () => {
   const requests = [];
   let requestCount = 0;
-  const signature = 'sig-read-imagegen-context-1';
+  const signature = 'sig-read-relevant-context-1';
   const result = await runZFlowAgentBrain({
     messages: [{ role: 'user', content: 'load image context' }],
     providerId: 'provider-1',
     model: 'test-model',
-    tools: [{ ...tools[0], name: 'read_imagegen_context', readOnly: true }],
+    tools: [{ ...tools[0], name: 'read_relevant_context', readOnly: true }],
     chatStream: (request) => {
       requests.push(request);
       requestCount += 1;
       return requestCount === 1
-        ? toolStream([{ id: 'gemini-tool-1', name: 'read_imagegen_context', args: {}, thoughtSignature: signature }])()
+        ? toolStream([{ id: 'gemini-tool-1', name: 'read_relevant_context', args: {}, thoughtSignature: signature }])()
         : textStream('done')();
     },
     executeTool: async () => ({ modelResult: { loaded: true }, publicResult: { loaded: true } }),
@@ -190,22 +190,22 @@ test('Pi runtime replays Gemini raw parts, order, signature, and function ID', a
   let requestCount = 0;
   const geminiParts = [
     { text: 'thinking', thought: true, thoughtSignature: 'sig-thinking' },
-    { functionCall: { id: 'provider-call-1', name: 'read_imagegen_context', args: {} }, thoughtSignature: 'sig-call' },
+    { functionCall: { id: 'provider-call-1', name: 'read_relevant_context', args: {} }, thoughtSignature: 'sig-call' },
   ];
   const result = await runZFlowAgentBrain({
     messages: [{ role: 'user', content: 'load image context' }],
     providerId: 'provider-1',
     model: 'gemini-3.1-flash',
-    tools: [{ ...tools[0], name: 'read_imagegen_context', readOnly: true }],
+    tools: [{ ...tools[0], name: 'read_relevant_context', readOnly: true }],
     chatStream: (request) => {
       requests.push(request);
       requestCount += 1;
       if (requestCount === 1) {
         return (async function* stream() {
           yield { type: 'start', model: 'gemini-3.1-flash' };
-          yield { type: 'tool_call_start', toolCallId: 'provider-call-1', index: 0, name: 'read_imagegen_context' };
+          yield { type: 'tool_call_start', toolCallId: 'provider-call-1', index: 0, name: 'read_relevant_context' };
           yield { type: 'tool_call_delta', toolCallId: 'provider-call-1', index: 0, argumentsDelta: '{}' };
-          yield { type: 'tool_call_end', toolCallId: 'provider-call-1', index: 0, name: 'read_imagegen_context', arguments: '{}', thoughtSignature: 'sig-call' };
+          yield { type: 'tool_call_end', toolCallId: 'provider-call-1', index: 0, name: 'read_relevant_context', arguments: '{}', thoughtSignature: 'sig-call' };
           yield { type: 'gemini_parts', parts: geminiParts };
           yield { type: 'done' };
         })();
@@ -247,14 +247,14 @@ test('Pi provider bridge sends the system prompt on every turn with Skill tool r
     providerId: 'provider-1',
     model: 'test-model',
     tools: [{
-      name: 'read_imagegen_context',
+      name: 'read_relevant_context',
       parameters: { type: 'object', properties: {}, additionalProperties: false },
       readOnly: true,
     }],
     chatStream: (request) => {
       requests.push(request);
       return requests.length === 1
-        ? toolStream([{ id: 'skill-1', name: 'read_imagegen_context', args: {} }])()
+        ? toolStream([{ id: 'context-1', name: 'read_relevant_context', args: {} }])()
         : textStream('done')();
     },
     executeTool: async () => ({
@@ -390,7 +390,7 @@ test('Pi runtime honors terminate returned by a non-terminal tool', async () => 
     providerId: 'provider-1',
     model: 'test-model',
     tools: [{
-      name: 'read_imagegen_context',
+      name: 'read_relevant_context',
       parameters: { type: 'object', properties: {}, additionalProperties: false },
       readOnly: true,
       countAgainstToolBudget: false,
@@ -398,7 +398,7 @@ test('Pi runtime honors terminate returned by a non-terminal tool', async () => 
     toolChoice: 'required',
     maxTurns: 2,
     maxToolCalls: 0,
-    chatStream: () => toolStream([{ id: 'skill-1', name: 'read_imagegen_context', args: {} }])(),
+    chatStream: () => toolStream([{ id: 'context-1', name: 'read_relevant_context', args: {} }])(),
     executeTool: async () => ({ terminate: true, type: 'skill_read_stage' }),
   });
   assert.equal(result.stopReason, 'completed');
@@ -483,7 +483,7 @@ test('Pi provider bridge only forwards strict when the tool declares it', async 
   ]);
 });
 
-test('Pi runtime forces generate_image after read_imagegen_context completes', async () => {
+test('Pi runtime forces generate_image after an auxiliary read completes', async () => {
   let requests = 0;
   const exposedTools = [];
   const toolChoices = [];
@@ -493,7 +493,7 @@ test('Pi runtime forces generate_image after read_imagegen_context completes', a
     model: 'test-model',
     tools: [
       {
-        name: 'read_imagegen_context',
+        name: 'read_relevant_context',
         parameters: { type: 'object', properties: {}, additionalProperties: false },
         readOnly: true,
         countAgainstToolBudget: false,
@@ -513,7 +513,7 @@ test('Pi runtime forces generate_image after read_imagegen_context completes', a
       exposedTools.push(request.tools.map((tool) => tool.function.name));
       toolChoices.push(request.toolChoice);
       if (requests === 1) {
-        return toolStream([{ id: 'context-1', name: 'read_imagegen_context', args: {} }])();
+        return toolStream([{ id: 'context-1', name: 'read_relevant_context', args: {} }])();
       }
       if (requests === 2) return textStream('准备生成。')();
       return toolStream([{ id: 'image-1', name: 'generate_image', args: {} }])();
@@ -527,8 +527,8 @@ test('Pi runtime forces generate_image after read_imagegen_context completes', a
   assert.equal(result.terminal.type, 'image_generated');
   assert.equal(requests, 3);
   assert.deepEqual(exposedTools, [
-    ['read_imagegen_context', 'generate_image'],
-    ['read_imagegen_context', 'generate_image'],
+    ['read_relevant_context', 'generate_image'],
+    ['read_relevant_context', 'generate_image'],
     ['generate_image'],
   ]);
   assert.deepEqual(toolChoices, [

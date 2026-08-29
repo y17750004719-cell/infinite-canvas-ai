@@ -67,7 +67,7 @@
 - Legacy events are accepted only at the parsing/normalization boundary and never emitted by new runtime code.
 - The shared event-contract module owns identity normalization, lifecycle classification, and stale-sequence decisions.
 - New fields are additive; event type changes require updates to the server writer, client parser, reducer, persistence normalizer, and structure tests.
-- The production image path is `Main Agent -> read_imagegen_context -> generate_image`; legacy Planner/handoff tools are not model-visible.
+- The production image path is `host-loaded ImageGen and locked Skill context -> Main Agent -> generate_image`; legacy Planner/handoff tools are not model-visible.
 - `generate_image` arguments are validated into a server-owned internal execution contract before provider execution.
 - Historical execution-plan data may be read for migration, but must never reactivate the removed Planner execution path.
 

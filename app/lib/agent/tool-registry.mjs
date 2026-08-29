@@ -164,7 +164,6 @@ export function createAgentToolRegistry({
   createSkillJob,
   getSkillJob,
   generateImage,
-  readImagegenContext,
   getConversationMemory,
   listProjectContext,
   readContextEntity,
@@ -181,18 +180,6 @@ export function createAgentToolRegistry({
   requestContextSelection,
 } = {}) {
   const registry = new Map([
-    ['read_imagegen_context', {
-      name: 'read_imagegen_context',
-      requiresConfirmation: false,
-      readOnly: true,
-      countAgainstToolBudget: false,
-      description: 'Read the internal ImageGen method and the visual Skill locked for this image task before writing the final prompt.',
-      parameters: { type: 'object', properties: {}, additionalProperties: false },
-      execute: async (_args, context) => {
-        if (typeof readImagegenContext !== 'function') throw new Error('read_imagegen_context is unavailable');
-        return readImagegenContext(context);
-      },
-    }],
     ['generate_image', {
       name: 'generate_image',
       requiresConfirmation: false,

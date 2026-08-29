@@ -9,7 +9,7 @@ test('tool registry exposes the direct image tool and current recovery tools', (
     getSkillJob: () => null,
   });
   assert.deepEqual([...registry.keys()], [
-    'read_imagegen_context', 'generate_image', 'get_canvas_context', 'get_conversation_memory', 'list_project_context',
+    'generate_image', 'get_canvas_context', 'get_conversation_memory', 'list_project_context',
     'read_context_entity', 'load_visual_reference', 'update_conversation_memory',
     'handle_failed_task', 'read_relevant_context', 'submit_agent_analysis_checkpoint',
     'request_user_decision', 'rewind_agent_analysis', 'resolve_failed_task_recovery',
@@ -22,9 +22,6 @@ test('tool registry exposes the direct image tool and current recovery tools', (
   assert.equal(registry.get('get_skill_job').readOnly, true);
   assert.equal(registry.get('generate_image').readOnly, false);
   assert.equal(registry.get('generate_image').terminal, true);
-  assert.equal(registry.get('read_imagegen_context').readOnly, true);
-  assert.equal(registry.get('read_imagegen_context').terminal, undefined);
-  assert.equal(registry.get('read_imagegen_context').countAgainstToolBudget, false);
   assert.equal(registry.get('load_visual_reference').readOnly, true);
   assert.equal(registry.get('update_conversation_memory').terminal, undefined);
   assert.equal(registry.get('update_conversation_memory').countAgainstToolBudget, false);
@@ -38,48 +35,6 @@ test('tool registry exposes the direct image tool and current recovery tools', (
   assert.equal(registry.get('request_main_agent_context').countAgainstToolBudget, false);
   assert.equal(registry.has('submit_image_compilation'), false);
   assert.equal(registry.has('submit_image_execution_plan'), false);
-});
-
-test('read_imagegen_context reads the locked host and visual Skills without model arguments', async () => {
-  const imagegenContext = {
-    hostSkill: {
-      id: 'imagegen',
-      content: '# ImageGen Host\nShape the prompt without over-expanding it.',
-      contentHash: 'host-hash',
-    },
-    visualSkill: {
-      id: 'gc-minimal-zine-poster-v0-1',
-      content: '# Minimal Zine Poster\nUse the locked visual method.',
-      contentHash: 'visual-hash',
-    },
-  };
-  const calls = [];
-  const registry = createAgentToolRegistry({
-    readImagegenContext: (context) => {
-      calls.push(context.runId);
-      return imagegenContext;
-    },
-  });
-  const [modelTool] = getAgentModelTools(registry, ['read_imagegen_context']);
-
-  assert.deepEqual(modelTool.function.parameters.required, []);
-  assert.deepEqual(modelTool.function.parameters.properties.publicProgress.required, []);
-  assert.deepEqual(
-    await executeAgentTool(registry, 'read_imagegen_context', {}, {
-      allowedTools: ['read_imagegen_context'],
-      runId: 'run-skill-read',
-    }),
-    imagegenContext,
-  );
-  assert.deepEqual(calls, ['run-skill-read']);
-  await assert.rejects(
-    () => executeAgentTool(registry, 'read_imagegen_context', { skillId: 'other' }, { allowedTools: ['read_imagegen_context'] }),
-    /not allowed/,
-  );
-  await assert.rejects(
-    () => executeAgentTool(createAgentToolRegistry(), 'read_imagegen_context', {}, { allowedTools: ['read_imagegen_context'] }),
-    /unavailable/,
-  );
 });
 
 test('generate_image exposes a strict direct execution contract and forwards the final prompt unchanged', async () => {

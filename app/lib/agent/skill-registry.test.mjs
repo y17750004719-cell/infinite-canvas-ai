@@ -9,7 +9,6 @@ import {
   hasDirectSkillExecutionIntent,
   listSkillManifests,
   loadSkillContent,
-  resolveLockedSkillReadId,
   resolveExplicitSkillDirective,
   selectSkillForPrompt,
   shouldInjectActiveSkill,
@@ -63,14 +62,6 @@ test('skill registry loads a registered SKILL.md inside the skills root', async 
   assert.match(watercolor, /actual reference subjects/i);
   assert.match(watercolor, /one readable subject/i);
   assert.doesNotMatch(watercolor, /Write exactly|generation\.prompt|generation\.items|### Quality Gate|generate_image/i);
-});
-
-test('locked Skill reads ignore a conflicting model-selected ID', () => {
-  assert.equal(
-    resolveLockedSkillReadId('magazine-poster', 'gc-minimal-zine-poster-v0-1'),
-    'gc-minimal-zine-poster-v0-1',
-  );
-  assert.equal(resolveLockedSkillReadId(' magazine-poster ', null), 'magazine-poster');
 });
 
 test('skill registry selects the most relevant enabled skill from trigger hints', async () => {

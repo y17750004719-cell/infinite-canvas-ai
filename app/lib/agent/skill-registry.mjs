@@ -88,12 +88,6 @@ export async function loadSkillContent(skillId, options = {}) {
   return readFile(skillFile, 'utf8');
 }
 
-export function resolveLockedSkillReadId(requestedSkillId, lockedSkillId = null) {
-  const locked = typeof lockedSkillId === 'string' ? lockedSkillId.trim() : '';
-  if (locked) return locked;
-  return typeof requestedSkillId === 'string' ? requestedSkillId.trim() : '';
-}
-
 export function selectSkillForPrompt(prompt, manifests) {
   const text = typeof prompt === 'string' ? prompt.toLowerCase() : '';
   let best = null;

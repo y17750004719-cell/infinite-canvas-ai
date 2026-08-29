@@ -13,7 +13,7 @@ test('recovery records are bounded and keep stable task state', () => {
     taskId: 'task-1', runId: 'run-1', operationId: 'operation-1', lastSequence: 0, topicId: 'topic-1', sourceUserMessageId: 'user-1',
     status: 'failed', resumeRoute: 'image_planner', intent: 'image', originalRequest: '生成海报',
     failureStage: 'image_pipeline', failureMessage: '504 upstream timeout https://private.test/x',
-    skillId: 'poster', contextEntityIds: ['a', 'a'], visualReferenceIds: ['v'],
+    skillId: 'poster', skillContentHash: 'a'.repeat(64), contextEntityIds: ['a', 'a'], visualReferenceIds: ['v'],
     completedAssetCount: 2,
     referenceContext: {
       references: [{ id: 'ref-1', src: '/image.png', label: '参考图', source: 'history', role: 'reference', sourceTaskId: 'task-1', sourceVersionId: 'version-1' }],
@@ -27,6 +27,7 @@ test('recovery records are bounded and keep stable task state', () => {
   assert.doesNotMatch(record.failure.message, /https?:/);
   assert.deepEqual(record.contextEntityIds, ['a']);
   assert.equal(record.completedAssetCount, 2);
+  assert.equal(record.skillContentHash, 'a'.repeat(64));
   assert.equal(record.referenceContext.references[0].sourceVersionId, 'version-1');
 });
 

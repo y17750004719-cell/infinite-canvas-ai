@@ -4,9 +4,12 @@ import { POST as generatePost } from '../generate/route';
 import { chat, chatStream } from '../../lib/api-client';
 import {
   resolveAgentConversationIntent,
+  resolveAgentIntent,
   resolveImageDeliveryPlan,
 } from '../../lib/agent/prompt-optimizer.mjs';
 import {
+  findDirectSkillMatches,
+  hasDirectSkillExecutionIntent,
   listSkillManifests,
   loadSkillContent,
   IMAGEGEN_HOST_SKILL_ID,
@@ -259,6 +262,7 @@ type ConfirmationRecord = {
   lastSequence: number;
   progressToolCallId?: string;
   skillId: string | null;
+  skillContentHash?: string;
   toolName: string;
   toolArgs: Record<string, unknown>;
   allowedTools: string[];
@@ -710,17 +714,6 @@ function normalizeRecentFailedTask(
     contextEntityIds: legacy.contextEntityIds,
     visualReferenceIds: legacy.contextEntityIds,
   });
-}
-
-function hasExplicitImagegenContextTranscript(value: unknown): boolean {
-  if (!value || typeof value !== 'object') return false;
-  const transcript = (value as { transcript?: unknown }).transcript;
-  return Array.isArray(transcript) && transcript.some((message) => (
-    message
-    && typeof message === 'object'
-    && (message as { role?: unknown }).role === 'toolResult'
-    && (message as { toolName?: unknown }).toolName === 'read_imagegen_context'
-  ));
 }
 
 const INTERNAL_IMAGE_PLACEHOLDER_PATTERN = /\[(?:Generated image[^\]]*omitted from chat history|聊天记录中省略了代理生成的图像)\]/gi;
@@ -1208,7 +1201,13 @@ export async function POST(request: NextRequest) {
     (Array.isArray(body.referenceImages) && body.referenceImages.some((value) => typeof value === 'string' && value.trim()))
     || (Array.isArray(body.referenceContext?.references) && body.referenceContext.references.some((reference) => typeof reference?.src === 'string' && reference.src.trim()))
   );
-  const imagePlanningRequest = body.intent === 'image' || Boolean(body.activeSkillId) || hasReferenceInput;
+  const explicitManifest = resolveExplicitSkillDirective(latestUserMessage, skillManifests)?.manifest;
+  const activeManifest = skillManifests.find((manifest) => manifest.id === body.activeSkillId) || explicitManifest;
+  const requestedIntent = body.intent === 'image'
+    ? 'image'
+    : resolveAgentIntent(latestUserMessage, hasReferenceInput);
+  let imagePlanningRequest = requestedIntent === 'image'
+    && (!activeManifest || activeManifest.executionMode === 'image_pipeline');
   const hasExplicitChatSelection = Boolean(body.chatOptions?.providerId || body.chatOptions?.model);
   const resolvedChatSelection = resolveProviderModelSelection({
     providers,
@@ -1275,6 +1274,7 @@ export async function POST(request: NextRequest) {
       let skillSelectionMethod: SkillSelectionMethod = body.activeSkillId ? 'manual_ui' : 'none';
       let skillCandidateIds: string[] = [];
       let skillContent = '';
+      let skillContentHash = '';
       let imagegenHostContent = '';
       let contextResolution = structuredClone(initialContextResolution) as AgentContextResolution;
       let executionBriefData = structuredClone(initialExecutionBrief) as ExecutionBrief;
@@ -1326,11 +1326,6 @@ export async function POST(request: NextRequest) {
       let executionPlanSource: 'model' | 'fallback' | null = null;
       let executionPlanSourceDetail: AgentPlannerSourceDetail | null = null;
       let executionKind: AgentExecutionPlan['execution']['kind'] | null = null;
-      let frontDoorResult: {
-        route: 'chat' | 'vision_analysis' | 'planner';
-        skillId: string | null;
-        confidence: 'high' | 'medium' | 'low';
-      } | null = null;
       let promptCompilation: AgentImagePromptCompilation | undefined;
       let taskExecutionReservation: ReturnType<typeof reserveTaskExecution> | null = null;
       let completedTaskIdentities: AgentPendingAssetIdentity[] = [];
@@ -1495,7 +1490,7 @@ export async function POST(request: NextRequest) {
         resumeRoute: resumeRoute === undefined
           ? stage === 'local_delivery'
             ? 'local_delivery'
-            : intent === 'image' || intent === 'skill_action' || frontDoorResult?.route === 'planner'
+            : intent === 'image' || intent === 'skill_action'
               ? 'main_agent'
               : recoveryBaseRecord?.resumeRoute || 'main_agent'
           : resumeRoute,
@@ -1506,6 +1501,7 @@ export async function POST(request: NextRequest) {
         failureMessage: message,
         retryability: retryable === true ? 'retryable' : retryable === false ? 'requires_change' : undefined,
         skillId: selectedSkill?.id || recoveryBaseRecord?.skillId || null,
+        skillContentHash: skillContentHash || recoveryBaseRecord?.skillContentHash || null,
         imageOperation: imageOperation || undefined,
         targetReferenceId: targetReferenceId || undefined,
         contextEntityIds: selectedContextEntityIds.length > 0
@@ -1591,6 +1587,9 @@ export async function POST(request: NextRequest) {
       const getExternalFollowUpMessages = () => takeActiveAgentRunInputs(runId, 'follow_up');
       const writeInteractionEvent = (event: unknown) => {
         const input = event as Record<string, unknown>;
+        if (input.state && typeof input.state === 'object' && selectedSkill && skillContentHash) {
+          input.state = { ...(input.state as Record<string, unknown>), skillContentHash };
+        }
         const request = input.request && typeof input.request === 'object'
           ? input.request as Record<string, unknown>
           : undefined;
@@ -1693,12 +1692,34 @@ export async function POST(request: NextRequest) {
       const ensureSelectedSkillContent = async () => {
         if (!selectedSkill || skillContent) return skillContent;
         skillContent = await loadSkillContent(selectedSkill.id);
+        skillContentHash = createHash('sha256').update(skillContent).digest('hex');
+        const savedContentHash = imagePlanning?.skill?.contentHash
+          || activeClarificationState?.skillContentHash
+          || recoveryBaseRecord?.skillContentHash;
+        if (savedContentHash && savedContentHash !== skillContentHash) {
+          throw new Error('The locked Skill content changed after this task was created');
+        }
+        if (imagePlanning?.skill && imagePlanning.skill.id === selectedSkill.id) {
+          imagePlanning.skill.contentHash = skillContentHash;
+        }
         return skillContent;
       };
       const ensureImagegenHostContent = async () => {
         if (imagegenHostContent) return imagegenHostContent;
         imagegenHostContent = await loadSkillContent(IMAGEGEN_HOST_SKILL_ID, { includeInternal: true });
         return imagegenHostContent;
+      };
+      const assertLockedImageSkill = async (skill: typeof selectedSkill, expectedHash?: string | null) => {
+        if (!skill) return '';
+        if (skill.executionMode !== 'image_pipeline' || !skill.allowedTools.includes('generate_image')) {
+          throw new Error('The locked Skill is not allowed to generate images');
+        }
+        const content = await loadSkillContent(skill.id);
+        const contentHash = createHash('sha256').update(content).digest('hex');
+        if (expectedHash && expectedHash !== contentHash) {
+          throw new Error('The locked Skill content changed after this task was created');
+        }
+        return contentHash;
       };
       const summarizePublicToolResult = (value: unknown) => {
         if (typeof value === 'string') return value.trim().slice(0, 600);
@@ -1909,10 +1930,6 @@ export async function POST(request: NextRequest) {
             stepId: 'routing',
             phase: 'analyzing',
           },
-          read_imagegen_context: {
-            stepId: 'skill_loading',
-            phase: 'loading',
-          },
           request_context_selection: {
             stepId: 'tool',
             phase: 'waiting_input',
@@ -1934,7 +1951,6 @@ export async function POST(request: NextRequest) {
           generate_image: '生成图片',
           read_context_entity: '读取上下文',
           read_relevant_context: '读取相关上下文',
-          read_imagegen_context: '读取图片生成上下文',
           load_visual_reference: '加载视觉参考',
           start_skill_job: '启动 Skill 任务',
           get_skill_job: '检查 Skill 任务',
@@ -2542,6 +2558,10 @@ export async function POST(request: NextRequest) {
           if (!confirmationRecord.execution && !confirmationRecord.result) {
             confirmationRecord.execution = (async () => {
               if (confirmationRecord.toolName === 'generate_image') {
+                confirmationRecord.skillContentHash = await assertLockedImageSkill(
+                  selectedSkill,
+                  confirmationRecord.skillContentHash,
+                ) || undefined;
                 const prompt = typeof confirmationRecord.toolArgs.prompt === 'string'
                   ? confirmationRecord.toolArgs.prompt
                   : confirmationRecord.generationBrief || confirmationRecord.userMessage;
@@ -2761,6 +2781,10 @@ export async function POST(request: NextRequest) {
               createSkillJob,
               getSkillJob,
               generateImage: async (args: Record<string, unknown>, context: { toolCallId?: string }) => {
+                confirmationRecord.skillContentHash = await assertLockedImageSkill(
+                  selectedSkill,
+                  confirmationRecord.skillContentHash,
+                ) || undefined;
                 const prompt = typeof args.prompt === 'string' && args.prompt.trim()
                   ? args.prompt.trim()
                   : confirmationRecord.generationBrief || confirmationRecord.userMessage;
@@ -3028,10 +3052,13 @@ export async function POST(request: NextRequest) {
               : 'none';
             skillCandidateIds = selectedSkill ? [selectedSkill.id] : [];
           } else {
-            selectedSkill = null;
-            skillSource = null;
-            skillCandidateIds = [];
-            skillSelectionMethod = 'none';
+            const directMatches = hasDirectSkillExecutionIntent(latestUserMessage)
+              ? findDirectSkillMatches(latestUserMessage, skillManifests)
+              : [];
+            selectedSkill = directMatches.length === 1 ? directMatches[0].manifest : null;
+            skillSource = selectedSkill ? 'auto' : null;
+            skillCandidateIds = directMatches.map((entry) => entry.manifest.id);
+            skillSelectionMethod = selectedSkill ? 'model' : 'none';
           }
         }
 
@@ -3396,7 +3423,7 @@ export async function POST(request: NextRequest) {
           contextRequested: Boolean(restoredMainAgentLoop?.contextScopes?.length),
           contextScopes: new Set<'conversation' | 'project'>(restoredMainAgentLoop?.contextScopes || []),
           selectedSkillId: selectedSkill?.id || null,
-          skillRead: hasExplicitImagegenContextTranscript(restoredMainAgentLoop),
+          skillRead: false,
         };
         const relevantContextCandidateIds = new Set<string>();
         const planningSkillSource: 'manual_ui' | 'explicit_text' | 'user_confirmation' | 'recovery' | null = selectedSkill
@@ -3518,11 +3545,7 @@ export async function POST(request: NextRequest) {
           });
         };
         if (imagePlanning) writeImagePlanningCheckpoint();
-        const loadImagegenContext = async ({ allowExisting = false, source = 'runtime' }: {
-          allowExisting?: boolean;
-          source?: 'runtime' | 'model';
-        } = {}) => {
-          if (mainAgentLoopState.skillRead && !allowExisting) throw new Error('ImageGen context may be read only once per task');
+        const loadImagegenContext = async () => {
           const hostContent = await ensureImagegenHostContent();
           const hostContentHash = createHash('sha256').update(hostContent).digest('hex');
           const visualContent = selectedSkill ? await ensureSelectedSkillContent() : '';
@@ -3546,7 +3569,7 @@ export async function POST(request: NextRequest) {
           }
           writeImagePlanningCheckpoint();
           void contextLogger.info('imagegen.context_read', 'Runtime loaded the ImageGen host and locked visual Skill', {
-            source,
+            source: 'runtime',
             hostContentLength: hostContent.length,
             hostContentHash,
             visualSkillId: selectedSkill?.id || null,
@@ -3558,21 +3581,36 @@ export async function POST(request: NextRequest) {
             visualSkill: selectedSkill ? { id: selectedSkill.id, content: visualContent, contentHash: visualContentHash } : null,
           };
         };
+        imagePlanningRequest = imagePlanningRequest || Boolean(
+          selectedSkill?.executionMode === 'image_pipeline'
+          && (requestedIntent === 'image'
+            || activeClarificationState?.intent === 'image'
+            || recoveryBaseRecord?.intent === 'image'
+            || imageOperation),
+        );
+        if (selectedSkill) await ensureSelectedSkillContent();
+        if (imagePlanningRequest) await loadImagegenContext();
+        void contextLogger.info('skill.context_loaded', 'Runtime loaded the activated Skill before Main Agent execution', {
+          selectedSkillId: selectedSkill?.id || null,
+          skillContextLoaded: Boolean(selectedSkill && skillContent),
+          skillContentHash: skillContentHash || null,
+          skillLoadSource: skillSource || null,
+          executionMode: selectedSkill?.executionMode || 'agent_loop',
+          imagegenContextLoaded: mainAgentLoopState.skillRead,
+        });
         const mainAgentRegistry = createAgentToolRegistry({
-          readImagegenContext: async () => {
-            emitIntentResolved('image');
-            const context = await loadImagegenContext({ source: 'model' });
-            return {
-              modelResult: context,
-              publicResult: {
-                hostSkill: { id: context.hostSkill.id, contentHash: context.hostSkill.contentHash },
-                visualSkill: context.visualSkill
-                  ? { id: context.visualSkill.id, contentHash: context.visualSkill.contentHash }
-                  : null,
-              },
-            };
-          },
+          createSkillJob,
+          getSkillJob,
           generateImage: async (args: Record<string, unknown>, context: { publicProgress?: unknown }) => {
+            if (selectedSkill && (
+              selectedSkill.executionMode !== 'image_pipeline'
+              || !selectedSkill.allowedTools.includes('generate_image')
+            )) {
+              throw new Error('The locked Skill is not allowed to generate images');
+            }
+            if (selectedSkill && (!skillContentHash || imagePlanning?.skill?.contentHash !== skillContentHash)) {
+              throw new Error('The image Prompt Skill lock is missing or changed');
+            }
             const operation = String(args.operation || '');
             if (operation !== 'generate' && operation !== 'edit') throw new Error('图片操作必须是 generate 或 edit');
             const prompt = String(args.prompt || '').trim();
@@ -4002,25 +4040,31 @@ export async function POST(request: NextRequest) {
           'submit_agent_analysis_checkpoint',
           'request_user_decision',
         ];
-        const imageExecutionToolName = () => (
-          !mainAgentLoopState.skillRead ? 'read_imagegen_context' : 'generate_image'
-        );
-        const mainAgentInitialToolNames = [...standardMainAgentToolNames, imageExecutionToolName()];
+        const imageExecutionToolName = () => imagePlanningRequest ? 'generate_image' : '';
+        const activatedSkillToolNames = selectedSkill && !imagePlanningRequest
+          ? selectedSkill.allowedTools.filter((name) => ['get_canvas_context', 'start_skill_job', 'get_skill_job'].includes(name))
+          : [];
+        const mainAgentInitialToolNames = [
+          ...standardMainAgentToolNames,
+          imageExecutionToolName(),
+          ...activatedSkillToolNames,
+        ].filter(Boolean);
         const resolveMainAgentToolNames = () => {
           return [
             ...standardMainAgentToolNames.filter((name) => (
               name !== 'submit_agent_analysis_checkpoint' || (agentAnalysis?.checkpointCount || 0) < 3
             )),
             imageExecutionToolName(),
+            ...activatedSkillToolNames,
             ...(recoveryRevisionMessage ? ['rewind_agent_analysis'] : []),
             ...(relevantContextCandidateIds.size >= 2 ? ['request_context_selection'] : []),
             ...(mainAgentLoopState.contextScopes.has('project') ? ['load_visual_reference'] : []),
-          ];
+          ].filter(Boolean);
         };
         const mainAgentToolNames = [
           ...standardMainAgentToolNames,
-          'read_imagegen_context',
-          'generate_image',
+          ...(imagePlanningRequest ? ['generate_image'] : []),
+          ...activatedSkillToolNames,
           'rewind_agent_analysis',
           'request_context_selection',
           'load_visual_reference',
@@ -4033,6 +4077,8 @@ export async function POST(request: NextRequest) {
           manifests: selectedSkill ? [selectedSkill] : [],
           manualSkillId: isExplicitSkillSource(skillSource) ? selectedSkill?.id || null : null,
           lockedSkillId: selectedSkill?.id || null,
+          skillContent,
+          imagegenHostContent,
           pendingTask: activeClarificationState ? {
             taskId: activeClarificationState.taskId,
             intent: activeClarificationState.intent,
@@ -4459,6 +4505,46 @@ export async function POST(request: NextRequest) {
           writeAgentDone('context_reference_required');
           return;
         }
+        if (loopResult.stopReason === 'confirmation_required') {
+          const confirmationId = randomUUID();
+          const toolName = String(loopResult.confirmation?.toolName || '');
+          const toolCallId = String(loopResult.confirmation?.toolCallId || `${runId}-${toolName}-confirmation`);
+          const toolArgs = loopResult.confirmation?.arguments && typeof loopResult.confirmation.arguments === 'object'
+            ? loopResult.confirmation.arguments as Record<string, unknown>
+            : {};
+          const checkpoint = progressTracker.snapshot();
+          confirmationStore.set(confirmationId, {
+            version: 1,
+            confirmationId,
+            runId,
+            status: 'pending',
+            operationId: checkpoint.operationId,
+            skillSource,
+            lastSequence: checkpoint.lastSequence,
+            progressToolCallId: toolCallId,
+            skillId: selectedSkill?.id || null,
+            skillContentHash: skillContentHash || undefined,
+            toolName,
+            toolArgs,
+            allowedTools: resolveMainAgentToolNames(),
+            userMessage: latestUserMessage,
+            referenceImages: [...executionReferenceImages],
+            canvasContext: body.canvasContext ? structuredClone(body.canvasContext) : undefined,
+            topicId,
+            expiresAt: Date.now() + CONFIRMATION_TTL_MS,
+          });
+          writeToolProgress(toolName, 'waiting', toolCallId);
+          writeInteractionEvent({
+            type: 'confirmation_required',
+            request: {
+              confirmationId,
+              toolName,
+              message: String(loopResult.confirmation?.message || `确认后执行 ${toolName}`),
+            },
+          });
+          writeAgentDone('awaiting_confirmation');
+          return;
+        }
         const terminal = loopResult.terminal as any;
         if (!terminal && !String(loopResult.content || '').trim()) {
           throw new Error('Main Agent returned an empty response');
@@ -4752,15 +4838,6 @@ export async function POST(request: NextRequest) {
                 clarificationQuestion: executionPlan.clarification?.question,
                 source: executionPlanSource || 'fallback',
               }
-            : frontDoorResult
-            ? {
-                version: 1,
-                intent: 'image' as const,
-                skillId: frontDoorResult.skillId,
-                confidence: frontDoorResult.confidence === 'high' ? 1 : frontDoorResult.confidence === 'medium' ? 0.7 : 0.4,
-                needsClarification: false,
-                source: 'main_agent',
-              }
             : explicitBatchImageRequest
             ? {
                 version: 1,
@@ -4787,7 +4864,7 @@ export async function POST(request: NextRequest) {
             ? resolvedContextIntent
             : conversationIntent.inherited
               ? conversationIntent.intent
-              : routingDecision.intent;
+              : requestedIntent;
           intent = routedIntent === 'image' && selectedSkill && !selectedSkill.allowedTools.includes('generate_image')
             ? 'chat'
             : routedIntent;
@@ -4806,6 +4883,10 @@ export async function POST(request: NextRequest) {
         if (!plannerAuthoritative && !executionPlan && intent === 'chat' && selectedSkillExecutionRequest) {
           intent = 'skill_action';
         }
+        if (plannerAuthoritative && selectedSkill?.allowedTools.includes('start_skill_job')
+          && hasDirectSkillExecutionIntent(executionBrief)) {
+          intent = 'skill_action';
+        }
         void contextLogger.info('image_contract.resolved', 'Main Agent image contract route resolved', {
           decisionSource: executionPlanSource || routingDecision?.source || null,
           skillSelectionMethod,
@@ -4814,7 +4895,6 @@ export async function POST(request: NextRequest) {
           sourceDetail: executionPlanSourceDetail,
           plannerConfidence: executionPlan?.confidence || null,
           conversationIntent: conversationIntent.intent,
-          frontDoorRoute: frontDoorResult?.route || null,
           finalIntent: intent,
           selectedSkillId: selectedSkill?.id || null,
           explicitBatchImageRequest,
@@ -5345,6 +5425,7 @@ export async function POST(request: NextRequest) {
               progressSequence: confirmationCheckpoint.lastSequence,
               progressToolCallId,
               skillId: selectedSkill?.id || null,
+              skillContentHash: skillContentHash || undefined,
               toolName: 'generate_image',
               toolArgs: structuredClone(imageToolArgs),
               pendingToolCall: {
@@ -5410,20 +5491,23 @@ export async function POST(request: NextRequest) {
           writeToolStartEvent(toolCallId, 'generate_image');
 
           const toolRegistry = createAgentToolRegistry({
-            generateImage: async (_args: Record<string, unknown>, context: { toolCallId?: string }) => generateImagePayload(
-              executionBrief,
-              body.imageOptions,
-              executionReferenceImages,
-              finalGenerationPrompt,
-              {
-                source: requestedImageCountSource,
-                totalCount: requestedTotalImageCount,
-                promptOptimized: false,
-              },
-              allGenerationItems,
-              { toolCallId: context.toolCallId },
-              imageDeliveryPlan,
-            ),
+            generateImage: async (_args: Record<string, unknown>, context: { toolCallId?: string }) => {
+              await assertLockedImageSkill(selectedSkill, skillContentHash || null);
+              return generateImagePayload(
+                executionBrief,
+                body.imageOptions,
+                executionReferenceImages,
+                finalGenerationPrompt,
+                {
+                  source: requestedImageCountSource,
+                  totalCount: requestedTotalImageCount,
+                  promptOptimized: false,
+                },
+                allGenerationItems,
+                { toolCallId: context.toolCallId },
+                imageDeliveryPlan,
+              );
+            },
           });
           const generationPayload = await executeAgentTool(toolRegistry, 'generate_image', imageToolArgs, {
             allowedTools: selectedSkill?.allowedTools || ['generate_image', 'get_canvas_context'],
@@ -5509,6 +5593,9 @@ export async function POST(request: NextRequest) {
           referenceContext: runReferenceContext,
           resolvedBrief: executionPlan || shouldRunClarifier ? executionBrief : undefined,
           executionPlan: executionPlan || undefined,
+          lockedSkillId: selectedSkill?.id || null,
+          skillContent,
+          imagegenHostContent,
         });
         const model = resolvedChatSelection.model!;
         const skillAllowedTools = selectedSkill?.allowedTools || [];
@@ -5557,7 +5644,8 @@ export async function POST(request: NextRequest) {
         // Only Planner routes may expose mutation/read tools to the main loop.
         // Chat and visual analysis remain explicitly tool-free, even when a
         // Skill is selected for context injection.
-        const routeAllowsTools = Boolean(executionPlan) || frontDoorResult?.route === 'planner';
+        const routeAllowsTools = Boolean(executionPlan)
+          || Boolean(selectedSkill && intent === 'skill_action');
         if (routeAllowsTools && modelTools.length > 0) {
           const rawToolResults = new Map<string, unknown>();
           const loopResult = await runZFlowAgentBrain({
@@ -5761,6 +5849,7 @@ export async function POST(request: NextRequest) {
               lastSequence: confirmationCheckpoint.lastSequence,
               progressToolCallId,
               skillId: selectedSkill?.id || null,
+              skillContentHash: skillContentHash || undefined,
               toolName: confirmationToolName,
               toolArgs: pendingArgs,
               publicProgress: confirmationPublicProgress,

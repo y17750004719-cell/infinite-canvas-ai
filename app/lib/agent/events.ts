@@ -115,6 +115,7 @@ export type AgentRecoveryRecord = {
     retryability: 'retryable' | 'requires_change' | 'unknown';
   };
   skillId: string | null;
+  skillContentHash?: string | null;
   imageOperation?: 'generate' | 'edit';
   targetReferenceId?: string;
   contextEntityIds: string[];
@@ -236,6 +237,7 @@ export type AgentClarificationState = {
   lastSequence?: number;
   intent: 'chat' | 'image' | 'skill_action';
   skillId?: string;
+  skillContentHash?: string;
   originalRequest: string;
   workingBrief: string;
   askedDimensions: string[];
