@@ -1178,7 +1178,7 @@ test('image card model selection stays scoped to the current provider model list
   assert.equal(modelSelectBlock.includes('findWorkspaceModelOption(workspaceImageModelOptions, modelId, selectedImageCardProviderId);'), false);
 });
 
-test('image card generation delegates request construction and execution to the Planner-backed agent route', () => {
+test('image card generation delegates request construction and execution to the Main Agent route', () => {
   assert.equal(pageSource.includes('if (count <= 1) {'), false);
   assert.equal(pageSource.includes('buildCanvasImageGenerationRequest({'), false);
   assert.equal(pageSource.includes('const asyncRequests = buildAsyncImageTaskRequests({'), false);

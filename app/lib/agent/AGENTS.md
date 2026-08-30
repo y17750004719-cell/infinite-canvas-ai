@@ -32,7 +32,7 @@
 - Tool arguments must be validated against their JSON schema before execution.
 - Tool schemas should use `additionalProperties: false` unless an explicit compatibility contract requires otherwise.
 - Read-only tools may execute without confirmation; mutating or high-risk tools require the existing confirmation path.
-- `SKILL.md` runtime input is limited to the locked compact manifest and required generation contract; do not inject the complete Skill source into the Planner context.
+- ImageGen runs in one Main Agent turn with the host `imagegen` content and locked visual Skill content loaded before `generate_image`; the visual Skill's `renderPrompt` convention is executed directly. Do not hand the Prompt to a Planner or second model.
 - Skills must not bypass the unified image execution contract or call a provider directly.
 - Keep public progress copy separate from raw tool arguments, internal prompts, and hidden reasoning.
 
@@ -43,7 +43,7 @@
 - A local delivery failure may retry delivery without rerunning image generation.
 - Partial success must preserve completed assets and identify only the missing work.
 - Cancellation must settle the active run and preserve enough state for an explicit user retry.
-- Stale steer, confirmation, and clarification submissions return a conflict response and must not restart the Planner.
+- Stale steer, confirmation, and clarification submissions return a conflict response and must not restart a Planner or replay a completed image call.
 
 ## Public Output
 
@@ -54,7 +54,7 @@
 ## Verification
 
 - Event or timeline changes: run `run-progress`, `agent-loop`, and Agent route structure tests.
-- Contract or Planner changes: run `execution-planner`, `main-agent`, and `recovery` tests.
+- Contract or Main Agent image changes: run `execution-planner`, `main-agent`, route structure, and `recovery` tests.
 - Tool schema changes: run `tool-registry` tests.
 - Reference or recovery changes: run `context-reference`, `image-planning`, and `recovery` tests.
 - Every Agent protocol change adds at least one failure, cancellation, stale-input, or recovery scenario.
@@ -67,7 +67,7 @@
 - Legacy events are accepted only at the parsing/normalization boundary and never emitted by new runtime code.
 - The shared event-contract module owns identity normalization, lifecycle classification, and stale-sequence decisions.
 - New fields are additive; event type changes require updates to the server writer, client parser, reducer, persistence normalizer, and structure tests.
-- The production image path is `host-loaded ImageGen and locked Skill context -> Main Agent -> generate_image`; legacy Planner/handoff tools are not model-visible.
+- The production image path is `host-loaded ImageGen and locked Skill context -> Main Agent -> generate_image`; `generate_image.args.prompt` is the sole final Prompt source. Legacy Planner/handoff tools are not model-visible.
 - `generate_image` arguments are validated into a server-owned internal execution contract before provider execution.
 - Historical execution-plan data may be read for migration, but must never reactivate the removed Planner execution path.
 

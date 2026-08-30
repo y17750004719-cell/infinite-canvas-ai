@@ -160,6 +160,16 @@ export type AgentRecoveryRecord = {
     skillRead?: boolean;
     contextScopes?: Array<'conversation' | 'project'>;
   };
+  toolCalls?: Array<{
+    callId: string;
+    attemptId: string;
+    taskId: string;
+    toolName: string;
+    status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
+    resultRef?: string | null;
+    startedAt?: number;
+    completedAt?: number;
+  }>;
   completedAssetCount: number;
   createdAt: number;
 };

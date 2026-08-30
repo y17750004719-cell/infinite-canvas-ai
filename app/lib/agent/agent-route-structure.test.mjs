@@ -41,7 +41,7 @@ test('Main Agent gates image execution on host-loaded ImageGen context', () => {
 
 test('image tasks submit one direct ImageGen contract before execution', () => {
   const source = read(routePath);
-  assert.match(source, /generateImage: async \(args: Record<string, unknown>, context: \{ publicProgress\?: unknown \}\)/);
+  assert.match(source, /generateImage: async \(args: Record<string, unknown>, context: \{ publicProgress\?: unknown; toolCallId\?: string \}\)/);
   assert.match(source, /const prompt = String\(args\.prompt \|\| ''\)\.trim\(\)/);
   assert.match(source, /assertImageExecutionContract\(/);
   assert.match(source, /lockedImageToolArgs = imageExecutionContract/);
@@ -189,14 +189,15 @@ test('direct image execution and confirmation reuse the complete locked tool arg
   const pipelineStart = source.indexOf('if (shouldUseImagePipeline)');
   const pipelineEnd = source.indexOf("if (executionPlan) {", pipelineStart);
   const pipeline = source.slice(pipelineStart, pipelineEnd);
-  assert.match(pipeline, /const imageToolArgs = lockedImageToolArgs/);
+  assert.match(pipeline, /const imageContract = lockedImageToolArgs/);
+  assert.match(pipeline, /const imageToolArgs = imageContract \|\|/);
   assert.match(pipeline, /toolArgs: structuredClone\(imageToolArgs\)/);
   assert.match(pipeline, /args: structuredClone\(imageToolArgs\)/);
   assert.match(pipeline, /executeAgentTool\(toolRegistry, 'generate_image', imageToolArgs/);
   assert.doesNotMatch(pipeline, /executeAgentTool\(toolRegistry, 'generate_image', \{\}/);
 });
 
-test('failed tasks stay passive until the lightweight entry explicitly resumes them', () => {
+test('failed tasks are supplied to the same Main Agent recovery loop', () => {
   const route = read(routePath);
   const page = read(pagePath);
   const mainAgent = read(mainAgentPath);
@@ -207,25 +208,14 @@ test('failed tasks stay passive until the lightweight entry explicitly resumes t
   assert.doesNotMatch(page, /skill: activeSkill \|\| sourceMessage\.skill/);
   assert.match(page, /effectiveAgentClarification\?\.state\.sourceUserMessageId/);
   assert.match(route, /normalizeRecentFailedTask\(body\.recentFailedTask, body\.messages\)/);
-  assert.match(route, /buildFailedTaskRecoveryMessages/);
-  assert.match(route, /\['handle_failed_task'\]/);
-  const recoveryGate = route.slice(
-    route.indexOf('const runRecoveryGate'),
-    route.indexOf('const recoveryRecord'),
-  );
-  assert.match(recoveryGate, /toolChoice:\s*'auto'/);
-  assert.doesNotMatch(recoveryGate, /for \(let attempt = 0; attempt < 2; attempt \+= 1\)/);
-  assert.match(recoveryGate, /decision: 'direct_response'/);
-  assert.match(route, /recoveryResolution\?\.decision === 'direct_response'/);
-  assert.match(route, /recoveryResolution = await runRecoveryGate\(recoveryRecord\)/);
-  assert.match(route, /body\.intent !== 'image'/);
-  assert.match(route, /selectedSkill\?\.executionMode !== 'image_pipeline'/);
-  assert.match(route, /requestedRecoveryTaskId[\s\S]{0,700}runRecoveryGate\(recoveryRecord\)/);
-  assert.match(route, /mainAgentReferenceImages = \[\]/);
+  assert.doesNotMatch(route, /buildFailedTaskRecoveryMessages/);
+  assert.doesNotMatch(route, /const runRecoveryGate/);
+  assert.match(route, /recoveryCandidateForAgent \? \['handle_failed_task'\] : \[\]/);
+  assert.match(route, /handleFailedTask: async/);
+  assert.match(route, /recentFailedTask: recoveryCandidateForAgent/);
   assert.match(route, /recoveryHistoryMessages = cropMessagesToRecoverySource/);
   assert.match(route, /knownVisualReferenceIds = new Set/);
-  assert.match(route, /const route = action === 'resume' \? record\.resumeRoute : null/);
-  assert.match(route, /record\.taskSnapshot\?\.imagePlanning\?\.skill\?\.id \|\| record\.skillId \|\| null/);
+  assert.match(route, /recoveryRecord\.taskSnapshot\?\.imagePlanning\?\.skill\?\.id \|\| recoveryRecord\.skillId \|\| null/);
   assert.match(route, /reserveTaskExecution\([\s\S]{0,500}recoveryTaskIdForExecution/);
   assert.match(route, /preserveRecoveryRecordOnFailure && recoveryBaseRecord[\s\S]{0,120}\? recoveryBaseRecord/);
   assert.match(route, /recoveryResolution\?\.decision === 'continue_current_request'[\s\S]{0,160}recoveryBaseRecord = null[\s\S]{0,100}preserveRecoveryRecordOnFailure = false/);
@@ -234,17 +224,12 @@ test('failed tasks stay passive until the lightweight entry explicitly resumes t
   assert.match(route, /rewindAgentAnalysis/);
   assert.match(route, /rewindImagePlanning\(imagePlanning, requestedStage as AgentImagePlanningStage, runId\)/);
   assert.doesNotMatch(route, /recoveryRevisionMessage[\s\S]{0,800}\/(?:prompt|提示词|关键词)/);
-  const recoveryValidation = route.slice(
-    route.indexOf('const handleFailedTask'),
-    route.indexOf('const runRecoveryGate'),
-  );
-  assert.doesNotMatch(recoveryValidation, /args\.taskId|args\.route|args\.skillId/);
+  assert.doesNotMatch(route, /const runRecoveryGate/);
   assert.match(route, /const src = version\.assetUrl \|\| entity\?\.assetUrl/);
-  assert.match(mainAgent, /轻量任务入口/);
-  assert.match(mainAgent, /简单寒暄或可以直接回答/);
+  assert.match(mainAgent, /同一个 Main Agent 流程/);
+  assert.match(mainAgent, /不得调用独立恢复门控模型/);
   assert.match(mainAgent, /action=inspect/);
   assert.match(mainAgent, /action=resume/);
-  assert.doesNotMatch(mainAgent, /系统可能提供 recentFailedTask/);
   assert.match(route, /let recoveryBaseRecord: AgentRecoveryRecord \| null = null/);
   assert.match(route, /recoveryBaseRecord = recoveryRecord/);
   assert.match(route, /selectedSkill = null;[\s\S]{0,120}skillSource = null/);
@@ -258,14 +243,15 @@ test('explicit image UI requests stay in the image domain without forcing an ent
   assert.doesNotMatch(route, /explicitImageEntryRequired/);
 });
 
-test('validated Image Planner contracts execute deterministically without another model decision', () => {
+test('Main Agent image contracts execute directly without a Prompt Planner', () => {
   const source = read(routePath);
   const imagePipeline = source.indexOf('if (shouldUseImagePipeline)');
   const directTool = source.indexOf("executeAgentTool(toolRegistry, 'generate_image'", imagePipeline);
   const completed = source.indexOf("writeAgentDone('image_generated')", directTool);
   assert.ok(imagePipeline >= 0 && directTool > imagePipeline && completed > directTool);
-  assert.match(source, /Unsupported deterministic image execution tool/);
-  assert.match(source, /toolName: 'start_skill_job'/);
+  assert.match(source, /const finalGenerationPrompt = String\(imageContract\?\.prompt \|\| ''\)\.trim\(\)/);
+  assert.match(source, /const imageToolArgs = imageContract \|\|/);
+  assert.doesNotMatch(source.slice(imagePipeline, completed), /generation!\.prompt|executionPlan\.generation\.prompt/);
 });
 
 test('long-running image supplier calls keep the Agent delivery stream active', () => {
@@ -280,13 +266,28 @@ test('long-running image supplier calls keep the Agent delivery stream active', 
   assert.match(source, /canvasContext: body\.canvasContext,\n\s*toolCallId,/);
 });
 
-test('manual image Skills pass the compiler prompt directly to image generation', () => {
+test('Main Agent image Skill Prompt is passed directly to image generation', () => {
   const source = read(routePath);
-  const finalPrompt = source.indexOf("const finalGenerationPrompt = String(generationPrompt || '').trim()");
-  const requestBuilder = source.indexOf('buildAgentImageGenerationRequests', finalPrompt);
-  assert.ok(finalPrompt >= 0 && requestBuilder > finalPrompt);
+  const finalPrompt = source.indexOf("const finalGenerationPrompt = String(imageContract?.prompt || '').trim()");
+  assert.ok(finalPrompt >= 0);
+  assert.match(source, /prompt: finalGenerationPrompt/);
+  assert.match(source, /sourcePrompt: finalGenerationPrompt/);
+  assert.doesNotMatch(source, /const finalGenerationPrompt = String\(generationPrompt/);
   assert.doesNotMatch(source, /validateSkillPromptAssertions|missingCompiledPromptLiterals/);
   assert.doesNotMatch(source, /submitImagePromptCompilation|imagePlanning\.promptRepair/);
+});
+
+test('image execution never falls back from tool Prompt to legacy brief fields', () => {
+  const source = read(routePath);
+  const payloadStart = source.indexOf('const generateImagePayload = async');
+  const payloadEnd = source.indexOf('const writeResolvedImageOptionUpdate', payloadStart);
+  const payload = source.slice(payloadStart, payloadEnd);
+  assert.doesNotMatch(payload, /generationBrief|executionBrief|\bgenerationPrompt\b|promptCompilation/);
+  const imageStart = source.indexOf('if (shouldUseImagePipeline)');
+  const imageEnd = source.indexOf('const imageToolArgs =', imageStart);
+  const image = source.slice(imageStart, imageEnd);
+  assert.match(image, /imageContract\?\.prompt/);
+  assert.doesNotMatch(image, /generation!\.prompt|executionPlan\.generation\.prompt/);
 });
 
 test('topic memory is bounded, emitted, and persisted by the client', () => {
@@ -344,13 +345,13 @@ test('Main Agent streams visible text activity without exposing reasoning and ha
 
 test('every Pi run path uses the shared live event adapter', () => {
   const source = read(routePath);
-  assert.equal((source.match(/runZFlowAgentBrain\(/g) || []).length, 4);
-  assert.equal((source.match(/onEvent: emitMainAgentEvent/g) || []).length, 4);
-  assert.equal((source.match(/onAssistantTurnComplete: handleAssistantTurnComplete/g) || []).length, 4);
-  assert.equal((source.match(/onToolUpdate: writeToolUpdate/g) || []).length, 4);
+  assert.equal((source.match(/runZFlowAgentBrain\(/g) || []).length, 3);
+  assert.equal((source.match(/onEvent: emitMainAgentEvent/g) || []).length, 3);
+  assert.equal((source.match(/onAssistantTurnComplete: handleAssistantTurnComplete/g) || []).length, 3);
+  assert.equal((source.match(/onToolUpdate: writeToolUpdate/g) || []).length, 3);
 });
 
-test('deterministic image execution keeps prompt and supplier stages tied to real work', () => {
+test('direct image execution keeps prompt and supplier stages tied to real work', () => {
   const source = read(routePath);
   assert.doesNotMatch(source, /正在等待模型规划/);
   assert.match(source, /type: 'image_prompts_ready'[\s\S]{0,300}completedLabel: imageProgress\?\.promptPreparation\?\.completedLabel/);

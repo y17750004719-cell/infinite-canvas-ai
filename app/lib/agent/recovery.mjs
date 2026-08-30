@@ -14,6 +14,28 @@ const ids = (value, limit = 20) => Array.isArray(value)
   ? Array.from(new Set(value.map((entry) => bounded(String(entry || ''), 200)).filter(Boolean))).slice(0, limit)
   : [];
 const nonNegativeInt = (value, max = 100) => Math.min(max, Math.max(0, Math.floor(Number(value) || 0)));
+const normalizeToolCalls = (value, taskId) => Array.isArray(value)
+  ? value.slice(-32).flatMap((entry) => {
+      if (!record(entry)) return [];
+      const callId = bounded(entry.callId, 200);
+      const attemptId = bounded(entry.attemptId, 200);
+      const toolName = bounded(entry.toolName, 160);
+      const status = ['pending', 'running', 'completed', 'failed', 'cancelled'].includes(entry.status)
+        ? entry.status
+        : null;
+      if (!callId || !attemptId || !toolName || !status) return [];
+      return [{
+        callId,
+        attemptId,
+        taskId: bounded(entry.taskId, 200) || taskId,
+        toolName,
+        status,
+        ...(bounded(entry.resultRef, 500) ? { resultRef: bounded(entry.resultRef, 500) } : {}),
+        ...(Number.isFinite(Number(entry.startedAt)) ? { startedAt: Number(entry.startedAt) } : {}),
+        ...(Number.isFinite(Number(entry.completedAt)) ? { completedAt: Number(entry.completedAt) } : {}),
+      }];
+    })
+  : [];
 
 function normalizeReferenceContext(value) {
   if (!record(value)) return null;
@@ -143,6 +165,7 @@ export function normalizeAgentRecoveryRecord(value) {
   const visualSummary = normalizeAgentVisualSummary(input.visualSummary);
   const referenceContext = normalizeReferenceContext(input.referenceContext);
   const mainAgentLoop = normalizeMainAgentLoop(input.mainAgentLoop);
+  const toolCalls = normalizeToolCalls(input.toolCalls, taskId);
   const imageOperation = input.imageOperation === 'generate' || input.imageOperation === 'edit'
     ? input.imageOperation
     : null;
@@ -174,6 +197,7 @@ export function normalizeAgentRecoveryRecord(value) {
     ...(visualSummary ? { visualSummary } : {}),
     ...(snapshot ? { taskSnapshot: structuredClone(snapshot) } : {}),
     ...(mainAgentLoop ? { mainAgentLoop } : {}),
+    ...(toolCalls.length ? { toolCalls } : {}),
     completedAssetCount: Math.min(100, Math.max(0, Math.floor(Number(input.completedAssetCount) || 0))),
     createdAt: Number.isFinite(Number(input.createdAt)) ? Number(input.createdAt) : Date.now(),
   };
@@ -220,6 +244,7 @@ export function createAgentRecoveryRecord(input = {}) {
     visualSummary: input.visualSummary,
     taskSnapshot: input.taskSnapshot,
     mainAgentLoop: input.mainAgentLoop,
+    toolCalls: input.toolCalls,
     completedAssetCount: input.completedAssetCount,
     createdAt: input.createdAt || Date.now(),
   });

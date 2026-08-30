@@ -31,6 +31,21 @@ test('recovery records are bounded and keep stable task state', () => {
   assert.equal(record.referenceContext.references[0].sourceVersionId, 'version-1');
 });
 
+test('recovery records retain bounded executed tool call identity', () => {
+  const record = createAgentRecoveryRecord({
+    taskId: 'task-tools', runId: 'run-tools', topicId: 'topic-1', sourceUserMessageId: 'user-1',
+    status: 'failed', resumeRoute: 'main_agent', intent: 'image', originalRequest: '生成图片',
+    failureStage: 'image_pipeline', failureMessage: '供应商失败',
+    toolCalls: [
+      { callId: 'call-1', attemptId: 'attempt-1', taskId: 'task-tools', toolName: 'generate_image', status: 'completed', startedAt: 1, completedAt: 2 },
+      { callId: 'call-1', attemptId: 'attempt-1', taskId: 'task-tools', toolName: 'generate_image', status: 'completed', startedAt: 1, completedAt: 2 },
+    ],
+  });
+  assert.equal(record.toolCalls.length, 2);
+  assert.equal(record.toolCalls[0].status, 'completed');
+  assert.equal(record.toolCalls[0].taskId, 'task-tools');
+});
+
 test('legacy recovery records receive identity defaults at the read boundary', () => {
   const record = normalizeAgentRecoveryRecord({
     version: 1,

@@ -186,7 +186,7 @@ export function createAgentToolRegistry({
       readOnly: false,
       terminal: true,
       countAgainstToolBudget: false,
-      description: 'Generate or edit images using the final prompt. For edits, targetReferenceId must identify the one image to edit and also appear in referenceIds.',
+      description: 'Generate or edit images. prompt is the complete final supplier Prompt produced by this Main Agent turn after applying the loaded ImageGen and locked visual Skill renderPrompt rules; do not submit a style-label summary or hand it to another model. For edits, targetReferenceId must identify the one image to edit and also appear in referenceIds.',
       parameters: {
         type: 'object',
         properties: {

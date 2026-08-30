@@ -64,6 +64,14 @@ test('Main Agent Loop defaults to the current request, manifests, and explicit v
   assert.ok(messages.at(-1).content.some((part) => part.type === 'image_url' && part.image_url.url === 'data:image/png;base64,AAAA'));
 });
 
+test('image renderPrompt rules require a complete final supplier prompt', () => {
+  assert.match(MAIN_AGENT_LOOP_SYSTEM_PROMPT, /renderPrompt 输出约定就是最终供应商 Prompt/);
+  assert.match(MAIN_AGENT_LOOP_SYSTEM_PROMPT, /generate_image\.args\.prompt/);
+  assert.match(MAIN_AGENT_LOOP_SYSTEM_PROMPT, /必须保留主体与内容关系、构图和空间比例、材质与印刷工艺/);
+  assert.match(MAIN_AGENT_LOOP_SYSTEM_PROMPT, /“concise”只能删除工作流说明/);
+  assert.match(MAIN_AGENT_LOOP_SYSTEM_PROMPT, /不得调用独立 Planner、Prompt Optimizer/);
+});
+
 test('failed task recovery gate contains only compact text metadata', () => {
   const messages = buildFailedTaskRecoveryMessages({
     userMessage: '继续刚才失败的任务',
@@ -152,7 +160,7 @@ test('Main Agent Loop restores bounded history and project context only after un
   assert.match(MAIN_AGENT_LOOP_SYSTEM_PROMPT, /只返回有界摘要和稳定 ID/);
   assert.match(MAIN_AGENT_LOOP_SYSTEM_PROMPT, /没有 lockedSkill 时直接使用通用图像合同/);
   assert.doesNotMatch(MAIN_AGENT_LOOP_SYSTEM_PROMPT, /自动选择 Skill/);
-  assert.doesNotMatch(MAIN_AGENT_LOOP_SYSTEM_PROMPT, /submit_image_compilation|renderPrompt/);
+  assert.doesNotMatch(MAIN_AGENT_LOOP_SYSTEM_PROMPT, /submit_image_compilation/);
 });
 
 test('Main Agent Loop unlock scopes do not leak unrelated context', () => {

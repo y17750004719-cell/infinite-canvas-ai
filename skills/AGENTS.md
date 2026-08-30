@@ -3,7 +3,7 @@
 ## Manifest Contract
 
 - Every image Skill has a stable Skill ID and a `SKILL.md` entry point.
-- `image_pipeline` Skills must provide `planningGuidance`, `generationContract`, and `promptStyle` sufficient for the Planner to compile the final provider prompt.
+- `image_pipeline` Skills must provide `planningGuidance`, `generationContract`, and `promptStyle` that the Main Agent can apply directly when producing the final provider Prompt. They are no longer a contract for an independent Planner.
 - `agent_loop` Skills must provide an explicit entry flow, allowed tools, and confirmation boundary instead of an image prompt compiler contract.
 - Skill manifests must declare the execution mode and required capabilities explicitly.
 - Skill configuration belongs in the Skill manifest or its existing config file; do not add hidden runtime constants in route handlers.

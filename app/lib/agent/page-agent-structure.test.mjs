@@ -49,7 +49,7 @@ test('image planning failures are presented as stage-specific recoverable Chines
   assert.match(source, /provider_unavailable: '图片供应商当前没有可用模型通道或账户/);
 });
 
-test('direct image and canvas image requests use the Planner-backed agent route', () => {
+test('direct image and canvas image requests use the Main Agent route', () => {
   const requestModeIndex = source.indexOf('const usesAgentRequest = true');
   const requestEndpointIndex = source.indexOf("const resolvedRequestEndpoint = usesAgentRequest ? '/api/agent'", requestModeIndex);
   const canvasHandlerIndex = source.indexOf('const handleCanvasImageGenerate = useCallback');
