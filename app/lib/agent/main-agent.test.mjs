@@ -201,7 +201,7 @@ test('main agent messages keep references without injecting full Skill text', ()
   });
 });
 
-test('Main Agent receives only locked Skill identity and reads its content through the image tool chain', () => {
+test('Main Agent receives locked Skill content as direct execution rules', () => {
   const originalRequest = '根据参考图生成海报';
   const messages = buildMainAgentLoopMessages({
     messages: [{ role: 'user', content: originalRequest }],
@@ -236,6 +236,25 @@ test('Main Agent receives only locked Skill identity and reads its content throu
     lockedSkillId: 'poster',
   });
   assert.deepEqual(JSON.parse(unloaded[1].content).lockedSkill, { id: 'poster' });
+});
+
+test('image generation contract keeps ImageGen and visual rules in one direct agent flow', () => {
+  const messages = buildMainAgentLoopMessages({
+    messages: [{ role: 'user', content: '生成一张杂志海报' }],
+    lockedSkillId: 'zine-poster',
+    skillContent: '# Visual Skill\nUse a small visual cluster, generous paper whitespace, and a saturated red anchor. Avoid gradients and 3D shadows.',
+    imagegenHostContent: '# ImageGen\nHandle reference images and write a supplier-facing prompt.',
+  });
+  const hostIndex = messages.findIndex((message) => String(message.content).includes('ImageGen 方法已由运行时加载'));
+  const visualIndex = messages.findIndex((message) => String(message.content).includes('Use a small visual cluster'));
+  assert.ok(hostIndex > 0);
+  assert.ok(visualIndex > hostIndex);
+  const content = messages.map((message) => String(message.content)).join('\n');
+  assert.match(content, /必须应用的视觉执行约束/);
+  assert.match(content, /最终 generate_image Prompt 必须体现/);
+  assert.match(content, /不得仅保留泛化风格标签/);
+  assert.match(MAIN_AGENT_LOOP_SYSTEM_PROMPT, /不得调用独立 Planner、Prompt Optimizer/);
+  assert.match(MAIN_AGENT_LOOP_SYSTEM_PROMPT, /直接调用 generate_image/);
 });
 
 test('Main Agent accepts host-loaded non-image Skill instructions without ImageGen context', () => {

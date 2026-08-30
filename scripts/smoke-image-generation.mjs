@@ -23,7 +23,7 @@ async function main() {
   try {
     const response = await fetch(`${baseUrl}/api/generate`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'x-z-flow-image-planner': '1' },
+      headers: { 'Content-Type': 'application/json', 'x-z-flow-image-agent': '1' },
       body: JSON.stringify({
         messages: [{ role: 'user', content: prompt }], intent: 'image', providerId, imageProviderId: providerId, model,
         reference_images: withReference ? [TINY_PNG] : [],

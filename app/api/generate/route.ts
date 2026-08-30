@@ -498,14 +498,14 @@ export async function POST(request: NextRequest) {
     if (
       resolved.intent === "image"
       && skill
-      && request.headers.get("x-z-flow-image-planner") !== "1"
+      && request.headers.get("x-z-flow-image-agent") !== "1"
     ) {
-      await logResponse(400, { mode: "image", reason: "image_skill_requires_planner", skill });
+      await logResponse(400, { mode: "image", reason: "image_skill_requires_agent", skill });
       return NextResponse.json(
         {
           status: "error",
-          code: "image_skill_requires_planner",
-          error: "Image requests with a Skill must be compiled by the Agent Planner first.",
+          code: "image_skill_requires_agent",
+          error: "Image requests with a Skill must be executed by the Main Agent.",
         },
         { status: 400 },
       );

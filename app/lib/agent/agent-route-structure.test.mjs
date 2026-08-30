@@ -152,8 +152,27 @@ test('Main Agent reads ImageGen and the locked visual Skill together before writ
   assert.match(source, /hostSkill: \{ id: IMAGEGEN_HOST_SKILL_ID, content: hostContent, contentHash: hostContentHash \}/);
   assert.doesNotMatch(source, /lockedSkillContract:/);
   assert.match(mainAgent, /运行时先加载 ImageGen 方法/);
-  assert.match(mainAgent, /ImageGen 方法负责 Prompt 组织/);
+  assert.match(mainAgent, /ImageGen 负责判断生成\/编辑.*Prompt 结构/);
   assert.doesNotMatch(source, /validateSkillPromptAssertions|missingCompiledPromptLiterals/);
+});
+
+test('image execution telemetry proves the single-agent contract', () => {
+  const source = read(routePath);
+  for (const field of [
+    'imagegenLoaded',
+    'visualSkillLoaded',
+    'selectedSkillId',
+    'skillContentLength',
+    'skillContentHash',
+    'mainAgentRequestCount',
+    'plannerRequestCount',
+    'directGenerateImageCall',
+    'finalPromptLength',
+  ]) {
+    assert.match(source, new RegExp(field));
+  }
+  assert.match(source, /const plannerRequestCount = 0/);
+  assert.match(source, /main_agent\.direct_generate_image/);
 });
 
 test('direct ImageGen does not invoke Planner transport from the active route', () => {
@@ -203,7 +222,7 @@ test('failed tasks stay passive until the lightweight entry explicitly resumes t
   assert.match(route, /selectedSkill\?\.executionMode !== 'image_pipeline'/);
   assert.match(route, /requestedRecoveryTaskId[\s\S]{0,700}runRecoveryGate\(recoveryRecord\)/);
   assert.match(route, /mainAgentReferenceImages = \[\]/);
-  assert.match(route, /plannerHistoryMessages = cropMessagesToRecoverySource/);
+  assert.match(route, /recoveryHistoryMessages = cropMessagesToRecoverySource/);
   assert.match(route, /knownVisualReferenceIds = new Set/);
   assert.match(route, /const route = action === 'resume' \? record\.resumeRoute : null/);
   assert.match(route, /record\.taskSnapshot\?\.imagePlanning\?\.skill\?\.id \|\| record\.skillId \|\| null/);
@@ -372,7 +391,7 @@ test('Main Agent prompt uses natural completion and direct ImageGen', () => {
   assert.match(source, /submit_agent_analysis_checkpoint/);
   assert.match(source, /request_user_decision/);
   assert.match(source, /generate_image/);
-  assert.match(source, /运行时先加载 ImageGen 方法和可选的已选视觉 Skill；主 Agent 再结合用户需求和稳定参考图写出最终 Prompt/);
+  assert.match(source, /运行时先加载 ImageGen 方法和已锁定的视觉 Skill/);
   assert.doesNotMatch(source, /submit_image_context_analysis|submit_image_brief|submit_image_prompt_compilation/);
   assert.doesNotMatch(source, /调用 submit_image_execution_plan/);
   assert.match(source, /运行时先加载 ImageGen 方法/);

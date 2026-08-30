@@ -13,7 +13,7 @@ test('image smoke is explicit, paid-test guarded, and uses the production image 
   assert.match(script, /IMAGE_SMOKE_PROVIDER_ID/);
   assert.match(script, /IMAGE_SMOKE_MODEL/);
   assert.match(script, /\/api\/generate/);
-  assert.match(script, /x-z-flow-image-planner/);
+  assert.match(script, /x-z-flow-image-agent/);
   assert.match(script, /IMAGE_SMOKE_REFERENCE/);
   assert.match(script, /imageCount === 0/);
 });

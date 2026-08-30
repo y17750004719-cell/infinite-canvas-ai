@@ -89,7 +89,6 @@ import {
 import { createSkillJob, getSkillJob, toJobSummary } from '../../lib/skill-jobs';
 import { readProviderRegistry } from '../../lib/provider-config.mjs';
 import {
-  listAlternativeProviderModelSelections,
   resolveProviderModelSelection,
 } from '../../lib/provider-model-selection.mjs';
 import { createLogger } from '../../lib/logger';
@@ -125,8 +124,6 @@ import type {
   AgentExecutionPlan,
   AgentImageTask,
   AgentPlanPresentation,
-  AgentPlannerModelCandidate,
-  AgentPlannerSourceDetail,
   AgentTaskContract,
 } from '../../lib/agent/execution-planner.types';
 import type {
@@ -155,18 +152,6 @@ const MAX_MAIN_AGENT_TOOL_CALLS = 6;
 const CONFIRMATION_TTL_MS = 10 * 60 * 1000;
 const encoder = new TextEncoder();
 
-function summarizePlannerNormalizations(fields: unknown) {
-  const normalizedFields = Array.isArray(fields)
-    ? fields.filter((field): field is string => typeof field === 'string')
-    : [];
-  return {
-    generationContractNormalizedCount: normalizedFields.filter((field) => (
-      field === 'generation.prompt' || /^generation\.items\[\d+\]\.prompt$/.test(field)
-    )).length,
-    executionToolNormalized: normalizedFields.includes('execution.tool'),
-  };
-}
-
 function summarizePromptQuality(prompt: unknown) {
   const value = typeof prompt === 'string' ? prompt : '';
   const lines = value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
@@ -188,44 +173,6 @@ function hasOnlyImageOperationAmbiguity(validationErrors: unknown) {
       && ['imageTask.targetReferenceId', 'imageTask.sourceReferenceId']
         .includes(String(issue.path || ''));
   });
-}
-
-function createPlannerModelSwitchClarification(
-  taskId: string,
-  providers: Awaited<ReturnType<typeof readProviderRegistry>>['providers'],
-  currentProviderId: string | undefined,
-  currentModel: string,
-  remainingCandidates?: AgentPlannerModelCandidate[],
-) {
-  const plannerCandidates = remainingCandidates
-    ? remainingCandidates.filter((candidate) => (
-        candidate.providerId !== currentProviderId || candidate.model !== currentModel
-      )).slice(0, 3)
-    : listAlternativeProviderModelSelections({
-        providers,
-        currentProviderId,
-        currentModel,
-        limit: 3,
-      }).map((candidate, index) => ({ ...candidate, id: `planner-model-${index + 1}` }));
-  if (plannerCandidates.length === 0) return null;
-  const currentProvider = providers.find((provider) => provider.id === currentProviderId);
-  const currentLabel = [currentProvider?.name || currentProviderId, currentModel].filter(Boolean).join(' / ');
-  const question = `${currentLabel || '当前 Planner'} 连接超时、中断或能力不匹配。请选择另一个模型重新规划。`;
-  const request: AgentClarificationRequest = {
-    id: randomUUID(),
-    taskId,
-    question,
-    dimension: 'planner_model_switch',
-    options: plannerCandidates.map((candidate) => ({
-      id: candidate.id,
-      label: `${candidate.providerName} / ${candidate.model}`,
-      answer: `使用 ${candidate.providerName} 的 ${candidate.model} 重新规划当前任务。`,
-      description: '保留原始需求、Skill、稳定引用和已缓存的视觉摘要。',
-    })),
-    allowCustom: true,
-    allowProceed: true,
-  };
-  return { request, plannerCandidates };
 }
 
 type AgentImagePromptCompilation = {
@@ -1038,14 +985,10 @@ export async function POST(request: NextRequest) {
   if (!latestUserMessage) {
     return NextResponse.json({ error: 'A user message is required' }, { status: 400 });
   }
-  const plannerShadowMode = false;
-  const plannerAuthoritative = true;
-  const conversationIntent = plannerAuthoritative
-    ? { intent: 'chat' as const, brief: latestUserMessage, inherited: false, needsDirectionConfirmation: false }
-    : resolveAgentConversationIntent(
-        body.messages,
-        Boolean(body.referenceImages?.length),
-      );
+  const conversationIntent = resolveAgentConversationIntent(
+    body.messages,
+    Boolean(body.referenceImages?.length),
+  );
   const contextEntities = Array.isArray(body.contextEntities)
     ? body.contextEntities.filter((entity) => entity && typeof entity.id === 'string').slice(-200)
     : [];
@@ -1134,35 +1077,29 @@ export async function POST(request: NextRequest) {
     ? body.selectedContextEntityIds.filter((id): id is string => typeof id === 'string').slice(0, 64)
     : [];
   const initialBriefSource = conversationIntent.brief || latestUserMessage;
-  const rawUserCountResolution = plannerAuthoritative
-    ? { status: 'none' as const, source: 'default' as const, candidates: [] as number[], count: undefined, matchedText: undefined }
-    : extractAgentImageCount(latestUserMessage);
+  const rawUserCountResolution = extractAgentImageCount(latestUserMessage);
   const briefCountResolution = initialBriefSource === latestUserMessage
     ? rawUserCountResolution
     : extractAgentImageCount(initialBriefSource);
   const explicitBatchCountResolution = rawUserCountResolution.status !== 'none'
     ? rawUserCountResolution
     : briefCountResolution;
-  const rawUserDeliveryPlan = plannerAuthoritative
-    ? { mode: 'variants' as const, outputCount: 1, promptCount: 1, panelCount: undefined, variationAxes: [], evidence: [], confidence: 'low' as const, requiresClarification: false }
-    : resolveImageDeliveryPlan(latestUserMessage, rawUserCountResolution.count || 1);
-  const briefDeliveryPlan = initialBriefSource === latestUserMessage || plannerAuthoritative
+  const rawUserDeliveryPlan = resolveImageDeliveryPlan(latestUserMessage, rawUserCountResolution.count || 1);
+  const briefDeliveryPlan = initialBriefSource === latestUserMessage
     ? rawUserDeliveryPlan
     : resolveImageDeliveryPlan(initialBriefSource, briefCountResolution.count || 1);
   const initialDeliveryPlan = rawUserDeliveryPlan.evidence.length > 0 ? rawUserDeliveryPlan : briefDeliveryPlan;
-  const explicitBatchImageRequest = !plannerAuthoritative && !body.activeSkillId
+  const explicitBatchImageRequest = !body.activeSkillId
     && (
       conversationIntent.intent === 'image'
     )
     && initialDeliveryPlan.outputCount > 1;
-  const shouldResolveInitialContext = !plannerAuthoritative && (
+  const shouldResolveInitialContext = (
     !explicitBatchImageRequest
     || selectedContextEntityIds.length > 0
     || isReferentialShorthand(latestUserMessage)
   );
-  const initialContextResolution = plannerAuthoritative
-    ? { status: 'none' as const, detected: false, confidence: 'none' as const, candidates: [], entityIds: [] }
-    : shouldResolveInitialContext
+  const initialContextResolution = shouldResolveInitialContext
     ? resolveContextReference({
         userMessage: latestUserMessage,
         entities: contextEntities,
@@ -1276,6 +1213,12 @@ export async function POST(request: NextRequest) {
       let skillContent = '';
       let skillContentHash = '';
       let imagegenHostContent = '';
+      let imagegenHostContentHash = '';
+      let imagegenLoaded = false;
+      let visualSkillLoaded = false;
+      let mainAgentRequestCount = 0;
+      const plannerRequestCount = 0;
+      let directGenerateImageCall = false;
       let contextResolution = structuredClone(initialContextResolution) as AgentContextResolution;
       let executionBriefData = structuredClone(initialExecutionBrief) as ExecutionBrief;
       let executionBrief = executionBriefData.plainText;
@@ -1323,8 +1266,6 @@ export async function POST(request: NextRequest) {
       if (executionPlan?.generation?.aspectRatio) {
         body.imageOptions = { ...body.imageOptions, aspectRatio: executionPlan.generation.aspectRatio };
       }
-      let executionPlanSource: 'model' | 'fallback' | null = null;
-      let executionPlanSourceDetail: AgentPlannerSourceDetail | null = null;
       let executionKind: AgentExecutionPlan['execution']['kind'] | null = null;
       let promptCompilation: AgentImagePromptCompilation | undefined;
       let taskExecutionReservation: ReturnType<typeof reserveTaskExecution> | null = null;
@@ -1707,6 +1648,7 @@ export async function POST(request: NextRequest) {
       const ensureImagegenHostContent = async () => {
         if (imagegenHostContent) return imagegenHostContent;
         imagegenHostContent = await loadSkillContent(IMAGEGEN_HOST_SKILL_ID, { includeInternal: true });
+        imagegenHostContentHash = createHash('sha256').update(imagegenHostContent).digest('hex');
         return imagegenHostContent;
       };
       const assertLockedImageSkill = async (skill: typeof selectedSkill, expectedHash?: string | null) => {
@@ -2063,7 +2005,7 @@ export async function POST(request: NextRequest) {
           };
         }
         const finalGenerationPrompt = String(generationPrompt || '').trim();
-        if (!finalGenerationPrompt) throw new Error('Planner returned an empty image prompt');
+        if (!finalGenerationPrompt) throw new Error('Main Agent returned an empty image prompt');
         const payloadOutputCount = normalizeAgentImageCount(imageOptions?.count);
         const payloadDeliveryPlan = deliveryPlan
           || (executionPlan
@@ -2166,6 +2108,15 @@ export async function POST(request: NextRequest) {
           editTargetReferenceId: imageTask?.targetReferenceId || null,
           streamed: streamOptions?.enabled === true && requests.length > 1,
           promptQuality: requests.map((request) => summarizePromptQuality(request.messages?.[0]?.content)),
+          imagegenLoaded,
+          visualSkillLoaded,
+          selectedSkillId: selectedSkill?.id || null,
+          skillContentLength: skillContent.length,
+          skillContentHash: skillContentHash || null,
+          mainAgentRequestCount,
+          plannerRequestCount,
+          directGenerateImageCall,
+          finalPromptLength: finalGenerationPrompt.length,
         });
         const executionMode = resolveCanvasImageTaskExecutionMode({
           modelId: resolvedImageSelection.model,
@@ -2207,7 +2158,7 @@ export async function POST(request: NextRequest) {
               method: 'POST',
               headers: {
                 'Content-Type': 'application/json',
-                'x-z-flow-image-planner': '1',
+                'x-z-flow-image-agent': '1',
               },
               signal: runSignal,
               body: JSON.stringify({
@@ -2536,6 +2487,25 @@ export async function POST(request: NextRequest) {
             ? skillManifests.find((manifest) => manifest.id === confirmationRecord.skillId) || null
             : null;
           if (confirmationRecord.skillId && !selectedSkill) throw new Error('Confirmed skill is no longer available');
+          imagegenHostContent = await loadSkillContent(IMAGEGEN_HOST_SKILL_ID, { includeInternal: true });
+          imagegenHostContentHash = createHash('sha256').update(imagegenHostContent).digest('hex');
+          imagegenLoaded = true;
+          if (selectedSkill) {
+            skillContent = await loadSkillContent(selectedSkill.id);
+            skillContentHash = createHash('sha256').update(skillContent).digest('hex');
+            if (confirmationRecord.skillContentHash && confirmationRecord.skillContentHash !== skillContentHash) {
+              throw new Error('The locked Skill content changed after this task was created');
+            }
+            visualSkillLoaded = true;
+          }
+          void contextLogger.info('imagegen.context_read', 'Reloaded ImageGen host and locked visual Skill before confirmation execution', {
+            source: 'confirmation',
+            hostContentLength: imagegenHostContent.length,
+            hostContentHash: imagegenHostContentHash,
+            visualSkillId: selectedSkill?.id || null,
+            visualContentLength: skillContent.length,
+            visualContentHash: skillContentHash || null,
+          });
           executionBriefData = confirmationRecord.executionBrief || compileExecutionBrief({
             userMessage: confirmationRecord.generationBrief || confirmationRecord.userMessage,
           });
@@ -2812,6 +2782,7 @@ export async function POST(request: NextRequest) {
               },
             });
             const continuationRawResults = new Map<string, unknown>();
+            mainAgentRequestCount += 1;
             const continuationResult = await runZFlowAgentBrain({
               messages: [],
               systemPrompt: confirmationRecord.systemPrompt,
@@ -3102,7 +3073,7 @@ export async function POST(request: NextRequest) {
           (mainAgentReferenceContext?.references || []).map((reference) => reference.id),
         );
         const loadedVisualReferenceIds = new Set(initiallyAttachedVisualIds);
-        let plannerHistoryMessages = body.messages;
+        let recoveryHistoryMessages = body.messages;
 
         const handleFailedTask = (record: AgentRecoveryRecord, args: Record<string, unknown>) => {
           const action = String(args.action || '');
@@ -3146,6 +3117,7 @@ export async function POST(request: NextRequest) {
             handleFailedTask: async (args: Record<string, unknown>) => handleFailedTask(record, args),
           });
           const recoveryTools = getAgentModelTools(recoveryRegistry, ['handle_failed_task']);
+          mainAgentRequestCount += 1;
           const result = await runZFlowAgentBrain({
             messages: (buildFailedTaskRecoveryMessages as any)({
               userMessage: latestUserMessage,
@@ -3329,10 +3301,10 @@ export async function POST(request: NextRequest) {
             writeAgentDone('recovery_scope_required');
             return;
           }
-          plannerHistoryMessages = cropMessagesToRecoverySource(recoveryRecord);
+          recoveryHistoryMessages = cropMessagesToRecoverySource(recoveryRecord);
           if (recoveryRevisionMessage) {
             const revisionSource = [...body.messages].reverse().find((message) => message.role === 'user');
-            plannerHistoryMessages.push({
+            recoveryHistoryMessages.push({
               id: revisionSource?.id || `revision-${runId}`,
               role: 'user',
               content: recoveryRevisionMessage,
@@ -3361,7 +3333,7 @@ export async function POST(request: NextRequest) {
               })
             : undefined;
           if (recoveryResolution.route === 'main_agent') {
-            mainAgentInputMessages = plannerHistoryMessages;
+            mainAgentInputMessages = recoveryHistoryMessages;
             mainAgentReferenceImages = body.referenceImages?.length
               ? body.referenceImages
               : recoveredReferenceContext?.references.map((reference) => reference.src) || [];
@@ -3405,7 +3377,7 @@ export async function POST(request: NextRequest) {
             writeAgentDone('local_delivery_recovered');
             return;
           } else {
-            mainAgentInputMessages = plannerHistoryMessages;
+            mainAgentInputMessages = recoveryHistoryMessages;
             mainAgentReferenceImages = [];
             mainAgentReferenceContext = runtimeReferenceContext || recoveredReferenceContext;
           }
@@ -3559,6 +3531,8 @@ export async function POST(request: NextRequest) {
           }
           if (!imagePlanning) imagePlanning = restoreImagePlanningSnapshot(null, imagePlanningDefaults);
           mainAgentLoopState.skillRead = true;
+          imagegenLoaded = true;
+          visualSkillLoaded = Boolean(selectedSkill && visualContent);
           imagePlanning.imagegenContext = {
             host: { id: IMAGEGEN_HOST_SKILL_ID, contentHash: hostContentHash },
             visualSkill: selectedSkill ? { id: selectedSkill.id, contentHash: visualContentHash } : null,
@@ -3602,6 +3576,15 @@ export async function POST(request: NextRequest) {
           createSkillJob,
           getSkillJob,
           generateImage: async (args: Record<string, unknown>, context: { publicProgress?: unknown }) => {
+            directGenerateImageCall = true;
+            void contextLogger.info('main_agent.direct_generate_image', 'Main Agent submitted the image generation contract', {
+              selectedSkillId: selectedSkill?.id || null,
+              finalPromptLength: typeof args.prompt === 'string' ? args.prompt.trim().length : 0,
+              imagegenLoaded,
+              visualSkillLoaded,
+              skillRead: mainAgentLoopState.skillRead,
+              plannerRequestCount,
+            });
             if (selectedSkill && (
               selectedSkill.executionMode !== 'image_pipeline'
               || !selectedSkill.allowedTools.includes('generate_image')
@@ -4138,18 +4121,14 @@ export async function POST(request: NextRequest) {
         }
         let loopResult: any;
         let rerunMainAgent: ((continuationOverride?: Record<string, unknown>) => Promise<any>) | null = null;
-        if (executionPlan) {
-          loopResult = {
-            stopReason: 'completed',
-            terminal: { type: 'image_execution', plan: executionPlan },
-            transcript: [], turns: 0, toolCalls: 0, budgetedToolCalls: 0, mutationToolCalls: 0,
-          };
-        } else {
+        {
           if (imagePlanning && !recoveryRevisionMessage && imagePlanning.currentStage !== 'routing') {
             rewindImagePlanning(imagePlanning, 'routing', runId);
             writeImagePlanningCheckpoint();
           }
-          const runMainAgentOnce = async (continuationOverride?: Record<string, unknown>) => runZFlowAgentBrain({
+          const runMainAgentOnce = async (continuationOverride?: Record<string, unknown>) => {
+            mainAgentRequestCount += 1;
+            return runZFlowAgentBrain({
           messages: buildLoopMessages(),
           providerId: resolvedChatSelection.providerId!,
           model: resolvedChatSelection.model!,
@@ -4257,7 +4236,8 @@ export async function POST(request: NextRequest) {
             if (name !== 'generate_image') writeToolProgress(name, isError ? 'failed' : 'completed', id, summarizePublicToolResult(result));
           },
           onEvent: emitMainAgentEvent,
-          });
+            });
+          };
           rerunMainAgent = runMainAgentOnce;
           loopResult = await runMainAgentOnce();
           while (loopResult.terminal?.type === 'agent_analysis_checkpoint') {
@@ -4585,7 +4565,7 @@ export async function POST(request: NextRequest) {
           skillId: selectedSkill?.id || null,
         }) as AgentExecutionPlan;
         lockedImageToolArgs = imageExecutionContract;
-        const plannerUserMessage = recoveryBaseRecord?.originalRequest || latestUserMessage;
+        const originalRequestForAgent = recoveryBaseRecord?.originalRequest || latestUserMessage;
         executionKind = 'image_pipeline';
         intent = 'image';
         imageDeliveryPlan = {
@@ -4661,8 +4641,8 @@ export async function POST(request: NextRequest) {
         if (!body.clarificationResponse && contextResolution.detected) {
           if (contextResolution.status === 'resolved') {
             executionBriefData = executionPlan
-              ? toExecutionBrief(executionPlan, plannerUserMessage, contextEntities) as ExecutionBrief
-              : compileExecutionBrief({ userMessage: plannerUserMessage, contextResolution });
+              ? toExecutionBrief(executionPlan, originalRequestForAgent, contextEntities) as ExecutionBrief
+              : compileExecutionBrief({ userMessage: originalRequestForAgent, contextResolution });
             executionBrief = executionBriefData.plainText;
             executionReferenceImages = Array.from(new Set([
               ...executionReferenceImages,
@@ -4725,7 +4705,7 @@ export async function POST(request: NextRequest) {
                 intent: candidates.every((candidate) => candidate.intent === 'skill_action') ? 'skill_action' : 'image',
                 ...(selectedSkill ? { skillId: selectedSkill.id, skillRead: mainAgentLoopState.skillRead } : {}),
                 originalRequest: rootOriginalRequest(),
-                workingBrief: plannerUserMessage,
+                workingBrief: originalRequestForAgent,
                 askedDimensions: [],
                 answers: [],
                 referenceImages: executionReferenceImages,
@@ -4767,23 +4747,9 @@ export async function POST(request: NextRequest) {
           const savedClarificationLoop = activeClarificationState.mainAgentLoop;
           const handledByResumedMainAgent = savedClarificationLoop
             && ['context_reference', 'skill_selection'].includes(body.clarificationRequest.dimension);
-          if (
-            plannerAuthoritative
-            && !handledByResumedMainAgent
-            && (
-              body.clarificationRequest.dimension === 'planner_failure'
-              || body.clarificationRequest.dimension === 'planner_model_switch'
-              || body.clarificationRequest.dimension === 'image_operation'
-              || body.clarificationRequest.dimension === 'recovery_scope'
-              || activeClarificationState.executionPlan?.needsClarification === true
-            )
-          ) {
-            mainAgentInputMessages = [{
-              id: activeClarificationState.taskId,
-              role: 'user',
-              content: activeClarificationState.originalRequest,
-            }];
-          }
+          // Clarifications resume the same Main Agent transcript. Historical
+          // planner dimensions are accepted for compatibility but never
+          // reactivate a planner or rewrite the request through another model.
           const selectedContextEntity = body.clarificationRequest.dimension === 'context_reference'
             ? [...(activeClarificationState.contextCandidates || []), ...contextEntities]
                 .find((entity) => entity.id === body.clarificationResponse?.selectedOptionId)
@@ -4836,7 +4802,7 @@ export async function POST(request: NextRequest) {
                 confidence: executionPlan.confidence === 'high' ? 1 : executionPlan.confidence === 'medium' ? 0.7 : 0.4,
                 needsClarification: executionPlan.needsClarification,
                 clarificationQuestion: executionPlan.clarification?.question,
-                source: executionPlanSource || 'fallback',
+                source: 'main_agent',
               }
             : explicitBatchImageRequest
             ? {
@@ -4872,7 +4838,7 @@ export async function POST(request: NextRequest) {
         const selectedSkillMayExecute = Boolean(selectedSkill?.allowedTools?.some(
           (toolName) => toolName === 'generate_image' || toolName === 'start_skill_job'
         ));
-        const selectedSkillExecutionRequest = !plannerAuthoritative && selectedSkillMayExecute
+        const selectedSkillExecutionRequest = selectedSkillMayExecute
           && (
             conversationIntent.inherited
             || (
@@ -4880,20 +4846,20 @@ export async function POST(request: NextRequest) {
               && !/(信息收集|访谈|分析|解释|点评|总结)/i.test(executionBrief)
             )
           );
-        if (!plannerAuthoritative && !executionPlan && intent === 'chat' && selectedSkillExecutionRequest) {
+        if (!executionPlan && intent === 'chat' && selectedSkillExecutionRequest) {
           intent = 'skill_action';
         }
-        if (plannerAuthoritative && selectedSkill?.allowedTools.includes('start_skill_job')
+        if (selectedSkill?.allowedTools.includes('start_skill_job')
           && hasDirectSkillExecutionIntent(executionBrief)) {
           intent = 'skill_action';
         }
-        void contextLogger.info('image_contract.resolved', 'Main Agent image contract route resolved', {
-          decisionSource: executionPlanSource || routingDecision?.source || null,
+          void contextLogger.info('image_contract.resolved', 'Main Agent image contract route resolved', {
+          decisionSource: routingDecision?.source || (lockedImageToolArgs ? 'main_agent' : null),
           skillSelectionMethod,
           skillCandidateIds,
               skillContentLength: skillContent.length,
-          sourceDetail: executionPlanSourceDetail,
-          plannerConfidence: executionPlan?.confidence || null,
+          sourceDetail: null,
+          plannerConfidence: null,
           conversationIntent: conversationIntent.intent,
           finalIntent: intent,
           selectedSkillId: selectedSkill?.id || null,
@@ -5116,8 +5082,10 @@ export async function POST(request: NextRequest) {
             ? structuredClone(countResolution.batchPlan)
             : undefined;
         }
-        const shouldRunClarifier = (intent === 'image' || intent === 'skill_action')
-          && !executionPlan;
+        // Image prompts are authored by this Main Agent turn. The legacy
+        // clarifier used a second model call and must never sit between the
+        // locked Skill context and generate_image.
+        const shouldRunClarifier = intent === 'skill_action' && !executionPlan;
 
         if (shouldRunClarifier && !proceedWithCurrentBrief) {
           writeProgress({ stepId: 'clarification', phase: 'analyzing', status: 'active', label: '正在检查需求完整性' });
@@ -5324,14 +5292,14 @@ export async function POST(request: NextRequest) {
           }
           const imageBatchMode = imageDeliveryPlan.mode as AgentImageBatchMode;
           const finalGenerationPrompt = generation!.prompt;
-          const plannerGenerationItems = generation!.items.map((item, index) => ({
+          const generationItemsFromAgent = generation!.items.map((item, index) => ({
             ...item,
             subject: executionPlan?.delivery.items[index]?.subject || item.label,
           }));
-          const plannerSeriesItems = executionPlan?.delivery?.items || [];
+          const seriesItemsFromAgent = executionPlan?.delivery?.items || [];
           const allGenerationItems: AgentImageGenerationItem[] = requestedTotalImageCount > 1
             ? imageBatchMode === 'series'
-              ? (plannerGenerationItems.length > 0 ? plannerGenerationItems : plannerSeriesItems).map((item: any) => ({
+              ? (generationItemsFromAgent.length > 0 ? generationItemsFromAgent : seriesItemsFromAgent).map((item: any) => ({
                   id: `series-${item.index}`,
                   index: item.index,
                   label: item.label || `系列 ${item.index}`,
@@ -5641,13 +5609,12 @@ export async function POST(request: NextRequest) {
             } : {}),
           };
         });
-        // Only Planner routes may expose mutation/read tools to the main loop.
-        // Chat and visual analysis remain explicitly tool-free, even when a
-        // Skill is selected for context injection.
+        // The Main Agent may use read-only context tools before a mutation.
         const routeAllowsTools = Boolean(executionPlan)
           || Boolean(selectedSkill && intent === 'skill_action');
         if (routeAllowsTools && modelTools.length > 0) {
           const rawToolResults = new Map<string, unknown>();
+          mainAgentRequestCount += 1;
           const loopResult = await runZFlowAgentBrain({
             messages: chatMessages,
             providerId: resolvedChatSelection.providerId,
