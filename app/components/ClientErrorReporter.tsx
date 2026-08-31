@@ -74,6 +74,7 @@ export default function ClientErrorReporter() {
   const seenRef = useRef<Map<string, number>>(new Map());
 
   useEffect(() => {
+    console.info('[workspace-build]', process.env.NEXT_PUBLIC_BUILD_VERSION || 'unknown');
     if (process.env.NODE_ENV !== 'development') {
       return undefined;
     }
@@ -120,6 +121,7 @@ export default function ClientErrorReporter() {
         userAgent: navigator.userAgent,
         workspaceId: getWorkspaceId(),
         extra: {
+          buildVersion: process.env.NEXT_PUBLIC_BUILD_VERSION || 'unknown',
           filename: event.filename || null,
           lineno: typeof event.lineno === 'number' ? event.lineno : null,
           colno: typeof event.colno === 'number' ? event.colno : null,
@@ -143,7 +145,10 @@ export default function ClientErrorReporter() {
         pageUrl,
         userAgent: navigator.userAgent,
         workspaceId: getWorkspaceId(),
-        extra: rejection.extra,
+        extra: {
+          buildVersion: process.env.NEXT_PUBLIC_BUILD_VERSION || 'unknown',
+          ...(rejection.extra || {}),
+        },
       });
     };
 

@@ -21,12 +21,11 @@ and follow-up messages.
 - Reuse `progress_update` and extend the existing progress tracker with shared
   stamps for commentary and interaction events. Do not add a second execution
   event protocol.
-- Treat execution rows as the only public representation of tools, Skill jobs,
-  and client delivery. Their details use already-sanitized public results.
+- Treat execution rows as the only public representation of tools and client
+  delivery. Image work is performed by the Main Agent through `generate_image`.
 - For image tasks, render model-authored public work notes as commentary. These
-  are normal assistant content, never hidden reasoning; final supplier Prompts
-  may be expanded after preparation, while system prompts, Skill source, and
-  raw tool arguments remain private.
+  are normal assistant content, never hidden reasoning; the Prompt in the
+  `generate_image` arguments is passed to the supplier unchanged.
 - Keep the current run in a process-local registry so composer input can steer
   at a Pi safe boundary or queue as a follow-up. Deterministic image generation
   is never cancelled by steering.

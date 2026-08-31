@@ -120,7 +120,7 @@ test('getRecentFailedAgentTask preserves the original request and failure stage 
     topicId: 'default',
     sourceUserMessageId: 'user-1',
     status: 'failed',
-    resumeRoute: 'image_planner',
+    resumeRoute: 'main_agent',
     intent: 'image',
     originalRequest: '生成一张极简杂志海报',
     failure: {
@@ -143,20 +143,12 @@ test('getRecentFailedAgentTask preserves the original request and failure stage 
 
 test('getRecentFailedAgentTask prefers the staged checkpoint over composer state', () => {
   const result = getRecentFailedAgentTask([
-    { id: 'user-short', role: 'user', content: '再试一次' },
+    { id: 'user-root', role: 'user', content: '使用海报 Skill 编辑参考图', skill: { id: 'poster', label: 'Poster' } },
     {
       id: 'assistant-failed', role: 'assistant', content: 'internal validation detail', taskStatus: 'failed',
       taskSnapshot: {
         topicId: 'topic-1', taskId: 'task-root', contractVersion: 1, activeVersions: [],
-        imagePlanning: {
-          version: 1, taskId: 'task-root', runId: 'run-2', sourceUserMessageId: 'user-root',
-          originalRequest: '使用海报 Skill 编辑参考图', revision: 1, currentStage: 'prompt', stages: {},
-          operation: 'edit', targetReferenceId: 'ref-target', referenceIds: ['ref-target'], contextEntityIds: [],
-          outputCount: 1, aspectRatio: '3:4', promptFormat: 'text',
-          skill: { id: 'poster', source: 'manual_ui', read: true, manifest: { allowedTools: [] } },
-          contextAnalysis: {}, brief: {}, promptCompilation: null, abandonedAt: null,
-          failure: { stage: 'prompt', kind: 'validation', message: 'invalid prompt', failedAt: 1 },
-        },
+        imageOperation: 'edit', targetReferenceId: 'ref-target',
       },
       agentRunProgress: { runId: 'run-2', intent: 'image', outcome: 'failed', steps: [] },
     },
@@ -164,20 +156,17 @@ test('getRecentFailedAgentTask prefers the staged checkpoint over composer state
   assert.equal(result.taskId, 'task-root');
   assert.equal(result.sourceUserMessageId, 'user-root');
   assert.equal(result.originalRequest, '使用海报 Skill 编辑参考图');
-  assert.equal(result.failure.stage, 'prompt');
+  assert.equal(result.failure.stage, 'unknown');
   assert.equal(result.skillId, 'poster');
-  assert.equal(result.imageOperation, 'edit');
-  assert.equal(result.targetReferenceId, 'ref-target');
 });
 
 test('getRecentFailedAgentTask skips abandoned image roots', () => {
   const abandoned = createAgentRecoveryRecord({
     taskId: 'task-abandoned', runId: 'run-abandoned', topicId: 'topic-1', sourceUserMessageId: 'user-1',
-    status: 'cancelled', resumeRoute: 'image_planner', intent: 'image', originalRequest: '取消的任务',
+    status: 'cancelled', resumeRoute: 'main_agent', intent: 'image', originalRequest: '取消的任务',
     failureStage: 'cancelled', failureMessage: '运行已取消',
     taskSnapshot: {
       topicId: 'topic-1', taskId: 'task-abandoned', contractVersion: 1, activeVersions: [],
-      imagePlanning: { abandonedAt: Date.now() },
     },
   });
   assert.equal(getRecentFailedAgentTask([
@@ -193,7 +182,7 @@ test('getLatestAgentRecoveryForTask returns the latest state for the exact task 
     topicId: 'topic-1',
     sourceUserMessageId: `user-${taskId}`,
     status: 'failed',
-    resumeRoute: 'image_planner',
+    resumeRoute: 'main_agent',
     intent: 'image',
     originalRequest: `request-${taskId}`,
     failureStage: 'image_pipeline',

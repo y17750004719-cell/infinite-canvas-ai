@@ -6,22 +6,6 @@ function normalizeIdentity(value, fallback = '') {
   return typeof value === 'string' && value.trim() ? value.trim().slice(0, 200) : fallback;
 }
 
-function jobCounts(value) {
-  const items = Array.isArray(value?.items) ? value.items : [];
-  return {
-    completed: Number.isFinite(Number(value?.completed))
-      ? finiteCount(value.completed)
-      : items.filter((item) => item?.status === 'completed').length,
-    failed: Number.isFinite(Number(value?.failed))
-      ? finiteCount(value.failed)
-      : items.filter((item) => item?.status === 'failed').length,
-    cancelled: Number.isFinite(Number(value?.cancelled))
-      ? finiteCount(value.cancelled)
-      : items.filter((item) => item?.status === 'cancelled').length,
-    total: Number.isFinite(Number(value?.total)) ? finiteCount(value.total) : items.length,
-  };
-}
-
 function sanitizeModelValue(value) {
   if (Array.isArray(value)) {
     return value
@@ -102,28 +86,6 @@ export function createAgentToolResultViews(toolName, rawResult) {
     };
     return {
       modelResult: { ...publicResult, selectedItemIds },
-      publicResult,
-    };
-  }
-
-  if (toolName === 'start_skill_job' || toolName === 'get_skill_job') {
-    const counts = jobCounts(value);
-    const publicResult = {
-      kind: toolName === 'start_skill_job' ? 'skill_job_started' : 'skill_job_status',
-      jobId: typeof value.jobId === 'string' ? value.jobId : typeof value.id === 'string' ? value.id : '',
-      ...(typeof value.skillType === 'string' ? { skillType: value.skillType } : {}),
-      status: typeof value.status === 'string' ? value.status : 'unknown',
-      ...counts,
-    };
-    const safeItems = (Array.isArray(value.items) ? value.items : []).map((item) => ({
-      ...(typeof item?.key === 'string' ? { key: item.key } : {}),
-      ...(typeof item?.name === 'string' ? { name: item.name } : {}),
-      ...(typeof item?.status === 'string' ? { status: item.status } : {}),
-      ...(typeof item?.size === 'string' ? { size: item.size } : {}),
-      ...(typeof item?.error === 'string' ? { error: item.error } : {}),
-    }));
-    return {
-      modelResult: sanitizeModelValue(safeItems.length > 0 ? { ...publicResult, items: safeItems } : publicResult),
       publicResult,
     };
   }

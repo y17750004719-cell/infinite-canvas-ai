@@ -1,7 +1,5 @@
 import { AGENT_IMAGE_ASPECT_RATIO_IDS } from './image-options.mjs';
 
-const SKILL_JOB_TYPES = new Set(['logo', 'brand']);
-
 const CONFIDENCE_SCHEMA = { type: 'string', enum: ['high', 'medium', 'low'] };
 const VISUAL_REFERENCE_ROLE_SCHEMA = {
   type: 'string',
@@ -161,8 +159,6 @@ export function validateAgentToolArguments(schema, value, toolName = 'tool', pat
 }
 
 export function createAgentToolRegistry({
-  createSkillJob,
-  getSkillJob,
   generateImage,
   getConversationMemory,
   listProjectContext,
@@ -176,7 +172,6 @@ export function createAgentToolRegistry({
   rewindAgentAnalysis,
   resolveFailedTaskRecovery,
   requestMainAgentContext,
-  requestImageClarification,
   requestContextSelection,
 } = {}) {
   const registry = new Map([
@@ -209,6 +204,11 @@ export function createAgentToolRegistry({
               type: 'object',
               properties: {
                 prompt: { type: 'string', minLength: 1 },
+                // Models may include a stable display index for series items;
+                // execution still derives ordering from the array position.
+                index: { type: 'integer', minimum: 1, maximum: 100 },
+                label: { type: 'string', minLength: 1, maxLength: 120 },
+                subject: { type: 'string', minLength: 1, maxLength: 240 },
               },
               required: ['prompt'],
               additionalProperties: false,
@@ -573,31 +573,6 @@ export function createAgentToolRegistry({
         return requestMainAgentContext(args, context);
       },
     }],
-    ['request_image_clarification', {
-      name: 'request_image_clarification',
-      requiresConfirmation: false,
-      mayRequireConfirmation: true,
-      readOnly: true,
-      terminal: true,
-      countAgainstToolBudget: false,
-      description: 'Pause the current image planning stage with one structured user question.',
-      parameters: {
-        type: 'object',
-        properties: {
-          stage: { type: 'string', enum: ['routing', 'compilation'] },
-          dimension: { type: 'string', minLength: 1 },
-          question: { type: 'string', minLength: 1 },
-          reason: { type: 'string', minLength: 1 },
-          options: CLARIFICATION_SCHEMA.properties.options,
-        },
-        required: ['stage', 'dimension', 'question', 'reason', 'options'],
-        additionalProperties: false,
-      },
-      execute: async (args, context) => {
-        if (typeof requestImageClarification !== 'function') throw new Error('request_image_clarification is unavailable');
-        return requestImageClarification(args, context);
-      },
-    }],
     ['request_context_selection', {
       name: 'request_context_selection',
       requiresConfirmation: false,
@@ -632,43 +607,6 @@ export function createAgentToolRegistry({
       execute: async (args) => {
         if (typeof requestContextSelection !== 'function') throw new Error('request_context_selection is unavailable');
         return requestContextSelection(args);
-      },
-    }],
-    ['start_skill_job', {
-      name: 'start_skill_job',
-      requiresConfirmation: true,
-      readOnly: false,
-      description: 'Start a confirmed batch Logo or Brand skill job.',
-      parameters: {
-        type: 'object',
-        properties: {
-          skillType: { type: 'string', enum: ['logo', 'brand'] },
-          payload: { type: 'object' },
-        },
-        required: ['skillType'],
-        additionalProperties: false,
-      },
-      execute: async (args) => {
-        if (!SKILL_JOB_TYPES.has(args?.skillType)) throw new Error('Unsupported skill job type');
-        if (typeof createSkillJob !== 'function') throw new Error('start_skill_job is unavailable');
-        return createSkillJob(args.skillType, args.payload || {});
-      },
-    }],
-    ['get_skill_job', {
-      name: 'get_skill_job',
-      requiresConfirmation: false,
-      readOnly: true,
-      description: 'Read the status of an existing skill job.',
-      parameters: {
-        type: 'object',
-        properties: { jobId: { type: 'string' } },
-        required: ['jobId'],
-        additionalProperties: false,
-      },
-      execute: async (args) => {
-        if (typeof args?.jobId !== 'string' || !args.jobId.trim()) throw new Error('jobId is required');
-        if (typeof getSkillJob !== 'function') throw new Error('get_skill_job is unavailable');
-        return getSkillJob(args.jobId.trim());
       },
     }],
   ]);

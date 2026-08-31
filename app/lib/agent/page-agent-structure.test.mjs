@@ -33,21 +33,11 @@ test('all chat modes post to the Pi-backed agent route and handle agent events',
   assert.match(source, /agentClarification/);
   assert.match(source, /agentClarificationResponse/);
   assert.match(source, /按当前信息开始制作/);
-  assert.match(source, /prompt_optimization_start/);
-  assert.match(source, /prompt_optimization_done/);
   assert.match(source, /image_prompts_ready/);
   assert.match(source, /client_action/);
   assert.match(source, /agent_error/);
 });
 
-test('image planning failures are presented as stage-specific recoverable Chinese UI copy', () => {
-  assert.match(source, /IMAGE_PLANNING_ERROR_MESSAGES/);
-  assert.match(source, /image_planner: '图片准备未完成，任务状态已保留，可继续重试'/);
-  assert.match(source, /prompt: '生图 Prompt 未完成，任务状态已保留，可继续重试'/);
-  assert.match(source, /closing turn ended\|final response or terminal control/i);
-  assert.match(source, /图像合同未完成，任务状态已保留，可继续重试/);
-  assert.match(source, /provider_unavailable: '图片供应商当前没有可用模型通道或账户/);
-});
 
 test('direct image and canvas image requests use the Main Agent route', () => {
   const requestModeIndex = source.indexOf('const usesAgentRequest = true');
@@ -65,13 +55,13 @@ test('agent requests send only explicitly selected references', () => {
   assert.doesNotMatch(source, /activeTaskContext,/);
   assert.match(source, /sourceTaskId/);
   assert.match(source, /sourceVersionId/);
-  assert.match(source, /plannerPreviewSrc:\s*token\.previewSrc \|\| token\.src/);
+  assert.match(source, /previewSrc:\s*token\.previewSrc \|\| token\.src/);
   assert.match(source, /event\.taskSnapshot \? \{ taskSnapshot: event\.taskSnapshot \}/);
   assert.match(source, /taskId:\s*event\.action\?\.taskId/);
   assert.match(source, /batchId:\s*event\.action\?\.batchId/);
   assert.match(source, /slotId:\s*asset\.slotId/);
   assert.match(source, /versionId:\s*asset\.versionId/);
-  assert.match(source, /plannerPreviewSrc:\s*asset\.plannerPreviewSrc \|\| asset\.src/);
+  assert.match(source, /previewSrc:\s*asset\.previewSrc \|\| asset\.src/);
 });
 
 test('selecting history upgrades an existing reference token provenance', () => {
@@ -89,7 +79,7 @@ test('agent clarification uses the shared editable decision popover', () => {
   assert.doesNotMatch(decisionPopoverSource, /aria-modal="true"/);
   assert.match(decisionPopoverSource, /自定义回答|custom\.label/);
   assert.match(source, /按当前信息开始制作/);
-  assert.match(source, /\['creative_direction', 'context_reference', 'image_operation', 'skill_selection', 'planner_model_switch', 'recovery_scope'\]\.includes/);
+  assert.match(source, /\['creative_direction', 'context_reference', 'image_operation', 'skill_selection', 'recovery_scope'\]\.includes/);
   assert.match(source, /retry:\s*true/);
   assert.match(source, /!options\?\.agentClarification/);
   assert.match(source, /agentClarificationResponsePayload/);
@@ -126,7 +116,7 @@ test('unified retry submits an exact recovery task and persists error checkpoint
   assert.match(source, /event\.type === 'agent_task_checkpoint'/);
   assert.match(source, /agentRecovery: event\.recoveryRecord/);
   assert.match(source, /latestTaskSnapshot\?\.activeVersions\.length/);
-  assert.match(source, /resumeRoute: localDeliveryOnly \? 'local_delivery' : 'image_planner'/);
+  assert.match(source, /resumeRoute: localDeliveryOnly \? 'local_delivery' : 'main_agent'/);
   assert.match(source, /failedLocalDeliveryIds/);
   const agentResponseStart = source.indexOf("const resolvedRequestEndpoint = usesAgentRequest ? '/api/agent'");
   const agentStreamStart = source.indexOf("const contentType = response.headers.get('content-type')", agentResponseStart);
@@ -151,20 +141,6 @@ test('region targets are snapshotted before composer cleanup and submitted from 
   assert.match(source, /定位对象数据已失效，请重新定位/);
 });
 
-test('planner failures use one message owner and expose a disabled reanalysis action while running', () => {
-  assert.match(source, /failedClarificationOwnsMessage/);
-  assert.match(source, /label: '重新分析'/);
-  assert.match(source, /disabled: isGenerating/);
-  assert.match(source, /agentReanalysisInFlightRef/);
-  assert.match(source, /handleGenerate\([\s\S]*\.finally\(\(\) => \{[\s\S]*agentReanalysisInFlightRef\.current = false/);
-  assert.match(source, /!pendingAgentClarification\.request\.failed[\s\S]*skipLabel: '按当前信息开始制作'/);
-  assert.doesNotMatch(source, /规划模型连接中断，系统已自动重试/);
-});
-
-test('planner model switching reuses the decision popover without unsafe bypass actions', () => {
-  assert.match(source, /planner_model_switch/);
-  assert.match(source, /pendingAgentClarification\.request\.dimension !== 'planner_model_switch'/);
-});
 
 test('agent proposals and context entities persist and submit stable selections', () => {
   assert.match(source, /buildAgentContextEntities/);
@@ -176,7 +152,7 @@ test('agent proposals and context entities persist and submit stable selections'
   assert.match(source, /pendingAgentProposal\.options\.map/);
   assert.match(source, /selectedContextEntityIds:\s*\[option\.entityId\]/);
   assert.match(source, /已采用：/);
-  assert.match(source, /\['creative_direction', 'context_reference', 'image_operation', 'skill_selection', 'planner_model_switch', 'recovery_scope'\]\.includes/);
+  assert.match(source, /\['creative_direction', 'context_reference', 'image_operation', 'skill_selection', 'recovery_scope'\]\.includes/);
 });
 
 test('server-selected Skills annotate the sent message without repopulating the next draft', () => {
@@ -258,12 +234,12 @@ test('agent final image prompts persist on the progress message and expand on de
   assert.match(source, /promptIdentity = `\$\{promptRunId\}:\$\{promptToolCallId\}:\$\{promptIndex\}`/);
   assert.match(source, /entry\.runId \|\| 'legacy'/);
   assert.match(source, /agentImagePrompts:\s*\[/);
-  assert.match(source, /step\.stepId === 'prompt_optimization'/);
+  assert.match(source, /step\.stepId === 'image_prompt'/);
   assert.match(source, /<details[\s\S]{0,300}<summary/);
   assert.match(source, /max-h-\[320px\]/);
   assert.match(source, /handleCopyAssistantMessage\(copyKey, entry\.prompt\)/);
   assert.match(source, /aria-label=\{`复制\$\{promptLabel\}提示词`\}/);
-  assert.match(source, /new Date\(entry\.compilation\.compiledAt\)\.toLocaleString\(\)/);
+  assert.doesNotMatch(source, /entry\.compilation|compiledAt/);
 });
 
 test('every chat-generated image is materialized in both chat and the canvas', () => {
@@ -286,12 +262,6 @@ test('every chat-generated image is materialized in both chat and the canvas', (
   assert.match(source, /for \(const key of processedAgentActionKeysForRun\)[\s\S]{0,180}processedAgentActionsRef\.current\.delete\(key\)/);
   assert.match(source, /generateAbortRef\.current === runController/);
   assert.match(source, /pendingAssistantMessageIdRef\.current === assistantPlaceholderId/);
-  assert.match(source, /activeSkillJobMessageIdRef\.current = assistantId/);
-  assert.match(source, /type: 'assets_progress'/);
-  assert.match(source, /type: 'assets_progress',[\s\S]{0,80}origin: 'client'/);
-  assert.match(source, /updateChatMessageById\(skillJobMessageId/);
-  assert.doesNotMatch(source, /agentReadOnlySkillJobIdsRef/);
-  assert.doesNotMatch(source, /if \(!isAgentReadOnlyJob\)/);
   assert.match(source, /recordCurrentCanvasUndoSnapshot\(\);\s*setItems\(prev => \[\.\.\.prev, newItem\]\);/);
 });
 
@@ -361,21 +331,16 @@ test('typed confirmation replies submit the stored image delivery plan instead o
   assert.match(source, /agentConfirmation:\s*confirmation/);
 });
 
-test('skill jobs, cancellation, and clarification recovery preserve progress state', () => {
+test('cancellation and clarification recovery preserve progress state', () => {
   assert.match(source, /interface AgentClarificationState\s*\{[\s\S]{0,260}operationId\?: string/);
   assert.match(source, /skillSource\?: 'manual_ui' \| 'explicit_text' \| 'user_confirmation' \| 'recovery' \| 'manual' \| 'auto' \| null/);
-  assert.match(source, /imagePlanning\?: TaskSnapshot\['imagePlanning'\]/);
-
-  const jobResultStart = source.indexOf("event.type === 'tool_result' && typeof event.result?.jobId === 'string'");
-  const imageResultStart = source.indexOf("event.type === 'tool_result' && event.result?.kind === 'image_generation'", jobResultStart);
-  assert.ok(jobResultStart >= 0 && imageResultStart > jobResultStart);
-  assert.doesNotMatch(source.slice(jobResultStart, imageResultStart), /agentRunProgress:\s*undefined/);
+  assert.doesNotMatch(source, /imagePlanning/);
 
   const abortStart = source.indexOf("error instanceof Error && error.name === 'AbortError'");
   const failureStart = source.indexOf("updateActiveStreamMessageStatus('failed'", abortStart);
   assert.ok(abortStart >= 0 && failureStart > abortStart);
   assert.doesNotMatch(source.slice(abortStart, failureStart), /agentRunProgress:\s*undefined/);
-  assert.match(source, /updateAgentRunProgress\(msg, \{ type: 'agent_error'(?:, runId: agentRunId)? \}\)/);
+  assert.match(source, /updateAgentRunProgress\(msg, \{ type: 'agent_error'(?:, runId: [^}]+)? \}\)/);
 });
 
 test('stale interactions close the prompt and expose explicit recovery', () => {
@@ -717,6 +682,12 @@ test('session hydration normalizes persisted Agent timelines before rendering th
   assert.match(source, /type: 'session_hydrate'/);
   assert.match(source, /const normalizedProgress = message\.agentRunProgress/);
   assert.match(source, /reduceAgentRunProgress\(normalizedProgress, \{ type: 'agent_error' \}\)/);
+});
+
+test('page handles explicit Agent cancellation and does not retain legacy Skill Job state', () => {
+  assert.match(source, /event\.type === 'agent_cancelled'/);
+  assert.match(source, /type: 'agent_cancelled'/);
+  assert.doesNotMatch(source, /activeSkillJobId|activeSkillJobType|activeSkillJobStatus|\/api\/skills\/jobs/);
 });
 
 test('late assistant deltas do not replay committed public commentary', () => {

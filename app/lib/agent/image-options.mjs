@@ -477,7 +477,6 @@ export function resolveAgentImageBatchContinuation({
 export function buildAgentImageGenerationRequests(input = {}) {
   const {
     prompt,
-    generationPrompt,
     generationPrompts,
     linkedImagePreviews: inputLinkedImagePreviews,
     referenceIds,
@@ -519,11 +518,9 @@ export function buildAgentImageGenerationRequests(input = {}) {
       : compatibilityLinkedImagePreviews,
     referenceIds,
   );
-  const fallbackPrompt = typeof generationPrompt === 'string' && generationPrompt.trim()
-    ? generationPrompt.trim()
-    : typeof prompt === 'string'
-      ? prompt.trim()
-      : '';
+  // The Main Agent's generate_image.prompt is the only single-image Prompt
+  // source. Per-item prompts are supplied through generationPrompts.
+  const fallbackPrompt = typeof prompt === 'string' ? prompt.trim() : '';
   const requestPrompts = normalizedGenerationPrompts.length
     ? normalizedGenerationPrompts
     : [fallbackPrompt];

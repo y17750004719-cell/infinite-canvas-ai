@@ -1,6 +1,6 @@
 import { normalizeAgentVisualSummary } from './visual-summary.mjs';
 
-const ROUTES = new Set(['main_agent', 'image_planner', 'local_delivery']);
+const ROUTES = new Set(['main_agent', 'local_delivery']);
 const INTENTS = new Set(['chat', 'vision_analysis', 'image', 'skill_action']);
 const FAILURE_KINDS = new Set([
   'cancelled', 'timeout', 'transport', 'upstream_http', 'protocol', 'validation',
@@ -49,7 +49,7 @@ function normalizeReferenceContext(value) {
     if (!id || !src || !label || !source || !role) return [];
     return [{
       id, src, label, source, role,
-      ...(bounded(entry.plannerPreviewSrc, 20_000) ? { plannerPreviewSrc: bounded(entry.plannerPreviewSrc, 20_000) } : {}),
+      ...(bounded(entry.previewSrc, 20_000) ? { previewSrc: bounded(entry.previewSrc, 20_000) } : {}),
       ...(bounded(entry.canvasItemId, 200) ? { canvasItemId: bounded(entry.canvasItemId, 200) } : {}),
       ...(bounded(entry.regionId, 200) ? { regionId: bounded(entry.regionId, 200) } : {}),
       ...(bounded(entry.candidateId, 200) ? { candidateId: bounded(entry.candidateId, 200) } : {}),

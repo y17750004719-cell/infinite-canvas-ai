@@ -214,8 +214,8 @@ test('agent generation requests are the canvas image-card builder output', () =>
     { id: 'comfly', imageModels: ['gpt-image-2'] },
   ]);
   const input = {
-    prompt: '生成一个 4:3 海报',
-    generationPrompt: 'professional poster prompt',
+    prompt: 'professional poster prompt',
+    contractAspectRatio: '4:3',
     referenceImages: ['/reference.png'],
     providerId: 'comfly',
     modelId: 'gpt-image-2',
@@ -225,7 +225,7 @@ test('agent generation requests are the canvas image-card builder output', () =>
 
   const resolved = buildAgentImageGenerationRequests(input);
   const canvasRequests = buildAsyncImageTaskRequests({
-    input: input.generationPrompt,
+    input: input.prompt,
     linkedImagePreviews: [{ id: 'agent-reference-1', src: '/reference.png', label: 'image1' }],
     modelId: 'gpt-image-2',
     allowedModelIds: ['gpt-image-2'],
@@ -255,6 +255,19 @@ test('agent generation requests are the canvas image-card builder output', () =>
   assert.deepEqual(resolved.options.requestSizes, ['2048x1536']);
 });
 
+test('agent generation ignores the retired generationPrompt fallback', () => {
+  const resolved = buildAgentImageGenerationRequests({
+    prompt: 'Main Agent final prompt',
+    // A persisted legacy field must not replace the current tool argument.
+    generationPrompt: 'legacy planner prompt',
+    providerId: 'comfly',
+    modelId: 'gpt-image-2',
+    allowedModelIds: ['gpt-image-2'],
+  });
+
+  assert.equal(resolved.requests[0]?.messages?.[0]?.content, 'Main Agent final prompt');
+});
+
 test('agent generation requests preserve the model-selected linked image order with canvas request parity', () => {
   const profiles = buildProviderImageOptionProfiles([
     { id: 'comfly', imageModels: ['gpt-image-2'] },
@@ -279,7 +292,7 @@ test('agent generation requests preserve the model-selected linked image order w
   };
 
   const agentResult = buildAgentImageGenerationRequests({
-    generationPrompt: sharedInput.input,
+    prompt: sharedInput.input,
     linkedImagePreviews,
     referenceIds: ['edit-target', 'supporting-reference'],
     providerId: sharedInput.imageProviderId,
@@ -303,7 +316,6 @@ test('agent series generation creates one request per distinct issue prompt', ()
   ]);
   const resolved = buildAgentImageGenerationRequests({
     prompt: 'Vogue 动物杂志系列，共 3 期',
-    generationPrompt: 'shared series prompt',
     generationPrompts: [
       'Vogue rabbit issue with red background',
       'Vogue cat issue with yellow background',
@@ -357,8 +369,8 @@ test('agent Gemini requests preserve the 2K tier and native aspect ratio', () =>
     { id: 'custom', imageModels: ['gemini-3.1-flash-image-preview'] },
   ]);
   const resolved = buildAgentImageGenerationRequests({
-    prompt: '生成一个 16:9 海报',
-    generationPrompt: 'professional widescreen poster',
+    prompt: 'professional widescreen poster',
+    contractAspectRatio: '16:9',
     providerId: 'custom',
     modelId: 'gemini-3.1-flash-image-preview',
     allowedModelIds: ['gemini-3.1-flash-image-preview'],

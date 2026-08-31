@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 
 import {
   buildAgentContextEntities,
-  compileExecutionBrief,
   extractLegacyProposal,
   isReferentialShorthand,
   parseAgentProposalBlock,
@@ -71,19 +70,6 @@ test('extracts legacy markdown tables only when they are actionable proposals', 
   assert.equal(legacy?.options.length, 3);
   assert.match(legacy?.options[2].brief || '', /德牧或杜宾/);
   assert.equal(extractLegacyProposal({ id: 'knowledge', content: '| 年份 | 销量 |\n| 2024 | 10 |\n| 2025 | 12 |' }), null);
-});
-
-test('compiles explicitly selected stable context into an authoritative brief', () => {
-  const entities = buildAgentContextEntities({ messages: [{ id: 'assistant-1', role: 'assistant', content: '', agentProposal: proposal }] });
-  const contextResolution = resolveContextReference({
-    userMessage: '按照3生成图片，背景改成红色',
-    entities,
-    selectedEntityIds: ['covers:three'],
-  });
-  const brief = compileExecutionBrief({ userMessage: '按照3生成图片，背景改成红色', contextResolution });
-  assert.match(brief.plainText, /两只德牧或杜宾/);
-  assert.match(brief.plainText, /背景改成红色/);
-  assert.deepEqual(brief.mustPreserve, ['先锋双犬（The Dog Duo）', '两只德牧或杜宾', '解构主义宽肩西装']);
 });
 
 test('requires explicit stable IDs for generated images and selected canvas objects', () => {

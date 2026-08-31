@@ -21,6 +21,10 @@ test('skill registry exposes only enabled skills backed by real directories', as
   assert.deepEqual(skills.map((skill) => skill.id), ['api-helper', 'brand', 'gc-minimal-zine-poster-v0-1', 'logo', 'magazine-poster', 'modular-watercolor-collage-v0-1']);
   assert.equal(skills.every((skill) => skill.enabled), true);
   assert.equal(skills.some((skill) => skill.id === IMAGEGEN_HOST_SKILL_ID), false);
+  for (const id of ['brand', 'logo']) {
+    const skill = skills.find((entry) => entry.id === id);
+    assert.deepEqual(skill?.allowedTools, ['generate_image', 'get_canvas_context']);
+  }
 });
 
 test('the internal ImageGen host is available only to the image runtime', async () => {
@@ -125,8 +129,36 @@ test('explicit textual skill directives select, switch, or clear without a model
   const exactName = resolveExplicitSkillDirective('Modular Watercolor Collage 做一张旧城海报', skills);
   assert.equal(exactName?.type, 'select');
   assert.equal(exactName?.manifest.id, 'modular-watercolor-collage-v0-1');
+  const dollarId = resolveExplicitSkillDirective('$modular-watercolor-collage-v0-1，请生成一张海报', skills);
+  assert.equal(dollarId?.type, 'select');
+  assert.equal(dollarId?.manifest.id, 'modular-watercolor-collage-v0-1');
+  const skillUri = resolveExplicitSkillDirective('使用 skill://modular-watercolor-collage-v0-1 生成一张图', skills);
+  assert.equal(skillUri?.type, 'select');
+  assert.equal(skillUri?.manifest.id, 'modular-watercolor-collage-v0-1');
+  const absoluteSkillPath = resolveExplicitSkillDirective(
+    '按照 /Volumes/ZO/ZO.DESIGN/skills/modular-watercolor-collage-v0-1/SKILL.md 生成一张图',
+    skills,
+  );
+  assert.equal(absoluteSkillPath?.type, 'select');
+  assert.equal(absoluteSkillPath?.manifest.id, 'modular-watercolor-collage-v0-1');
+  const markdownSkillPath = resolveExplicitSkillDirective(
+    '[Watercolor Skill](/Volumes/ZO/ZO.DESIGN/skills/modular-watercolor-collage-v0-1/SKILL.md) 做一张图',
+    skills,
+  );
+  assert.equal(markdownSkillPath?.type, 'select');
+  assert.equal(markdownSkillPath?.manifest.id, 'modular-watercolor-collage-v0-1');
+  const windowsSkillPath = resolveExplicitSkillDirective(
+    String.raw`按照 C:\workspace\skills\modular-watercolor-collage-v0-1\SKILL.md 生成一张图`,
+    skills,
+  );
+  assert.equal(windowsSkillPath?.type, 'select');
+  assert.equal(windowsSkillPath?.manifest.id, 'modular-watercolor-collage-v0-1');
   assert.deepEqual(resolveExplicitSkillDirective('这次不使用 Skill，普通模式处理', skills), { type: 'clear' });
   assert.equal(resolveExplicitSkillDirective('讨论一下模块化水彩的特点', skills), null);
+  assert.equal(resolveExplicitSkillDirective('请设计一张模块化水彩海报', skills), null);
+  assert.equal(resolveExplicitSkillDirective('请做一张安静的极简 zine 海报', skills), null);
+  assert.equal(resolveExplicitSkillDirective('skill://modular-watercolor-collage-v0-1-copy', skills), null);
+  assert.equal(resolveExplicitSkillDirective('skills/modular-watercolor-collage-v0-1/SKILL.md.bak', skills), null);
 });
 
 test('modular watercolor collage retains its image compiler contract', async () => {

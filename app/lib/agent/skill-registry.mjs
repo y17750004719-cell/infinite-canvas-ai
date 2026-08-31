@@ -16,6 +16,8 @@ const normalizeMatchText = (value) => typeof value === 'string'
   ? value.trim().toLowerCase().replace(/\s+/g, ' ')
   : '';
 const escapeRegExp = (value) => String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const EXPLICIT_SKILL_BOUNDARY_START = String.raw`(?:^|[\s"'“”‘’([{（【<《，,。.!！?？:：;；])`;
+const EXPLICIT_SKILL_BOUNDARY_END = String.raw`(?=$|[\s"'“”‘’\)\]}）】>》，,。.!！?？:：;；])`;
 
 function isManifest(value) {
   return value &&
@@ -160,12 +162,18 @@ export function resolveExplicitSkillDirective(prompt, manifests) {
     if (manifest?.enabled === false) continue;
     const aliases = [manifest.id, manifest.name].map((value) => normalizeMatchText(value)).filter(Boolean);
     for (const alias of aliases) {
-      const explicitId = new RegExp(`(?:^|\\s)\\$${escapeRegExp(alias)}(?=$|\\s|[，,。.!！?？])`, 'i');
-      const exactAlias = new RegExp(`(?:^|\\s)${escapeRegExp(alias)}(?=$|\\s|[，,。.!！?？])`, 'i');
-      const namedSelection = new RegExp(`${explicitAction.source}(?:\\$)?${escapeRegExp(alias)}(?=$|\\s|[，,。.!！?？])`, 'i');
+      const explicitId = new RegExp(`${EXPLICIT_SKILL_BOUNDARY_START}\\$${escapeRegExp(alias)}${EXPLICIT_SKILL_BOUNDARY_END}`, 'i');
+      const exactAlias = new RegExp(`${EXPLICIT_SKILL_BOUNDARY_START}${escapeRegExp(alias)}${EXPLICIT_SKILL_BOUNDARY_END}`, 'i');
+      const namedSelection = new RegExp(`${explicitAction.source}(?:\\$)?${escapeRegExp(alias)}${EXPLICIT_SKILL_BOUNDARY_END}`, 'i');
       if (explicitId.test(source) || exactAlias.test(source) || namedSelection.test(source)) {
         return { type: 'select', manifest };
       }
+    }
+    const normalizedPathSource = source.replaceAll('\\', '/');
+    const skillUri = new RegExp(`${EXPLICIT_SKILL_BOUNDARY_START}skill://${escapeRegExp(manifest.id)}(?:/)?${EXPLICIT_SKILL_BOUNDARY_END}`, 'i');
+    const skillFilePath = new RegExp(`(?:^|[\\s"'“”‘’([{（【<《])(?:[^\\s"'“”‘’<>]*?/)?skills/${escapeRegExp(manifest.id)}/skill\\.md(?=$|[\\s"'“”‘’\\)\\]}）】>》，,！?？:：;；])`, 'i');
+    if (skillUri.test(normalizedPathSource) || skillFilePath.test(normalizedPathSource)) {
+      return { type: 'select', manifest };
     }
   }
   return null;

@@ -1,7 +1,4 @@
 {
-  "job": {
-    "concurrency": 3
-  },
   "components": [
     { "key": "logo", "name": "品牌 Logo", "size": "2048x2048" },
     { "key": "business_card", "name": "名片", "size": "1024x1024" },

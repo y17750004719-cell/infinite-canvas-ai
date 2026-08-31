@@ -1,14 +1,15 @@
 import type { AgentContextEntity, AgentProposal } from './agent/context-reference.types';
-import type { AgentTaskContract } from './agent/execution-planner.types';
+import type { AgentTaskContract } from './agent/context-reference.types';
 import type { CanvasItem } from './canvas-types';
 import type { RegionSelection } from './image-region-selection.types';
-import type { AgentAnalysisSnapshot, AgentImagePlanningSnapshot, AgentRecoveryRecord } from './agent/events';
+import type { AgentAnalysisSnapshot, AgentRecoveryRecord } from './agent/events';
+import { removeDeprecatedImageAgentData } from './session-persistence.mjs';
 
 export type { CanvasItem } from './canvas-types';
-export type { AgentTaskContract } from './agent/execution-planner.types';
+export type { AgentTaskContract } from './agent/context-reference.types';
 
 const DB_NAME = 'zo-design-db';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const STORE_NAME = 'sessions';
 
 export {
@@ -33,7 +34,7 @@ export interface ChatMessage {
     references: Array<{
       id: string;
       src: string;
-      plannerPreviewSrc?: string;
+      previewSrc?: string;
       label: string;
       source: 'upload' | 'history' | 'canvas';
       canvasItemId?: string;
@@ -82,17 +83,6 @@ export interface ChatMessage {
     index: number;
     label: string;
     prompt: string;
-    compilation?: {
-      skillId: string | null;
-      skillLabel: string | null;
-      skillRead: boolean;
-      plannerProviderId: string | null;
-      plannerModel: string;
-      referenceCount: number;
-      visualReferencesUsed: boolean;
-      durationMs: number;
-      compiledAt: number;
-    };
   }>;
   agentProgressMode?: 'full' | 'compact';
   inlineContent?: Array<
@@ -138,15 +128,9 @@ export interface ChatMessage {
       referenceImages?: string[];
       referenceContext?: ChatMessage['referenceContext'];
       contextCandidates?: AgentContextEntity[];
-      plannerFailure?: {
-        reason: 'timeout' | 'transport' | 'invalid_reference' | 'invalid_context' | 'invalid_plan' | 'vision_unsupported' | 'vision_unavailable';
-        retryMode: 'replan';
-        failedAt: number;
-      };
       recoveryRecord?: AgentRecoveryRecord;
       recoveryMode?: 'fill_missing' | 'redo_all';
       agentAnalysis?: AgentAnalysisSnapshot;
-      imagePlanning?: AgentImagePlanningSnapshot;
       imageOperation?: 'generate' | 'edit';
       targetReferenceId?: string;
       mainAgentLoop?: AgentRecoveryRecord['mainAgentLoop'];
@@ -174,7 +158,6 @@ export interface ChatMessage {
     kind: string;
     confidence: 'high' | 'medium';
   };
-  executionBriefSummary?: string;
   taskSnapshot?: TaskSnapshot;
   agentRecovery?: AgentRecoveryRecord;
 }
@@ -208,7 +191,7 @@ export interface AgentConversationMemory {
 export interface GeneratedImageHistoryEntry {
   id: string;
   src: string;
-  plannerPreviewSrc?: string;
+  previewSrc?: string;
   naturalWidth?: number;
   naturalHeight?: number;
   createdAt: number;
@@ -238,7 +221,7 @@ export interface TaskSnapshotActiveVersion {
   slotId: string;
   versionId: string;
   assetUrl?: string;
-  plannerPreviewSrc?: string;
+  previewSrc?: string;
   naturalWidth?: number;
   naturalHeight?: number;
   model?: string;
@@ -257,14 +240,13 @@ export interface TaskSnapshot {
   contractVersion: number;
   contract?: AgentTaskContract;
   agentAnalysis?: AgentAnalysisSnapshot;
-  imagePlanning?: AgentImagePlanningSnapshot;
   editBaseVersionId?: string | null;
   latestBatchId?: string | null;
   activeVersions: TaskSnapshotActiveVersion[];
 }
 
 export interface ProjectSession {
-  schemaVersion?: 2;
+  schemaVersion?: 3;
   id: string;
   name: string;
   createdAt: number;
@@ -328,6 +310,21 @@ function openDB(): Promise<IDBDatabase> {
       if (!database.objectStoreNames.contains(STORE_NAME)) {
         database.createObjectStore(STORE_NAME, { keyPath: 'id' });
       }
+
+      if (event.oldVersion >= 2) return;
+
+      const transaction = (event.target as IDBOpenDBRequest).transaction;
+      if (!transaction) return;
+      const store = transaction.objectStore(STORE_NAME);
+      const cursorRequest = store.openCursor();
+
+      cursorRequest.onsuccess = () => {
+        const cursor = cursorRequest.result;
+        if (!cursor) return;
+
+        cursor.update(removeDeprecatedImageAgentData(cursor.value));
+        cursor.continue();
+      };
     };
   });
 }
@@ -346,7 +343,7 @@ export async function upsertSession(session: ProjectSession): Promise<void> {
     const transaction = database.transaction([STORE_NAME], 'readwrite');
     const store = transaction.objectStore(STORE_NAME);
 
-    store.put(session);
+    store.put(removeDeprecatedImageAgentData(session));
     await awaitTransaction(transaction);
   } catch (error) {
     console.error('Failed to upsert session:', error);

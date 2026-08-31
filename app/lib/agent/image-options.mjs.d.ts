@@ -74,7 +74,6 @@ export function resolveAgentImageOptions(input?: {
 
 export function buildAgentImageGenerationRequests(input?: {
   prompt?: string;
-  generationPrompt?: string;
   generationPrompts?: string[];
   linkedImagePreviews?: Array<{
     id: string;

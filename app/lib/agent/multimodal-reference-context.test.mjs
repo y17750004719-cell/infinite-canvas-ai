@@ -6,8 +6,8 @@ import { buildMultimodalReferenceParts, countMultimodalReferenceImages } from '.
 test('multimodal reference parts preserve inline text and reference order', () => {
   const context = {
     references: [
-      { id: 'target', src: 'https://example.test/target-original.png', plannerPreviewSrc: 'https://example.test/target.png', label: 'Target', source: 'canvas', role: 'reference' },
-      { id: 'style', src: 'https://example.test/style-original.png', plannerPreviewSrc: 'https://example.test/style.png', label: 'Style', source: 'upload', role: 'reference' },
+      { id: 'target', src: 'https://example.test/target-original.png', previewSrc: 'https://example.test/target.png', label: 'Target', source: 'canvas', role: 'reference' },
+      { id: 'style', src: 'https://example.test/style-original.png', previewSrc: 'https://example.test/style.png', label: 'Style', source: 'upload', role: 'reference' },
     ],
     composerSegments: [
       { type: 'text', text: '把' },
@@ -32,7 +32,7 @@ test('annotation composites are emitted as non-selectable evidence after their p
     references: [{
       id: 'annotated',
       src: 'https://example.test/original.png',
-      plannerPreviewSrc: 'https://example.test/original-preview.png',
+      previewSrc: 'https://example.test/original-preview.png',
       label: 'Annotated image',
       source: 'canvas',
       role: 'annotation_bundle',
@@ -57,11 +57,11 @@ test('annotation composites are emitted as non-selectable evidence after their p
 test('confirmed region crops follow their parent and pending region targets never reach the model', () => {
   const parts = buildMultimodalReferenceParts({
     references: [
-      { id: 'pending', src: 'https://example.test/pending-original.png', plannerPreviewSrc: 'https://example.test/pending.png', label: 'Pending', source: 'canvas', role: 'region_target' },
+      { id: 'pending', src: 'https://example.test/pending-original.png', previewSrc: 'https://example.test/pending.png', label: 'Pending', source: 'canvas', role: 'region_target' },
       {
         id: 'region',
         src: 'https://example.test/original.png',
-        plannerPreviewSrc: 'https://example.test/original-preview.png',
+        previewSrc: 'https://example.test/original-preview.png',
         label: '左侧老虎',
         source: 'canvas',
         role: 'region_target',
@@ -86,8 +86,8 @@ test('confirmed region crops follow their parent and pending region targets neve
 test('identical image sources are sent once while retaining both reference ids', () => {
   const parts = buildMultimodalReferenceParts({
     references: [
-      { id: 'first', src: 'https://example.test/first-original.png', plannerPreviewSrc: 'https://example.test/shared.png', label: 'First', source: 'upload', role: 'reference' },
-      { id: 'second', src: 'https://example.test/second-original.png', plannerPreviewSrc: 'https://example.test/shared.png', label: 'Second', source: 'history', role: 'reference' },
+      { id: 'first', src: 'https://example.test/first-original.png', previewSrc: 'https://example.test/shared.png', label: 'First', source: 'upload', role: 'reference' },
+      { id: 'second', src: 'https://example.test/second-original.png', previewSrc: 'https://example.test/shared.png', label: 'Second', source: 'history', role: 'reference' },
     ],
     composerSegments: [
       { type: 'reference', referenceId: 'first' },

@@ -50,17 +50,6 @@ export interface AgentContextResolution {
   entityIds: string[];
 }
 
-export interface ExecutionBrief {
-  version: 1;
-  originalRequest: string;
-  resolvedEntityIds: string[];
-  resolvedLabels?: string[];
-  plainText: string;
-  mustPreserve: string[];
-  referenceImageUrls: string[];
-  canvasItemIds: string[];
-}
-
 export function parseAgentProposalBlock(content: string): { cleanContent: string; proposal: AgentProposal | null };
 export function extractLegacyProposal(message: Record<string, unknown>): AgentProposal | null;
 export function buildAgentContextEntities(input?: Record<string, unknown>): AgentContextEntity[];
@@ -69,6 +58,5 @@ export function resolveContextReference(input?: {
   entities?: AgentContextEntity[];
   selectedEntityIds?: string[];
 }): AgentContextResolution;
-export function compileExecutionBrief(input?: { userMessage?: string; contextResolution?: AgentContextResolution }): ExecutionBrief;
 export function isReferentialShorthand(value: string): boolean;
 export const AGENT_PROPOSAL_MARKERS: { start: string; end: string };

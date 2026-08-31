@@ -10,6 +10,160 @@ const cloneValue = (value) => {
   return JSON.parse(JSON.stringify(value));
 };
 
+const LEGACY_AGENT_TOOL_NAMES = new Set(['start_skill_job', 'get_skill_job']);
+
+function omitKeys(value, keys) {
+  if (!isRecord(value)) return value;
+
+  return Object.fromEntries(Object.entries(value).filter(([key]) => !keys.has(key)));
+}
+
+function removeLegacyAgentFields(value) {
+  return omitKeys(value, new Set([
+    'executionPlan',
+    'generationBrief',
+    'executionBrief',
+    'promptCompilation',
+    'imagePlanning',
+    'plannerFailure',
+    'plannerCandidates',
+    'plannerSelection',
+    'plannerProviderId',
+    'plannerModel',
+    'executionBriefSummary',
+    'plannerVisualSummary',
+  ]));
+}
+
+function normalizeLegacyAgentRecovery(record) {
+  if (!isRecord(record)) return undefined;
+
+  const toolCalls = Array.isArray(record.toolCalls) ? record.toolCalls : [];
+  const containsLegacyJob = toolCalls.some((call) => (
+    isRecord(call) && LEGACY_AGENT_TOOL_NAMES.has(call.toolName)
+  )) || LEGACY_AGENT_TOOL_NAMES.has(record.mainAgentLoop?.pendingCall?.name);
+
+  if (record.resumeRoute === 'image_planner' || containsLegacyJob) {
+    return undefined;
+  }
+
+  const taskSnapshot = isRecord(record.taskSnapshot)
+    ? removeLegacyAgentFields(record.taskSnapshot)
+    : record.taskSnapshot;
+
+  return {
+    ...removeLegacyAgentFields(record),
+    ...(taskSnapshot ? { taskSnapshot } : {}),
+    ...(toolCalls.length > 0 ? { toolCalls: toolCalls.filter((call) => (
+      !isRecord(call) || !LEGACY_AGENT_TOOL_NAMES.has(call.toolName)
+    )) } : {}),
+  };
+}
+
+function normalizeLegacyAgentMessage(message) {
+  if (!isRecord(message)) return message;
+
+  const {
+    agentRecovery: legacyAgentRecovery,
+    agentClarification: legacyAgentClarification,
+    taskSnapshot: legacyTaskSnapshot,
+    agentImagePrompts: legacyAgentImagePrompts,
+    agentClarificationResponsePayload: legacyClarificationResponsePayload,
+    ...messageWithoutLegacyAgentState
+  } = removeLegacyAgentFields(message);
+  const sanitized = messageWithoutLegacyAgentState;
+  const agentRecovery = normalizeLegacyAgentRecovery(legacyAgentRecovery);
+  const agentClarification = isRecord(legacyAgentClarification)
+    ? {
+        ...legacyAgentClarification,
+        ...(isRecord(legacyAgentClarification.state)
+          ? { state: removeLegacyAgentFields(legacyAgentClarification.state) }
+          : {}),
+      }
+    : legacyAgentClarification;
+  const taskSnapshot = isRecord(legacyTaskSnapshot)
+    ? removeLegacyAgentFields(legacyTaskSnapshot)
+    : legacyTaskSnapshot;
+  const agentImagePrompts = Array.isArray(legacyAgentImagePrompts)
+    ? legacyAgentImagePrompts.map((entry) => (
+      isRecord(entry) ? omitKeys(entry, new Set(['compilation'])) : entry
+    ))
+    : legacyAgentImagePrompts;
+  const agentClarificationResponsePayload = isRecord(legacyClarificationResponsePayload)
+    ? {
+        ...legacyClarificationResponsePayload,
+        ...(isRecord(legacyClarificationResponsePayload.clarification)
+          ? {
+              clarification: {
+                ...legacyClarificationResponsePayload.clarification,
+                ...(isRecord(legacyClarificationResponsePayload.clarification.state)
+                  ? { state: removeLegacyAgentFields(legacyClarificationResponsePayload.clarification.state) }
+                  : {}),
+              },
+            }
+          : {}),
+        ...(isRecord(legacyClarificationResponsePayload.response)
+          ? { response: omitKeys(legacyClarificationResponsePayload.response, new Set(['retryMode'])) }
+          : {}),
+      }
+    : legacyClarificationResponsePayload;
+
+  return {
+    ...sanitized,
+    ...(agentRecovery ? { agentRecovery } : {}),
+    ...(agentClarification ? { agentClarification } : {}),
+    ...(taskSnapshot ? { taskSnapshot } : {}),
+    ...(agentImagePrompts ? { agentImagePrompts } : {}),
+    ...(agentClarificationResponsePayload ? { agentClarificationResponsePayload } : {}),
+  };
+}
+
+/**
+ * Remove obsolete Planner and Skill Job state from a persisted session.
+ * Current Main Agent recovery, assets, canvas state, and ordinary messages are retained.
+ */
+export function removeDeprecatedImageAgentData(session) {
+  if (!isRecord(session)) return session;
+
+  const { agentRecovery: legacyAgentRecovery, ...sessionWithoutLegacyAgentRecovery } = session;
+  const agentRecovery = normalizeLegacyAgentRecovery(legacyAgentRecovery);
+
+  const sanitizeMessages = (messages) => (
+    Array.isArray(messages) ? messages.map(normalizeLegacyAgentMessage) : messages
+  );
+
+  return {
+    ...removeLegacyAgentFields(sessionWithoutLegacyAgentRecovery),
+    schemaVersion: 3,
+    ...(Array.isArray(session.messages) ? { messages: sanitizeMessages(session.messages) } : {}),
+    ...(Array.isArray(session.topics)
+      ? {
+          topics: session.topics.map((topic) => (
+            isRecord(topic)
+              ? {
+                  ...removeLegacyAgentFields(topic),
+                  ...(Array.isArray(topic.messages) ? { messages: sanitizeMessages(topic.messages) } : {}),
+                }
+              : topic
+          )),
+        }
+      : {}),
+    ...(Array.isArray(session.generatedImageHistory)
+      ? {
+          generatedImageHistory: session.generatedImageHistory.map((entry) => (
+            isRecord(entry) ? removeLegacyAgentFields(entry) : entry
+          )),
+        }
+      : {}),
+    ...(isRecord(session.taskSnapshot)
+      ? { taskSnapshot: removeLegacyAgentFields(session.taskSnapshot) }
+      : {}),
+    ...(agentRecovery
+      ? { agentRecovery }
+      : {}),
+  };
+}
+
 const normalizeOptionalId = (value) =>
   typeof value === 'string' && value.trim().length > 0 ? value.trim() : undefined;
 
@@ -222,40 +376,41 @@ export function normalizeImageCardAspectRatioById(values, items) {
 }
 
 export function normalizeProjectSession(session) {
-  const normalizedItems = Array.isArray(session?.items) ? session.items : [];
-  const normalizedChat = normalizeSessionChatMessages(session);
+  const cleanedSession = removeDeprecatedImageAgentData(session);
+  const normalizedItems = Array.isArray(cleanedSession?.items) ? cleanedSession.items : [];
+  const normalizedChat = normalizeSessionChatMessages(cleanedSession);
 
   return {
-    ...session,
-    schemaVersion: 2,
+    ...cleanedSession,
+    schemaVersion: 3,
     items: normalizedItems,
-    connections: normalizeConnections(session?.connections, normalizedItems),
-    textCardPanelDrafts: normalizeTextCardPanelDrafts(session?.textCardPanelDrafts, normalizedItems),
-    textCardProviderById: normalizeTextCardProviderById(session?.textCardProviderById, normalizedItems),
-    textCardModelById: normalizeTextCardModelById(session?.textCardModelById, normalizedItems),
-    imageCardPanelDrafts: normalizeImageCardPanelDrafts(session?.imageCardPanelDrafts, normalizedItems),
-    imageCardProviderById: normalizeImageCardProviderById(session?.imageCardProviderById, normalizedItems),
-    imageCardModelById: normalizeImageCardModelById(session?.imageCardModelById, normalizedItems),
-    imageCardSizeById: normalizeImageCardSizeById(session?.imageCardSizeById, normalizedItems),
-    imageCardQualityById: normalizeImageCardQualityById(session?.imageCardQualityById, normalizedItems),
-    imageCardCountById: normalizeImageCardCountById(session?.imageCardCountById, normalizedItems),
-    imageCardAspectRatioById: normalizeImageCardAspectRatioById(session?.imageCardAspectRatioById, normalizedItems),
-    chatProviderId: normalizeOptionalId(session?.chatProviderId),
-    chatModelId: normalizeOptionalId(session?.chatModelId),
-    imageProviderId: normalizeOptionalId(session?.imageProviderId),
-    imageModelId: normalizeOptionalId(session?.imageModelId),
-    generatedImageHistory: normalizeGeneratedImageHistory(session?.generatedImageHistory),
+    connections: normalizeConnections(cleanedSession?.connections, normalizedItems),
+    textCardPanelDrafts: normalizeTextCardPanelDrafts(cleanedSession?.textCardPanelDrafts, normalizedItems),
+    textCardProviderById: normalizeTextCardProviderById(cleanedSession?.textCardProviderById, normalizedItems),
+    textCardModelById: normalizeTextCardModelById(cleanedSession?.textCardModelById, normalizedItems),
+    imageCardPanelDrafts: normalizeImageCardPanelDrafts(cleanedSession?.imageCardPanelDrafts, normalizedItems),
+    imageCardProviderById: normalizeImageCardProviderById(cleanedSession?.imageCardProviderById, normalizedItems),
+    imageCardModelById: normalizeImageCardModelById(cleanedSession?.imageCardModelById, normalizedItems),
+    imageCardSizeById: normalizeImageCardSizeById(cleanedSession?.imageCardSizeById, normalizedItems),
+    imageCardQualityById: normalizeImageCardQualityById(cleanedSession?.imageCardQualityById, normalizedItems),
+    imageCardCountById: normalizeImageCardCountById(cleanedSession?.imageCardCountById, normalizedItems),
+    imageCardAspectRatioById: normalizeImageCardAspectRatioById(cleanedSession?.imageCardAspectRatioById, normalizedItems),
+    chatProviderId: normalizeOptionalId(cleanedSession?.chatProviderId),
+    chatModelId: normalizeOptionalId(cleanedSession?.chatModelId),
+    imageProviderId: normalizeOptionalId(cleanedSession?.imageProviderId),
+    imageModelId: normalizeOptionalId(cleanedSession?.imageModelId),
+    generatedImageHistory: normalizeGeneratedImageHistory(cleanedSession?.generatedImageHistory),
     messages: normalizedChat.messages,
     topics: normalizedChat.topics,
-    regionSelections: normalizeRegionSelections(session?.regionSelections, normalizedItems),
+    regionSelections: normalizeRegionSelections(cleanedSession?.regionSelections, normalizedItems),
   };
 }
 
 export function buildPersistedSession(session, patch) {
-  const nextSession = cloneValue({
+  const nextSession = removeDeprecatedImageAgentData(cloneValue({
     ...session,
     ...patch,
-  });
+  }));
 
   const normalizedItems = Array.isArray(nextSession.items) ? nextSession.items : [];
   const normalizedConnections = normalizeConnections(nextSession.connections, normalizedItems);
@@ -275,7 +430,7 @@ export function buildPersistedSession(session, patch) {
 
   return {
     ...nextSession,
-    schemaVersion: 2,
+    schemaVersion: 3,
     items: normalizedItems,
     connections: normalizedConnections,
     textCardPanelDrafts: normalizedTextCardPanelDrafts,

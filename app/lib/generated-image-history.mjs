@@ -82,7 +82,7 @@ export function normalizeGeneratedImageHistory(entries) {
     return [{
       id,
       src,
-      plannerPreviewSrc: toSafeString(entry?.plannerPreviewSrc) || src,
+      previewSrc: toSafeString(entry?.previewSrc) || src,
       createdAt,
       source,
       sessionId: toSafeString(entry?.sessionId) || undefined,
@@ -208,7 +208,7 @@ export function buildGeneratedHistoryEntriesFromImageCard({
   return outputEntries.map((output, index) => ({
     id: `generated-history:${normalizedSourceItemId}:${index}:${output.src}`,
     src: output.src,
-    plannerPreviewSrc: output.src,
+    previewSrc: output.src,
     createdAt: buildGeneratedImageHistorySortKey(safeCreatedAt, index),
     source: 'image-card',
     sourceItemId: normalizedSourceItemId,

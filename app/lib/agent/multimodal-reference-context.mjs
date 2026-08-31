@@ -5,7 +5,7 @@ function normalizeReferences(referenceContext, imageSource) {
     ? referenceContext.references
       .map((reference) => {
         const id = text(reference?.id);
-        const src = text(imageSource === 'preview' ? reference?.plannerPreviewSrc : reference?.src);
+        const src = text(imageSource === 'preview' ? reference?.previewSrc : reference?.src);
         const label = text(reference?.label);
         if (!id || !src || !label) return null;
         if (reference.role === 'region_target' && reference.confirmationStatus !== 'confirmed') return null;

@@ -215,15 +215,3 @@ test('workspace commit performance is sampled only through the existing developm
 test('chat scroll contextSafe wrapper remains analyzable by the hooks rule', () => {
   assert.equal(pageSource.includes('const scrollChatToBottom = React.useMemo(() => workspaceContextSafe('), true);
 });
-
-test('skill job polling declares its stable state update dependencies', () => {
-  const pollingSource = sourceBetween(
-    pageSource,
-    'useEffect(() => {\n    if (!activeSkillJobId) return;',
-    'const handleWorkspaceProfilerRender = useCallback'
-  );
-  const dependencySource = pollingSource.slice(pollingSource.lastIndexOf('}, ['));
-  assert.equal(dependencySource.includes('setChatMessages'), true);
-  assert.equal(dependencySource.includes('setItems'), true);
-  assert.equal(dependencySource.includes('updateChatMessageById'), true);
-});

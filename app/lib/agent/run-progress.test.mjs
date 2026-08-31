@@ -357,7 +357,7 @@ test('keeps image preparation, submission, and supplier progress as distinct tim
     stepId: 'image_brief', phase: 'analyzing', status: 'completed', label: '图片生成任务已锁定', timestampMs: 1_000,
   }));
   state = reduceAgentRunProgress(state, progress(2, {
-    stepId: 'prompt_optimization', phase: 'optimizing', status: 'completed', label: '最终图片提示词已准备', timestampMs: 2_000,
+    stepId: 'image_prompt', phase: 'prompt', status: 'completed', label: '最终图片提示词已准备', timestampMs: 2_000,
   }));
   state = reduceAgentRunProgress(state, progress(3, {
     stepId: 'image_contract', phase: 'executing', status: 'active', label: '正在提交图片生成请求', toolCallId: 'image-1', toolName: 'generate_image', timestampMs: 3_000,
@@ -371,7 +371,7 @@ test('keeps image preparation, submission, and supplier progress as distinct tim
 
   assert.deepEqual(state.steps.map((step) => [step.stepId, step.sequence, step.lastUpdateSequence, step.label]), [
     ['image_brief', 1, 1, '图片生成任务已锁定'],
-    ['prompt_optimization', 2, 2, '最终图片提示词已准备'],
+    ['image_prompt', 2, 2, '最终图片提示词已准备'],
     ['image_contract', 3, 5, '图片生成请求已提交'],
     ['generate_image', 4, 4, '正在等待图片生成结果'],
   ]);
@@ -407,9 +407,9 @@ test('image prompt events expose a stable expandable preparation node', () => {
     timestampMs: state.steps[0].timestampMs,
     lastUpdateSequence: state.steps[0].lastUpdateSequence,
   }, {
-    stepId: 'prompt_optimization',
+    stepId: 'image_prompt',
     kind: 'execution',
-    phase: 'optimizing',
+    phase: 'prompt',
     status: 'completed',
     commentary: '最终图片提示词已准备',
     label: '最终图片提示词已准备',
@@ -443,9 +443,9 @@ test('keeps model-authored completion descriptions on their completed step', () 
 
 test('completes the existing prompt preparation row with model-authored copy', () => {
   let state = reduceAgentRunProgress(null, progress(1, {
-    stepId: 'prompt_optimization',
+    stepId: 'image_prompt',
     toolCallId: 'image-call-1',
-    phase: 'optimizing',
+    phase: 'prompt',
     label: '正在生成最终图片提示词',
   }));
   state = reduceAgentRunProgress(state, {
@@ -849,8 +849,8 @@ test('agent errors remain visible even before any activity arrives', () => {
   assert.equal(shouldShowAgentRunProgress(state), true);
 });
 
-test('async skill job progress keeps the run waiting until every asset settles', () => {
-  let state = createInitialAgentRunProgress('run-skill-job');
+test('multi-asset image progress keeps the run waiting until every asset settles', () => {
+  let state = createInitialAgentRunProgress('run-multi-asset');
   state = reduceAgentRunProgress(state, { type: 'intent_resolved', intent: 'skill_action' });
   state = reduceAgentRunProgress(state, { type: 'assets_pending', count: 4 });
   state = reduceAgentRunProgress(state, { type: 'agent_done' });
@@ -961,7 +961,7 @@ test('maps semantic progress phases to stable emoji prefixes', () => {
     ['planning', '🧩'],
     ['loading', '📚'],
     ['image_ready', '🖼'],
-    ['optimizing', '🎨'],
+    ['prompt', '🎨'],
     ['rendering', '🚀'],
     ['executing', '⚙️'],
     ['responding', '✍️', 'composing'],

@@ -87,7 +87,6 @@ test('every runtime image writer pre-generates canvas LODs', async () => {
     readFile(new URL('../api/upload/route.ts', import.meta.url), 'utf8'),
     readFile(new URL('../api/generate/route.ts', import.meta.url), 'utf8'),
     readFile(new URL('../api/image-tools/remove-background/route.ts', import.meta.url), 'utf8'),
-    readFile(new URL('./skill-jobs.ts', import.meta.url), 'utf8'),
   ]);
 
   writerSources.forEach((source) => {

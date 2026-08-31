@@ -402,39 +402,6 @@ export function resolveContextReference({ userMessage, entities = [], selectedEn
     : resolution('none', false);
 }
 
-/**
- * @param {{userMessage?: string, contextResolution?: import('./context-reference.types').AgentContextResolution}} input
- * @returns {import('./context-reference.types').ExecutionBrief}
- */
-export function compileExecutionBrief({ userMessage, contextResolution } = {}) {
-  const message = text(userMessage);
-  const candidates = contextResolution?.status === 'resolved' ? contextResolution.candidates || [] : [];
-  if (candidates.length === 0) {
-    return {
-      version: 1,
-      originalRequest: message,
-      resolvedEntityIds: [],
-      plainText: message,
-      mustPreserve: [],
-      referenceImageUrls: [],
-      canvasItemIds: [],
-    };
-  }
-  const authoritative = candidates.map((candidate) => candidate.brief).filter(Boolean).join('\n');
-  const labels = candidates.map((candidate) => candidate.label).filter(Boolean);
-  const mustPreserve = normalizeAliases(candidates.flatMap((candidate) => candidate.mustPreserve || labels));
-  return {
-    version: 1,
-    originalRequest: message,
-    resolvedEntityIds: candidates.map((candidate) => candidate.id),
-    resolvedLabels: labels,
-    plainText: `${authoritative}\n\n用户当前要求：${message}`.trim(),
-    mustPreserve,
-    referenceImageUrls: normalizeAliases(candidates.flatMap((candidate) => candidate.referenceImageUrls || (candidate.assetUrl ? [candidate.assetUrl] : []))),
-    canvasItemIds: normalizeAliases(candidates.flatMap((candidate) => candidate.canvasItemIds || [])),
-  };
-}
-
 export function isReferentialShorthand(value) {
   const message = text(value);
   if (!message || LITERAL_NUMBER_PATTERN.test(message)) return false;

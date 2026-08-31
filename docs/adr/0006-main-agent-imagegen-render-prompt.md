@@ -4,7 +4,7 @@
 
 ## Decision
 
-图片生成和编辑由同一个 Main Agent Turn 负责。运行时在模型调用前加载 `imagegen` host Skill 与锁定的视觉 Skill；视觉 Skill 的 `renderPrompt` 输出约定由 Main Agent 直接执行。`generate_image.args.prompt` 是唯一最终供应商 Prompt。
+图片生成和编辑由同一个 Main Agent Turn 负责。运行时在模型调用前加载 `imagegen` host Skill 与锁定的视觉 Skill；视觉 Skill 的 `renderPrompt` 输出约定由 Main Agent 直接执行。`generate_image.args.prompt` 是唯一最终供应商 Prompt。完整 Skill 的消息角色、选择方式和预算由 ADR 0008 定义。
 
 Main Agent 可以先读取必要的只读上下文，再在同一会话中调用 `generate_image`。本地执行层只负责工具参数 schema、图片合同、权限、稳定引用、幂等、确认、取消、重试状态和供应商请求。供应商只接收最终 Prompt、图片引用和已解析图片参数。
 
@@ -12,7 +12,7 @@ Main Agent 可以先读取必要的只读上下文，再在同一会话中调用
 
 最终 Prompt 可追溯为“用户原始需求 + imagegen 执行规则 + 锁定视觉 Skill”。允许整理语言和顺序，但必须保留主体关系、构图与空间比例、材质工艺、色彩锚点、文字排版限制及明确禁止项。`concise` 只能删除工作流说明、隐藏上下文和工具说明，不能把视觉约束压缩成几个风格标签。
 
-旧 `executionPlan`、`generationBrief`、`executionBrief` 和 `promptCompilation` 只为历史读取和迁移保留，不能覆盖当前工具参数或重新编译图片 Prompt。旧 ADR 0002 保留为历史记录。
+旧 `executionPlan`、`generationBrief`、`executionBrief` 和 `promptCompilation` 已从当前执行合同移除；迁移边界只会识别并清理它们，不能覆盖当前工具参数或重新编译图片 Prompt。已废弃的旧 ADR 不属于当前架构。
 
 ## Recovery and retry
 
@@ -20,5 +20,4 @@ Main Agent 可以先读取必要的只读上下文，再在同一会话中调用
 
 ## Consequences
 
-系统不再有图片 Prompt Planner、Prompt Optimizer 或第二个 Prompt 模型边界。Prompt 质量由 Main Agent 按 Skill 规则负责；本地不会以关键词、长度或旧 Prompt 静默替换模型输出。
-
+系统不再有图片 Prompt Planner、Prompt Optimizer 或第二个 Prompt 模型边界。Prompt 质量由 Main Agent 按 Skill 规则负责；本地不会以关键词、长度或历史数据静默替换模型输出。旧 Planner/Brief/Job 数据只在迁移时清理，不能重新执行。参见 ADR 0008，了解当前 Codex 式 Skill 注入架构。

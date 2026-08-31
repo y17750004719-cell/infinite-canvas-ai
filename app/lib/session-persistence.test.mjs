@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   buildPersistedSession,
   normalizeProjectSession,
+  removeDeprecatedImageAgentData,
   shouldFlushScheduledSessionSave,
 } from './session-persistence.mjs';
 
@@ -112,7 +113,7 @@ test('buildPersistedSession preserves normalized generated image history entries
       {
         id: 'history-1',
         src: '/uploads/generated/a.png',
-        plannerPreviewSrc: '/uploads/previews/a.webp',
+        previewSrc: '/uploads/previews/a.webp',
         createdAt: 10,
         source: 'image-card',
         sourceItemId: 'image-card-1',
@@ -137,7 +138,7 @@ test('buildPersistedSession preserves normalized generated image history entries
     {
       id: 'history-1',
       src: '/uploads/generated/a.png',
-      plannerPreviewSrc: '/uploads/previews/a.webp',
+      previewSrc: '/uploads/previews/a.webp',
       createdAt: 10,
       source: 'image-card',
       sessionId: undefined,
@@ -205,15 +206,133 @@ test('buildPersistedSession keeps task snapshots only on their owning assistant 
     viewport: { x: 0, y: 0, scale: 1 },
   }, {});
 
-  assert.deepEqual(result.messages[0].taskSnapshot, taskSnapshot);
-  assert.deepEqual(result.topics[0].messages[0].taskSnapshot, taskSnapshot);
-  assert.deepEqual(result.messages[0].agentImagePrompts, agentImagePrompts);
-  assert.deepEqual(result.topics[0].messages[0].agentImagePrompts, agentImagePrompts);
+  assert.deepEqual(result.messages[0].taskSnapshot, {
+    topicId: 'topic-1',
+    taskId: 'task-1',
+    contractVersion: 1,
+    contract: { intent: 'image' },
+    latestBatchId: 'batch-1',
+    activeVersions: [{ referenceId: 'task-slot:slot-1', batchId: 'batch-1', slotId: 'slot-1', versionId: 'version-1' }],
+  });
+  assert.deepEqual(result.topics[0].messages[0].taskSnapshot, result.messages[0].taskSnapshot);
+  assert.deepEqual(result.messages[0].agentImagePrompts, [{
+    index: 0,
+    label: '图片 1',
+    prompt: '最终供应商 Prompt',
+  }]);
+  assert.deepEqual(result.topics[0].messages[0].agentImagePrompts, result.messages[0].agentImagePrompts);
   assert.equal(result.messages[0].agentProgressMode, 'compact');
   assert.equal(result.topics[0].messages[0].agentProgressMode, 'compact');
-  assert.deepEqual(result.messages[0].agentRecovery, agentRecovery);
-  assert.deepEqual(result.topics[0].messages[0].agentRecovery, agentRecovery);
+  assert.equal(result.messages[0].agentRecovery, undefined);
+  assert.equal(result.topics[0].messages[0].agentRecovery, undefined);
   assert.equal(result.topics[0].taskSnapshot, undefined);
+});
+
+test('removeDeprecatedImageAgentData removes planner and job state while retaining current main agent work', () => {
+  const currentRecovery = {
+    version: 1,
+    taskId: 'task-current',
+    runId: 'run-current',
+    topicId: 'topic-1',
+    sourceUserMessageId: 'user-1',
+    status: 'failed',
+    resumeRoute: 'main_agent',
+    toolCalls: [{
+      callId: 'call-current',
+      attemptId: 'attempt-current',
+      taskId: 'task-current',
+      toolName: 'generate_image',
+      status: 'failed',
+    }],
+  };
+  const session = {
+    id: 'session-legacy-cleanup',
+    activeAgentRun: {
+      taskId: 'task-current',
+      runId: 'run-current',
+      userMessageId: 'user-1',
+      assistantMessageId: 'assistant-1',
+      startedAt: 1,
+      status: 'running',
+    },
+    items: [{ id: 'canvas-image', type: 'image', src: '/uploads/asset.png' }],
+    viewport: { x: 0, y: 0, scale: 1 },
+    executionPlan: { generation: { prompt: 'legacy' } },
+    generatedImageHistory: [{
+      id: 'asset-1',
+      src: '/uploads/asset.png',
+      previewSrc: '/uploads/preview.webp',
+      createdAt: 1,
+      source: 'chat',
+    }],
+    messages: [{
+      id: 'assistant-1',
+      role: 'assistant',
+      content: 'current and legacy',
+      executionBriefSummary: 'legacy summary',
+      taskSnapshot: {
+        taskId: 'task-current',
+        imagePlanning: { executionPlan: { generation: { prompt: 'legacy' } } },
+        activeVersions: [{ assetUrl: '/uploads/asset.png' }],
+      },
+      agentClarification: {
+        request: { id: 'confirmation-1', taskId: 'task-current' },
+        state: {
+          taskId: 'task-current',
+          intent: 'image',
+          originalRequest: '继续当前任务',
+          workingBrief: '当前任务事实',
+          askedDimensions: [],
+          answers: [],
+        },
+      },
+      agentClarificationResponsePayload: {
+        clarification: { state: { imagePlanning: { executionPlan: {} } } },
+        response: { requestId: 'confirmation-1', retryMode: 'replan' },
+      },
+      agentImagePrompts: [{ prompt: 'current prompt', compilation: { plannerModel: 'legacy' } }],
+      agentRecovery: currentRecovery,
+    }, {
+      id: 'assistant-2',
+      role: 'assistant',
+      content: 'legacy job',
+      agentRecovery: {
+        ...currentRecovery,
+        taskId: 'task-legacy-job',
+        resumeRoute: 'image_planner',
+        toolCalls: [{ toolName: 'start_skill_job' }],
+      },
+    }],
+    topics: [{
+      id: 'topic-1',
+      messages: [{
+        id: 'assistant-topic',
+        role: 'assistant',
+        content: 'legacy planner state',
+        agentClarification: { state: { imagePlanning: { executionPlan: {} }, plannerFailure: { reason: 'timeout' } } },
+      }],
+    }],
+  };
+
+  const cleaned = removeDeprecatedImageAgentData(session);
+
+  assert.equal(cleaned.executionPlan, undefined);
+  assert.equal(cleaned.schemaVersion, 3);
+  assert.deepEqual(cleaned.activeAgentRun, session.activeAgentRun);
+  assert.equal(cleaned.generatedImageHistory[0].previewSrc, '/uploads/preview.webp');
+  assert.equal(cleaned.messages[0].executionBriefSummary, undefined);
+  assert.equal(cleaned.messages[0].taskSnapshot.imagePlanning, undefined);
+  assert.deepEqual(cleaned.messages[0].taskSnapshot.activeVersions, [{ assetUrl: '/uploads/asset.png' }]);
+  assert.deepEqual(cleaned.messages[0].agentImagePrompts, [{ prompt: 'current prompt' }]);
+  assert.deepEqual(cleaned.messages[0].agentRecovery, currentRecovery);
+  assert.deepEqual(cleaned.messages[0].agentClarification, session.messages[0].agentClarification);
+  assert.deepEqual(cleaned.messages[0].agentClarificationResponsePayload, {
+    clarification: { state: {} },
+    response: { requestId: 'confirmation-1' },
+  });
+  assert.equal(cleaned.messages[1].agentRecovery, undefined);
+  assert.equal(cleaned.topics[0].messages[0].agentClarification.state.imagePlanning, undefined);
+  assert.equal(cleaned.topics[0].messages[0].agentClarification.state.plannerFailure, undefined);
 });
 
 test('buildPersistedSession keeps valid text card panel drafts for existing text card items', () => {
@@ -556,7 +675,7 @@ test('normalizeProjectSession keeps valid generated image history entries and re
     {
       id: 'history-1',
       src: '/uploads/generated/a.png',
-      plannerPreviewSrc: '/uploads/generated/a.png',
+      previewSrc: '/uploads/generated/a.png',
       createdAt: 10,
       source: 'chat',
       sessionId: undefined,

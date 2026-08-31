@@ -47,14 +47,13 @@ description: Logo 与品牌设计。帮助用户完成品牌定位方案和视�
 
 3. **用户确认后批量生成**
    - 用户输入"确认出图"、"开始出图"、"生成全部"等确认词后
-   - 系统将在后台异步并行生成全部 VI 素材
-   - 组件清单、尺寸比例、并发数以 `config.json` 为准
-   - 每张图片生成完成后会自动添加到画布和对话中
-   - 全部完成后展示汇总结果
+   - Main Agent 在同一轮中直接调用 `generate_image`，使用 `outputCount`、`deliveryMode` 或 `items` 表达批量素材
+   - 组件清单与尺寸比例以 `config.json` 为准；通过统一 Agent 图片流程提交批量生成
+   - 生成进度、部分成功和完成结果通过统一 Agent 事件流返回并添加到画布
 
 4. **生成失败处理**
-   - 如果部分素材生成失败，会在汇总中标注
-   - 用户可以针对失败的素材单独重试
+   - 如果部分素材生成失败，会在统一图片结果中标注
+   - 用户显式重试时创建新的 Main Agent Turn、attempt ID 和 call ID，不重放旧工具调用
 
 ## 关键原则
 
@@ -67,5 +66,4 @@ description: Logo 与品牌设计。帮助用户完成品牌定位方案和视�
 
 - 行业风格参考：`references/brand-style-guide.md`
 - VI 应用规范：`references/vi-components.md`
-- 提示词生成工具：`scripts/generate_prompts.py`
-- 任务与尺寸配置：`config.json`
+- 素材与尺寸配置：`config.json`

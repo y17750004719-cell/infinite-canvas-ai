@@ -377,18 +377,6 @@ type ChatMessageInlineSegment =
       annotationCount?: number;
     };
 
-interface AgentImagePromptCompilation {
-  skillId: string | null;
-  skillLabel: string | null;
-  skillRead: boolean;
-  plannerProviderId: string | null;
-  plannerModel: string;
-  referenceCount: number;
-  visualReferencesUsed: boolean;
-  durationMs: number;
-  compiledAt: number;
-}
-
 interface ChatMessage {
   id: string;
   role: 'user' | 'assistant' | 'skill';
@@ -422,7 +410,6 @@ interface ChatMessage {
     runId?: string;
     toolCallId?: string;
     sequence?: number;
-    compilation?: AgentImagePromptCompilation;
   }>;
   agentProgressMode?: 'full' | 'compact';
   model?: string;
@@ -447,7 +434,6 @@ interface ChatMessage {
   agentProposalDismissed?: boolean;
   agentProposalResolved?: boolean;
   resolvedContext?: { entityIds: string[]; labels: string[]; kind: string; confidence: 'high' | 'medium' };
-  executionBriefSummary?: string;
   taskSnapshot?: TaskSnapshot;
   agentRecovery?: AgentRecoveryRecord;
 }
@@ -923,24 +909,8 @@ interface AgentClarificationState {
     remainingCount: number;
     batchSize: number;
   };
-  plannerCandidates?: Array<{
-    id: string;
-    providerId: string;
-    providerName: string;
-    model: string;
-  }>;
-  plannerSelection?: {
-    providerId: string;
-    model: string;
-  };
-  plannerFailure?: {
-    reason: 'timeout' | 'transport' | 'invalid_reference' | 'invalid_context' | 'invalid_plan' | 'vision_unsupported' | 'vision_unavailable';
-    retryMode: 'replan';
-    failedAt: number;
-  };
   recoveryRecord?: AgentRecoveryRecord;
   recoveryMode?: 'fill_missing' | 'redo_all';
-  imagePlanning?: TaskSnapshot['imagePlanning'];
 }
 
 interface AgentClarificationRequest {
@@ -1109,7 +1079,7 @@ interface AgentReferenceContext {
   references: Array<{
     id: string;
     src: string;
-    plannerPreviewSrc?: string;
+    previewSrc?: string;
     label: string;
     source: ChatReferenceTokenSource;
     canvasItemId?: string;
@@ -2090,7 +2060,7 @@ const GENERATED_HISTORY_SOURCE_LABELS: Record<GeneratedImageHistoryEntry['source
 
 const createGeneratedImageHistoryEntry = ({
   src,
-  plannerPreviewSrc = src,
+  previewSrc = src,
   naturalWidth,
   naturalHeight,
   timestamp = Date.now(),
@@ -2114,7 +2084,7 @@ const createGeneratedImageHistoryEntry = ({
   parentVersionId,
 }: {
   src: string;
-  plannerPreviewSrc?: string;
+  previewSrc?: string;
   naturalWidth?: number;
   naturalHeight?: number;
   timestamp?: number;
@@ -2142,7 +2112,7 @@ const createGeneratedImageHistoryEntry = ({
   return {
     id: `generated-history-${normalizedCreatedAt}-${Math.random().toString(36).slice(2, 8)}`,
     src,
-    plannerPreviewSrc,
+    previewSrc,
     naturalWidth,
     naturalHeight,
     createdAt: normalizedCreatedAt,
@@ -2218,9 +2188,8 @@ const IMAGE_PLANNING_ERROR_MESSAGES: Record<string, string> = {
   skill: '已选 Skill 读取未完成，任务状态已保留，可继续重试',
   brief: '设计 Brief 未完成，任务状态已保留，可继续重试',
   prompt: '生图 Prompt 未完成，任务状态已保留，可继续重试',
-  image_planner: '图片准备未完成，任务状态已保留，可继续重试',
   execution: '图片合同执行未完成，任务状态已保留，可继续重试',
-  terminal_contract: '图像合同未完成，任务状态已保留，可继续重试',
+  terminal_contract: 'Agent 连接在完成前中断，任务状态已保留，可继续恢复',
   invalid_reference: '原参考图已失效，请重新选择参考图后继续',
   provider_unavailable: '图片供应商当前没有可用模型通道或账户，请切换供应商/模型后重试',
   invalid_tool_arguments: '图片参数未通过校验，任务状态已保留，请重新提交',
@@ -7007,14 +6976,6 @@ export default function AIWorkspace() {
   const [editingName, setEditingName] = useState('');
   const [imageToolbarNotice, setImageToolbarNotice] = useState<string | null>(null);
   
-  const [activeSkillJobId, setActiveSkillJobId] = useState<string | null>(null);
-  const [activeSkillJobType, setActiveSkillJobType] = useState<'logo' | 'brand' | null>(null);
-  const [activeSkillJobStatus, setActiveSkillJobStatus] = useState<{
-    completed: number;
-    failed: number;
-    total: number;
-    items: Array<{ component: string; name: string; status: string; localUrl?: string; error?: string }>;
-  } | null>(null);
   
   const projectMenuRef = useRef<HTMLDivElement>(null);
   const addNodeMenuRef = useRef<HTMLDivElement>(null);
@@ -7153,7 +7114,6 @@ export default function AIWorkspace() {
   const isChatNearBottomRef = useRef(true);
   const isProgrammaticChatScrollRef = useRef(false);
   const chatScrollTweenRef = useRef<gsap.core.Tween | null>(null);
-  const activeSkillJobMessageIdRef = useRef<string | null>(null);
   const generateAbortRef = useRef<AbortController | null>(null);
   const isGeneratingRef = useRef(false);
   const agentReanalysisInFlightRef = useRef(false);
@@ -7162,7 +7122,6 @@ export default function AIWorkspace() {
   const suppressCanvasTextAbortErrorItemIdsRef = useRef<Set<string>>(new Set());
   const canvasImageGenerateAbortControllersRef = useRef<Map<string, AbortController>>(new Map());
   const suppressCanvasImageAbortErrorItemIdsRef = useRef<Set<string>>(new Set());
-  const processedSkillJobUrlsRef = useRef<Set<string>>(new Set());
   const processedSkillChoiceIdsRef = useRef<Set<string>>(new Set());
   const streamQueueRef = useRef('');
   const streamTickerRef = useRef<((time: number) => void) | null>(null);
@@ -14080,7 +14039,7 @@ export default function AIWorkspace() {
 
   const handleCancelGenerate = async () => {
     updateActiveStreamMessageStatus('cancelled', '任务已终止');
-    const activeMessageId = activeSkillJobMessageIdRef.current || pendingAssistantMessageIdRef.current;
+    const activeMessageId = pendingAssistantMessageIdRef.current;
     if (activeMessageId) updateChatMessageById(activeMessageId, (msg) => ({
       ...msg,
       taskStatus: 'cancelled',
@@ -14090,33 +14049,6 @@ export default function AIWorkspace() {
         : undefined,
     }));
     stopStreamTypewriter();
-
-    if (activeSkillJobId) {
-      try {
-        await fetch(`/api/skills/jobs/${activeSkillJobId}`, { method: 'DELETE' });
-      } catch (error) {
-        console.error('Cancel skill job failed:', error);
-      }
-
-      const skillPrefix = `${activeSkillJobType || 'logo'}:`;
-      setChatMessages(prev => prev.map((msg) => {
-        if (msg.taskKey?.startsWith(skillPrefix) && msg.taskStatus !== 'completed') {
-          return {
-            ...msg,
-            taskStatus: 'cancelled',
-            content: msg.imageName ? `${msg.imageName} 已终止` : '任务已终止',
-          };
-        }
-        return msg;
-      }));
-
-      setActiveSkillJobId(null);
-      setActiveSkillJobType(null);
-      setIsGenerating(false);
-      activeSkillJobMessageIdRef.current = null;
-      pendingAssistantMessageIdRef.current = null;
-      return;
-    }
 
     if (generateAbortRef.current) {
       generateAbortRef.current.abort();
@@ -14236,7 +14168,7 @@ export default function AIWorkspace() {
             .map((token) => ({
               id: token.id,
               src: token.src,
-              plannerPreviewSrc: token.previewSrc || token.src,
+              previewSrc: token.previewSrc || token.src,
               label: token.label,
               source: token.source,
               ...(token.canvasItemId ? { canvasItemId: token.canvasItemId } : {}),
@@ -14281,9 +14213,7 @@ export default function AIWorkspace() {
       }]);
       return;
     }
-    const lockedSkillId = effectiveAgentClarification?.state.imagePlanning?.skill?.id
-      || effectiveAgentClarification?.state.skillId
-      || options?.recoveryRecord?.taskSnapshot?.imagePlanning?.skill?.id
+    const lockedSkillId = effectiveAgentClarification?.state.skillId
       || options?.recoveryRecord?.skillId;
     const lockedSkill = lockedSkillId
       ? quickActions.find((skill) => skill.id === lockedSkillId) || { id: lockedSkillId, label: lockedSkillId }
@@ -14319,7 +14249,7 @@ export default function AIWorkspace() {
       ])
     );
     
-    if (isGenerating || activeSkillJobId) {
+    if (isGenerating) {
       const errorMessage: ChatMessage = {
         id: `msg-${Date.now()}-error`,
         role: 'assistant',
@@ -14879,7 +14809,6 @@ export default function AIWorkspace() {
               label?: string;
               index?: number;
               prompt?: string;
-              compilation?: AgentImagePromptCompilation;
               skillId?: string;
               skill?: { id?: string; label?: string } | null;
               source?: 'manual_ui' | 'explicit_text' | 'user_confirmation' | 'recovery' | 'manual' | 'auto';
@@ -14908,7 +14837,7 @@ export default function AIWorkspace() {
                 presentation?: { title?: string; summary?: string; operation?: 'generate' | 'edit' };
                 assets?: Array<{
                   src?: string;
-                  plannerPreviewSrc?: string;
+                  previewSrc?: string;
                   naturalWidth?: number;
                   naturalHeight?: number;
                   model?: string;
@@ -14974,7 +14903,6 @@ export default function AIWorkspace() {
                 label?: string;
                 index?: number;
                 prompt?: string;
-                compilation?: AgentImagePromptCompilation;
                 skillId?: string;
                 skill?: { id?: string; label?: string } | null;
                 source?: 'manual_ui' | 'explicit_text' | 'user_confirmation' | 'recovery' | 'manual' | 'auto';
@@ -15002,7 +14930,7 @@ export default function AIWorkspace() {
                   contractVersion?: number;
                   batchId?: string;
                   presentation?: { title?: string; summary?: string; operation?: 'generate' | 'edit' };
-                  assets?: Array<{ src?: string; plannerPreviewSrc?: string; naturalWidth?: number; naturalHeight?: number; model?: string; itemId?: string; index?: number; label?: string; slotId?: string; versionId?: string; parentVersionId?: string; promptTrace?: ChatMessage['promptTrace'] }>;
+                  assets?: Array<{ src?: string; previewSrc?: string; naturalWidth?: number; naturalHeight?: number; model?: string; itemId?: string; index?: number; label?: string; slotId?: string; versionId?: string; parentVersionId?: string; promptTrace?: ChatMessage['promptTrace'] }>;
                   batch?: { total?: number; settled?: number; succeeded?: number; failed?: number };
                 };
               request?: {
@@ -15092,11 +15020,6 @@ export default function AIWorkspace() {
                   confidence: event.confidence || 'high',
                 },
               }));
-              continue;
-            }
-
-            if (event.type === 'brief_compiled' && event.summary) {
-              updatePendingAssistantMessage((msg) => ({ ...msg, executionBriefSummary: event.summary }));
               continue;
             }
 
@@ -15321,7 +15244,6 @@ export default function AIWorkspace() {
                 runId: promptRunId,
                 ...(promptToolCallId ? { toolCallId: promptToolCallId } : {}),
                 ...(Number.isFinite(event.sequence) ? { sequence: event.sequence } : {}),
-                ...(event.compilation ? { compilation: event.compilation } : {}),
               };
               updatePendingAssistantMessageImmediately((msg) => ({
                 ...updateAgentRunProgress(msg, {
@@ -15355,11 +15277,7 @@ export default function AIWorkspace() {
               continue;
             }
 
-            if (
-              event.type === 'prompt_optimization_start'
-              || event.type === 'prompt_optimization_done'
-              || event.type === 'tool_update'
-            ) {
+            if (event.type === 'tool_update') {
               continue;
             }
 
@@ -15387,39 +15305,6 @@ export default function AIWorkspace() {
                 setPendingAgentConfirmation(confirmation);
                 setShowAgentConfirmationModal(false);
               }
-              continue;
-            }
-
-            if (event.type === 'tool_result' && typeof event.result?.jobId === 'string') {
-              flushQueuedChatMessageUpdates();
-              const skillType = event.result.skillType === 'brand' ? 'brand' : 'logo';
-              const total = typeof event.result.total === 'number' ? event.result.total : 0;
-              const completed = typeof event.result.completed === 'number' ? event.result.completed : 0;
-              const failed = typeof event.result.failed === 'number' ? event.result.failed : 0;
-              const items = Array.isArray(event.result.items)
-                ? event.result.items.map((item) => {
-                    const row = item && typeof item === 'object' ? item as Record<string, unknown> : {};
-                    return {
-                      component: String(row.key || row.component || ''),
-                      name: String(row.name || ''),
-                      status: String(row.status || 'queued'),
-                    };
-                  })
-                : [];
-              setActiveSkillJobId(event.result.jobId);
-              setActiveSkillJobType(skillType);
-              setActiveSkillJobStatus({ completed, failed, total, items });
-              activeSkillJobMessageIdRef.current = assistantId;
-              updateChatMessageById(assistantId, (msg) => applyAgentRunProgressEvents({
-                ...msg,
-                content: `已启动 ${total} 个${skillType === 'brand' ? '品牌物料' : '视觉素材'}任务。`,
-                taskStatus: 'running',
-                agentConfirmation: undefined,
-              }, [
-                { type: 'assets_pending', count: total, origin: 'client' },
-                { type: 'assets_progress', total, succeeded: completed, failed, origin: 'client' },
-              ]));
-              flushQueuedChatMessageUpdates();
               continue;
             }
 
@@ -15508,7 +15393,7 @@ export default function AIWorkspace() {
                   itemId?: string;
                   index?: number;
                   label?: string;
-                  plannerPreviewSrc?: string;
+                  previewSrc?: string;
                   slotId?: string;
                   versionId?: string;
                   parentVersionId?: string;
@@ -15640,7 +15525,7 @@ export default function AIWorkspace() {
                     generationSessionId,
                     loadedAssets.map(({ asset, naturalWidth, naturalHeight }, index) => createGeneratedImageHistoryEntry({
                       src: asset.src,
-                      plannerPreviewSrc: asset.plannerPreviewSrc || asset.src,
+                      previewSrc: asset.previewSrc || asset.src,
                       naturalWidth,
                       naturalHeight,
                       source: 'chat',
@@ -15739,6 +15624,25 @@ export default function AIWorkspace() {
               return;
             }
 
+            if (event.type === 'agent_cancelled') {
+              agentTerminalReceived = true;
+              if (event.recoveryRecord) latestRecoveryRecord = event.recoveryRecord;
+              updatePendingAssistantMessageImmediately((msg) => ({
+                ...updateAgentRunProgress(msg, {
+                  type: 'agent_cancelled',
+                  taskId: event.taskId,
+                  runId: event.runId || agentRunId,
+                  operationId: event.operationId,
+                  sequence: event.sequence,
+                  timestampMs: event.timestampMs,
+                }),
+                taskStatus: 'cancelled',
+                content: '任务已终止，可从任务记录中恢复。',
+                ...(event.recoveryRecord ? { agentRecovery: event.recoveryRecord } : {}),
+              }));
+              return;
+            }
+
             if (event.type === 'agent_task_checkpoint' && event.taskSnapshot) {
               latestTaskSnapshot = event.taskSnapshot;
               updatePendingAssistantMessage((msg) => ({ ...msg, taskSnapshot: event.taskSnapshot }));
@@ -15831,7 +15735,7 @@ export default function AIWorkspace() {
             topicId: requestTopicId,
             sourceUserMessageId: recentRecoveryTask?.sourceUserMessageId || userMessage.id,
             status: 'failed',
-            resumeRoute: localDeliveryOnly ? 'local_delivery' : 'image_planner',
+            resumeRoute: localDeliveryOnly ? 'local_delivery' : 'main_agent',
             intent: latestTaskSnapshot.contract.intent,
             originalRequest: recentRecoveryTask?.originalRequest || currentChatInput,
             failureStage: localDeliveryOnly ? 'local_delivery' : 'image_pipeline',
@@ -16020,7 +15924,7 @@ export default function AIWorkspace() {
         sourceUserMessageId: previousRecovery?.sourceUserMessageId || userMessage.id,
         status: aborted ? 'cancelled' : 'failed',
         resumeRoute: latestTaskSnapshot
-          ? snapshotIntent === 'image' || snapshotIntent === 'skill_action' ? 'image_planner' : 'main_agent'
+          ? 'main_agent'
           : previousRecovery?.resumeRoute || null,
         intent: snapshotIntent || previousRecovery?.intent || null,
         originalRequest: previousRecovery?.originalRequest || currentChatInput,
@@ -16066,11 +15970,9 @@ export default function AIWorkspace() {
       }
       if (!runController || generateAbortRef.current === runController) {
         if (runController) generateAbortRef.current = null;
-        if (!activeSkillJobMessageIdRef.current) {
-          setIsGenerating(false);
-          if (pendingAssistantMessageIdRef.current === assistantPlaceholderId) {
-            pendingAssistantMessageIdRef.current = null;
-          }
+        setIsGenerating(false);
+        if (pendingAssistantMessageIdRef.current === assistantPlaceholderId) {
+          pendingAssistantMessageIdRef.current = null;
         }
       }
     }
@@ -16085,7 +15987,7 @@ export default function AIWorkspace() {
     const references = resolvedChatReferenceTokens.map((token) => ({
       id: token.id,
       src: token.src,
-      plannerPreviewSrc: token.previewSrc || token.src,
+      previewSrc: token.previewSrc || token.src,
       label: token.label,
       source: token.source,
       role: token.role,
@@ -18595,219 +18497,6 @@ export default function AIWorkspace() {
     syncEditorTextFromState(latestChatInputRef.current, true);
   }, [activeSkill?.id, syncEditorTextFromState]);
 
-  useEffect(() => {
-    if (!activeSkillJobId) return;
-
-    const skillJobMessageId = activeSkillJobMessageIdRef.current;
-    let stopped = false;
-    let pollCount = 0;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-
-    const pollOnce = async () => {
-      if (stopped) return;
-
-      try {
-        const response = await fetch(`/api/skills/jobs?jobId=${activeSkillJobId}&t=${Date.now()}`, {
-          cache: 'no-store',
-        });
-        if (!response.ok) {
-          if (response.status === 404) {
-            stopped = true;
-            const errorPayload = await response.json().catch(() => ({}));
-            const reason = typeof errorPayload?.error === 'string' ? errorPayload.error : '任务不存在';
-            if (skillJobMessageId) {
-              updateChatMessageById(skillJobMessageId, (msg) => ({
-                ...updateAgentRunProgress(msg, { type: 'agent_error' }),
-                content: `⚠️ 任务状态丢失（${reason}），请重新发起一次出图。`,
-                taskStatus: 'failed',
-              }));
-            }
-            setActiveSkillJobId(null);
-            setActiveSkillJobType(null);
-            setIsGenerating(false);
-            activeSkillJobMessageIdRef.current = null;
-            pendingAssistantMessageIdRef.current = null;
-            return;
-          }
-          const nextDelay = pollCount < 10 ? 2000 : 5000;
-          pollCount += 1;
-          timer = setTimeout(pollOnce, nextDelay);
-          return;
-        }
-        
-        const data = await response.json();
-        setActiveSkillJobStatus({
-          completed: data.completed,
-          failed: data.failed,
-          total: data.total,
-          items: data.items,
-        });
-        if (skillJobMessageId) {
-          updateChatMessageById(skillJobMessageId, (msg) => updateAgentRunProgress(msg, {
-            type: 'assets_progress',
-            origin: 'client',
-            total: data.total,
-            succeeded: data.completed,
-            failed: data.failed,
-          }));
-        }
-
-        const skillPrefix = `${activeSkillJobType || 'logo'}:`;
-        const skillLabel = activeSkillJobType === 'brand' ? '品牌物料' : 'VI 素材';
-
-        setChatMessages((prev) => prev.map((msg) => {
-          if (!msg.taskKey?.startsWith(skillPrefix)) return msg;
-          const key = msg.taskKey.replace(skillPrefix, '');
-          const item = data.items.find((entry: { key?: string; component?: string }) => (entry.key || entry.component) === key);
-          if (!item) return msg;
-
-          if (item.status === 'completed' && item.localUrl) {
-            return {
-              ...msg,
-              content: '',
-              imageUrl: item.localUrl,
-              taskStatus: 'completed',
-              model: 'gemini-3.1-flash-image-preview',
-            };
-          }
-
-          if (item.status === 'failed') {
-            return {
-              ...msg,
-              content: `${item.name} 生成失败${item.error ? `: ${item.error}` : ''}`,
-              taskStatus: 'failed',
-            };
-          }
-
-          if (item.status === 'cancelled') {
-            return {
-              ...msg,
-              content: `${item.name} 已终止`,
-              taskStatus: 'cancelled',
-            };
-          }
-
-          return {
-            ...msg,
-            content: `${item.name} 生成中...`,
-            taskStatus: item.status === 'queued' ? 'queued' : 'running',
-          };
-        }));
-
-        const completedItems = data.items.filter(
-          (item: { key?: string; component?: string; status: string; localUrl?: string }) => item.status === 'completed' && item.localUrl
-        );
-
-        const historyTimestamp = Date.now();
-        completedItems.forEach((item: { key?: string; component?: string; localUrl: string }, index: number) => {
-          const itemKey = item.key || item.component || 'logo-item';
-          if (processedSkillJobUrlsRef.current.has(item.localUrl)) return;
-          processedSkillJobUrlsRef.current.add(item.localUrl);
-
-          setImageCount((prev) => prev + 1);
-
-          const img = new window.Image();
-          img.crossOrigin = 'anonymous';
-          img.onload = () => {
-            const orderOffset = processedSkillJobUrlsRef.current.size - 1;
-            const spawnPosition = getSpawnPosition(
-              {
-                width: getConstrainedImageDisplaySize(img.width, img.height).width,
-                height: getConstrainedImageDisplaySize(img.width, img.height).height,
-              },
-              orderOffset
-            );
-
-            const newItem = createImageCanvasItem({
-              id: `generated-${Date.now()}-${itemKey}`,
-              src: item.localUrl,
-              naturalWidth: img.width,
-              naturalHeight: img.height,
-              x: spawnPosition.x,
-              y: spawnPosition.y,
-            });
-            appendGeneratedImageHistoryForSession(
-              currentSessionIdRef.current,
-              [
-                createGeneratedImageHistoryEntry({
-                  src: item.localUrl,
-                  naturalWidth: img.width,
-                  naturalHeight: img.height,
-                  timestamp: historyTimestamp,
-                  sequence: index,
-                  source: 'chat',
-                }),
-              ]
-            );
-            recordCurrentCanvasUndoSnapshot();
-            setItems(prev => [...prev, newItem]);
-          };
-          img.src = item.localUrl;
-        });
-        
-        if (data.status === 'completed' || data.status === 'failed' || data.status === 'partial' || data.status === 'cancelled') {
-          stopped = true;
-          
-          let summaryText = '';
-          if (data.status === 'completed') {
-            summaryText = `✅ 全部 ${data.total} 个${skillLabel}已生成完成！`;
-          } else if (data.status === 'partial') {
-            summaryText = `⚠️ 已完成 ${data.completed} 个，失败 ${data.failed} 个`;
-          } else if (data.status === 'cancelled') {
-            summaryText = `⏹️ 任务已终止，已完成 ${data.completed} 个`;
-          } else {
-            summaryText = `❌ 生成失败，请重试`;
-          }
-          
-          if (skillJobMessageId) {
-            updateChatMessageById(skillJobMessageId, (msg) => ({
-              ...updateAgentRunProgress(msg, {
-                type: 'assets_settled',
-                origin: 'client',
-                succeeded: data.completed,
-                failed: Math.max(data.failed, data.total - data.completed - data.failed),
-              }),
-              content: summaryText,
-              taskStatus: data.status === 'failed' ? 'failed' : data.status === 'cancelled' ? 'cancelled' : 'completed',
-            }));
-          }
-          setActiveSkillJobId(null);
-          setActiveSkillJobType(null);
-          setIsGenerating(false);
-          activeSkillJobMessageIdRef.current = null;
-          pendingAssistantMessageIdRef.current = null;
-          return;
-        }
-        const nextDelay = pollCount < 10 ? 2000 : 5000;
-        pollCount += 1;
-        timer = setTimeout(pollOnce, nextDelay);
-      } catch (error) {
-        console.error('Skill job polling error:', error);
-        const nextDelay = pollCount < 10 ? 2000 : 5000;
-        pollCount += 1;
-        timer = setTimeout(pollOnce, nextDelay);
-      }
-    };
-
-    pollOnce();
-
-    return () => {
-      stopped = true;
-      if (timer) {
-        clearTimeout(timer);
-      }
-    };
-  }, [
-    activeSkillJobId,
-    activeSkillJobType,
-    appendGeneratedImageHistoryForSession,
-    getSpawnPosition,
-    recordCurrentCanvasUndoSnapshot,
-    setChatMessages,
-    setItems,
-    updateChatMessageById,
-  ]);
-
   const handleWorkspaceProfilerRender = useCallback((
     _id: string,
     _phase: 'mount' | 'update' | 'nested-update',
@@ -20959,7 +20648,7 @@ export default function AIWorkspace() {
                               ) : <span>{step.label || getPendingAgentDecisionLabel(msg)}</span>
                           )}
                           executionDetailContent={(step) => (
-                            step.stepId === 'prompt_optimization' && (msg.agentImagePrompts?.length || 0) > 0 ? (
+                            step.stepId === 'image_prompt' && (msg.agentImagePrompts?.length || 0) > 0 ? (
                               <AgentImagePromptDetails
                                 messageId={msg.id}
                                 prompts={msg.agentImagePrompts || []}
@@ -21021,12 +20710,12 @@ export default function AIWorkspace() {
                             .filter((step) => (
                               msg.agentProgressMode !== 'compact'
                               || step.status === 'failed'
-                              || step.stepId === 'prompt_optimization'
+                              || step.stepId === 'image_prompt'
                               || step.stepId === 'generate_image'
                             ))
                             .map((step) => {
                             const canOpenDecision = step.status === 'waiting' && hasPendingAgentDecision(msg);
-                            const imagePrompts = step.stepId === 'prompt_optimization'
+                            const imagePrompts = step.stepId === 'image_prompt'
                               ? msg.agentImagePrompts || []
                               : [];
                             const className = `agent-progress-enter flex min-h-7 items-center gap-2.5 rounded-md text-left ${
@@ -21088,27 +20777,6 @@ export default function AIWorkspace() {
                                               <span>{copiedAssistantMessageId === copyKey ? '已复制' : '复制'}</span>
                                             </button>
                                           </div>
-                                          {entry.compilation && (
-                                            <div className="mb-3 grid gap-1 rounded-lg bg-[var(--workspace-surface)] px-2.5 py-2 text-[11px] leading-4 text-[var(--workspace-text-muted)]">
-                                              <span>
-                                                Skill：{entry.compilation.skillLabel
-                                                  ? `${entry.compilation.skillLabel}（${entry.compilation.skillId}）`
-                                                  : '未使用 Skill'}
-                                              </span>
-                                              <span>
-                                                Planner：{entry.compilation.plannerProviderId
-                                                  ? `${entry.compilation.plannerProviderId} / `
-                                                  : ''}{entry.compilation.plannerModel}
-                                              </span>
-                                              <span>
-                                                参考图：{entry.compilation.visualReferencesUsed
-                                                  ? `已读取 ${entry.compilation.referenceCount} 张`
-                                                  : '未使用'}
-                                                {' · '}编译耗时 {(entry.compilation.durationMs / 1000).toFixed(1)} 秒
-                                              </span>
-                                              <span>完成：{new Date(entry.compilation.compiledAt).toLocaleString()}</span>
-                                            </div>
-                                          )}
                                           <pre className="whitespace-pre-wrap break-words [overflow-wrap:anywhere] font-sans text-[12px] leading-5 text-[var(--workspace-text-primary)]">
                                             {entry.prompt}
                                           </pre>
@@ -21334,13 +21002,12 @@ export default function AIWorkspace() {
               onClose={closeAgentClarificationModal}
               {...(!pendingAgentClarification.request.failed
                 && pendingAgentClarification.request.allowProceed
-                && !['creative_direction', 'context_reference', 'image_operation', 'skill_selection', 'planner_model_switch', 'recovery_scope'].includes(pendingAgentClarification.request.dimension)
+                && !['creative_direction', 'context_reference', 'image_operation', 'skill_selection', 'recovery_scope'].includes(pendingAgentClarification.request.dimension)
                 ? { skipLabel: '按当前信息开始制作', onSkip: () => submitAgentClarification(true) }
                 : {})}
               {...(!pendingAgentClarification.request.failed
                 && pendingAgentClarification.request.allowCustom
                 && pendingAgentClarification.request.dimension !== 'skill_selection'
-                && pendingAgentClarification.request.dimension !== 'planner_model_switch'
                 ? {
                     custom: {
                       label: '自定义回答',

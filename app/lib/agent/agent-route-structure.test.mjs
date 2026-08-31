@@ -34,8 +34,8 @@ test('Main Agent gates image execution on host-loaded ImageGen context', () => {
   assert.match(source, /relevantContextCandidateIds\.size >= 2 \? \['request_context_selection'\] : \[\]/);
   const modelToolNames = source.slice(source.indexOf('const mainAgentToolNames = ['), source.indexOf('];', source.indexOf('const mainAgentToolNames = [')));
   assert.match(modelToolNames, /generate_image/);
-  assert.match(source, /const imageExecutionToolName = \(\) => imagePlanningRequest \? 'generate_image' : ''/);
-  assert.match(source, /manifests: selectedSkill \? \[selectedSkill\] : \[\]/);
+  assert.match(source, /const imageExecutionToolName = \(\) => 'generate_image'/);
+  assert.match(source, /manifests: skillManifests/);
   assert.doesNotMatch(source, /submit_image_execution_plan|image_execution_plan/);
 });
 
@@ -45,10 +45,9 @@ test('image tasks submit one direct ImageGen contract before execution', () => {
   assert.match(source, /const prompt = String\(args\.prompt \|\| ''\)\.trim\(\)/);
   assert.match(source, /assertImageExecutionContract\(/);
   assert.match(source, /lockedImageToolArgs = imageExecutionContract/);
-  assert.match(source, /completeImagePlanningStage\(imagePlanning, 'routing', 'execution'\)/);
   assert.doesNotMatch(source, /loopResult = await runStagedImagePlanning\(\)/);
   assert.doesNotMatch(source, /validateSkillPromptAssertions|missingCompiledPromptLiterals/);
-  assert.match(source, /imagePlanning:\s*structuredClone\(imagePlanning\)/);
+  assert.doesNotMatch(source, /imagePlanning|completeImagePlanningStage/);
   assert.match(source, /agent_task_checkpoint/);
 });
 
@@ -139,7 +138,7 @@ test('Runtime preserves direct ImageGen task identity locally', () => {
   const directEnd = source.indexOf('getConversationMemory:', directStart);
   const direct = source.slice(directStart, directEnd);
   assert.match(direct, /referenceIds\.some\(\(id\) => !runtimeReferenceById\.has\(id\)\)/);
-  assert.match(direct, /requestedAspectRatio \|\| imagePlanningDefaults\.aspectRatio \|\| selectedSkill\?\.aspectRatio/);
+  assert.match(direct, /requestedAspectRatio \|\| selectedSkill\?\.aspectRatio \|\| AGENT_DEFAULT_IMAGE_OPTIONS\.aspectRatio/);
   assert.match(direct, /assertImageExecutionContract\(/);
   assert.match(direct, /lockedImageToolArgs = imageExecutionContract/);
   assert.match(direct, /emitIntentResolved\('image'\)/);
@@ -187,14 +186,13 @@ test('direct ImageGen does not invoke Planner transport from the active route', 
 test('direct image execution and confirmation reuse the complete locked tool arguments', () => {
   const source = read(routePath);
   const pipelineStart = source.indexOf('if (shouldUseImagePipeline)');
-  const pipelineEnd = source.indexOf("if (executionPlan) {", pipelineStart);
-  const pipeline = source.slice(pipelineStart, pipelineEnd);
-  assert.match(pipeline, /const imageContract = lockedImageToolArgs/);
-  assert.match(pipeline, /const imageToolArgs = imageContract \|\|/);
-  assert.match(pipeline, /toolArgs: structuredClone\(imageToolArgs\)/);
-  assert.match(pipeline, /args: structuredClone\(imageToolArgs\)/);
-  assert.match(pipeline, /executeAgentTool\(toolRegistry, 'generate_image', imageToolArgs/);
-  assert.doesNotMatch(pipeline, /executeAgentTool\(toolRegistry, 'generate_image', \{\}/);
+  assert.ok(pipelineStart >= 0);
+  assert.match(source, /const imageContract = assertImageExecutionContract\(lockedImageToolArgs/);
+  assert.match(source, /const imageToolArgs = imageContract \|\|/);
+  assert.match(source, /toolArgs: structuredClone\(imageToolArgs\)/);
+  assert.match(source, /args: structuredClone\(imageToolArgs\)/);
+  assert.match(source, /executeAgentTool\(toolRegistry, 'generate_image', imageToolArgs/);
+  assert.doesNotMatch(source, /executeAgentTool\(toolRegistry, 'generate_image', \{\}/);
 });
 
 test('failed tasks are supplied to the same Main Agent recovery loop', () => {
@@ -215,14 +213,14 @@ test('failed tasks are supplied to the same Main Agent recovery loop', () => {
   assert.match(route, /recentFailedTask: recoveryCandidateForAgent/);
   assert.match(route, /recoveryHistoryMessages = cropMessagesToRecoverySource/);
   assert.match(route, /knownVisualReferenceIds = new Set/);
-  assert.match(route, /recoveryRecord\.taskSnapshot\?\.imagePlanning\?\.skill\?\.id \|\| recoveryRecord\.skillId \|\| null/);
+  assert.match(route, /recoveryRecord\.skillId \|\| null/);
   assert.match(route, /reserveTaskExecution\([\s\S]{0,500}recoveryTaskIdForExecution/);
   assert.match(route, /preserveRecoveryRecordOnFailure && recoveryBaseRecord[\s\S]{0,120}\? recoveryBaseRecord/);
   assert.match(route, /recoveryResolution\?\.decision === 'continue_current_request'[\s\S]{0,160}recoveryBaseRecord = null[\s\S]{0,100}preserveRecoveryRecordOnFailure = false/);
   assert.match(route, /!nextSnapshot\?\.activeVersions\.length && previousSnapshot[\s\S]{0,80}\? previousSnapshot/);
   assert.match(route, /recoveryRevisionMessage/);
   assert.match(route, /rewindAgentAnalysis/);
-  assert.match(route, /rewindImagePlanning\(imagePlanning, requestedStage as AgentImagePlanningStage, runId\)/);
+  assert.doesNotMatch(route, /rewindImagePlanning|AgentImagePlanningStage|imagePlanning/);
   assert.doesNotMatch(route, /recoveryRevisionMessage[\s\S]{0,800}\/(?:prompt|提示词|关键词)/);
   assert.doesNotMatch(route, /const runRecoveryGate/);
   assert.match(route, /const src = version\.assetUrl \|\| entity\?\.assetUrl/);
@@ -251,6 +249,9 @@ test('Main Agent image contracts execute directly without a Prompt Planner', () 
   assert.ok(imagePipeline >= 0 && directTool > imagePipeline && completed > directTool);
   assert.match(source, /const finalGenerationPrompt = String\(imageContract\?\.prompt \|\| ''\)\.trim\(\)/);
   assert.match(source, /const imageToolArgs = imageContract \|\|/);
+  assert.match(source, /let directImageExecution: DirectImageExecutionState \| null = null/);
+  assert.match(source, /directImageExecution = \{/);
+  assert.doesNotMatch(source, /toInternalImageExecutionState/);
   assert.doesNotMatch(source.slice(imagePipeline, completed), /generation!\.prompt|executionPlan\.generation\.prompt/);
 });
 
@@ -288,6 +289,33 @@ test('image execution never falls back from tool Prompt to legacy brief fields',
   const image = source.slice(imageStart, imageEnd);
   assert.match(image, /imageContract\?\.prompt/);
   assert.doesNotMatch(image, /generation!\.prompt|executionPlan\.generation\.prompt/);
+});
+
+test('image Prompt provenance is hashed and verified through the supplier bridge', () => {
+  const route = read(routePath);
+  const generate = read(path.resolve(import.meta.dirname, '../../api/generate/route.ts'));
+  assert.match(route, /function hashPrompt\(value: unknown\)/);
+  assert.match(route, /finalPromptHash/);
+  assert.match(route, /supplierPromptHash/);
+  assert.match(route, /供应商回执 Prompt 与 Main Agent Prompt 不一致/);
+  assert.match(route, /promptHash: hashPrompt\(prompt\)/);
+  assert.match(generate, /function hashPrompt\(value: unknown\)/);
+  assert.match(generate, /supplierPromptHash/);
+  assert.doesNotMatch(generate, /loadSkillContent\(skill\)[\s\S]{0,300}resolved\.intent === "image"/);
+});
+
+test('image Skill selection is explicit and does not use trigger similarity in the route', () => {
+  const route = read(routePath);
+  assert.match(route, /resolveExplicitSkillDirective\(latestUserMessage, skillManifests\)/);
+  assert.doesNotMatch(route, /findDirectSkillMatches\(|hasDirectSkillExecutionIntent\(/);
+  assert.doesNotMatch(route, /selectSkillForPrompt\(/);
+  assert.match(route, /selectedSkill = null;[\s\S]{0,180}skillSelectionMethod = 'none'/);
+});
+
+test('image-capable Skills bypass the legacy second-model clarifier', () => {
+  const route = read(routePath);
+  assert.doesNotMatch(route, /resolveBriefClarification|shouldRunClarifier|compileExecutionBrief/);
+  assert.match(route, /runMainAgentOnce/);
 });
 
 test('topic memory is bounded, emitted, and persisted by the client', () => {
@@ -354,11 +382,28 @@ test('every Pi run path uses the shared live event adapter', () => {
 test('direct image execution keeps prompt and supplier stages tied to real work', () => {
   const source = read(routePath);
   assert.doesNotMatch(source, /正在等待模型规划/);
-  assert.match(source, /type: 'image_prompts_ready'[\s\S]{0,300}completedLabel: imageProgress\?\.promptPreparation\?\.completedLabel/);
-  assert.match(source, /completionSummary: imageProgress\?\.promptPreparation\?\.completionSummary/);
-  assert.match(source, /writePromptPreparationProgress\('active', heartbeatToolCallId\)/);
+  assert.match(source, /type: 'image_prompts_ready'/);
+  assert.match(source, /finalPromptLength/);
   assert.match(source, /writeToolProgress\('generate_image', 'active', heartbeatToolCallId\)/);
   assert.doesNotMatch(source, /正在提交图片生成请求|图片生成请求已提交|正在等待图片生成结果/);
+});
+
+test('image execution records terminal checkpoints and maps aborts explicitly', () => {
+  const source = read(routePath);
+  assert.match(source, /main_agent\.direct_generate_image/);
+  assert.match(source, /stage: 'supplier_dispatch_start'/);
+  assert.match(source, /stage: 'supplier_dispatch_complete'/);
+  assert.match(source, /stage: 'asset_delivery_ready'/);
+  assert.match(source, /agent\.failure/);
+  assert.match(source, /type: aborted \? 'agent_cancelled' : 'agent_error'/);
+  assert.match(source, /request\.signal\.aborted/);
+});
+
+test('Main Agent keepalive emits bounded activity during long requests', () => {
+  const source = read(routePath);
+  assert.match(source, /startAgentImageGenerationHeartbeat\(\{\s*intervalMs: 10_000/);
+  assert.match(source, /main_agent\.keepalive/);
+  assert.match(source, /Main Agent 仍在处理当前请求/);
 });
 
 test('Main Agent image contract does not create supplier-generation progress', () => {
@@ -370,7 +415,7 @@ test('Main Agent image contract does not create supplier-generation progress', (
   assert.match(mainAgentCallbacks, /rememberToolPublicProgress\(id, name, args\)/);
   assert.match(mainAgentCallbacks, /onToolStart:[\s\S]{0,180}if \(name !== 'generate_image'\) writeToolProgress\(name, 'active', id\)/);
   assert.match(mainAgentCallbacks, /onToolResult:[\s\S]{0,240}if \(name !== 'generate_image'\) writeToolProgress\(name, isError \? 'failed' : 'completed', id, summarizePublicToolResult\(result\)\)/);
-  assert.match(source, /const toolCallId = `\$\{runId\}-generate-image-1`;\n\s*copyToolPublicProgress\(toolCallId, imagePublicProgress, 'generate_image'\);\n\s*writeToolProgress\('generate_image', 'active', toolCallId\)/);
+  assert.match(source, /const toolCallId = directGenerateImageCallId \|\| `\$\{runId\}-generate-image-1`;\n\s*copyToolPublicProgress\(toolCallId, imagePublicProgress, 'generate_image'\);\n\s*writeToolProgress\('generate_image', 'active', toolCallId\)/);
 });
 
 test('supplier completion is emitted before generated-asset delivery', () => {

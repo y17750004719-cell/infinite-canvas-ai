@@ -125,7 +125,7 @@ export function getRecentFailedAgentTask(messages) {
     const progress = assistant.agentRunProgress;
     const persisted = normalizeAgentRecoveryRecord(assistant.agentRecovery);
     if (persisted) {
-      if (persisted.status === 'cancelled' || persisted.taskSnapshot?.imagePlanning?.abandonedAt) continue;
+      if (persisted.status === 'cancelled') continue;
       return persisted;
     }
     if (
@@ -137,25 +137,22 @@ export function getRecentFailedAgentTask(messages) {
     const failed = assistant.taskStatus === 'failed' || progress?.outcome === 'failed';
     const partiallyFailed = progress?.outcome === 'warning' && Number(progress?.assets?.failed) > 0;
     if (!cancelled && !failed && !partiallyFailed) continue;
-    if (cancelled || assistant.taskSnapshot?.imagePlanning?.abandonedAt) continue;
+    if (cancelled) continue;
 
     const source = entries.slice(0, index).findLast((message) => message?.role === 'user');
     if (!source) return null;
     const clarificationState = source.agentClarificationResponsePayload?.clarification?.state;
-    const planning = assistant.taskSnapshot?.imagePlanning;
-    const originalRequest = String(planning?.originalRequest || clarificationState?.originalRequest || source.content || '').trim().slice(0, 4000);
+    const originalRequest = String(clarificationState?.originalRequest || source.content || '').trim().slice(0, 4000);
     if (!originalRequest) return null;
     const steps = Array.isArray(progress?.steps) ? progress.steps : [];
     const failureStep = steps.findLast((step) => step?.status === 'failed') || steps.at(-1);
     const referenceContext = clarificationState?.referenceContext || source.referenceContext;
     const visualReferenceIds = Array.from(new Set(
-      (planning?.referenceIds || (Array.isArray(referenceContext?.references) ? referenceContext.references : []))
+      ((Array.isArray(referenceContext?.references) ? referenceContext.references : []))
         .map((reference) => typeof reference === 'string' ? reference : String(reference?.id || '').trim())
         .filter(Boolean),
     )).slice(0, 20);
-    const intent = planning
-      ? 'image'
-      : ['chat', 'image', 'skill_action'].includes(progress?.intent)
+    const intent = ['chat', 'image', 'skill_action'].includes(progress?.intent)
       ? progress.intent
       : ['chat', 'image', 'skill_action'].includes(clarificationState?.intent)
         ? clarificationState.intent
@@ -167,20 +164,20 @@ export function getRecentFailedAgentTask(messages) {
       operationId: progress?.operationId || clarificationState?.operationId || progress?.runId || assistant.id,
       lastSequence: Number.isFinite(Number(progress?.lastSequence)) ? Number(progress.lastSequence) : 0,
       topicId: assistant.taskSnapshot?.topicId || 'default',
-      sourceUserMessageId: planning?.sourceUserMessageId || clarificationState?.sourceUserMessageId || source.id,
+      sourceUserMessageId: clarificationState?.sourceUserMessageId || source.id,
       status: cancelled ? 'cancelled' : 'failed',
       resumeRoute: String(failureStep?.phase || '') === 'local_delivery'
         ? 'local_delivery'
         : intent === 'image' || intent === 'skill_action'
-          ? 'image_planner'
+          ? 'main_agent'
           : 'main_agent',
       intent,
       originalRequest,
-      failureStage: String(planning?.failure?.stage || failureStep?.phase || 'unknown'),
-      failureMessage: String(planning?.failure?.message || assistant.content || failureStep?.label || '任务未完成'),
-      skillId: String(planning?.skill?.id || source.skill?.id || clarificationState?.skillId || '').trim() || null,
-      imageOperation: planning?.operation || undefined,
-      targetReferenceId: planning?.targetReferenceId || undefined,
+      failureStage: String(failureStep?.phase || 'unknown'),
+      failureMessage: String(assistant.content || failureStep?.label || '任务未完成'),
+      skillId: String(source.skill?.id || clarificationState?.skillId || '').trim() || null,
+      imageOperation: clarificationState?.imageOperation || undefined,
+      targetReferenceId: clarificationState?.targetReferenceId || undefined,
       contextEntityIds: visualReferenceIds,
       visualReferenceIds,
       taskSnapshot: assistant.taskSnapshot,

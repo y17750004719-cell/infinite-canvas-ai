@@ -5,6 +5,7 @@ import {
   MAIN_AGENT_LOOP_SYSTEM_PROMPT,
   FAILED_TASK_RECOVERY_SYSTEM_PROMPT,
   MAIN_AGENT_SYSTEM_PROMPT,
+  boundSkillContent,
   buildFailedTaskRecoveryMessages,
   buildMainAgentMessages,
   buildMainAgentLoopMessages,
@@ -53,11 +54,12 @@ test('Main Agent Loop defaults to the current request, manifests, and explicit v
     },
   });
   assert.equal(messages[0].content, MAIN_AGENT_LOOP_SYSTEM_PROMPT);
-  assert.doesNotMatch(messages[1].content, /history-image:1|用户正在评审海报|canvas:1/);
+  const contextMessage = messages.find((message) => typeof message.content === 'string' && message.content.includes('"aspectRatio":"3:4"'));
+  assert.ok(contextMessage);
+  assert.doesNotMatch(contextMessage.content, /history-image:1|用户正在评审海报|canvas:1/);
   assert.match(messages[1].content, /海报设计/);
-  assert.match(messages[1].content, /"aspectRatio":"3:4"/);
-  assert.doesNotMatch(messages[1].content, /allowedTools|generate_image/);
-  assert.equal(messages.length, 3);
+  assert.doesNotMatch(contextMessage.content, /allowedTools|generate_image/);
+  assert.equal(messages.length, 4);
   assert.ok(Array.isArray(messages.at(-1).content));
   assert.equal(messages.at(-1).content[0].text, '评价这张海报');
   assert.ok(messages.at(-1).content.some((part) => part.type === 'text' && /Reference ID: history-image:1/.test(part.text)));
@@ -120,10 +122,10 @@ test('Main Agent Loop keeps oversized unlocked context JSON valid', () => {
     })),
     contextUnlocked: true,
   });
-  const context = JSON.parse(messages[1].content);
+  const context = JSON.parse(messages.find((message) => typeof message.content === 'string' && message.content.startsWith('{')).content);
   assert.ok(context.manifests || context.contextTruncated);
   assert.equal(typeof messages[1].content, 'string');
-  assert.ok(messages[1].content.length <= 24_000);
+  assert.ok(context && JSON.stringify(context).length <= 24_000);
 });
 
 test('Main Agent Loop restores bounded history and project context only after unlock', () => {
@@ -141,9 +143,9 @@ test('Main Agent Loop restores bounded history and project context only after un
     contextUnlocked: true,
     contextScopes: ['conversation', 'project'],
   });
-  const context = JSON.parse(messages[1].content);
-  assert.equal(messages.slice(2).length, 20);
-  assert.equal(messages[2].content, 'message-5');
+  const context = JSON.parse(messages.find((message) => typeof message.content === 'string' && message.content.startsWith('{')).content);
+  assert.equal(messages.slice(3).length, 20);
+  assert.equal(messages[3].content, 'message-5');
   assert.equal(context.contextManifest.length, 80);
   assert.equal(context.contextManifest[0].id, 'history-image:20');
   assert.equal(context.contextManifest.at(-1).id, 'history-image:99');
@@ -180,7 +182,7 @@ test('Main Agent Loop unlock scopes do not leak unrelated context', () => {
   assert.equal(context.memory.rollingSummary, '对话摘要');
   assert.deepEqual(context.contextManifest, []);
   assert.equal(context.canvas, null);
-  assert.equal(messages.slice(2).length, 3);
+  assert.equal(messages.slice(3).length, 3);
 });
 
 test('main agent messages keep references without injecting full Skill text', () => {
@@ -198,7 +200,8 @@ test('main agent messages keep references without injecting full Skill text', ()
   assert.equal(messages[0].role, 'system');
   assert.equal(messages[0].content, MAIN_AGENT_SYSTEM_PROMPT);
   assert.equal(messages[1].role, 'system');
-  assert.match(messages[1].content, /"itemCount":2/);
+  assert.equal(messages[2].role, 'system');
+  assert.match(messages[2].content, /"itemCount":2/);
   assert.equal(messages.at(-1).role, 'user');
   assert.ok(Array.isArray(messages.at(-1).content));
   assert.deepEqual(messages.at(-1).content[0], { type: 'text', text: '分析这张图' });
@@ -216,22 +219,13 @@ test('Main Agent receives locked Skill content as direct execution rules', () =>
     manifests: [{ id: 'poster', name: 'Poster', description: 'Poster rules', enabled: true }],
     manualSkillId: 'poster',
     lockedSkillId: 'poster',
-    imagePlanning: {
-      currentStage: 'compilation',
-      originalRequest,
-      operation: 'generate',
-      referenceIds: ['ref-1'],
-      outputCount: 1,
-      aspectRatio: '2:3',
-      promptFormat: 'text',
-      skill: { manifest: { generationContract: 'Compile exactly four compact plain-text paragraphs.' } },
-    },
+    skillContent: '# Visual\nUse sparse zine poster composition.',
   });
   const context = JSON.parse(messages.find((message) => typeof message.content === 'string' && message.content.includes('"lockedSkill"')).content);
   assert.deepEqual(context.lockedSkill, { id: 'poster' });
   const allContent = messages.map((message) => String(message.content)).join('\n');
-  assert.doesNotMatch(allContent, /LOCKED SKILL CONTENT|Use sparse zine poster composition/);
-  assert.match(allContent, /运行时先加载 ImageGen 方法/);
+  assert.match(messages.find((message) => message.role === 'user' && String(message.content).includes('<name>poster</name>')).content, /Use sparse zine poster composition|# Visual/);
+  assert.match(allContent, /<skill>/);
   assert.equal(messages.filter((message) => String(message.content).includes(originalRequest)).length, 1);
   assert.doesNotMatch(JSON.stringify(context), /generationContract|promptFormat|originalRequest/);
   assert.match(allContent, /generate_image/);
@@ -243,7 +237,7 @@ test('Main Agent receives locked Skill content as direct execution rules', () =>
     manualSkillId: 'poster',
     lockedSkillId: 'poster',
   });
-  assert.deepEqual(JSON.parse(unloaded[1].content).lockedSkill, { id: 'poster' });
+  assert.deepEqual(JSON.parse(unloaded.find((message) => typeof message.content === 'string' && message.content.includes('"lockedSkill"')).content).lockedSkill, { id: 'poster' });
 });
 
 test('image generation contract keeps ImageGen and visual rules in one direct agent flow', () => {
@@ -253,14 +247,13 @@ test('image generation contract keeps ImageGen and visual rules in one direct ag
     skillContent: '# Visual Skill\nUse a small visual cluster, generous paper whitespace, and a saturated red anchor. Avoid gradients and 3D shadows.',
     imagegenHostContent: '# ImageGen\nHandle reference images and write a supplier-facing prompt.',
   });
-  const hostIndex = messages.findIndex((message) => String(message.content).includes('ImageGen 方法已由运行时加载'));
+  const hostIndex = messages.findIndex((message) => String(message.content).includes('<name>imagegen</name>'));
   const visualIndex = messages.findIndex((message) => String(message.content).includes('Use a small visual cluster'));
   assert.ok(hostIndex > 0);
   assert.ok(visualIndex > hostIndex);
   const content = messages.map((message) => String(message.content)).join('\n');
-  assert.match(content, /必须应用的视觉执行约束/);
-  assert.match(content, /最终 generate_image Prompt 必须体现/);
-  assert.match(content, /不得仅保留泛化风格标签/);
+  assert.match(content, /<skill>/);
+  assert.match(content, /Use a small visual cluster/);
   assert.match(MAIN_AGENT_LOOP_SYSTEM_PROMPT, /不得调用独立 Planner、Prompt Optimizer/);
   assert.match(MAIN_AGENT_LOOP_SYSTEM_PROMPT, /直接调用 generate_image/);
 });
@@ -287,21 +280,6 @@ test('Main Agent keeps ImageGen host and visual Skill instructions separate', ()
   const content = messages.map((message) => String(message.content)).join('\n');
   assert.match(content, /Use the editorial contract/);
   assert.match(content, /Compile the final prompt before execution/);
-});
-
-test('a started image task keeps its direct ImageGen contract locked', () => {
-  const messages = buildMainAgentLoopMessages({
-    messages: [{ role: 'user', content: '生成海报' }],
-    imagePlanning: {
-      currentStage: 'compilation',
-      deliveryMode: 'single',
-      promptFormat: 'text',
-      skill: { manifest: { generationContract: 'Compile exactly four compact plain-text paragraphs.' } },
-    },
-  });
-  const instruction = messages.find((message) => typeof message.content === 'string' && message.content.includes('图片任务已经锁定'))?.content || '';
-  assert.match(instruction, /不要重新解释 Prompt 或引用/);
-  assert.doesNotMatch(instruction, /submit_image_compilation|renderPrompt/);
 });
 
 test('main agent maps stable reference ids to images and preserves inline order', () => {
@@ -333,23 +311,35 @@ test('main agent messages do not load a skill when none was selected', () => {
   const messages = buildMainAgentMessages({
     messages: [{ role: 'user', content: '你好' }],
   });
-  assert.equal(messages.length, 2);
+  assert.equal(messages.length, 3);
   assert.equal(messages[0].role, 'system');
-  assert.equal(messages[1].content, '你好');
+  assert.equal(messages.at(-1).content, '你好');
 });
 
-test('main agent receives the unified execution plan as an authoritative system contract', () => {
-  const messages = buildMainAgentMessages({
-    messages: [{ role: 'user', content: '生成四张海报' }],
-    resolvedBrief: '四张独立海报',
-    executionPlan: {
-      intent: 'image',
-      delivery: { mode: 'series', outputCount: 4 },
-    },
+test('selected Skills are independent user fragments with UTF-8-safe Codex budget', () => {
+  const bounded = boundSkillContent('中文约束'.repeat(4000));
+  assert.equal(bounded.truncated, true);
+  assert.ok(bounded.injectedBytes <= 8000);
+  assert.doesNotThrow(() => Buffer.from(bounded.content, 'utf8').toString('utf8'));
+  const messages = buildMainAgentLoopMessages({
+    manifests,
+    imagegenHostContent: 'imagegen rules',
+    lockedSkillId: 'poster',
+    skillContent: 'visual rules',
+    messages: [{ role: 'user', content: '生成海报' }],
   });
-  assert.match(messages[1].content, /四张独立海报/);
-  assert.match(messages[2].content, /图像执行合同/);
-  assert.match(messages[2].content, /\"outputCount\":4/);
+  const fragments = messages.filter((message) => message.role === 'user' && String(message.content).startsWith('<skill>'));
+  assert.equal(fragments.length, 2);
+  assert.match(fragments[0].content, /<name>imagegen<\/name>/);
+  assert.match(fragments[1].content, /<name>poster<\/name>/);
+  assert.ok(messages.findIndex((message) => String(message.content).includes('<name>imagegen</name>'))
+    < messages.findIndex((message) => String(message.content).includes('<name>poster</name>')));
+  const lastSkillIndex = messages.reduce((index, message, current) => (
+    message.role === 'user' && String(message.content).startsWith('<skill>') ? current : index
+  ), -1);
+  const latestUserIndex = messages.findLastIndex((message) => message.role === 'user' && !String(message.content).startsWith('<skill>'));
+  assert.ok(lastSkillIndex >= 0 && latestUserIndex > lastSkillIndex);
+  assert.equal(messages.at(-1).role, 'user');
 });
 
 test('main agent prompt defines failure, budget, termination, and trust boundaries', () => {

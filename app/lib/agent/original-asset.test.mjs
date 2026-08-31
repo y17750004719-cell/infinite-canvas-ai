@@ -7,7 +7,7 @@ test('missing pinned original stops before provider invocation without preview o
   await assert.rejects(() => invokeWithOriginalAsset({
     targetReferenceId: 'task-slot:slot-1',
     pinnedVersionId: 'version-old',
-    editBaseAsset: { versionId: 'version-old', src: '', plannerPreviewSrc: '/preview.webp' },
+    editBaseAsset: { versionId: 'version-old', src: '', previewSrc: '/preview.webp' },
     activeVersions: [{ referenceId: 'task-slot:slot-1', versionId: 'version-new', src: '/new-original.png' }],
     references: [{ id: 'task-slot:slot-1', src: '/new-original.png' }],
   }, async () => {

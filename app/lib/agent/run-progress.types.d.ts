@@ -183,6 +183,7 @@ export type AgentRunProgressEvent =
       index: number;
       label: string;
       prompt: string;
+      promptHash?: string;
       completedLabel?: string;
       completionSummary?: string;
       toolCallId?: string;

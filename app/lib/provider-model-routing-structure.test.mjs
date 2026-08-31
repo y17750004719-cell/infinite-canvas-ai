@@ -7,7 +7,6 @@ import { fileURLToPath } from 'node:url';
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
 const agentSource = fs.readFileSync(path.join(root, 'app/api/agent/route.ts'), 'utf8');
 const generateSource = fs.readFileSync(path.join(root, 'app/api/generate/route.ts'), 'utf8');
-const skillJobsSource = fs.readFileSync(path.join(root, 'app/lib/skill-jobs.ts'), 'utf8');
 
 test('agent routes user-selected chat and image models independently', () => {
   assert.match(agentSource, /chatOptions\?:\s*\{/);
@@ -52,14 +51,4 @@ test('agent sends reference-image requests to the selected model without local v
   assert.match(agentSource, /allowFallback:\s*!hasExplicitChatSelection/);
   assert.doesNotMatch(agentSource, /resolvedChatCapabilities\.supportsVision/);
   assert.doesNotMatch(agentSource, /不支持参考图输入，请切换支持视觉的规划模型/);
-});
-
-test('skill jobs persist and execute with the revalidated image selection', () => {
-  assert.match(skillJobsSource, /providerId:\s*normalizeOptionalText\(payload\.providerId\)/);
-  assert.match(skillJobsSource, /model:\s*normalizeOptionalText\(payload\.model\)/);
-  assert.match(skillJobsSource, /readProviderRegistry/);
-  assert.match(skillJobsSource, /resolveProviderModelSelection/);
-  assert.match(skillJobsSource, /job\.metadata\.providerId\s*=\s*selection\.providerId/);
-  assert.match(skillJobsSource, /providerId:\s*selection\.providerId/);
-  assert.match(skillJobsSource, /model:\s*selection\.model/);
 });

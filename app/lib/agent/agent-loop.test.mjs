@@ -26,41 +26,6 @@ test('public image results contain counts but never asset URLs', () => {
   assert.doesNotMatch(JSON.stringify(views), /https?:\/\/|"(?:providerId|model|prompt|metadata|localUrl|url)"/i);
 });
 
-test('public skill job results preserve the skill type without exposing job internals', () => {
-  const views = agentLoopModule.createAgentToolResultViews('start_skill_job', {
-    id: 'brand-job-1',
-    skillType: 'brand',
-    status: 'queued',
-    metadata: { prompt: 'private prompt' },
-    items: [{ key: 'poster', name: '海报', status: 'queued', localUrl: '/var/private.png' }],
-  });
-
-  assert.equal(views.publicResult.skillType, 'brand');
-  assert.doesNotMatch(JSON.stringify(views.publicResult), /private prompt|localUrl|\/var\//i);
-});
-
-test('tool model results redact embedded URLs paths credentials and provider details', () => {
-  const views = agentLoopModule.createAgentToolResultViews('get_skill_job', {
-    id: 'job-sensitive',
-    status: 'failed',
-    providerId: 'private-provider',
-    model: 'private-model',
-    metadata: { token: 'raw-secret' },
-    items: [{
-      key: 'poster',
-      name: '海报',
-      status: 'failed',
-      prompt: 'private prompt',
-      localUrl: 'https://example.test/result.png?token=raw-secret',
-      error: 'provider=private-provider model=private-model failed at https://example.test/log?token=raw-secret /Users/alice/file /Volumes/ZO/file /var/tmp/file access_token=raw-secret',
-    }],
-  });
-
-  const serialized = JSON.stringify(views.modelResult);
-  assert.doesNotMatch(serialized, /raw-secret|private-provider|private-model|https?:\/\/|\/Users\/|\/Volumes\/|\/var\//i);
-  assert.doesNotMatch(serialized, /"(?:providerId|model|prompt|metadata|localUrl|url)"/i);
-});
-
 test('progress tracker resumes one operation with strictly increasing sequence and settles active steps', () => {
   const firstEvents = [];
   const first = agentLoopModule.createAgentProgressTracker({
@@ -174,7 +139,7 @@ test('public tool event helper emits no ordinary result for confirmation placeho
   assert.deepEqual(agentLoopModule.createAgentToolResultEvents({
     runId: 'run-confirm',
     toolCallId: 'tool-confirm',
-    toolName: 'start_skill_job',
+    toolName: 'generate_image',
     rawResult: { confirmationRequired: true },
   }), []);
 });

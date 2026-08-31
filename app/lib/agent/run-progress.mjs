@@ -12,18 +12,15 @@ const TOOL_LABELS = {
   read_relevant_context: '读取相关上下文',
   submit_agent_analysis_checkpoint: '深入分析当前需求',
   request_user_decision: '等待你选择',
-  start_image_planning: '启动图片规划',
   rewind_agent_analysis: '按修订回退任务',
   resolve_failed_task_recovery: '定位上次任务',
   request_context_selection: '等待选择引用',
-  request_image_clarification: '等待补充信息',
   generate_image: '生成图片',
-  start_skill_job: '启动 Skill 任务',
 };
 
 const PHASE_EMOJI_RULES = [
   [/(?:waiting|confirm|approval|input)/i, '📌'], [/(?:render)/i, '🚀'],
-  [/(?:optimi|style|compose_visual)/i, '🎨'], [/(?:image|asset|generat)/i, '🖼'],
+  [/(?:prompt|style|compose_visual)/i, '🎨'], [/(?:image|asset|generat)/i, '🖼'],
   [/(?:load|skill)/i, '📚'], [/(?:analy|inspect|read|search)/i, '🔎'],
   [/(?:plan|compos|orchestrat)/i, '🧩'], [/(?:execut|tool|run)/i, '⚙️'],
   [/(?:respond|writ|summar)/i, '✍️'], [/(?:resolv|context)/i, '🔗'],
@@ -57,8 +54,8 @@ function itemTypeFromStep(step = {}) {
   if (step.kind === 'tool') return 'tool_call';
   if (step.kind === 'interaction') return step.interactionType === 'confirmation' ? 'approval' : 'clarification';
   if (step.stepId === 'skill_loading' || /skill/i.test(String(step.phase || ''))) return 'skill';
-  if (step.stepId === 'skill_job_assets' || /asset|delivery/i.test(String(step.phase || ''))) return 'asset_delivery';
-  if (isImageGenerationStep(step) || /image|generat|optimiz/i.test(`${step.stepId || ''} ${step.phase || ''}`)) return 'image_generation';
+  if (step.stepId === 'asset_delivery' || /asset|delivery/i.test(String(step.phase || ''))) return 'asset_delivery';
+  if (isImageGenerationStep(step) || /image|generat|prompt/i.test(`${step.stepId || ''} ${step.phase || ''}`)) return 'image_generation';
   if (step.status === 'failed' || step.phase === 'failed') return 'error';
   return 'agent_message';
 }
@@ -249,7 +246,7 @@ function repairPersistedTerminalState(state, now) {
   if (!state.steps.some((step) => (
     isImageGenerationStep(step)
     || step.itemType === 'asset_delivery'
-    || step.stepId === 'skill_job_assets'
+    || step.stepId === 'asset_delivery'
   ) && step.status === 'completed')) return state;
   const endedAt = state.steps.reduce((latest, step) => Math.max(
     latest,
@@ -414,14 +411,14 @@ export function reduceAgentRunProgress(input, inputEvent) {
   if (event.type === 'image_prompts_ready') {
     const marker = stamp(state, event);
     if (!marker) return state;
-    const marked = completePreviousActiveSteps(withAttempt(state, event, marker), marker, (step) => step.stepId === 'prompt_optimization' && step.toolCallId === event.toolCallId && (!event.runId || step.runId === event.runId));
+    const marked = completePreviousActiveSteps(withAttempt(state, event, marker), marker, (step) => step.stepId === 'image_prompt' && step.toolCallId === event.toolCallId && (!event.runId || step.runId === event.runId));
     const result = appendOrReplaceStep(marked, {
-      stepId: 'prompt_optimization', itemId: event.itemId, parentItemId: event.parentItemId, kind: 'execution', itemType: 'image_generation', phase: 'optimizing', status: 'completed',
+      stepId: 'image_prompt', itemId: event.itemId, parentItemId: event.parentItemId, kind: 'execution', itemType: 'image_generation', phase: 'prompt', status: 'completed',
       commentary: String(event.completedLabel || '最终图片提示词已准备'), label: String(event.completedLabel || '最终图片提示词已准备'),
       ...(typeof event.completionSummary === 'string' && event.completionSummary.trim() ? { completionSummary: event.completionSummary.trim() } : {}),
       ...(typeof event.toolCallId === 'string' ? { toolCallId: event.toolCallId } : {}),
       ...(event.runId || marked.runId ? { runId: event.runId || marked.runId } : {}), sequence: marker.sequence, timestampMs: marker.timestampMs, lastUpdateSequence: marker.sequence,
-    }, (step) => step.stepId === 'prompt_optimization' && (event.toolCallId ? step.toolCallId === event.toolCallId : !step.toolCallId) && (!event.runId || step.runId === event.runId));
+    }, (step) => step.stepId === 'image_prompt' && (event.toolCallId ? step.toolCallId === event.toolCallId : !step.toolCallId) && (!event.runId || step.runId === event.runId));
     return withOutcome({ ...marked, steps: result.steps });
   }
 
@@ -519,7 +516,7 @@ export function reduceAgentRunProgress(input, inputEvent) {
 
   if (event.type === 'confirmation_submitted') {
     const marker = { sequence: Number.isFinite(Number(event.sequence)) ? Number(event.sequence) : state.lastSequence, timestampMs: finiteTimestamp(event.timestampMs) };
-    const marked = completePreviousActiveSteps(withAttempt(state, event, { ...marker, sequence: state.lastSequence }), marker, (step) => step.stepId === 'skill_job_assets');
+    const marked = completePreviousActiveSteps(withAttempt(state, event, { ...marker, sequence: state.lastSequence }), marker, (step) => step.stepId === 'asset_delivery');
     const targetIndex = marked.steps.findLastIndex((step) => step.status === 'waiting' && (!event.toolName || step.toolName === event.toolName || step.stepId === event.toolName));
     if (targetIndex < 0) return marked;
     return withOutcome({ ...marked, steps: marked.steps.map((step, index) => index === targetIndex
@@ -570,9 +567,9 @@ export function reduceAgentRunProgress(input, inputEvent) {
     const marked = clientOrigin ? state : withStamp(state, marker);
     const parentItemId = [...marked.steps].reverse().find((step) => step.toolName === 'generate_image')?.itemId;
     const result = appendOrReplaceStep(marked, {
-      stepId: 'skill_job_assets', itemId: `asset-delivery:${event.runId || marked.runId}`, parentItemId, kind: 'execution', itemType: 'asset_delivery', phase: 'generating', status: complete && failed > 0 && succeeded === 0 ? 'failed' : complete ? 'completed' : 'active',
-      label, commentary: label, toolName: 'start_skill_job', tool: 'start_skill_job', runId: event.runId || marked.runId, sequence: marker.sequence, timestampMs: marker.timestampMs, lastUpdateSequence: marker.sequence,
-    }, (step) => step.stepId === 'skill_job_assets' && (!event.runId || step.runId === event.runId));
+      stepId: 'asset_delivery', itemId: `asset-delivery:${event.runId || marked.runId}`, parentItemId, kind: 'execution', itemType: 'asset_delivery', phase: 'generating', status: complete && failed > 0 && succeeded === 0 ? 'failed' : complete ? 'completed' : 'active',
+      label, commentary: label, toolName: 'generate_image', tool: 'generate_image', runId: event.runId || marked.runId, sequence: marker.sequence, timestampMs: marker.timestampMs, lastUpdateSequence: marker.sequence,
+    }, (step) => step.stepId === 'asset_delivery' && (!event.runId || step.runId === event.runId));
     const assets = clientOrigin
       ? {
           expected,

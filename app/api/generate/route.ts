@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { createHash } from "node:crypto";
 import { chat, chatStream, ImageGenerationError, runImageTask, shouldUseExactImageSizeApi, shouldUseImageEditsApi } from "../../lib/api-client";
 import fs from "node:fs";
 import path from "node:path";
@@ -50,6 +51,10 @@ function debugWarn(message: string, payload?: unknown) {
   if (DEBUG_API_LOGS) {
     void generateLogger.warn("warn", message, toLogDetails(payload));
   }
+}
+
+function hashPrompt(value: unknown) {
+  return createHash("sha256").update(String(value || ""), "utf8").digest("hex");
 }
 
 function getErrorDiagnostics(error: unknown) {
@@ -494,6 +499,7 @@ export async function POST(request: NextRequest) {
       .map((msg) => msg.content);
     const latestRawUserMessage = [...userMessageTexts].reverse()[0] || "";
     const resolved = resolveIntent(intent, latestRawUserMessage, hasReferenceImages);
+    const supplierPromptHash = hashPrompt(resolved.prompt);
 
     if (
       resolved.intent === "image"
@@ -578,6 +584,7 @@ export async function POST(request: NextRequest) {
       requestedIntent: intent || "auto",
       resolvedIntent: resolved.intent,
       ambiguous: resolved.ambiguous,
+      supplierPromptHash,
     });
 
     const resolvedExecutionMode = executionMode === "async" ? "async" : "sync";
@@ -776,6 +783,7 @@ export async function POST(request: NextRequest) {
           model: resolvedImageModel,
           mode: referenceResultMode,
           analyzedPrompt: resolved.prompt,
+          supplierPromptHash,
           referenceLabels,
           savedFile: primarySavedImage?.filename,
           localUrl: primarySavedImage?.localUrl,
@@ -922,6 +930,7 @@ export async function POST(request: NextRequest) {
           requestedSize: imageSize,
           actualSize,
           analyzedPrompt: resolved.prompt,
+          supplierPromptHash,
           referenceLabels: [],
           savedFile: primarySavedImage?.filename,
           localUrl: primarySavedImage?.localUrl,

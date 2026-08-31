@@ -1,4 +1,4 @@
-import type { AgentActiveTaskVersion } from './execution-planner.types';
+import type { AgentActiveTaskVersion } from './context-reference.types';
 
 export function requireOriginalAsset(input?: {
   targetReferenceId?: string | null;

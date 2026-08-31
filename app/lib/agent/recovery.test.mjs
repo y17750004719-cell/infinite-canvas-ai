@@ -11,7 +11,7 @@ import {
 test('recovery records are bounded and keep stable task state', () => {
   const record = createAgentRecoveryRecord({
     taskId: 'task-1', runId: 'run-1', operationId: 'operation-1', lastSequence: 0, topicId: 'topic-1', sourceUserMessageId: 'user-1',
-    status: 'failed', resumeRoute: 'image_planner', intent: 'image', originalRequest: '生成海报',
+    status: 'failed', resumeRoute: 'main_agent', intent: 'image', originalRequest: '生成海报',
     failureStage: 'image_pipeline', failureMessage: '504 upstream timeout https://private.test/x',
     skillId: 'poster', skillContentHash: 'a'.repeat(64), contextEntityIds: ['a', 'a'], visualReferenceIds: ['v'],
     completedAssetCount: 2,
@@ -91,7 +91,7 @@ test('terminal contract recovery retains the operation lock and resumable Main A
 test('recovery records strictly normalize and persist bounded visual summaries', () => {
   const record = createAgentRecoveryRecord({
     taskId: 'task-1', runId: 'run-1', topicId: 'topic-1', sourceUserMessageId: 'user-1',
-    status: 'failed', resumeRoute: 'image_planner', intent: 'image', originalRequest: '继续修改图片',
+    status: 'failed', resumeRoute: 'main_agent', intent: 'image', originalRequest: '继续修改图片',
     failureStage: 'planning', failureMessage: '连接中断',
     visualSummary: {
       version: 1,
@@ -121,7 +121,7 @@ test('recovery normalization drops invalid visual summaries', () => {
   const base = {
     version: 1,
     taskId: 'task-1', runId: 'run-1', topicId: 'topic-1', sourceUserMessageId: 'user-1',
-    status: 'failed', resumeRoute: 'image_planner', intent: 'image', originalRequest: '继续修改图片',
+    status: 'failed', resumeRoute: 'main_agent', intent: 'image', originalRequest: '继续修改图片',
     failure: { stage: 'planning', kind: 'transport', message: '连接中断', retryability: 'retryable' },
     skillId: null, contextEntityIds: [], visualReferenceIds: [], completedAssetCount: 0, createdAt: 1,
   };

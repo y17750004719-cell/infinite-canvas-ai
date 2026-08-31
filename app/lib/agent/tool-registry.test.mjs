@@ -4,22 +4,16 @@ import assert from 'node:assert/strict';
 import { createAgentToolRegistry, executeAgentTool, getAgentModelTools } from './tool-registry.mjs';
 
 test('tool registry exposes the direct image tool and current recovery tools', () => {
-  const registry = createAgentToolRegistry({
-    createSkillJob: () => ({ id: 'job-1' }),
-    getSkillJob: () => null,
-  });
+  const registry = createAgentToolRegistry();
   assert.deepEqual([...registry.keys()], [
     'generate_image', 'get_canvas_context', 'get_conversation_memory', 'list_project_context',
     'read_context_entity', 'load_visual_reference', 'update_conversation_memory',
     'handle_failed_task', 'read_relevant_context', 'submit_agent_analysis_checkpoint',
     'request_user_decision', 'rewind_agent_analysis', 'resolve_failed_task_recovery',
-    'request_main_agent_context',
-    'request_image_clarification', 'request_context_selection', 'start_skill_job', 'get_skill_job',
+    'request_main_agent_context', 'request_context_selection',
   ]);
-  assert.equal(registry.get('start_skill_job').requiresConfirmation, true);
   assert.equal(registry.get('get_canvas_context').requiresConfirmation, false);
   assert.equal(registry.get('get_canvas_context').readOnly, true);
-  assert.equal(registry.get('get_skill_job').readOnly, true);
   assert.equal(registry.get('generate_image').readOnly, false);
   assert.equal(registry.get('generate_image').terminal, true);
   assert.equal(registry.get('load_visual_reference').readOnly, true);
@@ -66,6 +60,9 @@ test('generate_image exposes a strict direct execution contract and forwards the
     'operation', 'prompt', 'referenceIds', 'targetReferenceId', 'outputCount', 'aspectRatio', 'deliveryMode', 'panelCount',
   ]);
   assert.equal(modelTool.function.parameters.properties.items.items.additionalProperties, false);
+  assert.equal(modelTool.function.parameters.properties.items.items.properties.index.type, 'integer');
+  assert.equal(modelTool.function.parameters.properties.items.items.properties.label.type, 'string');
+  assert.equal(modelTool.function.parameters.properties.items.items.properties.subject.type, 'string');
   assert.deepEqual(
     modelTool.function.parameters.properties.publicProgress.required,
     [],
@@ -177,23 +174,6 @@ test('Prompt compilation is not exposed as a Main Agent tool', async () => {
   );
 });
 
-test('image clarification uses only the two model-owned image stages', async () => {
-  const calls = [];
-  const registry = createAgentToolRegistry({
-    requestImageClarification: (args) => calls.push(['clarification', args]),
-  });
-  const clarificationArgs = {
-    stage: 'compilation', dimension: 'edit_target', question: '编辑哪张图？', reason: '存在多个目标',
-    options: [{ id: 'ref-1', label: '图 1', answer: '编辑图 1' }, { id: 'ref-2', label: '图 2', answer: '编辑图 2' }],
-  };
-  await executeAgentTool(registry, 'request_image_clarification', clarificationArgs, { allowedTools: ['request_image_clarification'] });
-  assert.deepEqual(calls, [['clarification', clarificationArgs]]);
-  await assert.rejects(
-    () => executeAgentTool(registry, 'request_image_clarification', { ...clarificationArgs, stage: 'brief' }, { allowedTools: ['request_image_clarification'] }),
-    /allowed value/,
-  );
-});
-
 test('Main Agent context remains the only exposed auxiliary read operation', async () => {
   const calls = [];
   const registry = createAgentToolRegistry({
@@ -239,20 +219,20 @@ test('recovery gate rejects task identity, route, and Skill supplied by the mode
   });
   await assert.rejects(
     () => executeAgentTool(registry, 'resolve_failed_task_recovery', {
-      decision: 'resume', confidence: 'high', taskId: 'task-1', route: 'image_planner', skillId: null,
+      decision: 'resume', confidence: 'high', taskId: 'task-1', route: 'main_agent', skillId: null,
     }, { allowedTools: ['resolve_failed_task_recovery'] }),
     /Invalid arguments/,
   );
 });
 
 test('tool registry only exposes schemas for allowed tools', () => {
-  const registry = createAgentToolRegistry({ createSkillJob: () => null, getSkillJob: () => null });
+  const registry = createAgentToolRegistry();
   const definitions = getAgentModelTools(registry, ['get_canvas_context', 'unknown']);
   assert.deepEqual(definitions.map((tool) => tool.function.name), ['get_canvas_context']);
 });
 
 test('every model-visible tool accepts optional public progress without changing registry schemas', () => {
-  const registry = createAgentToolRegistry({ createSkillJob: () => null, getSkillJob: () => null });
+  const registry = createAgentToolRegistry();
   const definitions = getAgentModelTools(registry, [...registry.keys()]);
   for (const definition of definitions) {
     const progress = definition.function.parameters.properties.publicProgress;
@@ -265,47 +245,8 @@ test('every model-visible tool accepts optional public progress without changing
     .function.parameters.properties.publicProgress.properties.promptPreparation.type, 'object');
 });
 
-test('executeAgentTool enforces skill allowlists and confirmation', async () => {
-  const registry = createAgentToolRegistry({
-    createSkillJob: () => ({ id: 'job-1' }),
-    getSkillJob: () => null,
-  });
-  await assert.rejects(
-    () => executeAgentTool(registry, 'start_skill_job', { skillType: 'logo', payload: {} }, { allowedTools: [] }),
-    /not allowed/,
-  );
-  const confirmation = await executeAgentTool(
-    registry,
-    'start_skill_job',
-    { skillType: 'logo', payload: {} },
-    { allowedTools: ['start_skill_job'], confirmed: false },
-  );
-  assert.equal(confirmation.confirmationRequired, true);
-});
-
-test('executeAgentTool rejects schema-invalid arguments before confirmation or execution', async () => {
-  let created = 0;
-  const registry = createAgentToolRegistry({
-    createSkillJob: () => {
-      created += 1;
-      return { id: 'job-1' };
-    },
-    getSkillJob: () => null,
-  });
-  await assert.rejects(
-    () => executeAgentTool(
-      registry,
-      'start_skill_job',
-      { skillType: 123 },
-      { allowedTools: ['start_skill_job'], confirmed: true },
-    ),
-    /Invalid arguments for start_skill_job: arguments\.skillType/,
-  );
-  assert.equal(created, 0);
-});
-
 test('get_canvas_context returns only the supplied bounded summary', async () => {
-  const registry = createAgentToolRegistry({ createSkillJob: () => null, getSkillJob: () => null });
+  const registry = createAgentToolRegistry();
   const result = await executeAgentTool(
     registry,
     'get_canvas_context',

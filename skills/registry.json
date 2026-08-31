@@ -23,7 +23,7 @@
     "description": "梳理品牌策略、视觉识别并生成品牌延展物料。",
     "triggerHints": ["品牌", "VI", "视觉识别", "品牌物料"],
     "directTriggerHints": ["品牌识别系统", "品牌 VI", "全套品牌物料"],
-    "allowedTools": ["generate_image", "get_canvas_context", "start_skill_job", "get_skill_job"],
+    "allowedTools": ["generate_image", "get_canvas_context"],
     "entryPrompt": "请按品牌识别系统流程开始信息收集。",
     "enabled": true
   },
@@ -61,7 +61,7 @@
     "description": "收集品牌信息并生成 Logo 与基础视觉方向。",
     "triggerHints": ["Logo", "标志", "品牌名称", "商标"],
     "directTriggerHints": ["Logo", "标志设计"],
-    "allowedTools": ["generate_image", "get_canvas_context", "start_skill_job", "get_skill_job"],
+    "allowedTools": ["generate_image", "get_canvas_context"],
     "entryPrompt": "请按 Logo 与品牌流程开始信息收集。",
     "enabled": true
   },

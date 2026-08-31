@@ -1,10 +1,4 @@
 import type { AgentContextEntity, AgentProposal } from './context-reference.types';
-import type {
-  AgentExecutionPlan,
-  AgentPlannerModelCandidate,
-  AgentPlannerModelSelection,
-  AgentTaskContract,
-} from './execution-planner.types';
 
 export type AgentIntent = 'chat' | 'image' | 'skill_action';
 
@@ -105,7 +99,7 @@ export type AgentRecoveryRecord = {
   topicId: string;
   sourceUserMessageId: string;
   status: 'failed' | 'cancelled';
-  resumeRoute: 'main_agent' | 'image_planner' | 'local_delivery' | null;
+  resumeRoute: 'main_agent' | 'local_delivery' | null;
   intent: 'chat' | 'vision_analysis' | 'image' | 'skill_action' | null;
   originalRequest: string;
   failure: {
@@ -124,7 +118,7 @@ export type AgentRecoveryRecord = {
     references: Array<{
       id: string;
       src: string;
-      plannerPreviewSrc?: string;
+      previewSrc?: string;
       label: string;
       source: 'upload' | 'history' | 'canvas';
       role: 'reference' | 'edit_target' | 'annotation_bundle' | 'region_target';
@@ -180,16 +174,13 @@ export type AgentProgressStepId =
   | 'image_operation'
   | 'image_context'
   | 'image_skill'
-  | 'image_brief'
   | 'image_prompt'
   | 'image_contract'
   | 'context_resolution'
   | 'clarification'
   | 'skill_loading'
-  | 'prompt_optimization'
   | 'generate_image'
   | 'canvas_context'
-  | 'skill_job'
   | 'tool'
   | 'composing';
 
@@ -200,29 +191,21 @@ export type AgentProgressPhase =
   | 'analyzing'
   | 'waiting_input'
   | 'loading'
-  | 'optimizing'
   | 'generating'
   | 'reading'
   | 'starting'
   | 'checking'
   | 'executing'
-  | 'planning'
   | 'responding';
 
 export type AgentProgressStatus = 'pending' | 'active' | 'waiting' | 'completed' | 'failed';
 
-export type AgentPlannerFailureReason =
-  | 'timeout'
-  | 'transport'
-  | 'invalid_reference'
-  | 'invalid_context'
-  | 'invalid_plan'
-  | 'vision_unsupported'
-  | 'vision_unavailable';
-
 export type AgentPromptTrace = {
   sourcePrompt: string;
   finalPrompt: string;
+  sourcePromptHash?: string;
+  finalPromptHash?: string;
+  supplierPromptHash?: string;
   optimized: boolean;
   operation: 'generate' | 'edit';
   targetReferenceId: string | null;
@@ -298,14 +281,6 @@ export type AgentClarificationState = {
     remainingCount: number;
     batchSize: number;
   };
-  executionPlan?: AgentExecutionPlan;
-  plannerCandidates?: AgentPlannerModelCandidate[];
-  plannerSelection?: AgentPlannerModelSelection;
-  plannerFailure?: {
-    reason: AgentPlannerFailureReason;
-    retryMode: 'replan';
-    failedAt: number;
-  };
   recoveryRecord?: AgentRecoveryRecord;
   recoveryMode?: 'fill_missing' | 'redo_all';
   mainAgentLoop?: {
@@ -328,7 +303,6 @@ export type AgentClarificationState = {
     contextScopes?: Array<'conversation' | 'project'>;
   };
   agentAnalysis?: AgentAnalysisSnapshot;
-  imagePlanning?: AgentImagePlanningSnapshot;
 };
 
 export type AgentClarificationRequest = {
@@ -372,66 +346,9 @@ export type AgentClientAction = {
     slotId?: string;
     versionId?: string;
     parentVersionId?: string;
-    plannerPreviewSrc?: string;
+    previewSrc?: string;
   }>;
   batch?: { total: number; settled: number; succeeded: number; failed: number };
-};
-
-export type AgentImagePlanningStage =
-  | 'routing'
-  | 'image_planner'
-  | 'execution';
-
-export type AgentImagePlanningSnapshot = {
-  version: 4;
-  taskId: string;
-  runId: string;
-  sourceUserMessageId: string;
-  originalRequest: string;
-  resolvedRequirement: string | null;
-  revision: number;
-  currentStage: AgentImagePlanningStage;
-  stages: Record<string, {
-    status: 'pending' | 'in_progress' | 'completed' | 'awaiting_input' | 'failed' | 'skipped';
-    repairCount: number;
-    completedAt?: number;
-  }>;
-  decision: 'chat' | 'generate' | 'edit' | null;
-  operation: 'generate' | 'edit' | null;
-  targetReferenceId: string | null;
-  referenceIds: string[];
-  contextEntityIds: string[];
-  outputCount: number;
-  aspectRatio: string;
-  promptFormat: 'text' | 'json-text';
-  deliveryMode: 'single' | 'variants' | 'series' | 'composite' | null;
-  panelCount: number | null;
-  skill: {
-    id: string;
-    source: 'manual_ui' | 'explicit_text' | 'user_confirmation' | 'recovery';
-    read: boolean;
-    contentHash?: string;
-    manifest: {
-      executionMode?: 'agent_loop' | 'image_pipeline';
-      promptStyle?: 'text' | 'json-text';
-      aspectRatio?: string;
-      allowedTools: string[];
-      planningGuidance?: string;
-      generationContract?: string;
-    };
-  } | null;
-  imagegenContext: {
-    host: { id: 'imagegen'; contentHash: string };
-    visualSkill: { id: string; contentHash: string } | null;
-  } | null;
-  executionPlan?: Record<string, unknown> | null;
-  abandonedAt: number | null;
-  failure: {
-    stage: AgentImagePlanningStage;
-    kind: string;
-    message: string;
-    failedAt: number;
-  } | null;
 };
 
 export type AgentAnalysisCheckpoint = {
@@ -490,9 +407,8 @@ export type AgentTaskSnapshot = {
   operationId?: string;
   lastSequence?: number;
   contractVersion: number;
-  contract?: AgentTaskContract;
+  contract?: any;
   agentAnalysis?: AgentAnalysisSnapshot;
-  imagePlanning?: AgentImagePlanningSnapshot;
   editBaseVersionId?: string | null;
   latestBatchId?: string | null;
   activeVersions: Array<{
@@ -501,7 +417,7 @@ export type AgentTaskSnapshot = {
     slotId: string;
     versionId: string;
     assetUrl?: string;
-    plannerPreviewSrc?: string;
+    previewSrc?: string;
     naturalWidth?: number;
     naturalHeight?: number;
     model?: string;
@@ -596,29 +512,17 @@ export type AgentEvent =
       sequence: number;
       timestampMs: number;
     }
-  | { type: 'prompt_optimization_start' }
-  | { type: 'prompt_optimization_done'; summary: string; optimized: boolean }
   | {
       type: 'image_prompts_ready';
       index: number;
       label: string;
       prompt: string;
+      promptHash?: string;
       completedLabel?: string;
       completionSummary?: string;
       toolCallId?: string;
       sequence?: number;
       timestampMs?: number;
-      compilation?: {
-        skillId: string | null;
-        skillLabel: string | null;
-        skillRead: boolean;
-        plannerProviderId: string | null;
-        plannerModel: string;
-        referenceCount: number;
-        visualReferencesUsed: boolean;
-        durationMs: number;
-        compiledAt: number;
-      };
     }
   | (AgentLifecycleIdentity & { type: 'tool_start'; toolCallId: string; toolName: string; itemId?: string; executionId?: string; parentItemId?: string })
   | (AgentLifecycleIdentity & { type: 'tool_update'; toolCallId: string; message: string; itemId?: string; executionId?: string; parentItemId?: string })
@@ -657,7 +561,7 @@ export type AgentEvent =
       model?: string | null;
       message: string;
       code?: 'invalid_reference' | 'invalid_tool_arguments' | 'invalid_plan' | 'terminal_contract' | 'provider_unavailable' | 'provider_http' | 'provider_timeout' | 'transport' | 'budget_exceeded';
-      reason?: AgentPlannerFailureReason;
+      reason?: string;
       retryable?: boolean;
       recoveryRecord?: AgentRecoveryRecord;
     }

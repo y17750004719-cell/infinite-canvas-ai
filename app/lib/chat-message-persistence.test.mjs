@@ -19,7 +19,7 @@ test('chat messages persist bounded recovery records and drop invalid ones', () 
       topicId: 'topic-1',
       sourceUserMessageId: 'user-1',
       status: 'failed',
-      resumeRoute: 'image_planner',
+      resumeRoute: 'main_agent',
       intent: 'image',
       originalRequest: '生成海报',
       failure: { stage: 'planning', kind: 'transport', message: '<b>upstream</b> https://private.test', retryability: 'retryable' },
@@ -84,7 +84,7 @@ test('chat message persistence stores one canonical image source instead of thre
     content: '修改这张图',
     referenceImages: [src],
     referenceContext: {
-      references: [{ id: 'photo', src, plannerPreviewSrc: '/preview/photo.webp', label: '原图', source: 'upload', role: 'edit_target' }],
+      references: [{ id: 'photo', src, previewSrc: '/preview/photo.webp', label: '原图', source: 'upload', role: 'edit_target' }],
       composerSegments: [
         { type: 'reference', referenceId: 'photo' },
         { type: 'text', text: '修改这张图' },
@@ -100,7 +100,7 @@ test('chat message persistence stores one canonical image source instead of thre
   assert.equal(normalized.inlineContent, undefined);
   assert.equal(normalized.referenceContext.references.length, 1);
   assert.equal(normalized.referenceContext.references[0].src, src);
-  assert.equal(normalized.referenceContext.references[0].plannerPreviewSrc, '/preview/photo.webp');
+  assert.equal(normalized.referenceContext.references[0].previewSrc, '/preview/photo.webp');
   assert.deepEqual(normalized.referenceContext.composerSegments, [
     { type: 'reference', referenceId: 'photo' },
     { type: 'text', text: '修改这张图' },

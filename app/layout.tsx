@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import ClientErrorReporter from './components/ClientErrorReporter';
 import GsapMotionController from './components/GsapMotionController';
+import WorkspaceErrorBoundary from './components/WorkspaceErrorBoundary';
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -37,7 +38,7 @@ export default function RootLayout({
         />
         <ClientErrorReporter />
         <GsapMotionController />
-        {children}
+        <WorkspaceErrorBoundary>{children}</WorkspaceErrorBoundary>
       </body>
     </html>
   );

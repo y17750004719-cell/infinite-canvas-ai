@@ -1,5 +1,13 @@
+const buildVersion = process.env.NEXT_PUBLIC_BUILD_VERSION
+  || process.env.VERCEL_GIT_COMMIT_SHA
+  || process.env.GITHUB_SHA
+  || `local-${Date.now().toString(36)}`;
+
 /** @type {import('next').NextConfig} */
 const nextConfig = {
+  env: {
+    NEXT_PUBLIC_BUILD_VERSION: buildVersion,
+  },
   images: {
     formats: ['image/webp'],
     qualities: [72],

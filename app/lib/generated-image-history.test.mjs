@@ -64,7 +64,7 @@ test('normalizeGeneratedImageHistory keeps only valid generated image entries', 
     {
       id: 'history-1',
       src: '/uploads/generated/a.png',
-      plannerPreviewSrc: '/uploads/generated/a.png',
+      previewSrc: '/uploads/generated/a.png',
       createdAt: 10,
       source: 'chat',
       naturalWidth: 1024,
@@ -86,7 +86,7 @@ test('normalizeGeneratedImageHistory keeps only valid generated image entries', 
     {
       id: 'history-1',
       src: '/uploads/generated/a.png',
-      plannerPreviewSrc: '/uploads/generated/a.png',
+      previewSrc: '/uploads/generated/a.png',
       createdAt: 10,
       source: 'chat',
       sessionId: undefined,
@@ -99,7 +99,7 @@ test('normalizeGeneratedImageHistory keeps only valid generated image entries', 
     {
       id: 'generated-history-unknown-2',
       src: '/uploads/generated/archive.png',
-      plannerPreviewSrc: '/uploads/generated/archive.png',
+      previewSrc: '/uploads/generated/archive.png',
       createdAt: 0,
       source: 'archive',
       sessionId: undefined,
@@ -190,7 +190,7 @@ test('normalizeGeneratedImageHistory preserves task version identity and preview
   const [entry] = normalizeGeneratedImageHistory([{
     id: 'history-v2',
     src: '/original/v2.png',
-    plannerPreviewSrc: '/preview/v2.webp',
+    previewSrc: '/preview/v2.webp',
     createdAt: 20,
     source: 'chat',
     topicId: 'topic-1',
@@ -203,7 +203,7 @@ test('normalizeGeneratedImageHistory preserves task version identity and preview
   }]);
 
   assert.equal(entry.src, '/original/v2.png');
-  assert.equal(entry.plannerPreviewSrc, '/preview/v2.webp');
+  assert.equal(entry.previewSrc, '/preview/v2.webp');
   assert.deepEqual(
     {
       topicId: entry.topicId,
