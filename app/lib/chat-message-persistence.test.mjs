@@ -16,7 +16,8 @@ test('chat messages persist bounded recovery records and drop invalid ones', () 
       version: 1,
       taskId: 'task-1',
       runId: 'run-1',
-      topicId: 'topic-1',
+      operationId: 'operation-1',
+      sessionId: 'topic-1',
       sourceUserMessageId: 'user-1',
       status: 'failed',
       resumeRoute: 'main_agent',
@@ -35,7 +36,7 @@ test('chat messages persist bounded recovery records and drop invalid ones', () 
   assert.equal(normalizeChatMessageReferences({ id: 'a', role: 'assistant', content: '', agentRecovery: { version: 1 } }).agentRecovery, undefined);
 });
 
-test('topic agent memory is bounded and legacy sessions remain compatible', () => {
+test('agent memory is bounded and obsolete Topic messages are ignored', () => {
   assert.equal(normalizeAgentConversationMemory(null), undefined);
 
   const memory = normalizeAgentConversationMemory({
@@ -61,10 +62,10 @@ test('topic agent memory is bounded and legacy sessions remain compatible', () =
     activeTopicId: 'legacy',
     topics: [{ id: 'legacy', messages: [] }],
   });
-  assert.equal(normalized.topics[0].agentMemory, undefined);
+  assert.deepEqual(normalized, { messages: [] });
 });
 
-test('topic agent memory keeps the latest twenty raw conversation messages', () => {
+test('agent memory keeps the latest twenty raw conversation messages', () => {
   const memory = normalizeAgentConversationMemory({
     recentRawConversation: Array.from({ length: 25 }, (_, index) => ({
       role: index % 2 === 0 ? 'user' : 'assistant',
@@ -107,17 +108,18 @@ test('chat message persistence stores one canonical image source instead of thre
   ]);
 });
 
-test('active topic and top-level compatibility messages share the same normalized array', () => {
+test('Session messages ignore obsolete active Topic content', () => {
   const normalized = normalizeSessionChatMessages({
     activeTopicId: 'topic-1',
-    messages: [],
+    messages: [{ id: 'current', role: 'user', content: 'current message' }],
     topics: [{
       id: 'topic-1',
       messages: [{ id: 'message-1', role: 'user', content: 'hello' }],
     }],
   });
-  assert.equal(normalized.messages, normalized.topics[0].messages);
-  assert.equal(normalized.messages[0].content, 'hello');
+  assert.equal(normalized.topics, undefined);
+  assert.equal(normalized.messages.length, 1);
+  assert.equal(normalized.messages[0].content, 'current message');
 });
 
 test('distinct region targets on the same image survive message normalization', () => {

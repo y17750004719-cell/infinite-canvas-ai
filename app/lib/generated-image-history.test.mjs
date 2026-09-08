@@ -93,7 +93,6 @@ test('normalizeGeneratedImageHistory keeps only valid generated image entries', 
       naturalWidth: 1024,
       naturalHeight: 1024,
       sourceItemId: undefined,
-      topicId: undefined,
       messageId: undefined,
     },
     {
@@ -106,7 +105,6 @@ test('normalizeGeneratedImageHistory keeps only valid generated image entries', 
       naturalWidth: undefined,
       naturalHeight: undefined,
       sourceItemId: undefined,
-      topicId: undefined,
       messageId: undefined,
     },
   ]);
@@ -193,7 +191,7 @@ test('normalizeGeneratedImageHistory preserves task version identity and preview
     previewSrc: '/preview/v2.webp',
     createdAt: 20,
     source: 'chat',
-    topicId: 'topic-1',
+    sessionId: 'session-1',
     taskId: 'task-1',
     contractVersion: 2,
     batchId: 'batch-1',
@@ -206,7 +204,7 @@ test('normalizeGeneratedImageHistory preserves task version identity and preview
   assert.equal(entry.previewSrc, '/preview/v2.webp');
   assert.deepEqual(
     {
-      topicId: entry.topicId,
+      sessionId: entry.sessionId,
       taskId: entry.taskId,
       contractVersion: entry.contractVersion,
       batchId: entry.batchId,
@@ -215,7 +213,7 @@ test('normalizeGeneratedImageHistory preserves task version identity and preview
       parentVersionId: entry.parentVersionId,
     },
     {
-      topicId: 'topic-1',
+      sessionId: 'session-1',
       taskId: 'task-1',
       contractVersion: 2,
       batchId: 'batch-1',
@@ -231,7 +229,7 @@ test('appendMissingGeneratedHistoryEntries preserves distinct versions with the 
     src: '/original/shared.png',
     createdAt: 10,
     source: 'chat',
-    topicId: 'topic-1',
+    sessionId: 'session-1',
     taskId: 'task-1',
     contractVersion: 1,
     batchId: 'batch-1',
@@ -243,6 +241,25 @@ test('appendMissingGeneratedHistoryEntries preserves distinct versions with the 
   );
 
   assert.deepEqual(result.map((entry) => entry.versionId), ['version-1', 'version-2']);
+});
+
+test('version deduplication is scoped to Session for append and merge', () => {
+  const base = { src: '/shared.png', taskId: 'task-1', versionId: 'version-1', source: 'chat' };
+  const first = { ...base, id: 'first', sessionId: 'session-a' };
+  const second = { ...base, id: 'second', sessionId: 'session-b' };
+  const duplicate = { ...first, id: 'duplicate' };
+  for (const result of [
+    appendMissingGeneratedHistoryEntries([first], [second, duplicate]),
+    mergeGeneratedImageHistoryEntries({ sessionEntries: [first, second], archiveEntries: [duplicate] }),
+  ]) {
+    assert.deepEqual(result.map((entry) => entry.sessionId).sort(), ['session-a', 'session-b']);
+  }
+});
+
+test('normalization drops obsolete Topic identity without promoting it to Session identity', () => {
+  const [entry] = normalizeGeneratedImageHistory([{ src: '/old.png', topicId: 'old-topic' }]);
+  assert.equal(Object.hasOwn(entry, 'topicId'), false);
+  assert.equal(entry.sessionId, undefined);
 });
 
 test('buildGeneratedHistoryEntriesFromImageCard returns current image-card outputs as generated history entries', () => {

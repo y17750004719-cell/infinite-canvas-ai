@@ -32,6 +32,8 @@ export interface AgentContextEntity {
   brief: string;
   mustPreserve?: string[];
   assetUrl?: string;
+  assetId?: string;
+  originalSrc?: string;
   referenceImageUrls?: string[];
   canvasItemIds?: string[];
   sourceMessageId?: string;
@@ -55,6 +57,8 @@ export interface AgentReferenceContext {
   references: Array<{
     id: string;
     src?: string;
+    assetId?: string;
+    originalSrc?: string;
     previewSrc?: string;
     label: string;
     source: 'upload' | 'history' | 'canvas';

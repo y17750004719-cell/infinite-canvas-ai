@@ -16,8 +16,13 @@ test('workspace session controller wraps setSessions so sessionsRef stays curren
   assert.equal(controllerSource.includes('setSessionsState(nextSessions);'), true);
 });
 
-test('workspace session recovery clears interrupted active runs and persists the cleared marker', () => {
-  assert.match(controllerSource, /if \(session\.activeAgentRun\?\.status === 'running'\)/);
-  assert.match(controllerSource, /activeAgentRun: undefined/);
-  assert.match(controllerSource, /enqueueCoalescedSessionPersistence\(recoveredSession\)/);
+test('workspace session recovery keeps journal-backed active runs across refresh', () => {
+  assert.match(controllerSource, /Running turns are journal-backed/);
+  assert.doesNotMatch(controllerSource, /activeAgentRun: undefined/);
+});
+
+test('workspace session controller immediately persists sessions migrated to schema v4', () => {
+  assert.match(controllerSource, /savedSessions\[index\]\?\.schemaVersion !== 5/);
+  assert.match(controllerSource, /migratedSessions\.map\(\(session\) => upsertSession\(session\)\)/);
+  assert.match(controllerSource, /Promise\.allSettled/);
 });

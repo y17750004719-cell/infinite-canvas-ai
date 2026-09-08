@@ -1,22 +1,11 @@
 const DEFAULT_VIEWPORT = { x: 0, y: 0, scale: 1 };
 
-const createEmptyTopic = (now) => ({
-  id: `topic-${now}`,
-  title: '新对话',
-  messages: [],
-  activeSkill: null,
-  activeSkillExplicit: false,
-  createdAt: now,
-  updatedAt: now,
-});
-
+/** @returns {import('./db').ProjectSession} */
 export function createEmptySession({
   existingCount = 0,
   now = Date.now(),
   name,
 } = {}) {
-  const topic = createEmptyTopic(now);
-
   return {
     id: `session-${now}`,
     name: name?.trim() || `新画布 ${existingCount + 1}`,
@@ -36,8 +25,19 @@ export function createEmptySession({
     generatedImageHistory: [],
     regionSelections: [],
     messages: [],
-    topics: [topic],
-    activeTopicId: topic.id,
+    schemaVersion: 5,
+    threadId: `session-${now}`,
+    turns: [],
+    activeTurn: null,
+    lastSequence: 0,
+    threadStatus: 'idle',
+    archived: false,
+    pendingApproval: null,
+    todoItems: [],
+    commandState: { lastCommand: null, lastResult: null },
+    activeSkill: null,
+    activeSkillExplicit: false,
+    visualAssets: [],
     viewport: { ...DEFAULT_VIEWPORT },
   };
 }

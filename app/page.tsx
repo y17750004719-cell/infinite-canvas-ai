@@ -10,12 +10,66 @@ import { ScrollToPlugin } from 'gsap/ScrollToPlugin';
 import { useGSAP } from '@gsap/react';
 import { 
   MousePointer2, Type, Image as ImageIcon,
-  Share2, History, Settings, Paperclip,
+  Paperclip,
   Send, Sparkles, X, ChevronDown, ChevronLeft, ChevronRight, Trash2, Edit3, ArrowLeft, Plus, SlidersHorizontal, Copy, Check, CheckCircle2, XCircle, Loader2, CircleDashed, Video, Pencil, Package2, Workflow, Clock3, Eye, EyeOff, Moon, Sun, MessageCircle,
   MoreHorizontal, Upload, Library, Search, BrainCircuit, Settings2, ArrowUp, ArrowDown, Square, Pin
 } from 'lucide-react';
 import { GeneratedImageHistoryEntry, ProjectSession } from './lib/db';
+import type { ContextCompactionRecord, ContextCompactionSummary, ContextEvent } from './lib/db';
+import type { ContextWindowState } from './lib/db';
+import type { SessionVisualAsset } from './lib/db';
 import type { TaskSnapshot } from './lib/db';
+import { parseSlashCommand, isManagementCommand } from './lib/agent/commands.mjs';
+import { readCommandResponse, formatCommandResult } from './lib/agent/command-client.mjs';
+import { completedTranscriptMessages } from './lib/agent/thread-client.mjs';
+import { adaptCanonicalEvent, isCanonicalEvent } from './lib/agent/canonical-event-adapter.mjs';
+
+function normalizeContextCompactionRecords(value: unknown, sessionId: string): ContextCompactionRecord[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((entry, index) => {
+    if (!entry || typeof entry !== 'object') return [];
+    const input = entry as Record<string, unknown>;
+    if (input.sessionId && input.sessionId !== sessionId) return [];
+    const summaryInput = (input.structuredSummary && typeof input.structuredSummary === 'object'
+      ? input.structuredSummary
+      : input.summary && typeof input.summary === 'object'
+        ? input.summary
+        : {}) as Record<string, unknown>;
+    const summary: ContextCompactionSummary = {
+      task: typeof summaryInput.task === 'string' ? summaryInput.task : (typeof input.summary === 'string' ? input.summary : ''),
+      constraints: Array.isArray(summaryInput.constraints) ? summaryInput.constraints.filter((item): item is string => typeof item === 'string') : [],
+      decisions: Array.isArray(summaryInput.decisions) ? summaryInput.decisions.filter((item): item is string => typeof item === 'string') : [],
+      completedActions: Array.isArray(summaryInput.completedActions) ? summaryInput.completedActions.filter((item): item is string => typeof item === 'string') : [],
+      pendingActions: Array.isArray(summaryInput.pendingActions) ? summaryInput.pendingActions.filter((item): item is string => typeof item === 'string') : [],
+      toolFacts: Array.isArray(summaryInput.toolFacts) ? summaryInput.toolFacts.filter((item): item is string => typeof item === 'string') : [],
+      imageAssets: Array.isArray(summaryInput.imageAssets)
+        ? summaryInput.imageAssets.flatMap((asset) => {
+            if (!asset || typeof asset !== 'object' || typeof (asset as Record<string, unknown>).assetId !== 'string') return [];
+            const item = asset as Record<string, unknown>;
+            return [{ assetId: item.assetId as string, ...(typeof item.role === 'string' ? { role: item.role } : {}), ...(typeof item.description === 'string' ? { description: item.description } : {}) }];
+          })
+        : [],
+      confirmationState: typeof summaryInput.confirmationState === 'string' ? summaryInput.confirmationState : null,
+      recoveryState: typeof summaryInput.recoveryState === 'string' ? summaryInput.recoveryState : null,
+    };
+    const version = Number(input.summaryVersion ?? input.version ?? index + 1);
+    const fromSequence = Number(input.fromSequence ?? input.startSequence ?? 1);
+    const toSequence = Number(input.toSequence ?? input.endSequence ?? Math.max(0, fromSequence - 1));
+    return [{
+      compactionId: typeof input.compactionId === 'string' ? input.compactionId : `${sessionId}:compaction:${version}`,
+      sessionId,
+      fromSequence: Number.isFinite(fromSequence) ? fromSequence : 1,
+      toSequence: Number.isFinite(toSequence) ? toSequence : 0,
+      summaryVersion: Number.isFinite(version) ? version : index + 1,
+      summary,
+      model: typeof input.model === 'string' ? input.model : '',
+      contextWindow: Number.isFinite(Number(input.contextWindow)) ? Number(input.contextWindow) : 32768,
+      inputTokens: Number.isFinite(Number(input.inputTokens)) ? Number(input.inputTokens) : 0,
+      outputTokens: Number.isFinite(Number(input.outputTokens)) ? Number(input.outputTokens) : 0,
+      createdAt: Number.isFinite(Number(input.createdAt)) ? Number(input.createdAt) : Date.now(),
+    }];
+  });
+}
 import type { AgentRecoveryRecord } from './lib/agent/events';
 import type { CanvasItem, CanvasPoint } from './lib/canvas-types';
 import { isCanvasAnnotationItem, isCanvasAnnotationTextItem } from './lib/canvas-types';
@@ -106,6 +160,7 @@ import { applyQueuedChatMessageUpdates } from './lib/chat-stream-update-batcher.
 import { runGeneratedAssetPreloadQueue } from './lib/generated-asset-preload-queue.mjs';
 import { buildAgentContextEntities } from './lib/agent/context-reference.mjs';
 import { createAgentRecoveryRecord } from './lib/agent/recovery.mjs';
+import { normalizeContextEvents } from './lib/agent/context-events.mjs';
 import type { AgentContextEntity, AgentProposal } from './lib/agent/context-reference.types';
 import type {
   AgentRunProgress,
@@ -992,17 +1047,6 @@ interface MaterializedCanvasClipboardPaste {
   nextPasteCount: number;
 }
 
-interface ChatTopic {
-  id: string;
-  title: string;
-  messages: ChatMessage[];
-  activeSkill?: { id: string; label: string } | null;
-  activeSkillExplicit?: boolean;
-  agentMemory?: AgentConversationMemory;
-  createdAt: number;
-  updatedAt: number;
-}
-
 interface AgentConversationMemory {
   version: 1;
   recentRawConversation: Array<{ role: 'user' | 'assistant'; content: string }>;
@@ -1038,6 +1082,10 @@ interface SessionLiveState {
   imageProviderId: string;
   imageModelId: string;
   generatedImageHistoryBySession: Record<string, GeneratedImageHistoryEntry[]>;
+  contextEvents: ContextEvent[];
+  contextModelEvents: ContextEvent[];
+  compactedWindows: Array<Record<string, unknown>>;
+  activeContextWindow?: ContextWindowState;
   viewport: { x: number; y: number; scale: number };
   regionSelections: RegionSelection[];
 }
@@ -1156,6 +1204,7 @@ const getChatComposerPlainText = (segments: ChatComposerSegment[]): string =>
 
 const parseSlashSkillInput = (value: string) => {
   if (!value.startsWith('/')) return null;
+  if (isManagementCommand(parseSlashCommand(value))) return null;
   return { body: value.replace(/^\/\s*/, '') };
 };
 
@@ -1324,7 +1373,7 @@ const resolveChatMessageInlineContent = (message: ChatMessage): ResolvedChatMess
   return [
     ...(message.referenceImages || []).map((src, index) => ({
       type: 'reference' as const,
-      id: `${message.id}-legacy-reference-${index}`,
+      id: `${message.id}-reference-${index}`,
       src,
       label: `image${index + 1}`,
       source: 'upload' as const,
@@ -2067,7 +2116,6 @@ const createGeneratedImageHistoryEntry = ({
   sequence = 0,
   source,
   sourceItemId,
-  topicId,
   messageId,
   operation,
   sourceReferenceId,
@@ -2091,7 +2139,6 @@ const createGeneratedImageHistoryEntry = ({
   sequence?: number;
   source: GeneratedImageHistoryEntry['source'];
   sourceItemId?: string;
-  topicId?: string;
   messageId?: string;
   operation?: 'generate' | 'edit';
   sourceReferenceId?: string;
@@ -2118,7 +2165,6 @@ const createGeneratedImageHistoryEntry = ({
     createdAt: normalizedCreatedAt,
     source,
     sourceItemId,
-    topicId,
     messageId,
     operation,
     sourceReferenceId,
@@ -6152,7 +6198,7 @@ const LEFT_RAIL_ITEMS = [
   { id: 'workflow', label: '工作流', icon: Workflow },
   { id: 'history', label: '历史', icon: Clock3 },
   { id: 'theme', label: '黑夜', icon: Moon },
-  { id: 'settings', label: '设置', icon: Settings },
+  { id: 'settings', label: '设置', icon: Settings2 },
 ] as const;
 
 const IMAGE_NODE_TOOLBAR_ACTIONS = [
@@ -6574,9 +6620,11 @@ export default function AIWorkspace() {
   
   const [chatInputSyncRevision, setChatInputSyncRevision] = useState(0);
   const [chatMessages, setChatMessagesState] = useState<ChatMessage[]>([]);
+  const [contextEvents, setContextEventsState] = useState<ContextEvent[]>([]);
+  const [contextModelEvents, setContextModelEventsState] = useState<ContextEvent[]>([]);
+  const [compactedWindows, setCompactedWindowsState] = useState<Array<Record<string, unknown>>>([]);
+  const [activeContextWindow, setActiveContextWindowState] = useState<ContextWindowState | undefined>(undefined);
   const [visibleChatMessageLimit, setVisibleChatMessageLimit] = useState(20);
-  const attemptedLegacyChatReferenceMigrationsRef = useRef(new Set<string>());
-  const attemptedLegacyCanvasImageMigrationsRef = useRef(new Set<string>());
   const [activeAgentRunMarker, setActiveAgentRunMarker] = useState<ProjectSession['activeAgentRun']>(undefined);
   const activeAgentRunMarkerRef = useRef<ProjectSession['activeAgentRun']>(undefined);
   const [interruptedRunRecoveryPending, setInterruptedRunRecoveryPending] = useState(false);
@@ -6926,7 +6974,6 @@ export default function AIWorkspace() {
   
   // 项目管理状态
   const [showProjectMenu, setShowProjectMenu] = useState(false);
-  const [showHistoryPanel, setShowHistoryPanel] = useState(false);
   const [showGeneratedImageHistoryPanel, setShowGeneratedImageHistoryPanel] = useState(false);
   const providerSettingsModalGateRef = useRef<ProviderSettingsModalGateHandle | null>(null);
   const providerSettingsModalOpenRef = useRef(false);
@@ -7133,7 +7180,6 @@ export default function AIWorkspace() {
   const chatStreamPaintSamplesRef = useRef<number[]>([]);
   const pendingAssistantMessageIdRef = useRef<string | null>(null);
   const currentSessionIdRef = useRef<string | null>(null);
-  const currentTopicIdRef = useRef('default');
   const scheduleCurrentSessionSaveRef = useRef<() => void>(() => {});
   const canvasHistoryBySessionRef = useRef<Record<string, SessionCanvasHistoryState>>({});
   const pendingCanvasHistorySnapshotRef = useRef<CanvasUndoSnapshot | null>(null);
@@ -7308,6 +7354,10 @@ export default function AIWorkspace() {
     imageProviderId,
     imageModelId,
     generatedImageHistoryBySession,
+    contextEvents,
+    contextModelEvents,
+    compactedWindows,
+    activeContextWindow,
     viewport,
     regionSelections,
   });
@@ -8650,9 +8700,9 @@ export default function AIWorkspace() {
     return () => mediaQuery.removeListener(updateReducedMotion);
   }, []);
 
-  const inferTopicSkill = useCallback((topic: ChatTopic | null): { id: string; label: string } | null => {
-    if (!topic) return null;
-    return topic.activeSkillExplicit ? topic.activeSkill || null : null;
+  const inferSessionSkill = useCallback((session: ProjectSession | null): { id: string; label: string } | null => {
+    if (!session) return null;
+    return session.activeSkillExplicit ? session.activeSkill || null : null;
   }, []);
 
   const getAssistantSelectableHost = useCallback((node: Node | null): HTMLElement | null => {
@@ -9923,7 +9973,7 @@ export default function AIWorkspace() {
     const startedAt = performance.now();
     const skillToken = activeSkill ? editor.querySelector(SKILL_TOKEN_SELECTOR) : null;
     if (activeSkill && !skillToken) {
-      setActiveSkillForCurrentTopic(null);
+      setActiveSkillForCurrentSession(null);
     } else if (skillToken && editor.firstChild !== skillToken) {
       editor.insertBefore(skillToken, editor.firstChild);
     }
@@ -10231,7 +10281,7 @@ export default function AIWorkspace() {
 
     if ((e.key === 'Backspace' || e.key === 'Delete') && activeSkill && isCaretAtEditorStart()) {
       e.preventDefault();
-      setActiveSkillForCurrentTopic(null);
+      setActiveSkillForCurrentSession(null);
       return;
     }
 
@@ -13820,7 +13870,7 @@ export default function AIWorkspace() {
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             runId: `canvas-image-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-            topicId: currentTopicIdRef.current,
+            sessionId: currentSessionIdRef.current || undefined,
             messages: [{
               role: 'user',
               content: trimmedInput || '请根据所附参考图生成一张新图片。',
@@ -14038,6 +14088,27 @@ export default function AIWorkspace() {
   }, []);
 
   const handleCancelGenerate = async () => {
+    const activeRun = activeAgentRunMarker;
+    if (activeRun?.runId) {
+      const response = await fetch('/api/agent/cancel', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          runId: activeRun.runId,
+          threadId: currentSessionIdRef.current,
+          turnId: getCurrentSession()?.activeTurn || activeRun.runId,
+          taskId: activeRun.taskId,
+          operationId: activeRun.operationId,
+        }),
+      }).catch((error) => {
+        console.warn('Unable to cancel active agent run', error);
+        return null;
+      });
+      if (response && !response.ok) {
+        console.warn('Active agent cancellation was rejected', await response.text().catch(() => ''));
+        return;
+      }
+    }
     updateActiveStreamMessageStatus('cancelled', '任务已终止');
     const activeMessageId = pendingAssistantMessageIdRef.current;
     if (activeMessageId) updateChatMessageById(activeMessageId, (msg) => ({
@@ -14096,6 +14167,44 @@ export default function AIWorkspace() {
   }) => {
     const currentChatInput = options?.input ?? latestChatInputRef.current;
     if (!currentChatInput.trim()) return;
+    if (isManagementCommand(parseSlashCommand(currentChatInput))) {
+      const sessionId = currentSessionIdRef.current;
+      if (!sessionId) return;
+      try {
+        const response = await fetch('/api/agent', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sessionId, messages: [{ role: 'user', content: currentChatInput }] }),
+        });
+        const command = await readCommandResponse(response);
+        if (currentSessionIdRef.current !== sessionId) return;
+        const cleared = command.item?.command === 'clear' && command.item?.result?.cleared === true;
+        const compacted = command.item?.command === 'compact' && command.item?.result?.compacted === true;
+        const summary = typeof command.item?.result?.summary === 'string' ? command.item.result.summary : '';
+        setChatMessages((messages) => cleared ? [] : compacted ? (summary ? [{ id: `command-summary-${crypto.randomUUID()}`, role: 'assistant', content: summary }] : []) : [...messages,
+          { id: `command-user-${crypto.randomUUID()}`, role: 'user', content: currentChatInput },
+          { id: `command-result-${crypto.randomUUID()}`, role: 'assistant', content: formatCommandResult(command.item) },
+        ]);
+        if (latestChatInputRef.current === currentChatInput) setChatInput('');
+        const stateResponse = await fetch(`/api/agent?threadId=${encodeURIComponent(sessionId)}`);
+        if (stateResponse.ok) {
+          const { state } = await stateResponse.json();
+          setSessions((sessions) => sessions.map((session) => session.id !== sessionId ? session : {
+            ...session, threadId: sessionId, turns: state.turns, activeTurn: state.activeTurn,
+            lastSequence: state.lastSequence, threadStatus: state.threadStatus, archived: state.archived,
+            pendingApproval: state.pendingApproval, todoItems: state.todoItems, commandState: state.commandState,
+            transcriptStartSequence: state.transcriptStartSequence,
+            transcriptSummary: state.transcriptSummary,
+          }));
+        }
+      } catch (error) {
+        if (currentSessionIdRef.current === sessionId) setChatMessages((messages) => [...messages, {
+          id: `command-error-${crypto.randomUUID()}`, role: 'assistant',
+          content: error instanceof Error ? error.message : '命令执行失败，原输入已保留。',
+        }]);
+      }
+      return;
+    }
     if (
       !options?.agentConfirmation
       && pendingAgentConfirmation
@@ -14226,15 +14335,14 @@ export default function AIWorkspace() {
     const currentViewport = { ...viewport };
     const currentImageCount = imageCount;
     const generationSessionId = currentSessionIdRef.current;
-    const currentTopicId = getCurrentSession()?.activeTopicId || 'default';
-    const topicGeneratedImages = (generationSessionId
+    const sessionGeneratedImages = generationSessionId
       ? generatedImageHistoryBySession[generationSessionId] || []
-      : []).filter((entry) => !entry.topicId || entry.topicId === currentTopicId);
+      : [];
     const contextEntities = buildAgentContextEntities({
       messages: chatMessages,
       canvasItems: items,
       selectedItemIds: selectedIds,
-      generatedImages: topicGeneratedImages,
+      generatedImages: sessionGeneratedImages,
     }) as AgentContextEntity[];
     const uploadedLogoRefs = extractUploadedLogoReferences();
     const existingBrandLogoUrl = [...chatMessages]
@@ -14340,7 +14448,7 @@ export default function AIWorkspace() {
       }]);
     if (!options?.suppressUserMessage) {
       setChatInput('');
-      setActiveSkillForCurrentTopic(null);
+      setActiveSkillForCurrentSession(null);
     }
     setIsGenerating(true);
     setHasStartedChat(true);
@@ -14381,7 +14489,7 @@ export default function AIWorkspace() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               runId: `brand-symbol-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
-              topicId: getCurrentSession()?.activeTopicId || 'default',
+              sessionId: currentSessionIdRef.current || undefined,
               messages: [{ role: 'user', content: logoPrompt }],
               chatOptions: {
                 providerId: selectedChatProviderId,
@@ -14594,15 +14702,19 @@ export default function AIWorkspace() {
       generateAbortRef.current = controller;
 
       const requestSession = getCurrentSession();
-      const requestTopicId = requestSession?.activeTopicId || 'default';
-      const requestTopicMemory = requestSession?.topics?.find((topic) => topic.id === requestTopicId)?.agentMemory;
+      const requestSessionId = requestSession?.id || generationSessionId || undefined;
+      const requestSessionMemory = requestSession?.agentMemory;
+      const requestSessionVisualAssets = requestSession?.visualAssets || [];
+      const requestSessionGeneratedImageHistory = (generationSessionId
+        ? generatedImageHistoryBySession[generationSessionId] || []
+        : []).slice(0, 200);
       const recentRecoveryTask = options?.recoveryRecord
         ? getLatestAgentRecoveryForTask(chatMessages, options.recoveryRecord.taskId) || options.recoveryRecord
         : getRecentFailedAgentTask(chatMessages);
       const agentRequestBody = {
         clientRunId: agentRunId,
         operationId,
-        topicId: requestTopicId,
+        sessionId: requestSessionId,
         sourceAssistantMessageId: assistantMessageId,
         sourceUserMessageId: effectiveAgentClarification?.state.sourceUserMessageId
           || (recentRecoveryTask && options?.recoveryTaskId === recentRecoveryTask.taskId
@@ -14612,8 +14724,36 @@ export default function AIWorkspace() {
         messages: messagesForAPI,
         intent: generationMode,
         contextEntities,
+        sessionVisualAssets: requestSessionVisualAssets,
+        generatedImageHistory: requestSessionGeneratedImageHistory,
+        contextEvents: requestSession?.contextEvents || [],
+        compactedWindows: requestSession?.compactedWindows || [],
+        activeContextWindow: requestSession?.activeContextWindow,
+        contextHistory: {
+          schemaVersion: 3,
+          auditEvents: requestSession?.contextEvents || [],
+          modelEvents: requestSession?.contextHistory?.modelEvents || requestSession?.contextEvents || [],
+          compactionRecords: requestSession?.compactedWindows || [],
+          historyRevision: requestSession?.contextHistory?.historyRevision,
+          userMessageRevision: requestSession?.contextHistory?.userMessageRevision,
+          activeWindowRevision: requestSession?.contextHistory?.activeWindowRevision,
+          activeWindow: requestSession?.activeContextWindow || requestSession?.contextHistory?.activeWindow || {
+            sessionId: requestSessionId || '',
+            startSequence: 1,
+            endSequence: (requestSession?.contextEvents || []).at(-1)?.sequence || 0,
+            compactCount: 0,
+            summaryVersion: 0,
+            estimatedTokens: 0,
+            model: '',
+            contextWindow: 32768,
+          },
+        },
+        expectedHistoryRevision: requestSession?.contextHistory?.historyRevision,
+        expectedUserMessageRevision: requestSession?.contextHistory?.userMessageRevision,
+        expectedActiveWindowRevision: requestSession?.contextHistory?.activeWindowRevision,
+        contextWindow: 32768,
         selectedContextEntityIds: options?.selectedContextEntityIds ?? selectedIds.map((id) => `canvas:${id}`),
-        agentMemory: requestTopicMemory,
+        agentMemory: requestSessionMemory,
         recentFailedTask: recentRecoveryTask,
         activeSkillId: currentSkill?.id,
         referenceImages: referencesForRequest,
@@ -14725,6 +14865,7 @@ export default function AIWorkspace() {
         let promotedFinalReplayOffset = 0;
         let committedCommentaryText = '';
         let committedCommentaryReplayOffset = 0;
+        const seenCanonicalSequences = new Set<number>();
         const settleGeneratedAssetDelivery = () => {
           updateChatMessageById(assistantId, (msg) => updateAgentRunProgress(msg, {
             type: 'assets_settled',
@@ -14823,8 +14964,10 @@ export default function AIWorkspace() {
               isError?: boolean;
               activityId?: string;
               disposition?: 'commentary' | 'final';
+              event?: Record<string, unknown>;
               action?: {
                 type?: string;
+                sessionId?: string;
                 runId?: string;
                 model?: string;
                 providerId?: string;
@@ -14836,6 +14979,19 @@ export default function AIWorkspace() {
                 batchId?: string;
                 presentation?: { title?: string; summary?: string; operation?: 'generate' | 'edit' };
                 assets?: Array<{
+                  id?: string;
+                  sessionId?: string;
+                  durableSrc?: string;
+                  originalSrc?: string;
+                  contentHash?: string;
+                  mimeType?: string;
+                  byteSize?: number;
+                  source?: 'upload' | 'canvas' | 'generated';
+                  sourceReferenceId?: string;
+                  taskId?: string;
+                  batchId?: string;
+                  createdAt?: number;
+                  assetId?: string;
                   src?: string;
                   previewSrc?: string;
                   naturalWidth?: number;
@@ -14918,8 +15074,10 @@ export default function AIWorkspace() {
                 isError?: boolean;
                 activityId?: string;
                 disposition?: 'commentary' | 'final';
+                event?: Record<string, unknown>;
                 action?: {
                   type?: string;
+                  sessionId?: string;
                   runId?: string;
                   model?: string;
                   providerId?: string;
@@ -14930,7 +15088,7 @@ export default function AIWorkspace() {
                   contractVersion?: number;
                   batchId?: string;
                   presentation?: { title?: string; summary?: string; operation?: 'generate' | 'edit' };
-                  assets?: Array<{ src?: string; previewSrc?: string; naturalWidth?: number; naturalHeight?: number; model?: string; itemId?: string; index?: number; label?: string; slotId?: string; versionId?: string; parentVersionId?: string; promptTrace?: ChatMessage['promptTrace'] }>;
+                  assets?: Array<{ id?: string; sessionId?: string; durableSrc?: string; originalSrc?: string; contentHash?: string; mimeType?: string; byteSize?: number; source?: 'upload' | 'canvas' | 'generated'; sourceReferenceId?: string; taskId?: string; batchId?: string; createdAt?: number; assetId?: string; src?: string; previewSrc?: string; naturalWidth?: number; naturalHeight?: number; model?: string; itemId?: string; index?: number; label?: string; slotId?: string; versionId?: string; parentVersionId?: string; promptTrace?: ChatMessage['promptTrace'] }>;
                   batch?: { total?: number; settled?: number; succeeded?: number; failed?: number };
                 };
               request?: {
@@ -14966,12 +15124,30 @@ export default function AIWorkspace() {
                   deliveryMode?: 'single' | 'variants' | 'series' | 'composite';
                   panelCount?: number;
                 };
-              };
+            };
             } catch {
               continue;
             }
 
+            // The server wire contract is canonical lifecycle events. Adapt
+            // them once at the stream boundary so the existing message
+            // reducer can continue handling its established internal events.
+            if (isCanonicalEvent(event)) {
+              if (Number.isSafeInteger(event.sequence)) {
+                if (seenCanonicalSequences.has(event.sequence)) continue;
+                seenCanonicalSequences.add(event.sequence);
+              }
+              const adapted = adaptCanonicalEvent(event);
+              if (!adapted) continue;
+              event = { ...event, ...adapted } as typeof event;
+            }
+
             if (event.runId || event.operationId || event.taskId || Number.isFinite(event.sequence)) {
+              const identity = event as typeof event & { threadId?: string; turnId?: string };
+              if (identity.threadId === generationSessionId && identity.turnId) {
+                setSessions((sessions) => sessions.map((session) => session.id === generationSessionId
+                  ? { ...session, activeTurn: identity.turnId } : session));
+              }
               if (event.runId) protocolRunId = event.runId;
               setActiveAgentRunMarker((current) => current
                 ? {
@@ -14984,6 +15160,46 @@ export default function AIWorkspace() {
                       : {}),
                   }
                 : current);
+            }
+
+            if (event.type === 'context_event' && event.event && generationSessionId) {
+              const incoming = normalizeContextEvents([event.event], generationSessionId)[0];
+              if (incoming) {
+                setContextEventsState((previous) => {
+                  const next = normalizeContextEvents([...previous, incoming], generationSessionId);
+                  setContextModelEventsState((modelPrevious) => {
+                    const modelNext = normalizeContextEvents([...modelPrevious, incoming], generationSessionId);
+                    syncSessionLiveState({ contextEvents: next, contextModelEvents: modelNext });
+                    return modelNext;
+                  });
+                  return next;
+                });
+                setSessions((previous) => previous.map((session) => {
+                  if (session.id !== generationSessionId) return session;
+                  const next = normalizeContextEvents([...(session.contextEvents || []), incoming], generationSessionId);
+                  const previousModel = session.contextHistory?.modelEvents || session.contextEvents || [];
+                  const modelNext = normalizeContextEvents([...previousModel, incoming], generationSessionId);
+                  const revision = Number((incoming as any).historyRevision) || session.contextHistory?.historyRevision || next.length;
+                  const userRevision = Number((incoming as any).userMessageRevision) || session.contextHistory?.userMessageRevision || next.filter((item) => item.type === 'user_text').length;
+                  const activeRevision = Number((incoming as any).activeWindowRevision) || session.contextHistory?.activeWindowRevision || 0;
+                  return {
+                    ...session,
+                    updatedAt: Date.now(),
+                    contextEvents: next,
+                    contextHistory: {
+                      ...(session.contextHistory || { schemaVersion: 3, auditEvents: [], modelEvents: [], compactionRecords: [], activeWindow: { sessionId: generationSessionId, startSequence: 1, endSequence: 0, compactCount: 0, summaryVersion: 0, estimatedTokens: 0, model: '', contextWindow: 32768 } }),
+                      schemaVersion: 3,
+                      auditEvents: next,
+                      modelEvents: modelNext,
+                      historyRevision: revision,
+                      userMessageRevision: userRevision,
+                      activeWindowRevision: activeRevision,
+                    },
+                  };
+                }));
+                scheduleCurrentSessionSaveRef.current();
+              }
+              continue;
             }
 
             if (event.type === 'start' && event.model) {
@@ -15266,7 +15482,7 @@ export default function AIWorkspace() {
                 }),
                 agentImagePrompts: [
                   ...(msg.agentImagePrompts || []).filter((entry) => (
-                    `${entry.runId || 'legacy'}:${entry.toolCallId || ''}:${entry.index}` !== promptIdentity
+                    `${entry.runId || 'run'}:${entry.toolCallId || ''}:${entry.index}` !== promptIdentity
                   )),
                   promptEntry,
                 ].sort((left, right) => (
@@ -15369,14 +15585,12 @@ export default function AIWorkspace() {
             if (event.type === 'agent_memory_updated' && event.memory && typeof event.memory === 'object') {
               const memory = event.memory as AgentConversationMemory;
               setSessions((previous) => previous.map((session) => (
-                session.id !== generationSessionId || !session.topics
+                session.id !== generationSessionId
                   ? session
                   : {
                       ...session,
                       updatedAt: Date.now(),
-                      topics: session.topics.map((topic) => (
-                        topic.id === requestTopicId ? { ...topic, agentMemory: memory, updatedAt: Date.now() } : topic
-                      )),
+                      agentMemory: memory,
                     }
               )));
               continue;
@@ -15387,6 +15601,7 @@ export default function AIWorkspace() {
               const assets = (event.action.assets || []).filter(
                 (asset): asset is {
                   src: string;
+                  assetId?: string;
                   naturalWidth?: number;
                   naturalHeight?: number;
                   model?: string;
@@ -15493,6 +15708,7 @@ export default function AIWorkspace() {
                     role: 'assistant',
                     content: '',
                     imageUrl: asset.src,
+                    ...(asset.assetId ? { assetId: asset.assetId } : {}),
                     imageName: asset.label || `image ${firstImageNumber + index}`,
                     model: asset.model || resolvedModel,
                     ...(event.action?.providerId ? { imageProviderId: event.action.providerId } : {}),
@@ -15525,11 +15741,11 @@ export default function AIWorkspace() {
                     generationSessionId,
                     loadedAssets.map(({ asset, naturalWidth, naturalHeight }, index) => createGeneratedImageHistoryEntry({
                       src: asset.src,
+                      ...(asset.assetId ? { assetId: asset.assetId } : {}),
                       previewSrc: asset.previewSrc || asset.src,
                       naturalWidth,
                       naturalHeight,
                       source: 'chat',
-                      topicId: requestTopicId,
                       messageId: imageMessages[index]?.id,
                       operation: event.action?.presentation?.operation,
                       sourceReferenceId: event.action?.sourceReferenceId,
@@ -15572,6 +15788,85 @@ export default function AIWorkspace() {
                   });
                   settleGeneratedAssetDelivery();
                 });
+              }
+              continue;
+            }
+
+            if (event.type === 'client_action' && event.action?.type === 'register_session_visual_assets') {
+              const registeredSessionId = (event.action as { sessionId?: string }).sessionId || generationSessionId;
+              const registeredAssets = (Array.isArray(event.action.assets) ? event.action.assets : []).filter(
+                (asset): asset is SessionVisualAsset => Boolean(
+                  asset.id
+                  && asset.durableSrc
+                  && asset.contentHash
+                  && asset.mimeType
+                  && Number.isFinite(asset.byteSize)
+                  && Number.isFinite(asset.createdAt)
+                  && ['upload', 'canvas', 'generated'].includes(String(asset.source || ''))
+                ),
+              );
+              if (registeredSessionId && registeredAssets.length > 0) {
+                setSessions((previous) => previous.map((session) => (
+                  session.id !== registeredSessionId
+                    ? session
+                    : {
+                        ...session,
+                        updatedAt: Date.now(),
+                        visualAssets: (() => {
+                          const existing = session.visualAssets || [];
+                          const byId = new Map(existing.map((asset) => [asset.id, asset]));
+                          registeredAssets.forEach((asset) => byId.set(asset.id, asset));
+                          return [...byId.values()].slice(-200);
+                        })(),
+                      }
+                )));
+              }
+              continue;
+            }
+
+            if (event.type === 'client_action' && event.action?.type === 'update_context_window') {
+              const updatedSessionId = (event.action as { sessionId?: string }).sessionId || generationSessionId;
+              const activeContextWindow = (event.action as { activeContextWindow?: ProjectSession['activeContextWindow'] }).activeContextWindow;
+              const compactedWindows = (event.action as { compactedWindows?: ProjectSession['compactedWindows'] }).compactedWindows;
+              if (updatedSessionId && activeContextWindow?.sessionId === updatedSessionId) {
+                const normalizedCompactionRecords = normalizeContextCompactionRecords(compactedWindows, updatedSessionId);
+                if (updatedSessionId === generationSessionId) {
+                  if (Array.isArray(compactedWindows)) {
+                    syncSessionLiveState({ compactedWindows });
+                    setCompactedWindowsState(compactedWindows);
+                  }
+                  if (Array.isArray((event.action as any).modelEvents)) {
+                    const modelEvents = normalizeContextEvents((event.action as any).modelEvents, updatedSessionId);
+                    syncSessionLiveState({ contextModelEvents: modelEvents });
+                    setContextModelEventsState(modelEvents);
+                  }
+                  syncSessionLiveState({ activeContextWindow });
+                  setActiveContextWindowState(activeContextWindow);
+                }
+                setSessions((previous) => previous.map((session) => (
+                  session.id !== updatedSessionId
+                    ? session
+                    : {
+                        ...session,
+                        updatedAt: Date.now(),
+                        ...(Array.isArray(compactedWindows) ? { compactedWindows } : {}),
+                        activeContextWindow,
+                        contextHistory: {
+                          schemaVersion: 3,
+                          auditEvents: session.contextHistory?.auditEvents || session.contextEvents || [],
+                          modelEvents: Array.isArray((event.action as any).modelEvents)
+                            ? normalizeContextEvents((event.action as any).modelEvents, updatedSessionId)
+                            : session.contextHistory?.modelEvents || session.contextEvents || [],
+                          compactionRecords: normalizedCompactionRecords.length > 0
+                            ? normalizedCompactionRecords
+                            : session.contextHistory?.compactionRecords || normalizeContextCompactionRecords(session.compactedWindows, updatedSessionId),
+                          activeWindow: activeContextWindow,
+                          historyRevision: Number((event.action as any).historyRevision) || session.contextHistory?.historyRevision,
+                          userMessageRevision: Number((event.action as any).userMessageRevision) || session.contextHistory?.userMessageRevision,
+                          activeWindowRevision: Number((event.action as any).activeWindowRevision) || session.contextHistory?.activeWindowRevision,
+                        },
+                      }
+                )));
               }
               continue;
             }
@@ -15732,7 +16027,7 @@ export default function AIWorkspace() {
             runId: agentRunId,
             operationId: latestTaskSnapshot.operationId || operationId,
             lastSequence: latestTaskSnapshot.lastSequence || activeAgentRunMarker?.lastSequence || 0,
-            topicId: requestTopicId,
+            sessionId: requestSessionId,
             sourceUserMessageId: recentRecoveryTask?.sourceUserMessageId || userMessage.id,
             status: 'failed',
             resumeRoute: localDeliveryOnly ? 'local_delivery' : 'main_agent',
@@ -15920,7 +16215,7 @@ export default function AIWorkspace() {
         runId: protocolRunId,
         operationId,
         lastSequence: previousRecovery?.lastSequence || 0,
-        topicId: currentTopicId,
+        sessionId: generationSessionId || undefined,
         sourceUserMessageId: previousRecovery?.sourceUserMessageId || userMessage.id,
         status: aborted ? 'cancelled' : 'failed',
         resumeRoute: latestTaskSnapshot
@@ -15982,7 +16277,7 @@ export default function AIWorkspace() {
     const input = latestChatInputRef.current.trim();
     const runId = activeAgentRunMarker?.runId;
     if (!input || !runId || hasPendingChatReferenceUploads) return;
-    const delivery = 'follow_up' as const;
+    const delivery = 'steer' as const;
 
     const references = resolvedChatReferenceTokens.map((token) => ({
       id: token.id,
@@ -16008,19 +16303,18 @@ export default function AIWorkspace() {
       content: input,
       referenceImages: [...chatReferenceImages],
       referenceContext,
-      taskStatus: delivery === 'follow_up' ? 'queued' : 'running',
+      taskStatus: 'queued',
     };
 
     setChatMessages((messages) => [...messages, userMessage]);
-    setChatInput('');
-    clearSentChatReferenceTokens();
-
     try {
       const response = await fetch('/api/agent/steer', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           runId,
+          threadId: currentSessionIdRef.current,
+          turnId: getCurrentSession()?.activeTurn || runId,
           operationId: activeAgentRunMarker?.operationId,
           delivery,
           input,
@@ -16034,8 +16328,13 @@ export default function AIWorkspace() {
         error.code = payload?.code;
         throw error;
       }
+      const accepted = await response.json() as { delivery?: string };
+      if (latestChatInputRef.current.trim() === input) {
+        setChatInput('');
+        clearSentChatReferenceTokens();
+      }
       setChatMessages((messages) => messages.map((message) => message.id === messageId
-        ? { ...message, taskStatus: delivery === 'follow_up' ? 'queued' : undefined }
+        ? { ...message, taskStatus: accepted.delivery === 'follow_up' ? 'queued' : undefined }
         : message));
     } catch (error) {
       const conflictCode = error && typeof error === 'object' && 'code' in error
@@ -16395,7 +16694,7 @@ export default function AIWorkspace() {
         startedAt: performance.now(),
       };
     }
-    setActiveSkillForCurrentTopic(selectedSkill);
+    setActiveSkillForCurrentSession(selectedSkill);
     if (source === 'center_quick_action') {
       setHideWelcomeByCenterSkillPick(true);
     }
@@ -16410,28 +16709,6 @@ export default function AIWorkspace() {
 
   const buildCurrentSessionSnapshot = useCallback((session: ProjectSession) => {
     const liveState = sessionLiveStateRef.current;
-    let topics = session.topics || [];
-    const activeId = session.activeTopicId;
-
-    if (activeId) {
-      topics = topics.map((topic) => {
-        if (topic.id !== activeId) return topic;
-
-        let title = topic.title;
-        if ((title === '新对话' || !title) && liveState.chatMessages.length > 0) {
-          title = liveState.chatMessages[0].content.substring(0, 20) || '对话项目';
-        }
-
-        return {
-          ...topic,
-          title,
-          messages: liveState.chatMessages,
-          activeSkill: liveState.activeSkill || null,
-          activeSkillExplicit: Boolean(liveState.activeSkill),
-          updatedAt: Date.now(),
-        };
-      });
-    }
 
     return buildPersistedSession(session, {
       updatedAt: Date.now(),
@@ -16452,8 +16729,30 @@ export default function AIWorkspace() {
       chatModelId: liveState.chatModelId,
       imageProviderId: liveState.imageProviderId,
       imageModelId: liveState.imageModelId,
-      topics,
-      activeTopicId: activeId,
+      contextEvents: liveState.contextEvents,
+      compactedWindows: liveState.compactedWindows,
+      activeContextWindow: liveState.activeContextWindow,
+      contextHistory: {
+        schemaVersion: 3,
+        auditEvents: liveState.contextEvents,
+        modelEvents: liveState.contextModelEvents.length > 0 ? liveState.contextModelEvents : (session.contextHistory?.modelEvents || liveState.contextEvents),
+        compactionRecords: liveState.compactedWindows,
+        historyRevision: Math.max(0, ...liveState.contextEvents.map((event: any) => Number(event.historyRevision) || 0), Number(session.contextHistory?.historyRevision) || 0),
+        userMessageRevision: Math.max(0, ...liveState.contextEvents.map((event: any) => Number(event.userMessageRevision) || 0), Number(session.contextHistory?.userMessageRevision) || 0),
+        activeWindowRevision: Math.max(0, Number(liveState.activeContextWindow?.summaryVersion) || 0, Number(session.contextHistory?.activeWindowRevision) || 0),
+        activeWindow: liveState.activeContextWindow || session.contextHistory?.activeWindow || {
+          sessionId: session.id,
+          startSequence: 1,
+          endSequence: liveState.contextEvents.at(-1)?.sequence || 0,
+          compactCount: 0,
+          summaryVersion: 0,
+          estimatedTokens: 0,
+          model: '',
+          contextWindow: 32768,
+        },
+      },
+      activeSkill: liveState.activeSkill || null,
+      activeSkillExplicit: Boolean(liveState.activeSkill),
       activeAgentRun: activeAgentRunMarkerRef.current,
       generatedImageHistory:
         liveState.generatedImageHistoryBySession[session.id] ??
@@ -16468,12 +16767,10 @@ export default function AIWorkspace() {
   const resolveCurrentSessionPresentationState = useCallback((session: ProjectSession) => {
     return resolveSessionPresentationState({
       session,
-      now: Date.now(),
       normalizeSession: normalizeProjectSession,
       normalizeItems: (sessionItems: CanvasItem[]) => normalizeCanvasItems(sessionItems || []),
-      inferTopicSkill: (topic: ChatTopic | null) => inferTopicSkill(topic),
     });
-  }, [inferTopicSkill]);
+  }, []);
 
   const applyResolvedSessionState = useCallback((resolvedState: any) => {
     flushPendingCanvasCommit('session-switch');
@@ -16489,22 +16786,21 @@ export default function AIWorkspace() {
       if (!interruptedRun || message.id !== interruptedRun.assistantMessageId) {
         return normalizedProgress ? { ...message, agentRunProgress: normalizedProgress } : message;
       }
-      return {
-        ...message,
-        taskStatus: 'failed' as const,
-        content: message.content || '上次任务因页面异常中断，请重试。',
-        agentRunProgress: normalizedProgress
-          ? reduceAgentRunProgress(normalizedProgress, { type: 'agent_error' }) || undefined
-          : undefined,
-      };
+      return normalizedProgress ? { ...message, agentRunProgress: normalizedProgress } : message;
     });
-    activeAgentRunMarkerRef.current = undefined;
-    setActiveAgentRunMarker(undefined);
-    setInterruptedRunRecoveryPending(Boolean(interruptedRun));
+    // A refresh is not a failure. Keep the active marker so the journal-backed
+    // thread can replay or reattach the run instead of forcing a retry.
+    activeAgentRunMarkerRef.current = interruptedRun || undefined;
+    setActiveAgentRunMarker(interruptedRun || undefined);
+    setInterruptedRunRecoveryPending(false);
     syncSessionLiveState({
       items: resolvedState.items,
       connections: resolvedState.connections || [],
       chatMessages: resolvedChatMessages,
+        contextEvents: resolvedState.normalizedSession?.contextEvents || [],
+        contextModelEvents: resolvedState.normalizedSession?.contextHistory?.modelEvents || resolvedState.normalizedSession?.contextEvents || [],
+      compactedWindows: resolvedState.normalizedSession?.compactedWindows || [],
+      activeContextWindow: resolvedState.normalizedSession?.activeContextWindow,
       activeSkill: resolvedState.activeSkill || null,
       chatProviderId: resolvedState.normalizedSession?.chatProviderId || '',
       chatModelId: resolvedState.normalizedSession?.chatModelId || '',
@@ -16526,6 +16822,10 @@ export default function AIWorkspace() {
     setItemsState(resolvedState.items);
     setConnectionsState(resolvedState.connections || []);
     setChatMessagesState(resolvedChatMessages);
+    setContextEventsState(resolvedState.normalizedSession?.contextEvents || []);
+    setContextModelEventsState(resolvedState.normalizedSession?.contextHistory?.modelEvents || resolvedState.normalizedSession?.contextEvents || []);
+    setCompactedWindowsState(resolvedState.normalizedSession?.compactedWindows || []);
+    setActiveContextWindowState(resolvedState.normalizedSession?.activeContextWindow);
     setActiveSkillState(resolvedState.activeSkill || null);
     setChatProviderIdState(resolvedState.normalizedSession?.chatProviderId || '');
     setChatModelIdState(resolvedState.normalizedSession?.chatModelId || '');
@@ -16555,7 +16855,6 @@ export default function AIWorkspace() {
     setViewportState(resolvedState.viewport || { x: 0, y: 0, scale: 1 });
     setImageCount(resolvedState.imageCount || 0);
     setShowProjectMenu(false);
-    setShowHistoryPanel(false);
     connectionSessionRef.current = null;
   }, [clearPendingConnectionMenu, flushPendingCanvasCommit, resetPendingCanvasInteractionCommits, syncSessionLiveState]);
 
@@ -16592,9 +16891,12 @@ export default function AIWorkspace() {
       activeSkill,
       activeAgentRunMarker,
       generatedImageHistoryBySession,
+      contextEvents,
+      compactedWindows,
+      activeContextWindow,
       regionSelections,
     }),
-    [activeAgentRunMarker, activeSkill, chatMessages, chatModelId, chatProviderId, connections, generatedImageHistoryBySession, imageCardAspectRatioById, imageCardCountById, imageCardModelById, imageCardPanelDrafts, imageCardProviderById, imageCardQualityById, imageCardSizeById, imageCount, imageModelId, imageProviderId, items, regionSelections, textCardPanelDrafts, viewport]
+    [activeAgentRunMarker, activeContextWindow, activeSkill, chatMessages, chatModelId, chatProviderId, compactedWindows, connections, contextEvents, generatedImageHistoryBySession, imageCardAspectRatioById, imageCardCountById, imageCardModelById, imageCardPanelDrafts, imageCardProviderById, imageCardQualityById, imageCardSizeById, imageCount, imageModelId, imageProviderId, items, regionSelections, textCardPanelDrafts, viewport]
   );
 
   const {
@@ -16620,132 +16922,6 @@ export default function AIWorkspace() {
     sessionSaveSignal,
   });
   scheduleCurrentSessionSaveRef.current = scheduleCurrentSessionSave;
-
-  useEffect(() => {
-    if (!currentSessionId) return;
-    const getMigrationKey = (src: string) => `${currentSessionId}:${src.length}:${src.slice(-64)}`;
-    const pendingSources = Array.from(new Set(items.flatMap((item) => {
-      if (item.type !== 'image') return [];
-      return [
-        typeof item.src === 'string' ? item.src : '',
-        ...(Array.isArray(item.imageOutputs)
-          ? item.imageOutputs.map((output) => output?.src || '')
-          : []),
-      ].filter((src) => src.startsWith('data:image/'));
-    }))).filter((src) => !attemptedLegacyCanvasImageMigrationsRef.current.has(getMigrationKey(src)));
-    if (pendingSources.length === 0) return;
-
-    const migrationSessionId = currentSessionId;
-    const migratePendingSources = () => void (async () => {
-      pendingSources.forEach((src) => attemptedLegacyCanvasImageMigrationsRef.current.add(getMigrationKey(src)));
-      const migrated = new Map<string, string>();
-      for (const [index, src] of pendingSources.entries()) {
-        if (currentSessionIdRef.current !== migrationSessionId) return;
-        try {
-          const response = await fetch('/api/upload', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              imageData: src,
-              fileName: `migrated-canvas-image-${Date.now()}-${index}.png`,
-            }),
-          });
-          const payload = response.ok ? await response.json() : null;
-          if (typeof payload?.url === 'string' && payload.url) migrated.set(src, payload.url);
-        } catch (error) {
-          console.warn('Legacy canvas image migration failed:', error);
-        }
-      }
-      if (currentSessionIdRef.current !== migrationSessionId || migrated.size === 0) return;
-      setItems((currentItems) => currentItems.map((item) => {
-        if (item.type !== 'image') return item;
-        const migratedSrc = typeof item.src === 'string' ? migrated.get(item.src) : undefined;
-        const imageOutputs = Array.isArray(item.imageOutputs)
-          ? item.imageOutputs.map((output) => {
-              const migratedOutputSrc = migrated.get(output.src);
-              return migratedOutputSrc ? { ...output, src: migratedOutputSrc } : output;
-            })
-          : item.imageOutputs;
-        const outputsChanged = imageOutputs !== item.imageOutputs && imageOutputs.some(
-          (output, index) => output !== item.imageOutputs?.[index]
-        );
-        if (!migratedSrc && !outputsChanged) return item;
-        return {
-          ...item,
-          ...(migratedSrc ? { src: migratedSrc } : {}),
-          ...(outputsChanged ? { imageOutputs } : {}),
-        };
-      }));
-    })();
-    const schedule = typeof window.requestIdleCallback === 'function'
-      ? window.requestIdleCallback(migratePendingSources, { timeout: 2000 })
-      : window.setTimeout(migratePendingSources, 250);
-    return () => {
-      if (typeof window.cancelIdleCallback === 'function') window.cancelIdleCallback(schedule);
-      else window.clearTimeout(schedule);
-    };
-  }, [currentSessionId, items, setItems]);
-
-  useEffect(() => {
-    if (!currentSessionId) return;
-    const getMigrationKey = (src: string) => `${currentSessionId}:${src.length}:${src.slice(-64)}`;
-    const pendingSources = Array.from(new Set(
-      chatMessages.flatMap((message) => (
-        message.referenceContext?.references
-          .map((reference) => reference.src)
-          .filter((src) => src.startsWith('data:image/')) || []
-      ))
-    )).filter((src) => !attemptedLegacyChatReferenceMigrationsRef.current.has(getMigrationKey(src)));
-    if (pendingSources.length === 0) return;
-
-    const migrationSessionId = currentSessionId;
-    pendingSources.forEach((src) => attemptedLegacyChatReferenceMigrationsRef.current.add(getMigrationKey(src)));
-    void (async () => {
-      const migrated = new Map<string, string>();
-      for (const [index, src] of pendingSources.entries()) {
-        if (currentSessionIdRef.current !== migrationSessionId) return;
-        try {
-          const response = await fetch('/api/upload', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              imageData: src,
-              fileName: `migrated-chat-reference-${Date.now()}-${index}.png`,
-            }),
-          });
-          const payload = response.ok ? await response.json() : null;
-          if (typeof payload?.url === 'string' && payload.url) migrated.set(src, payload.url);
-        } catch (error) {
-          console.warn('Legacy chat reference migration failed:', error);
-        }
-      }
-      if (currentSessionIdRef.current !== migrationSessionId || migrated.size === 0) return;
-      setChatMessages((messages) => messages.map((message) => {
-        if (!message.referenceContext) return message;
-        let changed = false;
-        const references = message.referenceContext.references.map((reference) => {
-          const migratedSrc = migrated.get(reference.src);
-          if (!migratedSrc) return reference;
-          changed = true;
-          return { ...reference, src: migratedSrc };
-        });
-        const evidenceImages = message.referenceContext.evidenceImages?.map((evidence) => {
-          const migratedSrc = migrated.get(evidence.src);
-          if (!migratedSrc) return evidence;
-          changed = true;
-          return { ...evidence, src: migratedSrc };
-        });
-        return changed ? {
-          ...message,
-          referenceContext: {
-            ...message.referenceContext,
-            references,
-            ...(evidenceImages ? { evidenceImages } : {}),
-          },
-        } : message;
-      }));
-    })();
-  }, [chatMessages, currentSessionId, setChatMessages]);
 
   useEffect(() => {
     setVisibleChatMessageLimit(20);
@@ -16805,6 +16981,30 @@ export default function AIWorkspace() {
   }, []);
 
   // 项目管理函数
+  useEffect(() => {
+    if (!currentSessionId) return;
+    const controller = new AbortController();
+    const threadId = currentSessionId;
+    void (async () => {
+      try {
+        const response = await fetch(`/api/agent?threadId=${encodeURIComponent(threadId)}`, { signal: controller.signal });
+        if (!response.ok) return;
+        const { state } = await response.json();
+        if (controller.signal.aborted || currentSessionIdRef.current !== threadId || !state) return;
+        setSessions((sessions) => sessions.map((session) => session.id !== threadId ? session : {
+          ...session, threadId, turns: state.turns, activeTurn: state.activeTurn,
+          lastSequence: state.lastSequence, threadStatus: state.threadStatus, archived: state.archived,
+          pendingApproval: state.pendingApproval, todoItems: state.todoItems, commandState: state.commandState,
+        }));
+        // Restore a journal-only thread without duplicating locally retained messages.
+        setChatMessages((messages) => messages.length ? messages : completedTranscriptMessages(state.turns, state.transcriptStartSequence, state.transcriptSummary) as ChatMessage[]);
+      } catch {
+        // Historical loading failure does not cancel a live run or discard drafts.
+      }
+    })();
+    return () => controller.abort();
+  }, [currentSessionId, setChatMessages, setSessions]);
+
   const getCurrentSession = () => sessions.find(s => s.id === currentSessionId);
   const sessionsWithGeneratedImageHistory = React.useMemo(() => {
     return sessions.map((session) => {
@@ -16900,7 +17100,6 @@ export default function AIWorkspace() {
 
   useEffect(() => {
     currentSessionIdRef.current = currentSessionId;
-    currentTopicIdRef.current = sessions.find((session) => session.id === currentSessionId)?.activeTopicId || 'default';
   }, [currentSessionId, sessions]);
 
   useEffect(() => {
@@ -16932,14 +17131,7 @@ export default function AIWorkspace() {
     setCanvasImageGenerationErrorById({});
   }, [cancelAllRecognitions, currentSessionId, viewMode]);
 
-  // 对话项目管理函数
-  const getCurrentTopic = () => {
-    const session = getCurrentSession();
-    if (!session || !session.topics) return null;
-    return session.topics.find(t => t.id === session.activeTopicId) || null;
-  };
-
-  const setActiveSkillForCurrentTopic = (skill: { id: string; label: string } | null) => {
+  const setActiveSkillForCurrentSession = (skill: { id: string; label: string } | null) => {
     setActiveSkill(skill);
     if (!skill && chatMessages.length === 0) {
       setHideWelcomeByCenterSkillPick(false);
@@ -16948,114 +17140,15 @@ export default function AIWorkspace() {
 
     React.startTransition(() => {
       setSessions((prev) => prev.map((session) => {
-        if (session.id !== currentSessionId || !session.topics || !session.activeTopicId) return session;
+        if (session.id !== currentSessionId) return session;
         return {
           ...session,
           updatedAt: Date.now(),
-          topics: session.topics.map((topic) =>
-            topic.id === session.activeTopicId
-              ? { ...topic, activeSkill: skill, activeSkillExplicit: Boolean(skill) }
-              : topic
-          ),
+          activeSkill: skill,
+          activeSkillExplicit: Boolean(skill),
         };
       }));
     });
-  };
-
-  const createNewTopic = () => {
-    if (!currentSessionId) return;
-    
-    const newTopic: ChatTopic = {
-      id: `topic-${Date.now()}`,
-      title: '新对话',
-      messages: [],
-      activeSkill: null,
-      activeSkillExplicit: false,
-      createdAt: Date.now(),
-      updatedAt: Date.now(),
-    };
-    
-    setSessions(prev => prev.map(s => {
-      if (s.id === currentSessionId) {
-        const topics = s.topics || [];
-        return {
-          ...s,
-          topics: [newTopic, ...topics],
-          activeTopicId: newTopic.id,
-          updatedAt: Date.now()
-        };
-      }
-      return s;
-    }));
-    
-    setChatMessages([]);
-    setActiveSkill(null);
-    setHideWelcomeByCenterSkillPick(false);
-    setImageCount(0);
-    setShowHistoryPanel(false);
-  };
-
-  const switchTopic = (topicId: string) => {
-    const session = getCurrentSession();
-    if (!session || !session.topics) return;
-    
-    const topic = session.topics.find(t => t.id === topicId);
-    if (!topic) return;
-    
-    setSessions(prev => prev.map(s => {
-      if (s.id === currentSessionId) {
-        return { ...s, activeTopicId: topicId };
-      }
-      return s;
-    }));
-    
-    setChatMessages(topic.messages);
-    setActiveSkill(inferTopicSkill(topic));
-    if (topic.messages.length === 0) {
-      setHideWelcomeByCenterSkillPick(false);
-    }
-    setImageCount(topic.messages.filter(m => m.imageName).length);
-    setShowHistoryPanel(false);
-  };
-
-  const deleteTopic = (topicId: string, e: React.MouseEvent) => {
-    e.stopPropagation();
-    if (!confirm('确定要删除这个对话吗？')) return;
-    
-    setSessions(prev => prev.map(s => {
-      if (s.id === currentSessionId && s.topics) {
-        const newTopics = s.topics.filter(t => t.id !== topicId);
-        let nextActiveId = s.activeTopicId;
-        
-        if (s.activeTopicId === topicId) {
-          nextActiveId = newTopics.length > 0 ? newTopics[0].id : '';
-        }
-        
-        return {
-          ...s,
-          topics: newTopics,
-          activeTopicId: nextActiveId
-        };
-      }
-      return s;
-    }));
-    
-    // 如果删除的是当前活跃的对话，需要刷新聊天框
-    const session = getCurrentSession();
-    if (session && session.activeTopicId === topicId) {
-      const newTopics = (session.topics || []).filter(t => t.id !== topicId);
-      if (newTopics.length > 0) {
-        setChatMessages(newTopics[0].messages);
-        setActiveSkill(inferTopicSkill(newTopics[0]));
-        if (newTopics[0].messages.length === 0) {
-          setHideWelcomeByCenterSkillPick(false);
-        }
-      } else {
-        setChatMessages([]);
-        setActiveSkill(null);
-        setHideWelcomeByCenterSkillPick(false);
-      }
-    }
   };
 
   const renameSession = useCallback(async (sessionId: string, newName: string) => {
@@ -17281,7 +17374,6 @@ export default function AIWorkspace() {
   }, [applyProviderSettingsResponse]);
 
   const openProviderSettingsModal = useCallback(() => {
-    setShowHistoryPanel(false);
     setShowGeneratedImageHistoryPanel(false);
     providerSettingsModalGateRef.current?.open();
   }, []);
@@ -18378,13 +18470,12 @@ export default function AIWorkspace() {
         setShowImageCardSettingsMenu(false);
       }
       setShowAvatarMenu(false);
-      setShowHistoryPanel(false);
     };
-    if (showAvatarMenu || showProjectMenu || showAddNodeMenu || showGeneratedImageHistoryPanel || showHistoryPanel || showGenerationModeMenu || showChatModelSelector || showImageModelSelector || showSkillsMenu || showChatComposerMoreMenu || showChatAssetPicker || showModelPreferencePopover || showTextPanelProviderMenu || showImageCardProviderMenu || showImageCardModelMenu || showImageCardSettingsMenu || showTextPanelModelMenu) {
+    if (showAvatarMenu || showProjectMenu || showAddNodeMenu || showGeneratedImageHistoryPanel || showGenerationModeMenu || showChatModelSelector || showImageModelSelector || showSkillsMenu || showChatComposerMoreMenu || showChatAssetPicker || showModelPreferencePopover || showTextPanelProviderMenu || showImageCardProviderMenu || showImageCardModelMenu || showImageCardSettingsMenu || showTextPanelModelMenu) {
       document.addEventListener('pointerdown', handlePointerDownOutside);
       return () => document.removeEventListener('pointerdown', handlePointerDownOutside);
     }
-  }, [showAvatarMenu, showProjectMenu, showAddNodeMenu, showGeneratedImageHistoryPanel, showHistoryPanel, showGenerationModeMenu, showChatModelSelector, showImageModelSelector, showSkillsMenu, showChatComposerMoreMenu, showChatAssetPicker, showModelPreferencePopover, showTextPanelProviderMenu, showImageCardProviderMenu, showImageCardModelMenu, showImageCardSettingsMenu, showTextPanelModelMenu, editingSessionId, hasActiveAssistantTextSelection, isNodeInsideAssistantSelectable, closeSkillMenu]);
+  }, [showAvatarMenu, showProjectMenu, showAddNodeMenu, showGeneratedImageHistoryPanel, showGenerationModeMenu, showChatModelSelector, showImageModelSelector, showSkillsMenu, showChatComposerMoreMenu, showChatAssetPicker, showModelPreferencePopover, showTextPanelProviderMenu, showImageCardProviderMenu, showImageCardModelMenu, showImageCardSettingsMenu, showTextPanelModelMenu, editingSessionId, hasActiveAssistantTextSelection, isNodeInsideAssistantSelectable, closeSkillMenu]);
 
   useEffect(() => {
     if (!showChatModelSelector && !showImageModelSelector && !showChatComposerMoreMenu && !showChatAssetPicker && !showModelPreferencePopover && !showSkillsMenu && !showGenerationModeMenu) return;
@@ -20282,25 +20373,6 @@ export default function AIWorkspace() {
               <h1 className="text-base font-medium">{currentProjectName}</h1>
             </div>
             <div className="flex items-center gap-1">
-              <button className="rounded-lg p-2  hover:bg-[var(--workspace-control-hover)]" title="分享">
-                <Share2 size={18} className="workspace-text-muted" />
-              </button>
-              <div className="relative">
-                <button 
-                  className={`rounded-lg p-2  ${showHistoryPanel ? 'bg-[var(--workspace-control-active)]' : 'hover:bg-[var(--workspace-control-hover)]'}`}
-                  title="历史"
-                  onClick={() => setShowHistoryPanel(!showHistoryPanel)}
-                >
-                  <History size={18} className={showHistoryPanel ? "workspace-text-primary" : "workspace-text-muted"} />
-                </button>
-              </div>
-              <button
-                className="rounded-lg p-2  hover:bg-[var(--workspace-control-hover)]"
-                title="设置"
-                onClick={openProviderSettingsModal}
-              >
-                <Settings size={18} className="workspace-text-muted" />
-              </button>
               <button 
                 className="rounded-lg p-2  hover:bg-[var(--workspace-control-hover)]"
                 title="收缩"
@@ -20312,53 +20384,6 @@ export default function AIWorkspace() {
               </button>
             </div>
           </div>
-
-          {/* History Panel */}
-          {showHistoryPanel && (
-            <div className="workspace-subtle-divider border-b bg-[var(--workspace-surface-soft)]">
-              <div className="p-3">
-                <button 
-                  onClick={(e) => { e.stopPropagation(); createNewTopic(); }}
-                  className="flex w-full items-center justify-center gap-2 rounded-xl border border-[var(--workspace-border)] bg-[var(--workspace-inverse-bg)] px-3 py-2 text-[var(--workspace-inverse-fg)]  hover:opacity-90"
-                >
-                  <span className="text-lg">+</span>
-                  <span className="text-sm font-medium">新建对话</span>
-                </button>
-              </div>
-              <div className="panel-scrollbar max-h-48 overflow-y-auto pb-2">
-                {(getCurrentSession()?.topics || []).map(topic => (
-                  <div 
-                    key={topic.id}
-                    onClick={(e) => { e.stopPropagation(); switchTopic(topic.id); }}
-                    className={`workspace-menu-item group flex cursor-pointer items-center gap-2 border-l-2 border-transparent px-4 py-3 ${
-                      topic.id === (getCurrentSession()?.activeTopicId) ? 'is-selected' : ''
-                    }`}
-                  >
-                    <div className="flex-1 min-w-0">
-                      <div className="truncate text-sm font-medium">{topic.title || '无标题对话'}</div>
-                      <div className="workspace-text-muted text-xs">
-                        {topic.messages.length} 条消息 · {new Date(topic.updatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                      </div>
-                    </div>
-                    <div className="flex items-center gap-1 opacity-0" data-gsap-hover-reveal="true">
-                      <button
-                        onClick={(e) => deleteTopic(topic.id, e)}
-                        className="rounded-lg p-1.5  hover:bg-red-500/10"
-                        title="删除对话"
-                      >
-                        <Trash2 size={12} className="text-red-500" />
-                      </button>
-                    </div>
-                  </div>
-                ))}
-                {(getCurrentSession()?.topics || []).length === 0 && (
-                  <div className="px-4 py-6 text-center text-xs text-zinc-500">
-                    暂无历史对话
-                  </div>
-                )}
-              </div>
-            </div>
-          )}
 
           {/* Main Content - Welcome Text Only */}
           {chatMessages.length === 0 && (
@@ -20497,7 +20522,7 @@ export default function AIWorkspace() {
                           if (nextMessages.length === 0) {
                             setHideWelcomeByCenterSkillPick(false);
                           }
-                          setActiveSkillForCurrentTopic(null);
+                          setActiveSkillForCurrentSession(null);
                         }}
                         className="absolute -right-2 -top-2 flex h-5 w-5 items-center justify-center rounded-full border border-[var(--workspace-border)] bg-[var(--workspace-surface-elevated)] text-xs opacity-0 hover:bg-[var(--workspace-control-hover)]"
                         data-gsap-hover-reveal="true"
@@ -21092,7 +21117,7 @@ export default function AIWorkspace() {
                       const skillAction = target.closest('[data-skill-action]')?.getAttribute('data-skill-action');
                       if (skillAction === 'remove') {
                         event.stopPropagation();
-                        setActiveSkillForCurrentTopic(null);
+                        setActiveSkillForCurrentSession(null);
                         window.requestAnimationFrame(() => {
                           chatInputEditorRef.current?.focus();
                           moveCaretToEditorEnd();

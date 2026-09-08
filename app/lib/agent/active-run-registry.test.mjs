@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  cancelActiveAgentRun,
   enqueueActiveAgentRunInput,
   registerActiveAgentRun,
+  registerActiveAgentRunControl,
   settleActiveAgentRun,
   takeActiveAgentRunInputs,
   updateActiveAgentRun,
@@ -12,17 +14,8 @@ test('non-interruptible execution defers steering until the current result is re
   const runId = 'registry-test-image';
   registerActiveAgentRun(runId, { taskId: 'task-1', operationId: 'operation-1' });
   updateActiveAgentRun(runId, { phase: 'executing', nonInterruptible: true });
-
-  assert.deepEqual(enqueueActiveAgentRunInput(runId, { delivery: 'steer', input: '把背景调亮' }), {
-    accepted: true,
-    delivery: 'follow_up',
-    phase: 'executing',
-  });
-  assert.deepEqual(enqueueActiveAgentRunInput(runId, { operationId: 'old-operation', input: '过期输入' }), {
-    accepted: false,
-    reason: 'stale_operation',
-    operationId: 'operation-1',
-  });
+  assert.deepEqual(enqueueActiveAgentRunInput(runId, { delivery: 'steer', input: '把背景调亮' }), { accepted: true, delivery: 'follow_up', phase: 'executing' });
+  assert.deepEqual(enqueueActiveAgentRunInput(runId, { operationId: 'old-operation', input: '过期输入' }), { accepted: false, reason: 'stale_operation', operationId: 'operation-1' });
   assert.equal(takeActiveAgentRunInputs(runId, 'steer').length, 0);
   assert.equal(takeActiveAgentRunInputs(runId, 'follow_up')[0].content[0].text, '把背景调亮');
   settleActiveAgentRun(runId);
@@ -31,13 +24,21 @@ test('non-interruptible execution defers steering until the current result is re
 test('queued input preserves reference labels and data images for the Pi turn', () => {
   const runId = 'registry-test-reference';
   registerActiveAgentRun(runId);
-  enqueueActiveAgentRunInput(runId, {
-    delivery: 'steer',
-    input: '按这张图调整',
-    referenceContext: { references: [{ id: 'canvas-1', label: '主视觉', role: 'reference', src: 'data:image/png;base64,AA==' }] },
-  });
+  enqueueActiveAgentRunInput(runId, { delivery: 'steer', input: '按这张图调整', referenceContext: { references: [{ id: 'canvas-1', label: '主视觉', role: 'reference', src: 'data:image/png;base64,AA==' }] } });
   const message = takeActiveAgentRunInputs(runId, 'steer')[0];
   assert.match(message.content[0].text, /主视觉/);
   assert.deepEqual(message.content[1], { type: 'image', mimeType: 'image/png', data: 'AA==' });
   settleActiveAgentRun(runId);
+});
+
+test('cancels only the matching active run identity', () => {
+  const runId = `cancel-test-${Date.now()}`;
+  let cancelled = 0;
+  registerActiveAgentRun(runId, { threadId: 'thread', turnId: 'turn', taskId: 'task', operationId: 'op' });
+  assert.equal(registerActiveAgentRunControl(runId, { cancel: () => { cancelled += 1; } }), true);
+  assert.deepEqual(cancelActiveAgentRun(runId, { threadId: 'other' }), { accepted: false, reason: 'stale_operation' });
+  assert.deepEqual(cancelActiveAgentRun(runId, { threadId: 'thread', turnId: 'turn', taskId: 'task', operationId: 'op' }), { accepted: true });
+  assert.equal(cancelled, 1);
+  settleActiveAgentRun(runId);
+  assert.deepEqual(cancelActiveAgentRun(runId, { threadId: 'thread' }), { accepted: false, reason: 'settled' });
 });

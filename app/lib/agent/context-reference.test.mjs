@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 
 import {
   buildAgentContextEntities,
-  extractLegacyProposal,
   isReferentialShorthand,
   parseAgentProposalBlock,
   resolveContextReference,
@@ -62,14 +61,9 @@ test('keeps candidate selection out of local semantic routing', () => {
   assert.equal(result.status, 'missing');
 });
 
-test('extracts legacy markdown tables only when they are actionable proposals', () => {
-  const legacy = extractLegacyProposal({
-    id: 'legacy-message',
-    content: '建议按以下方向生成，请确认：\n| Vol.1 | 绅士双兔 | 两只兔子穿西装 |\n| --- | --- | --- |\n| Vol.2 | 优雅双猫 | 两只猫穿礼服 |\n| Vol.3 | 先锋双犬 | 德牧或杜宾，解构主义宽肩西装 |',
-  });
-  assert.equal(legacy?.options.length, 3);
-  assert.match(legacy?.options[2].brief || '', /德牧或杜宾/);
-  assert.equal(extractLegacyProposal({ id: 'knowledge', content: '| 年份 | 销量 |\n| 2024 | 10 |\n| 2025 | 12 |' }), null);
+test('does not infer proposals from unstructured assistant text', () => {
+  const entities = buildAgentContextEntities({ messages: [{ id: 'assistant-legacy', role: 'assistant', content: '建议按以下方向生成，请确认。' }] });
+  assert.equal(entities.some((entity) => entity.kind === 'proposal_option'), false);
 });
 
 test('requires explicit stable IDs for generated images and selected canvas objects', () => {

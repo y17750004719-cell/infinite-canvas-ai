@@ -15,6 +15,10 @@ test('createEmptySession creates a persisted-ready empty canvas', () => {
   });
 
   assert.equal(session.id, 'session-123');
+  assert.equal(session.threadId, session.id);
+  assert.equal(session.archived, false);
+  assert.equal(session.pendingApproval, null);
+  assert.deepEqual(session.todoItems, []);
   assert.equal(session.name, '新画布 3');
   assert.equal(session.createdAt, 123);
   assert.equal(session.updatedAt, 123);
@@ -28,7 +32,10 @@ test('createEmptySession creates a persisted-ready empty canvas', () => {
   assert.deepEqual(session.imageCardCountById, {});
   assert.deepEqual(session.imageCardAspectRatioById, {});
   assert.deepEqual(session.generatedImageHistory, []);
-  assert.equal(session.topics?.length, 1);
+  assert.equal(session.schemaVersion, 5);
+  assert.equal('topics' in session, false);
+  assert.equal('activeTopicId' in session, false);
+  assert.deepEqual(session.visualAssets, []);
   assert.equal(session.viewport.scale, 1);
 });
 

@@ -51,7 +51,6 @@ export interface AgentContextResolution {
 }
 
 export function parseAgentProposalBlock(content: string): { cleanContent: string; proposal: AgentProposal | null };
-export function extractLegacyProposal(message: Record<string, unknown>): AgentProposal | null;
 export function buildAgentContextEntities(input?: Record<string, unknown>): AgentContextEntity[];
 export function resolveContextReference(input?: {
   userMessage?: string;

@@ -9,6 +9,15 @@ export const AGENT_LIFECYCLE_EVENT_TYPES = new Set([
   'agent_completion_summary', 'agent_done', 'agent_error', 'agent_cancelled',
 ]);
 
+export const CODEX_LIFECYCLE_EVENT_TYPES = new Set([
+  'thread.started', 'turn.started', 'item.started', 'item.updated',
+  'item.completed', 'turn.completed', 'turn.failed', 'error',
+]);
+
+export function isCodexLifecycleEvent(value) {
+  return Boolean(value && typeof value.type === 'string' && CODEX_LIFECYCLE_EVENT_TYPES.has(value.type));
+}
+
 export function isAgentLifecycleEvent(value) {
   return Boolean(value && typeof value.type === 'string' && AGENT_LIFECYCLE_EVENT_TYPES.has(value.type));
 }
@@ -60,7 +69,7 @@ export function resolveAgentIdentity({
   };
 }
 
-export function normalizeAgentEventIdentity(event, { allowLegacy = true } = {}) {
+export function normalizeAgentEventIdentity(event) {
   const input = event && typeof event === 'object' ? event : {};
   for (const field of ['taskId', 'operationId', 'runId']) {
     if (typeof input[field] === 'string' && input[field].trim().length > MAX_ID_LENGTH) return null;
@@ -68,18 +77,16 @@ export function normalizeAgentEventIdentity(event, { allowLegacy = true } = {}) 
   const runId = normalizeOptionalAgentId(input.runId);
   const rawTaskId = normalizeOptionalAgentId(input.taskId);
   const rawOperationId = normalizeOptionalAgentId(input.operationId);
-  const taskId = rawTaskId || (allowLegacy ? runId : null);
-  const operationId = rawOperationId || (allowLegacy ? runId : null);
+  const taskId = rawTaskId;
+  const operationId = rawOperationId;
   const rawSequence = input.sequence;
   const hasSequence = Number.isFinite(Number(rawSequence)) && Number(rawSequence) >= 0;
-  if (!runId || !taskId || !operationId || (!hasSequence && !allowLegacy)) return null;
-  const legacy = !rawTaskId || !rawOperationId || !hasSequence;
+  if (!runId || !taskId || !operationId || !hasSequence) return null;
   return {
-    taskId: legacy ? runId : taskId,
-    operationId: legacy ? runId : operationId,
+    taskId,
+    operationId,
     runId,
-    ...(hasSequence ? { sequence: normalizeSequence(rawSequence) } : { legacy: true }),
-    ...(legacy ? { legacy: true } : {}),
+    sequence: normalizeSequence(rawSequence),
     ...(Number.isFinite(Number(input.timestampMs)) ? { timestampMs: Number(input.timestampMs) } : {}),
   };
 }
@@ -88,12 +95,9 @@ export function classifyAgentEvent(event, {
   taskId = '',
   operationId = '',
   lastSequence = 0,
-  allowLegacy = true,
 } = {}) {
-  if (allowLegacy && !event?.runId) return { accepted: true, reason: 'legacy', identity: null };
-  const identity = normalizeAgentEventIdentity(event, { allowLegacy });
+  const identity = normalizeAgentEventIdentity(event);
   if (!identity) return { accepted: false, reason: 'invalid_identity', identity: null };
-  if (identity.legacy) return { accepted: true, reason: 'legacy', identity };
   if (taskId && identity.taskId !== taskId && event?.type !== 'agent_start') {
     return { accepted: false, reason: 'stale_task', identity };
   }

@@ -82,6 +82,7 @@ export function normalizeGeneratedImageHistory(entries) {
     return [{
       id,
       src,
+      ...(toSafeString(entry?.assetId) ? { assetId: toSafeString(entry.assetId) } : {}),
       previewSrc: toSafeString(entry?.previewSrc) || src,
       createdAt,
       source,
@@ -89,7 +90,6 @@ export function normalizeGeneratedImageHistory(entries) {
       naturalWidth: toSafePositiveNumber(entry?.naturalWidth),
       naturalHeight: toSafePositiveNumber(entry?.naturalHeight),
       sourceItemId: toSafeString(entry?.sourceItemId) || undefined,
-      topicId: toSafeString(entry?.topicId) || undefined,
       messageId: toSafeString(entry?.messageId) || undefined,
       ...(toSafeString(entry?.taskId) ? { taskId: toSafeString(entry.taskId) } : {}),
       ...(toSafePositiveInteger(entry?.contractVersion) ? { contractVersion: entry.contractVersion } : {}),
@@ -174,22 +174,22 @@ export function appendMissingGeneratedHistoryEntries(existingEntries, nextEntrie
 
   const seenIds = new Set(normalizedExisting.map((entry) => entry.id));
   const seenVersionIds = new Set(normalizedExisting.flatMap((entry) => (
-    entry.topicId && entry.taskId && entry.versionId ? [`${entry.topicId}:${entry.taskId}:${entry.versionId}`] : []
+    entry.sessionId && entry.taskId && entry.versionId ? [`${entry.sessionId}:${entry.taskId}:${entry.versionId}`] : []
   )));
-  const seenLegacySrcs = new Set(normalizedExisting.flatMap((entry) => (
-    entry.topicId && entry.taskId && entry.versionId ? [] : [entry.src]
+  const seenUnversionedSrcs = new Set(normalizedExisting.flatMap((entry) => (
+    entry.sessionId && entry.taskId && entry.versionId ? [] : [entry.src]
   )));
   const appendedEntries = normalizedNext.filter((entry) => {
-    const versionKey = entry.topicId && entry.taskId && entry.versionId
-      ? `${entry.topicId}:${entry.taskId}:${entry.versionId}`
+    const versionKey = entry.sessionId && entry.taskId && entry.versionId
+      ? `${entry.sessionId}:${entry.taskId}:${entry.versionId}`
       : '';
-    if (seenIds.has(entry.id) || (versionKey ? seenVersionIds.has(versionKey) : seenLegacySrcs.has(entry.src))) {
+    if (seenIds.has(entry.id) || (versionKey ? seenVersionIds.has(versionKey) : seenUnversionedSrcs.has(entry.src))) {
       return false;
     }
 
     seenIds.add(entry.id);
     if (versionKey) seenVersionIds.add(versionKey);
-    else seenLegacySrcs.add(entry.src);
+    else seenUnversionedSrcs.add(entry.src);
     return true;
   });
 
@@ -231,8 +231,8 @@ export function mergeGeneratedImageHistoryEntries({
 
   const appendUnique = (entries) => {
     entries.forEach((entry) => {
-      const key = entry.topicId && entry.taskId && entry.versionId
-        ? `version:${entry.topicId}:${entry.taskId}:${entry.versionId}`
+      const key = entry.sessionId && entry.taskId && entry.versionId
+        ? `version:${entry.sessionId}:${entry.taskId}:${entry.versionId}`
         : `src:${entry.src}`;
       if (seenKeys.has(key)) {
         return;

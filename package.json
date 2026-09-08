@@ -15,14 +15,14 @@
     "dev": "next dev -p 3001",
     "build": "next build",
     "start": "next start -p 3001",
-    "test": "node --test",
+    "test": "node --test 'app/**/*.test.mjs' 'scripts/*.test.mjs'",
+    "test:native-smoke": "node scripts/smoke-native-codex.mjs runtime/native-codex/target/debug/codex-app-server",
     "test:image-smoke": "node scripts/smoke-image-generation.mjs",
     "lint": "eslint app",
     "typecheck": "next typegen && tsc --noEmit",
     "check": "npm run lint && npm run typecheck && npm test && npm run build"
   },
   "dependencies": {
-    "@earendil-works/pi-agent-core": "0.84.2",
     "@gsap/react": "^2.1.2",
     "gsap": "^3.15.0",
     "lucide-react": "0.577.0",

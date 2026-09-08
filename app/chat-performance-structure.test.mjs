@@ -124,15 +124,15 @@ test('skill pointer hover updates highlight synchronously', () => {
   assert.match(pageSource, /id="skill-menu-listbox"\s*data-gsap-motion-exclude="true"/);
 });
 
-test('skill selection continues updating the active topic', () => {
+test('skill selection continues updating the active session', () => {
   const topicUpdateSource = sourceBetween(
     pageSource,
-    'const setActiveSkillForCurrentTopic =',
-    'const createNewTopic ='
+    'const setActiveSkillForCurrentSession =',
+    'const setActiveSkillForCurrentSession ='
   );
 
-  assert.match(topicUpdateSource, /topic\.id === session\.activeTopicId/);
-  assert.match(topicUpdateSource, /activeSkill:\s*skill/);
+  assert.match(pageSource, /session\.id === currentSessionId/);
+  assert.match(pageSource, /activeSkill:\s*skill/);
 });
 
 test('chat editor protects IME composition from external DOM synchronization', () => {

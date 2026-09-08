@@ -40,6 +40,13 @@ export default function WorkspaceDetailPage() {
 
     try {
       await removeSession(session.id);
+      await fetch('/api/session-visual-assets', {
+        method: 'DELETE',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ sessionId: session.id }),
+      }).catch((error) => {
+        console.warn('Failed to delete session visual assets:', error);
+      });
       router.push('/workspaces');
     } catch (error) {
       console.error('Failed to delete workspace:', error);

@@ -159,13 +159,13 @@ test('server-selected Skills annotate the sent message without repopulating the 
   const activeSkillChangeStart = source.indexOf("if (event.type === 'active_skill_changed')");
   const skillSelectedStart = source.indexOf("if (event.type === 'skill_selected'", activeSkillChangeStart);
   assert.ok(activeSkillChangeStart >= 0 && skillSelectedStart > activeSkillChangeStart);
-  assert.doesNotMatch(source.slice(activeSkillChangeStart, skillSelectedStart), /setActiveSkillForCurrentTopic/);
+  assert.doesNotMatch(source.slice(activeSkillChangeStart, skillSelectedStart), /setActiveSkillForCurrentSession/);
   assert.match(source, /event\.type === 'skill_selected' && event\.label/);
   assert.match(source, /if \(!currentSkill\)/);
   assert.match(source, /type: 'skill_selected'/);
   assert.match(source, /updatePendingAssistantMessageImmediately\(\(msg\) => updateAgentRunProgress/);
   assert.match(source, /message\.id === userMessage\.id \? \{ \.\.\.message, skill: selectedSkill \}/);
-  assert.match(source, /setChatInput\(''\);\s*setActiveSkillForCurrentTopic\(null\);/);
+  assert.match(source, /setChatInput\(''\);\s*setActiveSkillForCurrentSession\(null\);/);
   assert.match(source, /pendingAgentClarification\.request\.dimension !== 'skill_selection'/);
 });
 
@@ -232,7 +232,7 @@ test('agent final image prompts persist on the progress message and expand on de
   assert.match(source, /event\.type === 'image_prompts_ready'/);
   assert.match(source, /promptRunId = event\.runId \|\| agentRunId/);
   assert.match(source, /promptIdentity = `\$\{promptRunId\}:\$\{promptToolCallId\}:\$\{promptIndex\}`/);
-  assert.match(source, /entry\.runId \|\| 'legacy'/);
+  assert.match(source, /entry\.runId \|\| 'run'/);
   assert.match(source, /agentImagePrompts:\s*\[/);
   assert.match(source, /step\.stepId === 'image_prompt'/);
   assert.match(source, /<details[\s\S]{0,300}<summary/);
@@ -457,8 +457,8 @@ test('Skill tokens reuse reference token styling, stay first, and support explic
   assert.match(source.slice(skillBlockStart, composerSegmentLoopIndex), /workspace-reference-token workspace-skill-token/);
   assert.match(source.slice(skillBlockStart, composerSegmentLoopIndex), /data-skill-action', 'remove'/);
   assert.match(source, /target\.closest\('\[data-reference-action\], \[data-skill-action\]'\)/);
-  assert.match(source, /skillAction === 'remove'[\s\S]{0,180}setActiveSkillForCurrentTopic\(null\)/);
-  assert.match(source, /\(e\.key === 'Backspace' \|\| e\.key === 'Delete'\)[\s\S]{0,160}setActiveSkillForCurrentTopic\(null\)/);
+  assert.match(source, /skillAction === 'remove'[\s\S]{0,180}setActiveSkillForCurrentSession\(null\)/);
+  assert.match(source, /\(e\.key === 'Backspace' \|\| e\.key === 'Delete'\)[\s\S]{0,160}setActiveSkillForCurrentSession\(null\)/);
   assert.match(source, /editor\.firstChild !== skillToken[\s\S]{0,100}editor\.insertBefore\(skillToken, editor\.firstChild\)/);
   const userMessageStart = source.indexOf("{msg.role === 'user' ? (");
   const sentSkillIndex = source.indexOf('{msg.skill && (', userMessageStart);
@@ -681,7 +681,7 @@ test('assistant chat content uses the Codex-style content axis while user messag
 test('session hydration normalizes persisted Agent timelines before rendering them', () => {
   assert.match(source, /type: 'session_hydrate'/);
   assert.match(source, /const normalizedProgress = message\.agentRunProgress/);
-  assert.match(source, /reduceAgentRunProgress\(normalizedProgress, \{ type: 'agent_error' \}\)/);
+  assert.doesNotMatch(source, /上次任务因页面异常中断/);
 });
 
 test('page handles explicit Agent cancellation and does not retain legacy Skill Job state', () => {
@@ -697,11 +697,15 @@ test('late assistant deltas do not replay committed public commentary', () => {
   assert.match(source, /consumePromotedFinalReplay\([\s\S]{0,120}consumeCommittedCommentaryReplay\(event\.delta\)/);
 });
 
-test('running composer uses one adaptive control and queues follow-ups without steering', () => {
+test('running composer delegates delivery by phase and retains draft until accepted', () => {
   assert.match(source, /const handleSubmitRunningAgentInput = async \(\)/);
   assert.match(source, /fetch\('\/api\/agent\/steer'/);
-  assert.match(source, /delivery === 'follow_up' \? 'queued' : 'running'/);
-  assert.match(source, /const delivery = 'follow_up' as const/);
+  assert.match(source, /accepted\.delivery === 'follow_up' \? 'queued' : undefined/);
+  assert.match(source, /const delivery = 'steer' as const/);
+  const submit = source.slice(source.indexOf('const handleSubmitRunningAgentInput ='), source.indexOf('const handleSelectedTextCardPanelSubmit ='));
+  assert.ok(submit.indexOf("setChatInput('')") > submit.indexOf('if (!response.ok)'));
+  assert.match(submit, /threadId: currentSessionIdRef\.current/);
+  assert.match(submit, /turnId: getCurrentSession\(\)\?\.activeTurn/);
   assert.doesNotMatch(source, /handleSubmitRunningAgentInput\('steer'\)/);
   assert.doesNotMatch(source, /showRunningDeliveryMenu|选择发送方式|立即调整当前任务/);
   assert.match(source, /isGenerating && !latestChatInputRef\.current\.trim\(\)[\s\S]{0,500}handleCancelGenerate/);

@@ -49,6 +49,8 @@ function normalizeReferenceContext(value) {
     if (!id || !src || !label || !source || !role) return [];
     return [{
       id, src, label, source, role,
+      ...(bounded(entry.assetId, 300) ? { assetId: bounded(entry.assetId, 300) } : {}),
+      ...(bounded(entry.originalSrc, 20_000) ? { originalSrc: bounded(entry.originalSrc, 20_000) } : {}),
       ...(bounded(entry.previewSrc, 20_000) ? { previewSrc: bounded(entry.previewSrc, 20_000) } : {}),
       ...(bounded(entry.canvasItemId, 200) ? { canvasItemId: bounded(entry.canvasItemId, 200) } : {}),
       ...(bounded(entry.regionId, 200) ? { regionId: bounded(entry.regionId, 200) } : {}),
@@ -152,12 +154,12 @@ export function normalizeAgentRecoveryRecord(value) {
   if (!input || !failure || Number(input.version) !== 1) return null;
   const taskId = bounded(input.taskId, 200);
   const runId = bounded(input.runId, 200);
-  const operationId = bounded(input.operationId, 200) || runId;
+  const operationId = bounded(input.operationId, 200);
   const lastSequence = nonNegativeInt(input.lastSequence, Number.MAX_SAFE_INTEGER);
-  const topicId = bounded(input.topicId, 200);
+  const sessionId = bounded(input.sessionId, 200);
   const sourceUserMessageId = bounded(input.sourceUserMessageId, 200);
   const originalRequest = bounded(input.originalRequest, 4000);
-  if (!taskId || !runId || !topicId || !sourceUserMessageId || !originalRequest) return null;
+  if (!taskId || !runId || !operationId || !sessionId || !sourceUserMessageId || !originalRequest) return null;
   if (!['failed', 'cancelled'].includes(input.status)) return null;
   const failureKind = FAILURE_KINDS.has(failure.kind) ? failure.kind : 'unknown';
   const retryability = RETRYABILITY.has(failure.retryability) ? failure.retryability : 'unknown';
@@ -175,7 +177,7 @@ export function normalizeAgentRecoveryRecord(value) {
     runId,
     operationId,
     lastSequence,
-    topicId,
+    sessionId,
     sourceUserMessageId,
     status: input.status === 'cancelled' ? 'cancelled' : 'failed',
     resumeRoute: ROUTES.has(input.resumeRoute) ? input.resumeRoute : null,
@@ -190,6 +192,7 @@ export function normalizeAgentRecoveryRecord(value) {
     skillId: bounded(input.skillId, 160) || null,
     ...(bounded(input.skillContentHash, 64) ? { skillContentHash: bounded(input.skillContentHash, 64) } : {}),
     ...(imageOperation ? { imageOperation } : {}),
+    ...(bounded(input.assetId, 240) ? { assetId: bounded(input.assetId, 240) } : {}),
     ...(bounded(input.targetReferenceId, 200) ? { targetReferenceId: bounded(input.targetReferenceId, 200) } : {}),
     contextEntityIds: ids(input.contextEntityIds),
     visualReferenceIds: ids(input.visualReferenceIds),
@@ -222,7 +225,7 @@ export function createAgentRecoveryRecord(input = {}) {
     runId,
     operationId,
     lastSequence,
-    topicId: input.topicId,
+    sessionId: input.sessionId,
     sourceUserMessageId: input.sourceUserMessageId,
     status: input.status === 'cancelled' ? 'cancelled' : 'failed',
     resumeRoute: input.resumeRoute || null,
@@ -237,6 +240,7 @@ export function createAgentRecoveryRecord(input = {}) {
     skillId: input.skillId || null,
     skillContentHash: input.skillContentHash || null,
     imageOperation: input.imageOperation,
+    assetId: input.assetId,
     targetReferenceId: input.targetReferenceId,
     contextEntityIds: input.contextEntityIds || [],
     visualReferenceIds: input.visualReferenceIds || [],

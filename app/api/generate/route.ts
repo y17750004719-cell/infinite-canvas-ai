@@ -80,6 +80,11 @@ function getErrorDiagnostics(error: unknown) {
   return {
     errorName: error.name,
     errorMessage: error.message,
+    failureClass: error instanceof ImageGenerationError ? error.failureClass || null : null,
+    failureCode: error instanceof ImageGenerationError ? error.failureCode || null : null,
+    retryable: error instanceof ImageGenerationError ? error.isRetryable ?? null : null,
+    retryAttempt: error instanceof ImageGenerationError ? error.retryAttempt ?? null : null,
+    outcomeUnknown: error instanceof ImageGenerationError ? error.outcomeUnknown ?? null : null,
     causeName: typeof cause?.name === "string" ? cause.name : null,
     causeMessage: typeof cause?.message === "string" ? cause.message : null,
     causeCode: typeof cause?.code === "string" ? cause.code : null,
@@ -728,6 +733,7 @@ export async function POST(request: NextRequest) {
                 failureCode: error.failureCode,
                 isRetryable: error.isRetryable,
                 retryAttempt: error.retryAttempt,
+                outcomeUnknown: error.outcomeUnknown,
               }
             : undefined;
         const normalizedMessage = message.toLowerCase();
@@ -750,13 +756,24 @@ export async function POST(request: NextRequest) {
       }
 
       if (!imageResult.data || imageResult.data.length === 0) {
-        await logResponse(500, { mode: referenceResponseMode, reason: "no_image_data" });
+        const emptyResultMeta = {
+          mode: referenceResponseMode,
+          reason: "no_image_data",
+          failureClass: "payload",
+          failureCode: "provider_result_unknown",
+          failureStage: "provider_result_parse",
+          retryable: false,
+          outcomeUnknown: true,
+        };
+        await requestLogger.error("image.empty_result", "No image data in reference-based generation result", emptyResultMeta);
+        await logResponse(502, emptyResultMeta);
         return NextResponse.json(
           {
             status: "error",
             error: usesImageEditsApi ? "Edits failed: no image data returned" : "No image data returned",
+            ...emptyResultMeta,
           },
-          { status: 500 }
+          { status: 502 }
         );
       }
 
@@ -843,7 +860,8 @@ export async function POST(request: NextRequest) {
           const canRetryWithLowerSize =
             index < fallbackSizes.length - 1 &&
             error instanceof ImageGenerationError &&
-            [429, 502, 503, 504].includes(error.statusCode || 0);
+            error.outcomeUnknown !== true &&
+            error.failureCode === "invalid_tool_arguments";
 
           if (!canRetryWithLowerSize) {
             throw error;
@@ -862,11 +880,18 @@ export async function POST(request: NextRequest) {
       }
 
       if (!imageResult.data || imageResult.data.length === 0) {
-        await requestLogger.error("image.empty_result", "No image data in generation result", {
+        const emptyResultMeta = {
           mode: "image_generate",
-        });
-        await logResponse(500, { mode: "image_generate", reason: "no_image_data" });
-        return NextResponse.json({ status: "error", error: "No image data returned" }, { status: 500 });
+          reason: "no_image_data",
+          failureClass: "payload",
+          failureCode: "provider_result_unknown",
+          failureStage: "provider_result_parse",
+          retryable: false,
+          outcomeUnknown: true,
+        };
+        await requestLogger.error("image.empty_result", "No image data in generation result", emptyResultMeta);
+        await logResponse(502, emptyResultMeta);
+        return NextResponse.json({ status: "error", error: "No image data returned", ...emptyResultMeta }, { status: 502 });
       }
 
       debugLog("Image generate supplier returned outputs", {
@@ -1000,13 +1025,17 @@ export async function POST(request: NextRequest) {
     const errorMessage = error instanceof Error ? error.message : "Unknown error";
     const errorStack = error instanceof Error ? error.stack : "";
     const routeErrorMeta = buildGenerateRouteErrorMeta(error, ImageGenerationError);
-    const { statusCode, failureClass, isRetryable, retryAttempt } = routeErrorMeta;
+    const { statusCode, failureClass, failureStage, isRetryable, retryable, retryAttempt, outcomeUnknown } = routeErrorMeta;
 
     await requestLogger.error("request.error", "Generate API error", {
       statusCode,
       failureClass,
+      failureCode: routeErrorMeta.failureCode || null,
+      failureStage,
       isRetryable,
+      retryable,
       retryAttempt,
+      outcomeUnknown,
       error: serializeError(error),
       ...getErrorDiagnostics(error),
     });
@@ -1015,8 +1044,12 @@ export async function POST(request: NextRequest) {
       mode: "error",
       error: errorMessage,
       failureClass,
+      failureCode: routeErrorMeta.failureCode || null,
+      failureStage,
       isRetryable,
+      retryable,
       retryAttempt,
+      outcomeUnknown,
     });
 
     return NextResponse.json({
@@ -1024,6 +1057,11 @@ export async function POST(request: NextRequest) {
       error: errorMessage,
       failureClass,
       code: routeErrorMeta.failureCode,
+      failureStage,
+      retryable,
+      isRetryable,
+      retryAttempt,
+      outcomeUnknown,
       stack: process.env.NODE_ENV === 'development' ? errorStack : undefined,
     }, { status: statusCode });
   }

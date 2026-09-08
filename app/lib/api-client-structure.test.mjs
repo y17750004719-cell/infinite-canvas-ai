@@ -73,6 +73,20 @@ test('api-client keeps the Gemini official image helper available as a non-defau
   );
 });
 
+test('api-client retries transient upstream failures but never retries caller cancellation', () => {
+  assert.match(apiClientSource, /failureState\.isRetryable && attempt < maxAttempts && !request\.signal\?\.aborted/);
+  assert.match(apiClientSource, /status === 502 \|\| status === 503 \|\| status === 504/);
+});
+
+test('api-client treats uncertain image POST outcomes as non-retryable', () => {
+  assert.equal(apiClientSource.includes('failureCode?: "provider_unavailable" | "provider_http" | "provider_timeout" | "provider_result_unknown"'), true);
+  assert.equal(apiClientSource.includes('outcomeUnknown?: boolean;'), true);
+  assert.equal(apiClientSource.includes('retryWithoutStream("empty_stream")'), false);
+  assert.equal(apiClientSource.includes('retryWithoutStream("interrupted")'), false);
+  assert.equal(apiClientSource.includes('failureCode: "provider_result_unknown"'), true);
+  assert.equal(apiClientSource.includes('const resultUnknown = responseAccepted || failureState.outcomeUnknown === true;'), true);
+});
+
 test('api-client routes any Gemini-protocol image model through the official helper path', () => {
   assert.equal(
     apiClientSource.includes('export function shouldUseExactImageSizeApi(model?: string, size?: string): boolean {'),
@@ -368,7 +382,8 @@ test('api-client keeps partial-image streaming scoped to direct OpenAI image tra
   assert.equal(apiClientSource.includes('body.partial_images = 1;'), true);
   assert.equal(apiClientSource.includes('formData.set("partial_images", "1");'), true);
   assert.equal(apiClientSource.includes('readOpenAiImageStream(response)'), true);
-  assert.equal(apiClientSource.includes('await retryWithoutStream("empty_stream")'), true);
+  assert.equal(apiClientSource.includes('await retryWithoutStream("empty_stream")'), false);
+  assert.equal(apiClientSource.includes('await retryWithoutStream("interrupted")'), false);
 });
 
 test('api-client keeps image edits synchronous and recognizes Infinite-Canvas task statuses', () => {
@@ -396,10 +411,7 @@ test('api-client retries retryable OpenAI-compatible image transport failures on
     apiClientSource.includes('Retrying retryable OpenAI compatible image transport failure'),
     true
   );
-  assert.equal(
-    apiClientSource.includes('if (failureState.isRetryable && attempt < maxAttempts) {'),
-    true
-  );
+  assert.match(apiClientSource, /if \(failureState\.isRetryable && attempt < maxAttempts(?: && !request\.signal\?\.aborted)?\) \{/);
 });
 
 test('api-client parses common OpenAI compatible image2 task output field names', () => {
@@ -487,7 +499,7 @@ test('api-client uses a fixed 120 second timeout for Gemini official image submi
   );
 });
 
-test('api-client decouples Gemini image supplier fetches from the outer request signal and retries retryable socket disconnects once', () => {
+test('api-client decouples Gemini image supplier fetches from the outer request signal without retrying uncertain socket disconnects', () => {
   assert.equal(
     apiClientSource.includes('request.signal?.addEventListener("abort", onAbort);'),
     false
@@ -520,10 +532,8 @@ test('api-client decouples Gemini image supplier fetches from the outer request 
     apiClientSource.includes('causeMessage?.includes("client network socket disconnected before secure tls connection was established")'),
     true
   );
-  assert.equal(
-    apiClientSource.includes('if (failureState.isRetryable && attempt < maxAttempts) {'),
-    true
-  );
+  assert.equal(apiClientSource.includes('const policy = classifyImagePostRetry({ kind: "transport" });'), true);
+  assert.equal(apiClientSource.includes('failureCode: policy.failureCode === "provider_result_unknown" ? policy.failureCode : undefined'), true);
 });
 
 test('api-client annotates Gemini image failures with failureClass retryability and retryAttempt metadata', () => {
@@ -857,10 +867,32 @@ test('api-client converts Gemini chat messages and image parts into official con
 test('api-client materializes local chat images before both Gemini and OpenAI-compatible transport', () => {
   assert.equal(apiClientSource.includes('materializeChatMessageImages'), true);
   assert.equal(apiClientSource.includes('const requestMessages = materialized.messages'), true);
-  assert.equal(apiClientSource.includes('messages: requestMessages'), true);
+  assert.equal(apiClientSource.includes('messages: adaptToolResultImagesForOpenAi(requestMessages)'), true);
   assert.equal(apiClientSource.includes('convertChatMessagesToGeminiRequest(requestMessages'), true);
   assert.equal(apiClientSource.includes('localImageCount: materialized.localImageCount'), true);
   assert.equal(apiClientSource.includes('referenceImageBytes: materialized.totalImageBytes'), true);
+});
+
+test('api-client exposes and wires provider-neutral response item conversion', () => {
+  assert.equal(apiClientSource.includes('export type ResponseItem ='), true);
+  assert.equal(apiClientSource.includes('export function responseItemsToChatMessages('), true);
+  assert.equal(apiClientSource.includes('responseItems?: ResponseItem[];'), true);
+  assert.equal(apiClientSource.includes('request = normalizeChatRequest(request);'), true);
+  assert.equal(apiClientSource.includes('messages: responseItemsToChatMessages(request.responseItems'), true);
+  assert.equal(apiClientSource.includes("item.type === 'tool_result_image'"), true);
+});
+
+test('provider adapters own tool-result image compatibility conversion', () => {
+  const adapter = apiClientSource.slice(
+    apiClientSource.indexOf('function adaptToolResultImagesForOpenAi'),
+    apiClientSource.indexOf('export type ChatStreamEvent'),
+  );
+  assert.equal(apiClientSource.includes('function adaptToolResultImagesForOpenAi'), true);
+  assert.equal(adapter.includes('Chat Completions providers commonly require text-only tool results.'), true);
+  assert.equal(adapter.includes('role: "user" as const'), false);
+  assert.equal(adapter.includes('[tool_result_image: ${part.image_url.url}]'), true);
+  assert.equal(adapter.includes('Images returned by the preceding tool result.'), false);
+  assert.equal(apiClientSource.includes('pendingToolResponses.push(await referenceToInlineData'), true);
 });
 
 test('api-client adds Gemini no-image payload summaries and explicit failure classification', () => {

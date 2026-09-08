@@ -88,7 +88,7 @@ function dedupePersistedErrorSteps(steps) {
     }
     const key = step.operationId || step.itemId
       ? `${step.operationId || ''}:${step.sequence || ''}:${step.itemId || step.runId || 'agent-error'}:agent-error`
-      : `legacy:${step.runId || 'agent'}:agent-error`;
+      : `${step.runId || 'agent'}:agent-error`;
     const existingIndex = positions.get(key);
     if (existingIndex === undefined) {
       positions.set(key, result.length);
@@ -349,15 +349,22 @@ export function reduceAgentRunProgress(input, inputEvent) {
   if (!inputEvent || typeof inputEvent !== 'object') return input;
   const state = normalizeState(input, inputEvent);
 
-  const eventClassification = classifyAgentEvent(inputEvent, {
-    taskId: state.taskId,
-    operationId: state.operationId,
-    lastSequence: state.lastSequence,
-    allowLegacy: true,
-  });
+  const hasIdentity = Boolean(inputEvent.runId || inputEvent.taskId || inputEvent.operationId);
+  const eventForClassification = {
+    ...inputEvent,
+    taskId: inputEvent.taskId || (inputEvent.runId && inputEvent.runId !== state.runId ? inputEvent.runId : state.taskId) || inputEvent.runId || 'transient',
+    operationId: inputEvent.operationId || (inputEvent.runId && inputEvent.runId !== state.runId ? inputEvent.runId : state.operationId) || inputEvent.runId || 'transient',
+    runId: inputEvent.runId || state.runId || 'transient',
+    sequence: inputEvent.sequence ?? (state.lastSequence + 1),
+  };
+  const eventClassification = hasIdentity ? classifyAgentEvent(eventForClassification, {
+    taskId: inputEvent.taskId ? state.taskId : '',
+    operationId: inputEvent.taskId ? state.operationId : '',
+    lastSequence: inputEvent.runId && inputEvent.runId !== state.runId ? 0 : state.lastSequence,
+  }) : { accepted: true, identity: null };
   if (!eventClassification.accepted && inputEvent.type !== 'agent_start') return state;
-  const event = eventClassification.identity && !eventClassification.identity.legacy
-    ? { ...inputEvent, ...eventClassification.identity }
+  const event = eventClassification.identity
+    ? { ...eventForClassification, ...eventClassification.identity }
     : inputEvent;
 
   if (event.type === 'agent_start') {

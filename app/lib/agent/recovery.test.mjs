@@ -10,13 +10,23 @@ import {
 
 test('recovery records are bounded and keep stable task state', () => {
   const record = createAgentRecoveryRecord({
-    taskId: 'task-1', runId: 'run-1', operationId: 'operation-1', lastSequence: 0, topicId: 'topic-1', sourceUserMessageId: 'user-1',
+    taskId: 'task-1', runId: 'run-1', operationId: 'operation-1', lastSequence: 0, sessionId: 'topic-1', sourceUserMessageId: 'user-1',
     status: 'failed', resumeRoute: 'main_agent', intent: 'image', originalRequest: '生成海报',
     failureStage: 'image_pipeline', failureMessage: '504 upstream timeout https://private.test/x',
     skillId: 'poster', skillContentHash: 'a'.repeat(64), contextEntityIds: ['a', 'a'], visualReferenceIds: ['v'],
     completedAssetCount: 2,
     referenceContext: {
-      references: [{ id: 'ref-1', src: '/image.png', label: '参考图', source: 'history', role: 'reference', sourceTaskId: 'task-1', sourceVersionId: 'version-1' }],
+      references: [{
+        id: 'ref-1',
+        src: '/image.png',
+        assetId: 'topic-asset:topic-hash:content-hash',
+        originalSrc: 'https://example.test/original.png',
+        label: '参考图',
+        source: 'history',
+        role: 'reference',
+        sourceTaskId: 'task-1',
+        sourceVersionId: 'version-1',
+      }],
       composerSegments: [{ type: 'reference', referenceId: 'ref-1' }],
     },
   });
@@ -29,11 +39,13 @@ test('recovery records are bounded and keep stable task state', () => {
   assert.equal(record.completedAssetCount, 2);
   assert.equal(record.skillContentHash, 'a'.repeat(64));
   assert.equal(record.referenceContext.references[0].sourceVersionId, 'version-1');
+  assert.equal(record.referenceContext.references[0].assetId, 'topic-asset:topic-hash:content-hash');
+  assert.equal(record.referenceContext.references[0].originalSrc, 'https://example.test/original.png');
 });
 
 test('recovery records retain bounded executed tool call identity', () => {
   const record = createAgentRecoveryRecord({
-    taskId: 'task-tools', runId: 'run-tools', topicId: 'topic-1', sourceUserMessageId: 'user-1',
+    taskId: 'task-tools', runId: 'run-tools', sessionId: 'topic-1', sourceUserMessageId: 'user-1',
     status: 'failed', resumeRoute: 'main_agent', intent: 'image', originalRequest: '生成图片',
     failureStage: 'image_pipeline', failureMessage: '供应商失败',
     toolCalls: [
@@ -46,12 +58,12 @@ test('recovery records retain bounded executed tool call identity', () => {
   assert.equal(record.toolCalls[0].taskId, 'task-tools');
 });
 
-test('legacy recovery records receive identity defaults at the read boundary', () => {
+test('legacy recovery records without operation identity are rejected', () => {
   const record = normalizeAgentRecoveryRecord({
     version: 1,
     taskId: 'task-legacy',
     runId: 'run-legacy',
-    topicId: 'topic-1',
+    sessionId: 'topic-1',
     sourceUserMessageId: 'user-1',
     status: 'failed',
     resumeRoute: 'main_agent',
@@ -64,13 +76,12 @@ test('legacy recovery records receive identity defaults at the read boundary', (
     completedAssetCount: 0,
     createdAt: 1,
   });
-  assert.equal(record.operationId, 'run-legacy');
-  assert.equal(record.lastSequence, 0);
+  assert.equal(record, null);
 });
 
 test('terminal contract recovery retains the operation lock and resumable Main Agent transcript', () => {
   const record = createAgentRecoveryRecord({
-    taskId: 'task-1', runId: 'run-2', topicId: 'topic-1', sourceUserMessageId: 'user-1',
+    taskId: 'task-1', runId: 'run-2', sessionId: 'topic-1', sourceUserMessageId: 'user-1',
     status: 'failed', resumeRoute: 'main_agent', intent: 'image', originalRequest: '编辑海报',
     failureStage: 'terminal_contract', failureMessage: '图像合同未完成',
     imageOperation: 'edit', targetReferenceId: 'reference-1',
@@ -90,7 +101,7 @@ test('terminal contract recovery retains the operation lock and resumable Main A
 
 test('recovery records strictly normalize and persist bounded visual summaries', () => {
   const record = createAgentRecoveryRecord({
-    taskId: 'task-1', runId: 'run-1', topicId: 'topic-1', sourceUserMessageId: 'user-1',
+    taskId: 'task-1', runId: 'run-1', sessionId: 'topic-1', sourceUserMessageId: 'user-1',
     status: 'failed', resumeRoute: 'main_agent', intent: 'image', originalRequest: '继续修改图片',
     failureStage: 'planning', failureMessage: '连接中断',
     visualSummary: {
@@ -120,7 +131,8 @@ test('recovery records strictly normalize and persist bounded visual summaries',
 test('recovery normalization drops invalid visual summaries', () => {
   const base = {
     version: 1,
-    taskId: 'task-1', runId: 'run-1', topicId: 'topic-1', sourceUserMessageId: 'user-1',
+    operationId: 'operation-1',
+    taskId: 'task-1', runId: 'run-1', sessionId: 'topic-1', sourceUserMessageId: 'user-1',
     status: 'failed', resumeRoute: 'main_agent', intent: 'image', originalRequest: '继续修改图片',
     failure: { stage: 'planning', kind: 'transport', message: '连接中断', retryability: 'retryable' },
     skillId: null, contextEntityIds: [], visualReferenceIds: [], completedAssetCount: 0, createdAt: 1,
@@ -145,11 +157,11 @@ test('recovery normalization drops invalid visual summaries', () => {
 
 test('recovery snapshots retain saved assets for deterministic local delivery', () => {
   const record = createAgentRecoveryRecord({
-    taskId: 'task-1', runId: 'run-1', topicId: 'topic-1', sourceUserMessageId: 'user-1',
+    taskId: 'task-1', runId: 'run-1', sessionId: 'topic-1', sourceUserMessageId: 'user-1',
     status: 'failed', resumeRoute: 'local_delivery', intent: 'image', originalRequest: '生成海报',
     failureStage: 'local_delivery', failureMessage: '素材交付失败',
     taskSnapshot: {
-      topicId: 'topic-1',
+      sessionId: 'topic-1',
       taskId: 'task-1',
       contractVersion: 1,
       contract: { intent: 'image' },

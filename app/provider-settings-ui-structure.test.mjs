@@ -13,7 +13,7 @@ const motionControllerSource = fs.readFileSync(
 const globalStylesSource = fs.readFileSync(path.join(__dirname, 'globals.css'), 'utf8');
 
 test('page adds a dedicated left rail settings item and isolated modal gate for provider settings', () => {
-  assert.equal(pageSource.includes("{ id: 'settings', label: '设置', icon: Settings }"), true);
+  assert.equal(pageSource.includes("{ id: 'settings', label: '设置', icon: Settings2 }"), true);
   assert.equal(pageSource.includes('const ProviderSettingsModalGate = memo(React.forwardRef<'), true);
   assert.equal(
     pageSource.includes('const providerSettingsModalGateRef = useRef<ProviderSettingsModalGateHandle | null>(null);'),
@@ -22,15 +22,16 @@ test('page adds a dedicated left rail settings item and isolated modal gate for 
   assert.equal(pageSource.includes('const openProviderSettingsModal = useCallback(() => {'), true);
 });
 
-test('page routes both left rail settings and top bar settings to the same provider settings modal', () => {
+test('page routes the left rail settings item to the provider settings modal', () => {
   assert.equal(pageSource.includes("if (itemId === 'settings') {"), true);
   assert.equal(pageSource.includes('openProviderSettingsModal();'), true);
-  assert.equal(pageSource.includes('title="设置"'), true);
-  assert.equal(pageSource.includes('onClick={openProviderSettingsModal}'), true);
   assert.equal(
     pageSource.includes("data-provider-settings-trigger={item.id === 'settings' ? 'true' : undefined}"),
     true
   );
+  assert.equal(pageSource.includes('title="设置"'), false);
+  assert.equal(pageSource.includes('title="分享"'), false);
+  assert.equal(pageSource.includes('title="历史"'), false);
 });
 
 test('provider settings opens without changing root modal state or refetching loaded settings', () => {

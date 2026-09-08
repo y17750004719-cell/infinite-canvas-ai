@@ -115,6 +115,8 @@ function extractAgentImageAssets(rawResult) {
             : '',
       ...(Number.isFinite(item?.naturalWidth) ? { naturalWidth: item.naturalWidth } : {}),
       ...(Number.isFinite(item?.naturalHeight) ? { naturalHeight: item.naturalHeight } : {}),
+      ...(typeof item?.assetId === 'string' && item.assetId ? { assetId: item.assetId } : {}),
+      ...(typeof item?.previewSrc === 'string' && item.previewSrc ? { previewSrc: item.previewSrc } : {}),
       ...(item?.promptTrace && typeof item.promptTrace === 'object'
         ? { promptTrace: item.promptTrace }
         : {}),

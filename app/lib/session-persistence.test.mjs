@@ -1,15 +1,27 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
+test('v5 retains workbench state while v4 resets it and binds thread to session', () => {
+  const base = { schemaVersion: 5, id: 'workbench', threadId: 'wrong', items: [], messages: [], viewport: { x: 0, y: 0, scale: 1 }, archived: true, pendingApproval: { itemId: 'approval' }, todoItems: [{ id: '1', content: 'Review', status: 'completed' }], commandState: { lastCommand: 'status', lastResult: {} } };
+  const current = normalizeProjectSession(base);
+  assert.equal(current.threadId, base.id);
+  assert.deepEqual(current.todoItems, base.todoItems);
+  assert.deepEqual(current.pendingApproval, base.pendingApproval);
+  const old = normalizeProjectSession({ ...base, schemaVersion: 4 });
+  assert.equal(old.archived, false);
+  assert.equal(old.pendingApproval, null);
+  assert.deepEqual(old.todoItems, []);
+});
+
 import {
   buildPersistedSession,
   normalizeProjectSession,
-  removeDeprecatedImageAgentData,
   shouldFlushScheduledSessionSave,
 } from './session-persistence.mjs';
 
 test('buildPersistedSession stores connections in the saved session', () => {
   const session = {
+    schemaVersion: 5,
     id: 'session-1',
     name: 'Canvas',
     createdAt: 1,
@@ -67,6 +79,7 @@ test('project sessions normalize and persist chat panel provider model selection
 
 test('project sessions preserve normalized image region selections and request revisions', () => {
   const normalized = normalizeProjectSession({
+    schemaVersion: 5,
     id: 'session-regions',
     name: 'Regions',
     createdAt: 1,
@@ -99,6 +112,7 @@ test('project sessions preserve normalized image region selections and request r
 
 test('buildPersistedSession preserves normalized generated image history entries', () => {
   const session = {
+    schemaVersion: 5,
     id: 'session-1',
     name: 'Canvas',
     createdAt: 1,
@@ -112,6 +126,7 @@ test('buildPersistedSession preserves normalized generated image history entries
     generatedImageHistory: [
       {
         id: 'history-1',
+        sessionId: 'session-1',
         src: '/uploads/generated/a.png',
         previewSrc: '/uploads/previews/a.webp',
         createdAt: 10,
@@ -127,6 +142,7 @@ test('buildPersistedSession preserves normalized generated image history entries
       },
       {
         id: 'history-2',
+        sessionId: 'session-1',
         src: '',
         createdAt: 11,
         source: 'chat',
@@ -141,11 +157,10 @@ test('buildPersistedSession preserves normalized generated image history entries
       previewSrc: '/uploads/previews/a.webp',
       createdAt: 10,
       source: 'image-card',
-      sessionId: undefined,
+      sessionId: 'session-1',
       naturalWidth: undefined,
       naturalHeight: undefined,
       sourceItemId: 'image-card-1',
-      topicId: 'topic-1',
       messageId: undefined,
       taskId: 'task-1',
       contractVersion: 2,
@@ -159,7 +174,7 @@ test('buildPersistedSession preserves normalized generated image history entries
 
 test('buildPersistedSession keeps task snapshots only on their owning assistant message', () => {
   const taskSnapshot = {
-    topicId: 'topic-1',
+    sessionId: 'session-1',
     taskId: 'task-1',
     contractVersion: 1,
     contract: { intent: 'image' },
@@ -183,7 +198,7 @@ test('buildPersistedSession keeps task snapshots only on their owning assistant 
   }];
   const agentRecovery = {
     version: 1,
-    taskId: 'task-1', runId: 'run-1', operationId: 'run-1', lastSequence: 0, topicId: 'topic-1', sourceUserMessageId: 'user-1',
+    taskId: 'task-1', runId: 'run-1', operationId: 'run-1', lastSequence: 0, sessionId: 'session-1', sourceUserMessageId: 'user-1',
     status: 'failed', resumeRoute: 'image_planner', intent: 'image', originalRequest: '生成海报',
     failure: { stage: 'planning', kind: 'transport', message: '连接中断', retryability: 'retryable' },
     skillId: null, contextEntityIds: [], visualReferenceIds: [], completedAssetCount: 0, createdAt: 1,
@@ -198,141 +213,80 @@ test('buildPersistedSession keeps task snapshots only on their owning assistant 
     agentRecovery,
   };
   const result = buildPersistedSession({
+    schemaVersion: 5,
     id: 'session-1',
     items: [],
     messages: [assistantMessage],
-    topics: [{ id: 'topic-1', messages: [assistantMessage] }],
-    activeTopicId: 'topic-1',
     viewport: { x: 0, y: 0, scale: 1 },
   }, {});
 
   assert.deepEqual(result.messages[0].taskSnapshot, {
-    topicId: 'topic-1',
+    sessionId: 'session-1',
     taskId: 'task-1',
     contractVersion: 1,
     contract: { intent: 'image' },
     latestBatchId: 'batch-1',
     activeVersions: [{ referenceId: 'task-slot:slot-1', batchId: 'batch-1', slotId: 'slot-1', versionId: 'version-1' }],
   });
-  assert.deepEqual(result.topics[0].messages[0].taskSnapshot, result.messages[0].taskSnapshot);
   assert.deepEqual(result.messages[0].agentImagePrompts, [{
     index: 0,
     label: '图片 1',
     prompt: '最终供应商 Prompt',
+    compilation: agentImagePrompts[0].compilation,
   }]);
-  assert.deepEqual(result.topics[0].messages[0].agentImagePrompts, result.messages[0].agentImagePrompts);
   assert.equal(result.messages[0].agentProgressMode, 'compact');
-  assert.equal(result.topics[0].messages[0].agentProgressMode, 'compact');
-  assert.equal(result.messages[0].agentRecovery, undefined);
-  assert.equal(result.topics[0].messages[0].agentRecovery, undefined);
-  assert.equal(result.topics[0].taskSnapshot, undefined);
+  assert.equal(result.messages[0].agentRecovery.resumeRoute, null);
+  assert.equal('topics' in result, false);
+  assert.equal('activeTopicId' in result, false);
 });
 
-test('removeDeprecatedImageAgentData removes planner and job state while retaining current main agent work', () => {
-  const currentRecovery = {
-    version: 1,
-    taskId: 'task-current',
-    runId: 'run-current',
-    topicId: 'topic-1',
-    sourceUserMessageId: 'user-1',
-    status: 'failed',
-    resumeRoute: 'main_agent',
-    toolCalls: [{
-      callId: 'call-current',
-      attemptId: 'attempt-current',
-      taskId: 'task-current',
-      toolName: 'generate_image',
-      status: 'failed',
-    }],
-  };
-  const session = {
+test('legacy sessions reset chat protocol data while retaining canvas and model selections', () => {
+  const reset = normalizeProjectSession({
+    schemaVersion: 4,
     id: 'session-legacy-cleanup',
-    activeAgentRun: {
-      taskId: 'task-current',
-      runId: 'run-current',
-      userMessageId: 'user-1',
-      assistantMessageId: 'assistant-1',
-      startedAt: 1,
-      status: 'running',
-    },
+    name: 'Legacy canvas',
+    createdAt: 1,
+    updatedAt: 2,
     items: [{ id: 'canvas-image', type: 'image', src: '/uploads/asset.png' }],
-    viewport: { x: 0, y: 0, scale: 1 },
-    executionPlan: { generation: { prompt: 'legacy' } },
-    generatedImageHistory: [{
-      id: 'asset-1',
-      src: '/uploads/asset.png',
-      previewSrc: '/uploads/preview.webp',
-      createdAt: 1,
-      source: 'chat',
-    }],
-    messages: [{
-      id: 'assistant-1',
-      role: 'assistant',
-      content: 'current and legacy',
-      executionBriefSummary: 'legacy summary',
-      taskSnapshot: {
-        taskId: 'task-current',
-        imagePlanning: { executionPlan: { generation: { prompt: 'legacy' } } },
-        activeVersions: [{ assetUrl: '/uploads/asset.png' }],
-      },
-      agentClarification: {
-        request: { id: 'confirmation-1', taskId: 'task-current' },
-        state: {
-          taskId: 'task-current',
-          intent: 'image',
-          originalRequest: '继续当前任务',
-          workingBrief: '当前任务事实',
-          askedDimensions: [],
-          answers: [],
-        },
-      },
-      agentClarificationResponsePayload: {
-        clarification: { state: { imagePlanning: { executionPlan: {} } } },
-        response: { requestId: 'confirmation-1', retryMode: 'replan' },
-      },
-      agentImagePrompts: [{ prompt: 'current prompt', compilation: { plannerModel: 'legacy' } }],
-      agentRecovery: currentRecovery,
-    }, {
-      id: 'assistant-2',
-      role: 'assistant',
-      content: 'legacy job',
-      agentRecovery: {
-        ...currentRecovery,
-        taskId: 'task-legacy-job',
-        resumeRoute: 'image_planner',
-        toolCalls: [{ toolName: 'start_skill_job' }],
-      },
-    }],
-    topics: [{
-      id: 'topic-1',
-      messages: [{
-        id: 'assistant-topic',
-        role: 'assistant',
-        content: 'legacy planner state',
-        agentClarification: { state: { imagePlanning: { executionPlan: {} }, plannerFailure: { reason: 'timeout' } } },
-      }],
-    }],
-  };
-
-  const cleaned = removeDeprecatedImageAgentData(session);
-
-  assert.equal(cleaned.executionPlan, undefined);
-  assert.equal(cleaned.schemaVersion, 3);
-  assert.deepEqual(cleaned.activeAgentRun, session.activeAgentRun);
-  assert.equal(cleaned.generatedImageHistory[0].previewSrc, '/uploads/preview.webp');
-  assert.equal(cleaned.messages[0].executionBriefSummary, undefined);
-  assert.equal(cleaned.messages[0].taskSnapshot.imagePlanning, undefined);
-  assert.deepEqual(cleaned.messages[0].taskSnapshot.activeVersions, [{ assetUrl: '/uploads/asset.png' }]);
-  assert.deepEqual(cleaned.messages[0].agentImagePrompts, [{ prompt: 'current prompt' }]);
-  assert.deepEqual(cleaned.messages[0].agentRecovery, currentRecovery);
-  assert.deepEqual(cleaned.messages[0].agentClarification, session.messages[0].agentClarification);
-  assert.deepEqual(cleaned.messages[0].agentClarificationResponsePayload, {
-    clarification: { state: {} },
-    response: { requestId: 'confirmation-1' },
+    connections: [],
+    viewport: { x: 10, y: 20, scale: 2 },
+    chatProviderId: ' chat-provider ',
+    chatModelId: ' chat-model ',
+    imageProviderId: ' image-provider ',
+    imageModelId: ' image-model ',
+    messages: [{ id: 'assistant-1', role: 'assistant', content: 'old' }],
+    topics: [{ id: 'topic-1', messages: [{ id: 'old', role: 'user', content: 'old' }] }],
+    contextEvents: [{ eventId: 'old-event' }],
+    contextHistory: { auditEvents: [{ eventId: 'old-event' }] },
+    activeAgentRun: { runId: 'old-run' },
+    agentRecovery: { runId: 'old-run' },
+    pendingApproval: { itemId: 'old-approval' },
+    todoItems: [{ id: 'old-todo', content: 'old', status: 'pending' }],
+    visualAssets: [{ id: 'old-asset', durableSrc: '/old.png' }],
+    generatedImageHistory: [{ id: 'old-image', src: '/old.png', source: 'chat', createdAt: 1 }],
+    regionSelections: [{ id: 'old-region' }],
   });
-  assert.equal(cleaned.messages[1].agentRecovery, undefined);
-  assert.equal(cleaned.topics[0].messages[0].agentClarification.state.imagePlanning, undefined);
-  assert.equal(cleaned.topics[0].messages[0].agentClarification.state.plannerFailure, undefined);
+
+  assert.equal(reset.schemaVersion, 5);
+  assert.equal(reset.threadId, 'session-legacy-cleanup');
+  assert.deepEqual(reset.items, [{ id: 'canvas-image', type: 'image', src: '/uploads/asset.png' }]);
+  assert.deepEqual(reset.viewport, { x: 10, y: 20, scale: 2 });
+  assert.equal(reset.chatProviderId, 'chat-provider');
+  assert.equal(reset.chatModelId, 'chat-model');
+  assert.equal(reset.imageProviderId, 'image-provider');
+  assert.equal(reset.imageModelId, 'image-model');
+  assert.deepEqual(reset.messages, []);
+  assert.deepEqual(reset.turns, []);
+  assert.deepEqual(reset.contextEvents, []);
+  assert.equal(reset.contextHistory?.auditEvents?.length || 0, 0);
+  assert.equal(reset.pendingApproval, null);
+  assert.deepEqual(reset.todoItems, []);
+  assert.deepEqual(reset.visualAssets, []);
+  assert.deepEqual(reset.generatedImageHistory, []);
+  assert.deepEqual(reset.regionSelections, []);
+  assert.equal('topics' in reset, false);
+  assert.equal('activeAgentRun' in reset, false);
+  assert.equal('agentRecovery' in reset, false);
 });
 
 test('buildPersistedSession keeps valid text card panel drafts for existing text card items', () => {
@@ -552,6 +506,7 @@ test('buildPersistedSession clones canvas state collections so later live edits 
 
 test('normalizeProjectSession keeps only connections whose endpoints still exist', () => {
   const result = normalizeProjectSession({
+    schemaVersion: 5,
     id: 'session-1',
     items: [{ id: 'a' }, { id: 'b' }],
     connections: [
@@ -653,17 +608,20 @@ test('normalizeProjectSession removes orphan and invalid image card state while 
 
 test('normalizeProjectSession keeps valid generated image history entries and removes invalid ones', () => {
   const result = normalizeProjectSession({
+    schemaVersion: 5,
     id: 'session-1',
     items: [],
     generatedImageHistory: [
       {
         id: 'history-1',
+        sessionId: 'session-1',
         src: '/uploads/generated/a.png',
         createdAt: 10,
         source: 'chat',
       },
       {
         id: 'history-2',
+        sessionId: 'session-1',
         src: '   ',
         createdAt: 11,
         source: 'archive',
@@ -678,14 +636,206 @@ test('normalizeProjectSession keeps valid generated image history entries and re
       previewSrc: '/uploads/generated/a.png',
       createdAt: 10,
       source: 'chat',
-      sessionId: undefined,
+      sessionId: 'session-1',
       naturalWidth: undefined,
       naturalHeight: undefined,
       sourceItemId: undefined,
-      topicId: undefined,
       messageId: undefined,
     },
   ]);
+});
+
+test('normalizeProjectSession rejects visual assets and generated history owned by another session', () => {
+  const result = normalizeProjectSession({
+    schemaVersion: 5,
+    id: 'session-1',
+    items: [],
+    messages: [],
+    visualAssets: [
+      { id: 'local', sessionId: 'session-1', durableSrc: '/local.png' },
+      { id: 'foreign', sessionId: 'session-2', durableSrc: '/foreign.png' },
+    ],
+    generatedImageHistory: [
+      { id: 'local', sessionId: 'session-1', src: '/local.png', createdAt: 1, source: 'chat' },
+      { id: 'foreign', sessionId: 'session-2', src: '/foreign.png', createdAt: 2, source: 'chat' },
+    ],
+    viewport: { x: 0, y: 0, scale: 1 },
+  });
+
+  assert.deepEqual(result.visualAssets.map((asset) => asset.id), ['local']);
+  assert.deepEqual(result.generatedImageHistory.map((entry) => entry.id), ['local']);
+});
+
+test('normalizeProjectSession strips obsolete root protocol fields from v5 sessions', () => {
+  const result = normalizeProjectSession({
+    schemaVersion: 5,
+    id: 'session-1',
+    items: [],
+    messages: [],
+    topics: [{ id: 'old-topic' }],
+    activeTopicId: 'old-topic',
+    activeAgentRun: { runId: 'old-run' },
+    agentRecovery: { runId: 'old-run' },
+    topicId: 'old-topic',
+    viewport: { x: 0, y: 0, scale: 1 },
+  });
+
+  for (const key of ['topics', 'activeTopicId', 'activeAgentRun', 'agentRecovery', 'topicId']) {
+    assert.equal(key in result, false);
+  }
+});
+
+test('normalizeProjectSession rejects ownerless persisted assets and context events', () => {
+  const result = normalizeProjectSession({
+    schemaVersion: 5,
+    id: 'session-1',
+    items: [],
+    messages: [],
+    visualAssets: [{ id: 'ownerless', durableSrc: '/ownerless.png' }],
+    generatedImageHistory: [{ id: 'ownerless', src: '/ownerless.png', createdAt: 1, source: 'chat' }],
+    contextEvents: [{ eventId: 'ownerless', sequence: 1, type: 'user_text', source: 'persisted', content: 'drop' }],
+    contextHistory: {
+      auditEvents: [{ eventId: 'ownerless-audit', sequence: 1, type: 'user_text', source: 'persisted', content: 'drop' }],
+      modelEvents: [{ eventId: 'ownerless-model', sequence: 1, type: 'user_text', source: 'persisted', content: 'drop' }],
+    },
+    viewport: { x: 0, y: 0, scale: 1 },
+  });
+
+  assert.deepEqual(result.visualAssets, []);
+  assert.deepEqual(result.generatedImageHistory, []);
+  assert.deepEqual(result.contextEvents, []);
+  assert.deepEqual(result.contextHistory.auditEvents, []);
+  assert.deepEqual(result.contextHistory.modelEvents, []);
+});
+
+test('normalizeProjectSession hard resets legacy chat data exactly once', () => {
+  const legacyAsset = {
+    id: 'asset-1',
+    topicId: 'topic-1',
+    durableSrc: '/api/local-assets/topic-assets/hash/asset.png',
+    contentHash: 'abc123',
+    mimeType: 'image/png',
+    byteSize: 128,
+    source: 'generated',
+    createdAt: 10,
+  };
+  const migrated = normalizeProjectSession({
+    schemaVersion: 3,
+    id: 'session-legacy',
+    name: 'Legacy canvas',
+    createdAt: 1,
+    updatedAt: 2,
+    items: [{ id: 'image-1', type: 'image', src: '/uploads/generated/a.png' }],
+    connections: [],
+    messages: [{ id: 'legacy-root', role: 'user', content: 'legacy root' }],
+    agentMemory: { version: 1, recentRawConversation: [{ role: 'user', content: 'old' }], rollingSummary: 'old', facts: [], preferences: [], activeTask: null, recentReferencedAssetIds: [], updatedAt: 1 },
+    topics: [
+      { id: 'topic-1', messages: [{ id: 'old-1', role: 'user', content: 'old' }], visualAssets: [legacyAsset] },
+      { id: 'topic-2', messages: [{ id: 'old-2', role: 'assistant', content: 'old' }], visualAssets: [{ ...legacyAsset, id: 'asset-duplicate' }] },
+    ],
+    activeTopicId: 'topic-2',
+    generatedImageHistory: [{ id: 'history-1', src: '/uploads/generated/a.png', source: 'chat', topicId: 'topic-1', createdAt: 10 }],
+    activeAgentRun: { runId: 'run-1', userMessageId: 'old-1', assistantMessageId: 'old-2', startedAt: 3, status: 'running' },
+    viewport: { x: 0, y: 0, scale: 1 },
+  });
+
+  assert.equal(migrated.schemaVersion, 5);
+  assert.deepEqual(migrated.messages, []);
+  assert.equal(migrated.agentMemory, undefined);
+  assert.equal('topics' in migrated, false);
+  assert.equal('activeTopicId' in migrated, false);
+  assert.equal('activeAgentRun' in migrated, false);
+  assert.equal(migrated.items.length, 1);
+  assert.deepEqual(migrated.visualAssets, []);
+  assert.deepEqual(migrated.generatedImageHistory, []);
+
+  const normalizedAgain = normalizeProjectSession({
+    ...migrated,
+    messages: [{ id: 'new-1', role: 'user', content: 'new conversation' }],
+  });
+  assert.equal(normalizedAgain.messages.length, 1);
+  assert.equal(normalizedAgain.messages[0].content, 'new conversation');
+});
+
+test('normalizeProjectSession drops legacy messages when the event list is empty', () => {
+  const migrated = normalizeProjectSession({
+    schemaVersion: 3,
+    id: 'session-empty-events',
+    items: [],
+    messages: [{ id: 'legacy-message', role: 'user', content: '保留这条消息' }],
+    contextEvents: [],
+    viewport: { x: 0, y: 0, scale: 1 },
+  });
+  assert.deepEqual(migrated.messages, []);
+  assert.deepEqual(migrated.contextEvents, []);
+});
+
+test('normalizeProjectSession preserves compact state and filters foreign context windows', () => {
+  const normalized = normalizeProjectSession({
+    schemaVersion: 5,
+    id: 'session-context',
+    items: [],
+    messages: [{ id: 'm1', role: 'user', content: 'new' }],
+    contextEvents: [{ eventId: 'e1', sessionId: 'session-context', sequence: 1, type: 'user_text', source: 'persisted', content: 'old' }],
+    compactedWindows: [
+      { version: 1, sessionId: 'session-context', summary: 'keep' },
+      { version: 2, sessionId: 'other-session', summary: 'drop' },
+    ],
+    activeContextWindow: { sessionId: 'other-session', startSequence: 1, endSequence: 1, compactCount: 8, summaryVersion: 8, estimatedTokens: 10, model: 'wrong', contextWindow: 100 },
+    viewport: { x: 0, y: 0, scale: 1 },
+  });
+
+  assert.deepEqual(normalized.compactedWindows, [{ version: 1, sessionId: 'session-context', summary: 'keep' }]);
+  assert.equal(normalized.activeContextWindow.compactCount, 0);
+  assert.equal(normalized.activeContextWindow.sessionId, 'session-context');
+  assert.deepEqual(normalized.contextEvents.map((event) => event.content), ['old', 'new']);
+});
+
+test('buildPersistedSession keeps context events idempotent while appending a new message', () => {
+  const session = {
+    schemaVersion: 5,
+    id: 'session-idempotent',
+    items: [],
+    messages: [{ id: 'm1', role: 'user', content: 'old' }],
+    contextEvents: [{ eventId: 'e1', sessionId: 'session-idempotent', sequence: 1, type: 'user_text', source: 'persisted', content: 'old' }],
+    viewport: { x: 0, y: 0, scale: 1 },
+  };
+  const first = buildPersistedSession(session, { messages: [...session.messages, { id: 'm2', role: 'assistant', content: 'reply' }] });
+  const second = buildPersistedSession(first, {});
+  assert.deepEqual(second.contextEvents.map((event) => [event.eventId, event.content]), [
+    ['e1', 'old'],
+    ['session-idempotent:event:2:assistant_text', 'reply'],
+  ]);
+});
+
+test('context history preserves audit events and revision metadata while extending the model tail', () => {
+  const session = {
+    schemaVersion: 5,
+    id: 'session-revisions',
+    items: [],
+    messages: [{ id: 'm1', role: 'user', content: 'old' }],
+    contextEvents: [
+      { eventId: 'e1', sessionId: 'session-revisions', sequence: 1, type: 'user_text', source: 'persisted', content: 'old' },
+      { eventId: 'e2', sessionId: 'session-revisions', sequence: 2, type: 'tool_result', source: 'runtime', content: 'new fact' },
+    ],
+    contextHistory: {
+      schemaVersion: 2,
+      auditEvents: [{ eventId: 'e1', sessionId: 'session-revisions', sequence: 1, type: 'user_text', source: 'persisted', content: 'old' }],
+      modelEvents: [{ eventId: 'e1', sessionId: 'session-revisions', sequence: 1, type: 'user_text', source: 'persisted', content: 'old' }],
+      compactionRecords: [],
+      activeWindow: { sessionId: 'session-revisions', startSequence: 1, endSequence: 1, compactCount: 1, summaryVersion: 1, estimatedTokens: 4, model: 'm', contextWindow: 100 },
+      historyRevision: 1,
+      userMessageRevision: 1,
+      activeWindowRevision: 1,
+    },
+    viewport: { x: 0, y: 0, scale: 1 },
+  };
+  const persisted = buildPersistedSession(session, {});
+  assert.deepEqual(persisted.contextHistory.auditEvents.map((event) => event.eventId), ['e1', 'e2']);
+  assert.deepEqual(persisted.contextHistory.modelEvents.map((event) => event.eventId), ['e1', 'e2']);
+  assert.equal(persisted.contextHistory.historyRevision, 2);
+  assert.equal(persisted.contextHistory.userMessageRevision, 1);
+  assert.equal(persisted.contextHistory.activeWindowRevision, 1);
 });
 
 test('shouldFlushScheduledSessionSave rejects stale save epochs', () => {

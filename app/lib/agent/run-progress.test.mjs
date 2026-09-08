@@ -66,7 +66,7 @@ test('keeps exactly one active breadcrumb as commentary and tools advance', () =
     type: 'agent_activity_delta', runId: 'run-sequential', activityId: 'understand', delta: '先检查需求', timestampMs: 1,
   });
   state = reduceAgentRunProgress(state, progress(2, {
-    runId: 'run-sequential', stepId: 'read-context', toolCallId: 'read-1', label: '正在读取上下文', timestampMs: 2,
+    runId: 'run-sequential', operationId: 'run-sequential', stepId: 'read-context', toolCallId: 'read-1', label: '正在读取上下文', timestampMs: 2,
   }));
   state = reduceAgentRunProgress(state, {
     type: 'agent_activity_delta', runId: 'run-sequential', activityId: 'explain', delta: '已确认上下文', timestampMs: 3,
@@ -85,13 +85,13 @@ test('keeps a real commentary-tool-final lifecycle in event order', () => {
     type: 'agent_activity_commit', runId: 'run-lifecycle', activityId: 'before-read', disposition: 'commentary', sequence: 1, timestampMs: 10,
   });
   state = reduceAgentRunProgress(state, progress(2, {
-    runId: 'run-lifecycle', stepId: 'tool', toolCallId: 'read-1', toolName: 'read_relevant_context', status: 'pending', label: '准备读取相关上下文', timestampMs: 20,
+    runId: 'run-lifecycle', operationId: 'run-lifecycle', stepId: 'tool', toolCallId: 'read-1', toolName: 'read_relevant_context', status: 'pending', label: '准备读取相关上下文', timestampMs: 20,
   }));
   state = reduceAgentRunProgress(state, progress(3, {
-    runId: 'run-lifecycle', stepId: 'tool', toolCallId: 'read-1', toolName: 'read_relevant_context', status: 'active', label: '正在读取相关上下文', timestampMs: 30,
+    runId: 'run-lifecycle', operationId: 'run-lifecycle', stepId: 'tool', toolCallId: 'read-1', toolName: 'read_relevant_context', status: 'active', label: '正在读取相关上下文', timestampMs: 30,
   }));
   state = reduceAgentRunProgress(state, progress(4, {
-    runId: 'run-lifecycle', stepId: 'tool', toolCallId: 'read-1', toolName: 'read_relevant_context', status: 'completed', label: '读取相关上下文已完成', timestampMs: 40,
+    runId: 'run-lifecycle', operationId: 'run-lifecycle', stepId: 'tool', toolCallId: 'read-1', toolName: 'read_relevant_context', status: 'completed', label: '读取相关上下文已完成', timestampMs: 40,
   }));
   state = reduceAgentRunProgress(state, {
     type: 'agent_activity_delta', runId: 'run-lifecycle', activityId: 'final', delta: '读取完成。', sequence: 5, timestampMs: 50,
@@ -214,7 +214,7 @@ test('continues a recovered attempt without replacing earlier breadcrumbs or ela
   }));
   state = reduceAgentRunProgress(state, { type: 'agent_error', runId: 'run-1', timestampMs: 200 });
   state = reduceAgentRunProgress(state, progress(1, {
-    runId: 'run-2', stepId: 'generate_image', toolCallId: 'image-2', timestampMs: 1_000,
+    runId: 'run-2', operationId: 'run-2', stepId: 'generate_image', toolCallId: 'image-2', timestampMs: 1_000,
   }));
   state = reduceAgentRunProgress(state, { type: 'agent_done', runId: 'run-2', timestampMs: 1_300 });
 

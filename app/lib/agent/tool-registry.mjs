@@ -1,4 +1,5 @@
 import { AGENT_IMAGE_ASPECT_RATIO_IDS } from './image-options.mjs';
+import { TODO_READ_TOOL, TODO_UPDATE_TOOL } from './todo-tools.mjs';
 
 const CONFIDENCE_SCHEMA = { type: 'string', enum: ['high', 'medium', 'low'] };
 const VISUAL_REFERENCE_ROLE_SCHEMA = {
@@ -173,6 +174,8 @@ export function createAgentToolRegistry({
   resolveFailedTaskRecovery,
   requestMainAgentContext,
   requestContextSelection,
+  todoRead,
+  todoUpdate,
 } = {}) {
   const registry = new Map([
     ['generate_image', {
@@ -181,7 +184,7 @@ export function createAgentToolRegistry({
       readOnly: false,
       terminal: true,
       countAgainstToolBudget: false,
-      description: 'Generate or edit images. prompt is the complete final supplier Prompt produced by this Main Agent turn after applying the loaded ImageGen and locked visual Skill renderPrompt rules; do not submit a style-label summary or hand it to another model. For edits, targetReferenceId must identify the one image to edit and also appear in referenceIds.',
+      description: 'Generate or edit images. prompt is the complete final supplier Prompt produced by this Main Agent turn after applying the loaded ImageGen and locked visual Skill renderPrompt rules; do not submit a style-label summary or hand it to another model. For edits, targetReferenceId must identify the one image to edit and also appear in referenceIds. To continue editing the most recent image in this canvas session, set numLastImagesToInclude to 1; this is only valid for edit operations, is mutually exclusive with non-empty referenceIds and targetReferenceId, and is resolved by the runtime.',
       parameters: {
         type: 'object',
         properties: {
@@ -193,6 +196,11 @@ export function createAgentToolRegistry({
             items: { type: 'string', minLength: 1, maxLength: 200 },
           },
           targetReferenceId: { type: ['string', 'null'], minLength: 1, maxLength: 200 },
+          numLastImagesToInclude: {
+            type: 'integer',
+            enum: [1],
+            description: 'For edit operations only, explicitly continue from the most recent image in the current canvas session. Mutually exclusive with non-empty referenceIds and targetReferenceId; the runtime resolves the image.',
+          },
           outputCount: { type: 'integer', minimum: 1, maximum: 100 },
           aspectRatio: { type: 'string', enum: AGENT_IMAGE_ASPECT_RATIO_IDS },
           deliveryMode: { type: 'string', enum: ['single', 'variants', 'series', 'composite'] },
@@ -230,6 +238,20 @@ export function createAgentToolRegistry({
       description: 'Read the bounded summary of the current canvas.',
       parameters: { type: 'object', properties: {}, additionalProperties: false },
       execute: async (_args, context) => context.canvasContext || {},
+    }],
+    ['todo_read', {
+      ...TODO_READ_TOOL,
+      execute: async (args, context) => {
+        if (typeof todoRead !== 'function') throw new Error('todo_read is unavailable');
+        return todoRead(args, context);
+      },
+    }],
+    ['todo_update', {
+      ...TODO_UPDATE_TOOL,
+      execute: async (args, context) => {
+        if (typeof todoUpdate !== 'function') throw new Error('todo_update is unavailable');
+        return todoUpdate(args, context);
+      },
     }],
     ['get_conversation_memory', {
       name: 'get_conversation_memory',
@@ -629,6 +651,7 @@ export function getAgentModelTools(registry, allowedTools = []) {
       terminal: tool.terminal === true,
       countAgainstToolBudget: tool.countAgainstToolBudget !== false,
       mayRequireConfirmation: tool.mayRequireConfirmation === true,
+      requiresConfirmation: tool.requiresConfirmation === true,
     }));
 }
 

@@ -1,25 +1,11 @@
 const PROPOSAL_START = '<<agent_proposal>>';
 const PROPOSAL_END = '<</agent_proposal>>';
-const ACTIONABLE_PROPOSAL_PATTERN = /(方案|方向|请选择|请确认|建议按|可以选择|生成|制作|出图|封面|海报|视觉)/i;
 const LITERAL_NUMBER_PATTERN = /(?:数字|号码|编号|number)\s*[一二三四五六七八九十\d]+/i;
 const RATIO_PATTERN = /\b\d+\s*[:：比]\s*\d+\b/;
 const REFERENCE_LANGUAGE_PATTERN = /(?:(?:按照|按|选择|选|使用|用|继续|基于|参考|修改).{0,12}(?:第[一二三四五六七八九十\d]+(?:个|项|版|张)?|vol\.?\s*\d+|方案\s*[一二三四五六七八九十\d]*|选项\s*[一二三四五六七八九十\d]*|版本\s*[一二三四五六七八九十\d]*|这个|那个|上一个|刚才|之前|上一张|选中的|左边|右边)|(?:生成|制作|出图).{0,8}(?:这个|那个|上一个|刚才|之前|上一张|选中的|左边|右边)|(?:这个|那个|上一个|刚才那个|之前那个|上一张图|选中的|左边那个|右边那个))/i;
 
 function text(value) {
   return typeof value === 'string' ? value.trim() : '';
-}
-
-function numberFromToken(value) {
-  const normalized = text(value).toLowerCase();
-  if (/^\d+$/.test(normalized)) return Number(normalized);
-  const values = { 一: 1, 二: 2, 两: 2, 三: 3, 四: 4, 五: 5, 六: 6, 七: 7, 八: 8, 九: 9, 十: 10 };
-  if (values[normalized]) return values[normalized];
-  if (/^十[一二三四五六七八九]$/.test(normalized)) return 10 + values[normalized[1]];
-  if (/^[二三四五六七八九]十$/.test(normalized)) return values[normalized[0]] * 10;
-  if (/^[二三四五六七八九]十[一二三四五六七八九]$/.test(normalized)) {
-    return values[normalized[0]] * 10 + values[normalized[2]];
-  }
-  return 0;
 }
 
 function normalizeAliases(value) {
@@ -116,80 +102,6 @@ function proposalEntities(proposal, sourceMessageId, createdAt) {
   }));
 }
 
-function isTableSeparator(cells) {
-  return cells.length > 0 && cells.every((cell) => /^:?-{2,}:?$/.test(cell.replace(/\s/g, '')));
-}
-
-function legacyOptionsFromTable(lines) {
-  const options = [];
-  for (const line of lines) {
-    if (!line.includes('|')) continue;
-    const cells = line.split('|').map(text).filter(Boolean);
-    if (cells.length < 2 || isTableSeparator(cells)) continue;
-    const first = cells[0];
-    const match = first.match(/(?:vol\.?\s*|第|方案|选项)?([一二三四五六七八九十\d]+)(?:个|项|版|张)?/i);
-    if (!match) continue;
-    const index = numberFromToken(match[1]);
-    if (!index) continue;
-    const label = cells[1] || first;
-    options.push({
-      id: `legacy-${index}`,
-      index,
-      label,
-      aliases: [first, `方案${index}`, `选项${index}`, `Vol.${index}`],
-      summary: cells.slice(2).join('；'),
-      brief: cells.join('；'),
-      mustPreserve: [label],
-      sourceQuote: line.trim(),
-    });
-  }
-  return options;
-}
-
-function legacyOptionsFromList(lines) {
-  const options = [];
-  for (const line of lines) {
-    const match = line.match(/^\s*(?:[-*]\s*)?(?:方案|选项|vol\.?)?\s*([一二三四五六七八九十\d]+)[.、:：)）\-]\s*(.+)$/i);
-    if (!match) continue;
-    const index = numberFromToken(match[1]);
-    const body = text(match[2]);
-    if (!index || !body) continue;
-    const label = text(body.split(/[：:—–-]/)[0]) || `方案 ${index}`;
-    options.push({
-      id: `legacy-${index}`,
-      index,
-      label,
-      aliases: [`方案${index}`, `选项${index}`, `Vol.${index}`],
-      summary: body,
-      brief: body,
-      mustPreserve: [label],
-      sourceQuote: line.trim(),
-    });
-  }
-  return options;
-}
-
-export function extractLegacyProposal(message) {
-  const content = text(message?.content);
-  if (!content || !ACTIONABLE_PROPOSAL_PATTERN.test(content)) return null;
-  const lines = content.split('\n').map((line) => line.trim()).filter(Boolean);
-  const rawOptions = legacyOptionsFromTable(lines);
-  const options = (rawOptions.length >= 2 ? rawOptions : legacyOptionsFromList(lines)).slice(0, 8);
-  if (options.length < 2) return null;
-  const id = `legacy-${text(message?.id) || 'message'}`;
-  return {
-    version: 1,
-    id,
-    title: '历史方案',
-    intent: 'image',
-    requiresSelection: /(?:请选择|请确认|是否|按.*生成|选择.*方向)/i.test(content),
-    options: options.map((option) => ({
-      ...option,
-      entityId: `${id}:${option.id}`,
-    })),
-  };
-}
-
 function dedupeEntities(entities) {
   const seen = new Set();
   const seenAssets = new Set();
@@ -217,7 +129,7 @@ export function buildAgentContextEntities({
   for (let index = 0; index < messages.length; index += 1) {
     const message = messages[index] || {};
     const createdAt = Number(message.createdAt) || index + 1;
-    const proposal = message.agentProposal || extractLegacyProposal(message);
+    const proposal = message.agentProposal;
     entities.push(...proposalEntities(proposal, message.id, createdAt));
     if (message.agentClarification?.request?.options?.length) {
       const request = message.agentClarification.request;
@@ -248,6 +160,8 @@ export function buildAgentContextEntities({
         brief: `使用已生成图片 ${text(message.imageName) || `image ${displayIndex}`} 作为视觉参考。`,
         mustPreserve: [],
         assetUrl: message.imageUrl,
+        assetId: message.assetId,
+        originalSrc: message.imageUrl,
         referenceImageUrls: [message.imageUrl],
         sourceMessageId: message.id,
         createdAt,
@@ -269,6 +183,8 @@ export function buildAgentContextEntities({
         brief: `使用用户提供的参考图 ${text(reference.label) || `image${referenceIndex + 1}`}。`,
         mustPreserve: [],
         assetUrl,
+        assetId: reference.assetId,
+        originalSrc: reference.originalSrc || assetUrl,
         referenceImageUrls: [assetUrl],
         sourceMessageId: message.id,
         createdAt,
@@ -288,6 +204,7 @@ export function buildAgentContextEntities({
         brief: `使用用户上传的参考图 image${referenceIndex + 1}。`,
         mustPreserve: [],
         assetUrl,
+        originalSrc: assetUrl,
         referenceImageUrls: [assetUrl],
         sourceMessageId: message.id,
         createdAt,
@@ -362,6 +279,8 @@ export function buildAgentContextEntities({
         : `使用生成历史中的 image ${index + 1} 作为视觉参考。`,
       mustPreserve: [],
       assetUrl: image.src,
+      assetId: image.assetId,
+      originalSrc: image.originalSrc || image.src,
       referenceImageUrls: [image.src],
       sourceMessageId: image.messageId,
       createdAt: Number(image.createdAt) || index + 1,

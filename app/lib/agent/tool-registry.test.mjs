@@ -6,7 +6,8 @@ import { createAgentToolRegistry, executeAgentTool, getAgentModelTools } from '.
 test('tool registry exposes the direct image tool and current recovery tools', () => {
   const registry = createAgentToolRegistry();
   assert.deepEqual([...registry.keys()], [
-    'generate_image', 'get_canvas_context', 'get_conversation_memory', 'list_project_context',
+    'generate_image', 'get_canvas_context', 'todo_read', 'todo_update',
+    'get_conversation_memory', 'list_project_context',
     'read_context_entity', 'load_visual_reference', 'update_conversation_memory',
     'handle_failed_task', 'read_relevant_context', 'submit_agent_analysis_checkpoint',
     'request_user_decision', 'rewind_agent_analysis', 'resolve_failed_task_recovery',
@@ -14,6 +15,10 @@ test('tool registry exposes the direct image tool and current recovery tools', (
   ]);
   assert.equal(registry.get('get_canvas_context').requiresConfirmation, false);
   assert.equal(registry.get('get_canvas_context').readOnly, true);
+  assert.equal(registry.get('todo_read').readOnly, true);
+  assert.equal(registry.get('todo_read').requiresConfirmation, false);
+  assert.equal(registry.get('todo_update').readOnly, false);
+  assert.equal(registry.get('todo_update').requiresConfirmation, true);
   assert.equal(registry.get('generate_image').readOnly, false);
   assert.equal(registry.get('generate_image').terminal, true);
   assert.equal(registry.get('load_visual_reference').readOnly, true);
@@ -59,6 +64,11 @@ test('generate_image exposes a strict direct execution contract and forwards the
   assert.deepEqual(modelTool.function.parameters.required, [
     'operation', 'prompt', 'referenceIds', 'targetReferenceId', 'outputCount', 'aspectRatio', 'deliveryMode', 'panelCount',
   ]);
+  assert.deepEqual(modelTool.function.parameters.properties.numLastImagesToInclude, {
+    type: 'integer',
+    enum: [1],
+    description: 'For edit operations only, explicitly continue from the most recent image in the current canvas session. Mutually exclusive with non-empty referenceIds and targetReferenceId; the runtime resolves the image.',
+  });
   assert.equal(modelTool.function.parameters.properties.items.items.additionalProperties, false);
   assert.equal(modelTool.function.parameters.properties.items.items.properties.index.type, 'integer');
   assert.equal(modelTool.function.parameters.properties.items.items.properties.label.type, 'string');
@@ -102,6 +112,21 @@ test('generate_image exposes a strict direct execution contract and forwards the
   await assert.rejects(
     () => executeAgentTool(registry, 'generate_image', { ...args, items: [{ prompt: 'valid', style: 'unused' }] }, { allowedTools: ['generate_image'] }),
     /not allowed/,
+  );
+
+  const recentImageArgs = {
+    ...args,
+    referenceIds: [],
+    targetReferenceId: null,
+    numLastImagesToInclude: 1,
+  };
+  await executeAgentTool(registry, 'generate_image', recentImageArgs, {
+    allowedTools: ['generate_image'], runId: 'run-image-recent',
+  });
+  assert.deepEqual(calls.at(-1), [recentImageArgs, 'run-image-recent', undefined]);
+  await assert.rejects(
+    () => executeAgentTool(registry, 'generate_image', { ...recentImageArgs, numLastImagesToInclude: 2 }, { allowedTools: ['generate_image'] }),
+    /allowed value/,
   );
 });
 
@@ -229,6 +254,37 @@ test('tool registry only exposes schemas for allowed tools', () => {
   const registry = createAgentToolRegistry();
   const definitions = getAgentModelTools(registry, ['get_canvas_context', 'unknown']);
   assert.deepEqual(definitions.map((tool) => tool.function.name), ['get_canvas_context']);
+});
+
+test('todo callbacks use strict schemas and propagate confirmation metadata', async () => {
+  const calls = [];
+  const registry = createAgentToolRegistry({
+    todoRead: async (args, context) => { calls.push(['read', args, context.threadId]); return { items: [] }; },
+    todoUpdate: async (args, context) => { calls.push(['update', args, context.threadId]); return { items: args.items }; },
+  });
+  const definitions = getAgentModelTools(registry, ['todo_read', 'todo_update']);
+  assert.deepEqual(definitions.map((tool) => [tool.function.name, tool.requiresConfirmation]), [
+    ['todo_read', false],
+    ['todo_update', true],
+  ]);
+  assert.equal(definitions[1].function.parameters.properties.items.maxItems, 100);
+  assert.equal(definitions[1].function.parameters.properties.items.items.additionalProperties, false);
+
+  assert.deepEqual(await executeAgentTool(registry, 'todo_read', {}, {
+    allowedTools: ['todo_read'], threadId: 'thread-1',
+  }), { items: [] });
+  assert.deepEqual(await executeAgentTool(registry, 'todo_update', {
+    items: [{ id: 'a', content: 'Ship', status: 'completed' }],
+  }, { allowedTools: ['todo_update'], threadId: 'thread-1' }), { confirmationRequired: true, toolName: 'todo_update', message: '确认后执行 todo_update' });
+  assert.deepEqual(await executeAgentTool(registry, 'todo_update', {
+    items: [{ id: 'a', content: 'Ship', status: 'completed' }],
+  }, { allowedTools: ['todo_update'], threadId: 'thread-1', confirmed: true }), {
+    items: [{ id: 'a', content: 'Ship', status: 'completed' }],
+  });
+  assert.deepEqual(calls.map((entry) => entry[0]), ['read', 'update']);
+  await assert.rejects(() => executeAgentTool(registry, 'todo_update', {
+    items: [{ id: 'a', content: 'Ship', status: 'invalid' }],
+  }, { allowedTools: ['todo_update'], confirmed: true }), /Invalid arguments for todo_update/);
 });
 
 test('every model-visible tool accepts optional public progress without changing registry schemas', () => {

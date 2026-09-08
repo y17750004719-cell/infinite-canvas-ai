@@ -81,7 +81,10 @@ test('buildGenerateRouteErrorMeta mirrors route ImageGenerationError handling', 
       statusCode: 429,
       failureClass: 'transport',
       isRetryable: true,
+      retryable: true,
       retryAttempt: 2,
+      outcomeUnknown: false,
+      failureStage: 'provider_execution',
     }
   );
 
@@ -90,7 +93,10 @@ test('buildGenerateRouteErrorMeta mirrors route ImageGenerationError handling', 
     statusCode: 500,
     failureClass: 'unknown',
     isRetryable: false,
+    retryable: false,
     retryAttempt: null,
+    outcomeUnknown: false,
+    failureStage: 'generate_route',
   });
 });
 
@@ -111,7 +117,36 @@ test('buildGenerateRouteErrorMeta exposes structured provider availability failu
       failureClass: 'upstream_http',
       failureCode: 'provider_unavailable',
       isRetryable: false,
+      retryable: false,
       retryAttempt: 1,
+      outcomeUnknown: false,
+      failureStage: 'provider_execution',
+    },
+  );
+});
+
+test('buildGenerateRouteErrorMeta preserves unknown provider result metadata', () => {
+  class TestImageGenerationError extends Error {
+    statusCode = 502;
+    failureClass = 'payload';
+    failureCode = 'provider_result_unknown';
+    isRetryable = false;
+    retryAttempt = 1;
+    outcomeUnknown = true;
+  }
+
+  assert.deepEqual(
+    buildGenerateRouteErrorMeta(new TestImageGenerationError('no image payload'), TestImageGenerationError),
+    {
+      isImageGenerationError: true,
+      statusCode: 502,
+      failureClass: 'payload',
+      failureCode: 'provider_result_unknown',
+      isRetryable: false,
+      retryable: false,
+      retryAttempt: 1,
+      outcomeUnknown: true,
+      failureStage: 'provider_result_parse',
     },
   );
 });

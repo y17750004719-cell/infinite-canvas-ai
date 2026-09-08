@@ -94,6 +94,11 @@ test('generate route decouples image supplier calls from the incoming request si
     routeSource.includes('retryAttempt: error.retryAttempt,'),
     true
   );
+  assert.equal(routeSource.includes('outcomeUnknown: error.outcomeUnknown,'), true);
+  assert.equal(routeSource.includes('failureStage,'), true);
+  assert.equal(routeSource.includes('retryable,'), true);
+  assert.equal(routeSource.includes('failureCode: "provider_result_unknown"'), true);
+  assert.equal(routeSource.includes('error.outcomeUnknown !== true'), true);
 });
 
 test('generate route uses model capability size allowlists for gpt-image-2 and skips derived aspect ratios for size-only models', () => {

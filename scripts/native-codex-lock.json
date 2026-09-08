@@ -1,0 +1,9 @@
+{
+  "sourceCommit": "98a8425e223106d6e20fb31881fd693e9c56cf63",
+  "rustVersion": "1.95.0",
+  "package": "codex-app-server",
+  "binary": "codex-app-server",
+  "transport": "stdio://",
+  "protocolSource": "codex-rs/app-server-protocol/schema/typescript",
+  "license": "Apache-2.0"
+}

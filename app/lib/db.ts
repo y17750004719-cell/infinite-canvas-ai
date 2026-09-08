@@ -3,13 +3,13 @@ import type { AgentTaskContract } from './agent/context-reference.types';
 import type { CanvasItem } from './canvas-types';
 import type { RegionSelection } from './image-region-selection.types';
 import type { AgentAnalysisSnapshot, AgentRecoveryRecord } from './agent/events';
-import { removeDeprecatedImageAgentData } from './session-persistence.mjs';
+import { normalizeProjectSession } from './session-persistence.mjs';
 
 export type { CanvasItem } from './canvas-types';
 export type { AgentTaskContract } from './agent/context-reference.types';
 
 const DB_NAME = 'zo-design-db';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 const STORE_NAME = 'sessions';
 
 export {
@@ -28,12 +28,15 @@ export interface ChatMessage {
   reasoningContent?: string;
   agentRunProgress?: import('./agent/run-progress.types').AgentRunProgress;
   imageUrl?: string;
+  assetId?: string;
   skill?: { id: string; label: string };
   referenceImages?: string[];
   referenceContext?: {
     references: Array<{
       id: string;
       src: string;
+      assetId?: string;
+      originalSrc?: string;
       previewSrc?: string;
       label: string;
       source: 'upload' | 'history' | 'canvas';
@@ -162,15 +165,23 @@ export interface ChatMessage {
   agentRecovery?: AgentRecoveryRecord;
 }
 
-export interface ChatTopic {
+export interface SessionVisualAsset {
   id: string;
-  title: string;
-  messages: ChatMessage[];
-  activeSkill?: { id: string; label: string } | null;
-  activeSkillExplicit?: boolean;
-  agentMemory?: AgentConversationMemory;
+  sessionId: string;
+  durableSrc: string;
+  previewSrc?: string;
+  originalSrc?: string;
+  contentHash: string;
+  mimeType: string;
+  byteSize: number;
+  naturalWidth?: number;
+  naturalHeight?: number;
+  source: 'upload' | 'canvas' | 'generated';
+  sourceReferenceId?: string;
+  taskId?: string;
+  batchId?: string;
+  versionId?: string;
   createdAt: number;
-  updatedAt: number;
 }
 
 export interface AgentConversationMemory {
@@ -188,9 +199,100 @@ export interface AgentConversationMemory {
   updatedAt: number;
 }
 
+export type ContextEventType =
+  | 'user_text'
+  | 'assistant_text'
+  | 'tool_call'
+  | 'tool_result'
+  | 'image_input'
+  | 'image_output'
+  | 'confirmation'
+  | 'clarification'
+  | 'recovery'
+  | 'error'
+  | 'compaction';
+
+export interface ContextCompactionSummary {
+  task: string;
+  constraints: string[];
+  decisions: string[];
+  completedActions: string[];
+  pendingActions: string[];
+  toolFacts: string[];
+  imageAssets: Array<{ assetId: string; role?: string; description?: string }>;
+  confirmationState?: string | null;
+  recoveryState?: string | null;
+}
+
+export interface ContextCompactionRecord {
+  compactionId: string;
+  sessionId: string;
+  fromSequence: number;
+  toSequence: number;
+  summaryVersion: number;
+  summary: ContextCompactionSummary;
+  model: string;
+  contextWindow: number;
+  inputTokens: number;
+  outputTokens: number;
+  createdAt: number;
+}
+
+export interface ContextTokenBudget {
+  systemTokens: number;
+  historyTokens: number;
+  toolDefinitionTokens: number;
+  visualTokens: number;
+  outputReserve: number;
+  fallbackReserve: number;
+  effectiveInputBudget: number;
+  fullContextLimit: number;
+}
+
+export interface ContextEvent {
+  eventId: string;
+  sessionId: string;
+  sequence: number;
+  turnId?: string;
+  type: ContextEventType | string;
+  source: string;
+  timestampMs?: number;
+  toolCallId?: string;
+  parentEventId?: string;
+  content?: string;
+  assetId?: string;
+  [key: string]: unknown;
+}
+
+export interface ContextHistory {
+  schemaVersion: 3;
+  auditEvents: ContextEvent[];
+  modelEvents: ContextEvent[];
+  compactionRecords: ContextCompactionRecord[];
+  activeWindow: ContextWindowState;
+  /** Monotonic revision of the complete session event history. */
+  historyRevision?: number;
+  /** Monotonic revision of user-authored turns. */
+  userMessageRevision?: number;
+  /** Revision of the currently materialized model window. */
+  activeWindowRevision?: number;
+}
+
+export interface ContextWindowState {
+  sessionId: string;
+  startSequence: number;
+  endSequence: number;
+  compactCount: number;
+  summaryVersion: number;
+  estimatedTokens: number;
+  model: string;
+  contextWindow: number;
+}
+
 export interface GeneratedImageHistoryEntry {
   id: string;
   src: string;
+  assetId?: string;
   previewSrc?: string;
   naturalWidth?: number;
   naturalHeight?: number;
@@ -198,7 +300,6 @@ export interface GeneratedImageHistoryEntry {
   source: 'chat' | 'image-card' | 'archive';
   sessionId?: string;
   sourceItemId?: string;
-  topicId?: string;
   messageId?: string;
   taskId?: string;
   contractVersion?: number;
@@ -232,7 +333,7 @@ export interface TaskSnapshotActiveVersion {
 }
 
 export interface TaskSnapshot {
-  topicId: string;
+  sessionId: string;
   taskId: string;
   /** Added in the identity protocol; absent only on legacy persisted snapshots. */
   operationId?: string;
@@ -246,7 +347,7 @@ export interface TaskSnapshot {
 }
 
 export interface ProjectSession {
-  schemaVersion?: 3;
+  schemaVersion?: 5;
   id: string;
   name: string;
   createdAt: number;
@@ -265,9 +366,39 @@ export interface ProjectSession {
     fromItemId: string;
     toItemId: string;
   }>;
-  messages: ChatMessage[]; // 保持兼容性
-  topics?: ChatTopic[];    // 新增：对话项目列表
-  activeTopicId?: string; // 新增：当前对话 ID
+  messages: ChatMessage[];
+  threadId?: string;
+  turns?: Array<{
+    turnId: string;
+    operationId: string;
+    runId?: string;
+    runIds?: string[];
+    startSequence?: number;
+    startedAt?: number;
+    completedAt?: number | null;
+    status: 'queued' | 'running' | 'waiting' | 'completed' | 'failed' | 'cancelled' | 'interrupted';
+    items: Array<Record<string, unknown>>;
+    usage: { inputTokens: number | null; cachedInputTokens: number | null; outputTokens: number | null; reasoningOutputTokens: number | null; totalTokens: number | null; durationMs: number | null } | null;
+    error?: Record<string, unknown> | null;
+    recovery?: Record<string, unknown> | null;
+  }>;
+  activeTurn?: string | null;
+  archived?: boolean;
+  pendingApproval?: Record<string, unknown> | null;
+  todoItems?: Array<{ id: string; content: string; status: 'pending' | 'in_progress' | 'completed' }>;
+  commandState?: { lastCommand: string | null; lastResult: unknown };
+  lastSequence?: number;
+  transcriptStartSequence?: number;
+  transcriptSummary?: string | null;
+  threadStatus?: 'idle' | 'running' | 'waiting' | 'error' | 'archived';
+  activeSkill?: { id: string; label: string } | null;
+  activeSkillExplicit?: boolean;
+  agentMemory?: AgentConversationMemory;
+  contextEvents?: ContextEvent[];
+  contextHistory?: ContextHistory;
+  compactedWindows?: Array<Record<string, unknown>>;
+  activeContextWindow?: ContextWindowState;
+  visualAssets?: SessionVisualAsset[];
   chatProviderId?: string;
   chatModelId?: string;
   imageProviderId?: string;
@@ -311,8 +442,6 @@ function openDB(): Promise<IDBDatabase> {
         database.createObjectStore(STORE_NAME, { keyPath: 'id' });
       }
 
-      if (event.oldVersion >= 2) return;
-
       const transaction = (event.target as IDBOpenDBRequest).transaction;
       if (!transaction) return;
       const store = transaction.objectStore(STORE_NAME);
@@ -322,7 +451,7 @@ function openDB(): Promise<IDBDatabase> {
         const cursor = cursorRequest.result;
         if (!cursor) return;
 
-        cursor.update(removeDeprecatedImageAgentData(cursor.value));
+        cursor.update(normalizeProjectSession(cursor.value));
         cursor.continue();
       };
     };
@@ -337,13 +466,35 @@ function awaitTransaction(transaction: IDBTransaction): Promise<void> {
   });
 }
 
+function awaitRequest<T>(request: IDBRequest<T>): Promise<T> {
+  return new Promise((resolve, reject) => {
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
 export async function upsertSession(session: ProjectSession): Promise<void> {
   try {
     const database = await openDB();
     const transaction = database.transaction([STORE_NAME], 'readwrite');
     const store = transaction.objectStore(STORE_NAME);
-
-    store.put(removeDeprecatedImageAgentData(session));
+    const nextSession = normalizeProjectSession(session);
+    const currentSession = await awaitRequest(store.get(session.id));
+    const currentRevision = Number(currentSession?.schemaVersion) === 5
+      ? Number(currentSession?.contextHistory?.historyRevision)
+      : Number.NaN;
+    const nextRevision = Number(nextSession.contextHistory?.historyRevision);
+    // Async compact/recovery saves can finish after a newer request. Never let
+    // a snapshot with an older event revision overwrite the durable history.
+    if (
+      Number.isFinite(currentRevision) &&
+      Number.isFinite(nextRevision) &&
+      currentRevision > nextRevision
+    ) {
+      await awaitTransaction(transaction);
+      return;
+    }
+    store.put(nextSession);
     await awaitTransaction(transaction);
   } catch (error) {
     console.error('Failed to upsert session:', error);

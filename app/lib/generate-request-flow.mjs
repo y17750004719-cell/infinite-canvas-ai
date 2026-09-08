@@ -110,12 +110,25 @@ export function buildGenerateRouteErrorMeta(error, ImageGenerationErrorClass) {
   const isImageGenerationError =
     typeof ImageGenerationErrorClass === 'function' && error instanceof ImageGenerationErrorClass;
 
+  const failureClass = isImageGenerationError && error.failureClass ? error.failureClass : 'unknown';
+  const outcomeUnknown = isImageGenerationError ? error.outcomeUnknown === true : false;
+  const failureStage = isImageGenerationError && typeof error.failureStage === 'string' && error.failureStage
+    ? error.failureStage
+    : failureClass === 'payload'
+      ? 'provider_result_parse'
+      : failureClass === 'transport' || failureClass === 'timeout' || failureClass === 'upstream_http'
+        ? 'provider_execution'
+        : 'generate_route';
+
   return {
     isImageGenerationError,
     statusCode: isImageGenerationError && error.statusCode ? error.statusCode : 500,
-    failureClass: isImageGenerationError && error.failureClass ? error.failureClass : 'unknown',
+    failureClass,
     ...(isImageGenerationError && error.failureCode ? { failureCode: error.failureCode } : {}),
     isRetryable: isImageGenerationError ? Boolean(error.isRetryable) : false,
+    retryable: isImageGenerationError ? Boolean(error.isRetryable) : false,
     retryAttempt: isImageGenerationError && typeof error.retryAttempt === 'number' ? error.retryAttempt : null,
+    outcomeUnknown,
+    failureStage,
   };
 }

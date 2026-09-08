@@ -3,6 +3,8 @@ import type { AgentContextEntity, AgentProposal } from './context-reference.type
 export type AgentIntent = 'chat' | 'image' | 'skill_action';
 
 export type AgentLifecycleIdentity = {
+  threadId?: string;
+  turnId?: string;
   taskId: string;
   operationId: string;
   runId: string;
@@ -10,17 +12,26 @@ export type AgentLifecycleIdentity = {
   timestampMs: number;
 };
 
-export type AgentConflictCode = 'stale_operation' | 'stale_sequence' | 'agent_run_settled' | 'invalid_identity';
+export type CodexLifecycleEventType =
+  | 'thread.started'
+  | 'turn.started'
+  | 'item.started'
+  | 'item.updated'
+  | 'item.completed'
+  | 'turn.completed'
+  | 'turn.failed'
+  | 'error';
 
-export type LegacyAgentEvent = {
-  type: string;
-  taskId?: string;
-  runId?: string;
-  operationId?: string;
-  sequence?: number;
-  timestampMs?: number;
-  [key: string]: unknown;
+export type AgentUsage = {
+  inputTokens: number | null;
+  cachedInputTokens: number | null;
+  outputTokens: number | null;
+  reasoningOutputTokens: number | null;
+  totalTokens: number | null;
+  durationMs: number | null;
 };
+
+export type AgentConflictCode = 'stale_operation' | 'stale_sequence' | 'agent_run_settled' | 'invalid_identity';
 
 export type AgentItemStatus =
   | 'in_progress'
@@ -96,7 +107,7 @@ export type AgentRecoveryRecord = {
   runId: string;
   operationId?: string;
   lastSequence?: number;
-  topicId: string;
+  sessionId: string;
   sourceUserMessageId: string;
   status: 'failed' | 'cancelled';
   resumeRoute: 'main_agent' | 'local_delivery' | null;
@@ -111,6 +122,7 @@ export type AgentRecoveryRecord = {
   skillId: string | null;
   skillContentHash?: string | null;
   imageOperation?: 'generate' | 'edit';
+  assetId?: string;
   targetReferenceId?: string;
   contextEntityIds: string[];
   visualReferenceIds: string[];
@@ -118,6 +130,8 @@ export type AgentRecoveryRecord = {
     references: Array<{
       id: string;
       src: string;
+      assetId?: string;
+      originalSrc?: string;
       previewSrc?: string;
       label: string;
       source: 'upload' | 'history' | 'canvas';
@@ -243,6 +257,8 @@ export type AgentClarificationState = {
     references: Array<{
       id: string;
       src: string;
+      assetId?: string;
+      originalSrc?: string;
       label: string;
       source: 'upload' | 'history' | 'canvas';
       canvasItemId?: string;
@@ -336,6 +352,8 @@ export type AgentClientAction = {
   };
   assets: Array<{
     src: string;
+    assetId?: string;
+    originalSrc?: string;
     naturalWidth?: number;
     naturalHeight?: number;
     model?: string;
@@ -349,6 +367,45 @@ export type AgentClientAction = {
     previewSrc?: string;
   }>;
   batch?: { total: number; settled: number; succeeded: number; failed: number };
+} | {
+  type: 'update_context_window';
+  sessionId: string;
+  compactedWindows: Array<Record<string, unknown>>;
+  historyRevision?: number;
+  userMessageRevision?: number;
+  activeWindowRevision?: number;
+  modelEvents?: Array<Record<string, unknown>>;
+  activeContextWindow: {
+    sessionId: string;
+    startSequence: number;
+    endSequence: number;
+    compactCount: number;
+    summaryVersion: number;
+    estimatedTokens: number;
+    model: string;
+    contextWindow: number;
+  };
+} | {
+  type: 'register_topic_visual_assets' | 'register_session_visual_assets';
+  topicId?: string;
+  sessionId?: string;
+  assets: Array<{
+    id: string;
+    sessionId?: string;
+    topicId?: string;
+    durableSrc: string;
+    previewSrc?: string;
+    originalSrc?: string;
+    contentHash: string;
+    mimeType: string;
+    byteSize: number;
+    source: 'upload' | 'canvas' | 'generated';
+    sourceReferenceId?: string;
+    taskId?: string;
+    batchId?: string;
+    versionId?: string;
+    createdAt: number;
+  }>;
 };
 
 export type AgentAnalysisCheckpoint = {
@@ -401,9 +458,9 @@ export type AgentAnalysisSnapshot = {
 };
 
 export type AgentTaskSnapshot = {
-  topicId: string;
+  sessionId: string;
   taskId: string;
-  /** Optional only for legacy persisted snapshots. New checkpoints include both fields. */
+  /** Operation identity is included in every current checkpoint. */
   operationId?: string;
   lastSequence?: number;
   contractVersion: number;
@@ -448,6 +505,14 @@ export type AgentProgressUpdate = {
   parentItemId?: string;
   retryability?: 'retryable' | 'requires_change' | 'unknown';
   detail?: string;
+  action?: string;
+  agentTurnId?: string;
+  parentTurnId?: string;
+  modelSampleIndex?: number;
+  nextSampleReason?: string;
+  retryAttempt?: number;
+  failureStage?: string;
+  failureCode?: string;
 };
 
 export type AgentActivityDelta = {
@@ -471,9 +536,21 @@ export type AgentActivityCommit = {
   type: 'agent_activity_commit';
   activityId: string;
   disposition: 'commentary' | 'final';
+  commentaryKind?: 'model_task_description' | 'fallback' | 'result_summary';
 };
 
 export type AgentEvent =
+  | {
+      type: 'context_event';
+      event: {
+        eventId: string;
+        sessionId: string;
+        sequence: number;
+        type: string;
+        source: string;
+        [key: string]: unknown;
+      };
+    }
   | (AgentLifecycleIdentity & { type: 'agent_start' })
   | AgentProgressUpdate
   | { type: 'routing_start' }
@@ -524,7 +601,7 @@ export type AgentEvent =
       sequence?: number;
       timestampMs?: number;
     }
-  | (AgentLifecycleIdentity & { type: 'tool_start'; toolCallId: string; toolName: string; itemId?: string; executionId?: string; parentItemId?: string })
+  | (AgentLifecycleIdentity & { type: 'tool_start'; toolCallId: string; toolName: string; itemId?: string; executionId?: string; parentItemId?: string; agentTurnId?: string; parentTurnId?: string; modelSampleIndex?: number; toolCallIndex?: number; toolCallsInTurn?: number; skipped?: boolean; nextSampleReason?: string })
   | (AgentLifecycleIdentity & { type: 'tool_update'; toolCallId: string; message: string; itemId?: string; executionId?: string; parentItemId?: string })
   | (AgentLifecycleIdentity & { type: 'tool_result'; toolCallId: string; toolName?: string; result: unknown; isError?: boolean; itemId?: string; executionId?: string; parentItemId?: string; retryability?: 'retryable' | 'requires_change' | 'unknown' })
   | AgentActivityDelta

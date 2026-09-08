@@ -106,14 +106,6 @@ export function findWorkspaceModelOption(options, modelId, providerId) {
 }
 
 export function getSessionConversationCount(session) {
-  const topics = Array.isArray(session?.topics) ? session.topics : [];
-  if (topics.length > 0) {
-    return topics.reduce(
-      (total, topic) => total + (Array.isArray(topic?.messages) ? topic.messages.length : 0),
-      0
-    );
-  }
-
   return Array.isArray(session?.messages) ? session.messages.length : 0;
 }
 
@@ -158,12 +150,18 @@ export function getRecentFailedAgentTask(messages) {
         ? clarificationState.intent
         : null;
 
+    const taskId = assistant.taskSnapshot?.taskId || clarificationState?.taskId || progress?.taskId;
+    const runId = progress?.runId;
+    const operationId = progress?.operationId || clarificationState?.operationId;
+    const sessionId = assistant.taskSnapshot?.sessionId || clarificationState?.sessionId;
+    if (![taskId, runId, operationId, sessionId].every((value) => typeof value === 'string' && value.trim())) return null;
+
     return createAgentRecoveryRecord({
-      taskId: assistant.taskSnapshot?.taskId || clarificationState?.taskId || progress?.runId || assistant.id,
-      runId: progress?.runId || assistant.id,
-      operationId: progress?.operationId || clarificationState?.operationId || progress?.runId || assistant.id,
+      taskId,
+      runId,
+      operationId,
       lastSequence: Number.isFinite(Number(progress?.lastSequence)) ? Number(progress.lastSequence) : 0,
-      topicId: assistant.taskSnapshot?.topicId || 'default',
+      sessionId,
       sourceUserMessageId: clarificationState?.sourceUserMessageId || source.id,
       status: cancelled ? 'cancelled' : 'failed',
       resumeRoute: String(failureStep?.phase || '') === 'local_delivery'
@@ -1971,11 +1969,9 @@ export function getGeneratedImageHistoryEntries({ sessions, currentSessionSnapsh
       })));
     }
 
-    const topics = Array.isArray(session?.topics) ? session.topics : [];
-    topics.forEach((topic, topicIndex) => {
-      const topicMessages = Array.isArray(topic?.messages) ? topic.messages : [];
-      const topicUpdatedAt =
-        Number.isFinite(topic?.updatedAt) && topic.updatedAt > 0 ? topic.updatedAt : sessionUpdatedAt;
+    const conversationSources = [{ messages: session?.messages }];
+    conversationSources.forEach(({ messages }) => {
+      const topicMessages = Array.isArray(messages) ? messages : [];
 
       topicMessages.forEach((message, messageIndex) => {
         if (typeof message?.imageUrl !== 'string' || message.imageUrl.length === 0) {
@@ -1985,9 +1981,9 @@ export function getGeneratedImageHistoryEntries({ sessions, currentSessionSnapsh
         const messageTimestamp =
           extractTimestampFromGeneratedId(message.id) ??
           extractTimestampFromGeneratedAsset(message.imageUrl) ??
-          topicUpdatedAt;
+          sessionUpdatedAt;
         fallbackEntries.push({
-          id: `chat:${sessionId}:${topic?.id || topicIndex}:${message?.id || messageIndex}`,
+          id: `chat:${sessionId}:${message?.id || messageIndex}`,
           sessionId,
           source: 'chat',
           src: message.imageUrl,
@@ -2136,63 +2132,29 @@ export function getDirectImagePreviewsForTextCard({
 /**
  * @param {{
  *   session: any,
- *   now?: number,
  *   normalizeSession?: (value: any) => any,
  *   normalizeItems?: (items: any[]) => any[],
- *   inferTopicSkill?: (topic: any) => any,
  * }} options
  */
 export function resolveSessionPresentationState({
   session,
-  now = Date.now(),
   normalizeSession = (value) => value,
   normalizeItems = (items) => items,
-  inferTopicSkill = () => null,
 }) {
-  let topics = session.topics || [];
-  let activeTopicId = session.activeTopicId || '';
-
-  if (topics.length === 0 && Array.isArray(session.messages) && session.messages.length > 0) {
-    const initialTopic = {
-      id: `topic-initial-${now}`,
-      title: session.messages[0].content?.substring(0, 20) || '初始对话',
-      messages: session.messages,
-      activeSkill: null,
-      activeSkillExplicit: false,
-      createdAt: session.createdAt,
-      updatedAt: session.updatedAt,
-    };
-    topics = [initialTopic];
-    activeTopicId = initialTopic.id;
-  } else if (topics.length === 0) {
-    const emptyTopic = {
-      id: `topic-empty-${now}`,
-      title: '新对话',
-      messages: [],
-      activeSkill: null,
-      activeSkillExplicit: false,
-      createdAt: now,
-      updatedAt: now,
-    };
-    topics = [emptyTopic];
-    activeTopicId = emptyTopic.id;
-  }
-
   const normalizedSession = normalizeSession(session);
-  const activeTopic = topics.find((topic) => topic.id === activeTopicId) || topics[0] || null;
-  const chatMessages = activeTopic ? activeTopic.messages || [] : [];
+  const chatMessages = Array.isArray(normalizedSession.messages) ? normalizedSession.messages : [];
 
   return {
     normalizedSession,
-    topics,
-    activeTopic,
+    topics: [],
+    activeTopic: null,
     items: normalizeItems(normalizedSession.items || []),
     connections: normalizedSession.connections || [],
     chatMessages,
-    activeSkill: inferTopicSkill(activeTopic),
+    activeSkill: normalizedSession.activeSkill || null,
     viewport: normalizedSession.viewport || { ...DEFAULT_VIEWPORT },
     imageCount: chatMessages.filter((message) => message.imageName).length,
-    shouldResetWelcome: !activeTopic || chatMessages.length === 0,
+    shouldResetWelcome: chatMessages.length === 0,
     currentSessionId: normalizedSession.id,
   };
 }

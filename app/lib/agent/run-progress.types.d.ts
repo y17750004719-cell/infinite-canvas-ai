@@ -11,7 +11,7 @@ export interface AgentLifecycleIdentity {
   timestampMs: number;
 }
 
-/** New lifecycle events use this identity; legacy persisted events are normalized before this type is used. */
+/** Lifecycle events use this identity. */
 export type StrictAgentLifecycleEvent =
   | (AgentLifecycleIdentity & { type: 'agent_start' })
   | (AgentLifecycleIdentity & { type: 'progress_update'; stepId?: string; phase?: string; status?: AgentRunStepStatus; label?: string; detail?: unknown })
@@ -28,15 +28,6 @@ export type StrictAgentLifecycleEvent =
   | (AgentLifecycleIdentity & { type: 'agent_done'; stopReason?: string })
   | (AgentLifecycleIdentity & { type: 'agent_error'; message?: string; retryable?: boolean; code?: 'invalid_reference' | 'invalid_tool_arguments' | 'invalid_plan' | 'terminal_contract' | 'provider_unavailable' | 'provider_http' | 'provider_timeout' | 'transport' | 'budget_exceeded' })
   | (AgentLifecycleIdentity & { type: 'agent_cancelled'; message?: string });
-
-export type LegacyAgentRunEvent = {
-  type: string;
-  taskId?: string;
-  operationId?: string;
-  runId?: string;
-  sequence?: number;
-  timestampMs?: number;
-};
 
 export type AgentItemStatus = 'in_progress' | 'waiting' | 'completed' | 'failed' | 'declined' | 'cancelled';
 export type AgentItemType = 'agent_message' | 'commentary' | 'reasoning_summary' | 'tool_call' | 'skill' | 'image_generation' | 'approval' | 'clarification' | 'asset_delivery' | 'error';

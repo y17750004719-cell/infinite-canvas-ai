@@ -181,7 +181,7 @@ test('workspace palette and canvas background are neutral gray and dot-free', ()
   assert.equal(globalsSource.includes('background-position:'), false);
 });
 
-test('left rail places the theme toggle between history and settings', () => {
+test('left rail keeps the theme toggle between history and settings', () => {
   const railStart = pageSource.indexOf('const LEFT_RAIL_ITEMS = [');
   const railEnd = pageSource.indexOf('] as const;', railStart);
 
@@ -191,7 +191,7 @@ test('left rail places the theme toggle between history and settings', () => {
   const railBlock = pageSource.slice(railStart, railEnd);
   const historyIndex = railBlock.indexOf("{ id: 'history', label: '历史', icon: Clock3 }");
   const themeIndex = railBlock.indexOf("{ id: 'theme', label: '黑夜', icon: Moon }");
-  const settingsIndex = railBlock.indexOf("{ id: 'settings', label: '设置', icon: Settings }");
+  const settingsIndex = railBlock.indexOf("{ id: 'settings', label: '设置', icon: Settings2 }");
 
   assert.ok(historyIndex > -1);
   assert.ok(themeIndex > historyIndex);

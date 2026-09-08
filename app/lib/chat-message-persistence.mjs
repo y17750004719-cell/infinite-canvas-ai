@@ -42,6 +42,8 @@ function createLegacyReference(messageId, src, index, overrides = {}) {
   return {
     id: text(overrides.id) || `${messageId}:reference:${index + 1}`,
     src,
+    ...(text(overrides.assetId) ? { assetId: text(overrides.assetId) } : {}),
+    ...(text(overrides.originalSrc) ? { originalSrc: text(overrides.originalSrc) } : {}),
     ...(text(overrides.previewSrc) ? { previewSrc: overrides.previewSrc } : {}),
     label: text(overrides.label) || `image${index + 1}`,
     source: ['upload', 'history', 'canvas'].includes(overrides.source) ? overrides.source : 'upload',
@@ -161,24 +163,6 @@ export function normalizeChatMessageReferences(message) {
 }
 
 export function normalizeSessionChatMessages(session) {
-  const topics = Array.isArray(session?.topics) ? session.topics : [];
-  const activeTopicIndex = topics.findIndex((topic) => topic?.id === session?.activeTopicId);
-  const activeSource = activeTopicIndex >= 0 && Array.isArray(topics[activeTopicIndex]?.messages)
-    ? topics[activeTopicIndex].messages
-    : Array.isArray(session?.messages)
-      ? session.messages
-      : [];
-  const activeMessages = activeSource.map(normalizeChatMessageReferences);
-  const normalizedTopics = topics.map((topic, index) => {
-    const agentMemory = normalizeAgentConversationMemory(topic?.agentMemory);
-    return {
-      ...topic,
-      ...(agentMemory ? { agentMemory } : {}),
-      messages: index === activeTopicIndex
-        ? activeMessages
-        : (Array.isArray(topic?.messages) ? topic.messages.map(normalizeChatMessageReferences) : []),
-    };
-  });
-
-  return { messages: activeMessages, topics: normalizedTopics };
+  const messages = Array.isArray(session?.messages) ? session.messages : [];
+  return { messages: messages.map(normalizeChatMessageReferences) };
 }

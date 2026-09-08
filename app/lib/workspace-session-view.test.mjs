@@ -85,7 +85,7 @@ import {
   getViewportCenteredOnBounds,
 } from './workspace-session-view.mjs';
 
-test('getRecentFailedAgentTask preserves the original request and failure stage for model-driven retry', () => {
+test('getRecentFailedAgentTask preserves the original request and complete operation identity', () => {
   const result = getRecentFailedAgentTask([
     {
       id: 'user-1',
@@ -102,8 +102,10 @@ test('getRecentFailedAgentTask preserves the original request and failure stage 
       role: 'assistant',
       content: '生成失败: supplier stream stalled',
       taskStatus: 'failed',
+      taskSnapshot: { taskId: 'task-1', sessionId: 'session-1', activeVersions: [] },
       agentRunProgress: {
         runId: 'agent-run-1',
+        operationId: 'operation-1',
         intent: 'image',
         outcome: 'failed',
         steps: [{ stepId: 'planner', phase: 'planning', status: 'failed', label: 'Image Planner 执行失败' }],
@@ -113,11 +115,11 @@ test('getRecentFailedAgentTask preserves the original request and failure stage 
 
   assert.deepEqual(result, {
     version: 1,
-    taskId: 'agent-run-1',
+    taskId: 'task-1',
     runId: 'agent-run-1',
-    operationId: 'agent-run-1',
+    operationId: 'operation-1',
     lastSequence: 0,
-    topicId: 'default',
+    sessionId: 'session-1',
     sourceUserMessageId: 'user-1',
     status: 'failed',
     resumeRoute: 'main_agent',
@@ -137,8 +139,16 @@ test('getRecentFailedAgentTask preserves the original request and failure stage 
       composerSegments: [{ type: 'reference', referenceId: 'history-image:1' }],
     },
     completedAssetCount: 0,
+    taskSnapshot: result.taskSnapshot,
     createdAt: result.createdAt,
   });
+});
+
+test('getRecentFailedAgentTask does not synthesize recovery identity from message ids', () => {
+  assert.equal(getRecentFailedAgentTask([
+    { id: 'user-1', role: 'user', content: 'request' },
+    { id: 'assistant-1', role: 'assistant', taskStatus: 'failed', agentRunProgress: { runId: 'old-run', outcome: 'failed' } },
+  ]), null);
 });
 
 test('getRecentFailedAgentTask prefers the staged checkpoint over composer state', () => {
@@ -147,10 +157,10 @@ test('getRecentFailedAgentTask prefers the staged checkpoint over composer state
     {
       id: 'assistant-failed', role: 'assistant', content: 'internal validation detail', taskStatus: 'failed',
       taskSnapshot: {
-        topicId: 'topic-1', taskId: 'task-root', contractVersion: 1, activeVersions: [],
+        sessionId: 'topic-1', taskId: 'task-root', contractVersion: 1, activeVersions: [],
         imageOperation: 'edit', targetReferenceId: 'ref-target',
       },
-      agentRunProgress: { runId: 'run-2', intent: 'image', outcome: 'failed', steps: [] },
+      agentRunProgress: { runId: 'run-2', operationId: 'operation-1', intent: 'image', outcome: 'failed', steps: [] },
     },
   ]);
   assert.equal(result.taskId, 'task-root');
@@ -162,11 +172,11 @@ test('getRecentFailedAgentTask prefers the staged checkpoint over composer state
 
 test('getRecentFailedAgentTask skips abandoned image roots', () => {
   const abandoned = createAgentRecoveryRecord({
-    taskId: 'task-abandoned', runId: 'run-abandoned', topicId: 'topic-1', sourceUserMessageId: 'user-1',
+    taskId: 'task-abandoned', runId: 'run-abandoned', sessionId: 'topic-1', sourceUserMessageId: 'user-1',
     status: 'cancelled', resumeRoute: 'main_agent', intent: 'image', originalRequest: '取消的任务',
     failureStage: 'cancelled', failureMessage: '运行已取消',
     taskSnapshot: {
-      topicId: 'topic-1', taskId: 'task-abandoned', contractVersion: 1, activeVersions: [],
+      sessionId: 'topic-1', taskId: 'task-abandoned', contractVersion: 1, activeVersions: [],
     },
   });
   assert.equal(getRecentFailedAgentTask([
@@ -179,7 +189,7 @@ test('getLatestAgentRecoveryForTask returns the latest state for the exact task 
   const recovery = (taskId, runId, completedAssetCount) => createAgentRecoveryRecord({
     taskId,
     runId,
-    topicId: 'topic-1',
+    sessionId: 'topic-1',
     sourceUserMessageId: `user-${taskId}`,
     status: 'failed',
     resumeRoute: 'main_agent',
@@ -240,6 +250,8 @@ test('fallback recovery keeps the clarification root task across repeated failur
           state: {
             taskId: 'task-root',
             sourceUserMessageId: 'user-root',
+            sessionId: 'session-1',
+            operationId: 'operation-1',
             intent: 'image',
             skillId: 'poster',
             originalRequest: '生成一张极简海报',
@@ -274,7 +286,7 @@ test('fallback recovery keeps the clarification root task across repeated failur
 
 test('getLatestAgentRecoveryForTask stops at a later successful boundary for that task', () => {
   const failed = createAgentRecoveryRecord({
-    taskId: 'task-a', runId: 'run-a1', topicId: 'topic-1', sourceUserMessageId: 'user-a',
+    taskId: 'task-a', runId: 'run-a1', sessionId: 'topic-1', sourceUserMessageId: 'user-a',
     status: 'failed', resumeRoute: 'main_agent', intent: 'chat', originalRequest: 'answer me',
     failureStage: 'chat', failureMessage: 'failed',
   });
@@ -297,7 +309,7 @@ test('a later completed task clears older recovery candidates', () => {
   assert.equal(getRecentFailedAgentTask(messages), null);
 });
 
-test('getSessionConversationCount sums topic messages before falling back to legacy messages', () => {
+test('getSessionConversationCount ignores removed topic data', () => {
   assert.equal(typeof workspaceSessionView.getSessionConversationCount, 'function');
 
   const session = {
@@ -324,10 +336,10 @@ test('getSessionConversationCount sums topic messages before falling back to leg
     ],
   };
 
-  assert.equal(workspaceSessionView.getSessionConversationCount(session), 3);
+  assert.equal(workspaceSessionView.getSessionConversationCount(session), 1);
 });
 
-test('getSessionConversationCount falls back to legacy messages when topics are absent', () => {
+test('getSessionConversationCount counts current session messages', () => {
   assert.equal(typeof workspaceSessionView.getSessionConversationCount, 'function');
 
   const session = {
@@ -342,8 +354,8 @@ test('getSessionConversationCount falls back to legacy messages when topics are 
   assert.equal(workspaceSessionView.getSessionConversationCount(session), 2);
 });
 
-test('resolveSessionPresentationState creates a topic for legacy sessions that only have messages', () => {
-  const legacyMessages = [
+test('resolveSessionPresentationState uses v5 session messages without creating a topic', () => {
+  const messages = [
     {
       id: 'msg-1',
       role: 'user',
@@ -353,9 +365,7 @@ test('resolveSessionPresentationState creates a topic for legacy sessions that o
 
   const session = {
     ...createEmptySession({ existingCount: 0, now: 100 }),
-    messages: legacyMessages,
-    topics: [],
-    activeTopicId: '',
+    messages,
   };
 
   const result = resolveSessionPresentationState({
@@ -366,18 +376,15 @@ test('resolveSessionPresentationState creates a topic for legacy sessions that o
     inferTopicSkill: () => null,
   });
 
-  assert.equal(result.topics.length, 1);
-  assert.equal(result.topics[0].id, 'topic-initial-200');
-  assert.equal(result.activeTopic?.id, 'topic-initial-200');
-  assert.deepEqual(result.chatMessages, legacyMessages);
+  assert.deepEqual(result.topics, []);
+  assert.equal(result.activeTopic, null);
+  assert.deepEqual(result.chatMessages, messages);
   assert.equal(result.currentSessionId, session.id);
 });
 
-test('resolveSessionPresentationState creates an empty topic for sessions without any conversation state', () => {
+test('resolveSessionPresentationState keeps a new v5 session chat empty without creating a topic', () => {
   const session = {
     ...createEmptySession({ existingCount: 0, now: 100 }),
-    topics: [],
-    activeTopicId: '',
     messages: [],
   };
 
@@ -389,31 +396,23 @@ test('resolveSessionPresentationState creates an empty topic for sessions withou
     inferTopicSkill: () => null,
   });
 
-  assert.equal(result.topics.length, 1);
-  assert.equal(result.topics[0].id, 'topic-empty-300');
-  assert.equal(result.activeTopic?.id, 'topic-empty-300');
+  assert.deepEqual(result.topics, []);
+  assert.equal(result.activeTopic, null);
   assert.deepEqual(result.chatMessages, []);
   assert.equal(result.imageCount, 0);
   assert.equal(result.shouldResetWelcome, true);
 });
 
-test('resolveSessionPresentationState uses inferred topic skill and normalized items/connections', () => {
+test('resolveSessionPresentationState uses the v5 session skill and normalized items/connections', () => {
   const session = createEmptySession({ existingCount: 0, now: 100 });
   const skill = { id: 'brand', label: '品牌识别系统' };
   const nextSession = {
     ...session,
     items: [{ id: 'item-1', type: 'text' }],
     connections: [{ id: 'conn-1', fromItemId: 'item-1', toItemId: 'item-1' }],
-    topics: [
-      {
-        id: 'topic-1',
-        title: '品牌',
-        messages: [{ id: 'msg-1', role: 'assistant', content: '已开始', skill }],
-        createdAt: 100,
-        updatedAt: 100,
-      },
-    ],
-    activeTopicId: 'topic-1',
+    messages: [{ id: 'msg-1', role: 'assistant', content: '已开始', skill }],
+    activeSkill: skill,
+    activeSkillExplicit: true,
   };
 
   const result = resolveSessionPresentationState({
@@ -492,27 +491,18 @@ test('getGeneratedImageHistoryEntries keeps only generated images and sorts newe
           },
         ],
         connections: [],
-        messages: [],
-        topics: [
+        messages: [
           {
-            id: 'topic-1',
-            title: 'Topic 1',
-            createdAt: 1700000000000,
-            updatedAt: 1700000000250,
-            messages: [
-              {
-                id: 'msg-1700000000100-old',
-                role: 'assistant',
-                content: '',
-                imageUrl: '/chat-old.png',
-              },
-              {
-                id: 'msg-1700000000200-new',
-                role: 'assistant',
-                content: '',
-                imageUrl: '/chat-new.png',
-              },
-            ],
+            id: 'msg-1700000000100-old',
+            role: 'assistant',
+            content: '',
+            imageUrl: '/chat-old.png',
+          },
+          {
+            id: 'msg-1700000000200-new',
+            role: 'assistant',
+            content: '',
+            imageUrl: '/chat-new.png',
           },
         ],
       },
@@ -550,7 +540,30 @@ test('getGeneratedImageHistoryEntries keeps only generated images and sorts newe
   );
 });
 
-test('getGeneratedImageHistoryEntries falls back to topic order when chat image message ids do not contain timestamps', () => {
+test('getGeneratedImageHistoryEntries backfills chat images from v5 session messages', () => {
+  const result = getGeneratedImageHistoryEntries({
+    sessions: [{
+      id: 'session-v4',
+      schemaVersion: 5,
+      updatedAt: 1700000000200,
+      messages: [{
+        id: 'msg-1700000000100-image',
+        role: 'assistant',
+        content: '',
+        imageUrl: '/session-chat.png',
+      }],
+      items: [],
+      connections: [],
+    }],
+  });
+
+  assert.deepEqual(
+    result.map((entry) => ({ src: entry.src, source: entry.source, sessionId: entry.sessionId })),
+    [{ src: '/session-chat.png', source: 'chat', sessionId: 'session-v4' }],
+  );
+});
+
+test('getGeneratedImageHistoryEntries falls back to message order when ids do not contain timestamps', () => {
   const result = getGeneratedImageHistoryEntries({
     sessions: [
       {
@@ -560,27 +573,18 @@ test('getGeneratedImageHistoryEntries falls back to topic order when chat image 
         updatedAt: 1700000000400,
         items: [],
         connections: [],
-        messages: [],
-        topics: [
+        messages: [
           {
-            id: 'topic-fallback',
-            title: 'Topic fallback',
-            createdAt: 1700000000000,
-            updatedAt: 1700000000400,
-            messages: [
-              {
-                id: 'msg-alpha',
-                role: 'assistant',
-                content: '',
-                imageUrl: '/fallback-old.png',
-              },
-              {
-                id: 'msg-beta',
-                role: 'assistant',
-                content: '',
-                imageUrl: '/fallback-new.png',
-              },
-            ],
+            id: 'msg-alpha',
+            role: 'assistant',
+            content: '',
+            imageUrl: '/fallback-old.png',
+          },
+          {
+            id: 'msg-beta',
+            role: 'assistant',
+            content: '',
+            imageUrl: '/fallback-new.png',
           },
         ],
       },
@@ -616,21 +620,12 @@ test('getGeneratedImageHistoryEntries prefers image-card output file timestamps 
           },
         ],
         connections: [],
-        messages: [],
-        topics: [
+        messages: [
           {
-            id: 'topic-mixed',
-            title: 'Mixed',
-            createdAt: 1700000000000,
-            updatedAt: 1700000000200,
-            messages: [
-              {
-                id: 'msg-1700000000200-chat',
-                role: 'assistant',
-                content: '',
-                imageUrl: '/uploads/generated/img-1700000000200-chat.png',
-              },
-            ],
+            id: 'msg-1700000000200-chat',
+            role: 'assistant',
+            content: '',
+            imageUrl: '/uploads/generated/img-1700000000200-chat.png',
           },
         ],
       },
@@ -656,27 +651,18 @@ test('getGeneratedImageHistoryEntries prefers chat image file timestamps when me
         updatedAt: 1700000000400,
         items: [],
         connections: [],
-        messages: [],
-        topics: [
+        messages: [
           {
-            id: 'topic-file-order',
-            title: 'File order',
-            createdAt: 1700000000000,
-            updatedAt: 1700000000400,
-            messages: [
-              {
-                id: 'msg-alpha',
-                role: 'assistant',
-                content: '',
-                imageUrl: '/uploads/generated/img-1700000000500-newest.png',
-              },
-              {
-                id: 'msg-beta',
-                role: 'assistant',
-                content: '',
-                imageUrl: '/uploads/generated/img-1700000000100-oldest.png',
-              },
-            ],
+            id: 'msg-alpha',
+            role: 'assistant',
+            content: '',
+            imageUrl: '/uploads/generated/img-1700000000500-newest.png',
+          },
+          {
+            id: 'msg-beta',
+            role: 'assistant',
+            content: '',
+            imageUrl: '/uploads/generated/img-1700000000100-oldest.png',
           },
         ],
       },
@@ -711,21 +697,12 @@ test('getGeneratedImageHistoryEntries keeps newer explicit session history entri
         ],
         items: [],
         connections: [],
-        messages: [],
-        topics: [
+        messages: [
           {
-            id: 'topic-old-chat',
-            title: 'Old chat',
-            createdAt: 1700000000000,
-            updatedAt: 1700000000200,
-            messages: [
-              {
-                id: 'msg-1700000000200-chat',
-                role: 'assistant',
-                content: '',
-                imageUrl: '/uploads/generated/img-1700000000200-chat.png',
-              },
-            ],
+            id: 'msg-1700000000200-chat',
+            role: 'assistant',
+            content: '',
+            imageUrl: '/uploads/generated/img-1700000000200-chat.png',
           },
         ],
       },
@@ -758,21 +735,12 @@ test('getGeneratedImageHistoryEntries prefers the current session snapshot over 
           },
         ],
         connections: [],
-        messages: [],
-        topics: [
+        messages: [
           {
-            id: 'topic-persisted',
-            title: 'Persisted',
-            createdAt: 1700000000000,
-            updatedAt: 1700000000100,
-            messages: [
-              {
-                id: 'msg-persisted',
-                role: 'assistant',
-                content: '',
-                imageUrl: '/persisted-chat.png',
-              },
-            ],
+            id: 'msg-persisted',
+            role: 'assistant',
+            content: '',
+            imageUrl: '/persisted-chat.png',
           },
         ],
       },
@@ -783,21 +751,12 @@ test('getGeneratedImageHistoryEntries prefers the current session snapshot over 
         updatedAt: 1700000000200,
         items: [],
         connections: [],
-        messages: [],
-        topics: [
+        messages: [
           {
-            id: 'topic-other',
-            title: 'Other',
-            createdAt: 1700000000000,
-            updatedAt: 1700000000200,
-            messages: [
-              {
-                id: 'msg-1700000000200-other',
-                role: 'assistant',
-                content: '',
-                imageUrl: '/other-chat.png',
-              },
-            ],
+            id: 'msg-1700000000200-other',
+            role: 'assistant',
+            content: '',
+            imageUrl: '/other-chat.png',
           },
         ],
       },
@@ -816,21 +775,12 @@ test('getGeneratedImageHistoryEntries prefers the current session snapshot over 
         },
       ],
       connections: [],
-      messages: [],
-      topics: [
+      messages: [
         {
-          id: 'topic-live',
-          title: 'Live',
-          createdAt: 1700000000000,
-          updatedAt: 1700000000300,
-          messages: [
-            {
-              id: 'msg-1700000000300-live',
-              role: 'assistant',
-              content: '',
-              imageUrl: '/live-chat.png',
-            },
-          ],
+          id: 'msg-1700000000300-live',
+          role: 'assistant',
+          content: '',
+          imageUrl: '/live-chat.png',
         },
       ],
     },

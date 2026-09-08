@@ -25,10 +25,8 @@ test('continuations preserve task and operation identity and sequence', () => {
   });
 });
 
-test('legacy events fall back to runId and are marked legacy without sequence', () => {
-  assert.deepEqual(normalizeAgentEventIdentity({ type: 'agent_done', runId: 'run-1' }), {
-    taskId: 'run-1', operationId: 'run-1', runId: 'run-1', legacy: true,
-  });
+test('events without the current identity contract are rejected', () => {
+  assert.equal(normalizeAgentEventIdentity({ type: 'agent_done', runId: 'run-1' }), null);
 });
 
 test('sequence classification rejects duplicates and older events', () => {
@@ -51,8 +49,8 @@ test('strict IDs reject overlong values instead of truncating them', () => {
   assert.equal(normalizeAgentEventIdentity({ type: 'agent_done', runId: 'x'.repeat(201) }), null);
 });
 
-test('event classification is shared by strict and legacy consumers', () => {
-  assert.equal(classifyAgentEvent({ type: 'tool_result', runId: 'run-1' }).reason, 'legacy');
+test('event classification rejects incomplete identity and stale events', () => {
+  assert.equal(classifyAgentEvent({ type: 'tool_result', runId: 'run-1' }).reason, 'invalid_identity');
   assert.equal(classifyAgentEvent({ type: 'tool_result', taskId: 'task-1', operationId: 'op-1', runId: 'run-1', sequence: 2 }, { taskId: 'task-1', operationId: 'op-1', lastSequence: 2 }).reason, 'stale_sequence');
   assert.equal(classifyAgentEvent({ type: 'tool_result', taskId: 'task-1', operationId: 'op-1', runId: 'run-1', sequence: 3 }, { taskId: 'task-1', operationId: 'op-1', lastSequence: 2 }).accepted, true);
 });

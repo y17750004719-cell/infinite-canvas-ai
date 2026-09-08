@@ -180,18 +180,9 @@ export function useWorkspaceSessionController<TResolvedSessionState>({
     }
     skipNextSessionAutoSaveRef.current = true;
     applySessionState(session);
-    if (session.activeAgentRun?.status === 'running') {
-      const recoveredSession: ProjectSession = {
-        ...session,
-        activeAgentRun: undefined,
-        updatedAt: Date.now(),
-      };
-      setSessions((previous) => previous.map((entry) => (
-        entry.id === recoveredSession.id ? recoveredSession : entry
-      )));
-      enqueueCoalescedSessionPersistence(recoveredSession);
-    }
-  }, [applySessionState, enqueueCoalescedSessionPersistence, interruptSessionPersistence, setSessions]);
+    // Running turns are journal-backed and must survive a refresh. The server
+    // decides whether to attach, resume, or mark an unknown side effect.
+  }, [applySessionState, interruptSessionPersistence]);
 
   const captureWorkspaceUiSnapshot = useCallback((): WorkspaceUiSnapshot => {
     const currentSession = sessionsRef.current.find((session) => session.id === currentSessionIdRef.current) || null;
@@ -469,6 +460,15 @@ export function useWorkspaceSessionController<TResolvedSessionState>({
     try {
       await enqueueSessionPersistenceTask(async () => {
         await removeSession(sessionId);
+        // IndexedDB and filesystem assets have separate lifecycles. Asset
+        // cleanup is best-effort so a stale file cannot block canvas deletion.
+        await fetch('/api/session-visual-assets', {
+          method: 'DELETE',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ sessionId }),
+        }).catch((error) => {
+          console.warn('Failed to delete session visual assets:', error);
+        });
         if (shouldPersistFallbackSession && nextSession) {
           await upsertSession(nextSession);
         }
@@ -529,6 +529,20 @@ export function useWorkspaceSessionController<TResolvedSessionState>({
             items: resolved.items,
           };
         });
+
+        const migratedSessions = normalizedSessions.filter((_, index) => (
+          savedSessions[index]?.schemaVersion !== 5
+        ));
+        if (migratedSessions.length > 0) {
+          const migrationResults = await Promise.allSettled(
+            migratedSessions.map((session) => upsertSession(session))
+          );
+          migrationResults.forEach((result, index) => {
+            if (result.status === 'rejected') {
+              console.warn('Failed to persist migrated canvas chat session:', migratedSessions[index]?.id, result.reason);
+            }
+          });
+        }
 
         sessionsRef.current = normalizedSessions;
         setSessions(normalizedSessions);
