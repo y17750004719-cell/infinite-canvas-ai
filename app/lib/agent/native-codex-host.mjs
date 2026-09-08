@@ -24,6 +24,10 @@ export function nativeProviderFingerprint(provider) {
   return hash(JSON.stringify([provider.id, provider.model, new URL(provider.baseUrl).href]));
 }
 
+export function nativeProviderConfigFingerprint(provider) {
+  return hash(JSON.stringify([provider.id, provider.model, new URL(provider.baseUrl).href, hash(provider.apiKey || '')]));
+}
+
 export function nativeConfig(provider) {
   const endpoint = new URL(provider.baseUrl);
   if (!['https:', 'http:'].includes(endpoint.protocol) || endpoint.username || endpoint.password) throw failure('native_provider_url_invalid');
@@ -52,6 +56,7 @@ export async function assertNativeModelAdmission(provider, runtimeRoot) {
   }
   const record = admission?.models?.find((entry) => entry.fingerprint === nativeProviderFingerprint(provider));
   if (record?.sourceCommit !== NATIVE_SOURCE_COMMIT || record.wireApi !== 'responses'
+      || record.configFingerprint !== nativeProviderConfigFingerprint(provider)
       || !['streaming', 'toolContinuation', 'vision', 'cancellation', 'errors'].every((key) => record.checks?.[key] === true)) {
     throw failure('native_model_not_validated');
   }

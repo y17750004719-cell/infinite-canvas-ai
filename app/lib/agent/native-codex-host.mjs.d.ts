@@ -1,6 +1,7 @@
 export const NATIVE_SOURCE_COMMIT: string;
 export const NATIVE_DISABLED_FEATURES: readonly string[];
 export function nativeProviderFingerprint(provider: { id: string; model: string; baseUrl: string }): string;
+export function nativeProviderConfigFingerprint(provider: { id: string; model: string; baseUrl: string; apiKey?: string }): string;
 export function nativeConfig(provider: { model: string; baseUrl: string }): string;
 export function assertNativeModelAdmission(provider: Record<string, any>, runtimeRoot: string): Promise<void>;
 export function acquireNativeCodexHost(input: { provider: Record<string, any>; ownerId?: string; runtimeRoot?: string }): Promise<{

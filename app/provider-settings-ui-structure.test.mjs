@@ -224,6 +224,12 @@ test('provider settings model rows expose per-model protocol overrides', () => {
   assert.equal(pageSource.includes('modelProtocols: nextModelProtocols,'), true);
 });
 
+test('Responses chat models expose an explicit validation action', () => {
+  assert.equal(pageSource.includes("{ id: 'responses', label: 'Responses' }"), true);
+  assert.equal(pageSource.includes("/api/settings/providers/validate-model"), true);
+  assert.equal(pageSource.includes('验证并启用'), true);
+});
+
 test('provider settings opens fetched model selection in a centered overlay instead of expanding the card', () => {
   assert.equal(
     pageSource.includes('providerSettingsModelPickerOpen && providerSettingsFetchedModels && selectedProviderSettings && ('),

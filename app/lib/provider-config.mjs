@@ -1,4 +1,5 @@
 import path from 'node:path';
+import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { classifyModel } from './provider-models.ts';
 import { effectiveProviderProtocol } from './provider-protocol.mjs';
@@ -12,6 +13,7 @@ const SUPPORTED_PROVIDER_PROTOCOLS = new Set(['openai', 'responses', 'gemini']);
 const SUPPORTED_PROVIDER_AUTH_TYPES = new Set(['api-key', 'xiaomi-browser']);
 const SUPPORTED_IMAGE_REQUEST_MODES = new Set(['openai', 'openai-json']);
 const SUPPORTED_IMAGE_API_KEY_SCOPES = new Set(['all', 'gemini', 'gpt']);
+const nativeConfigHash = (providerId, model, baseUrl, apiKey) => createHash('sha256').update(JSON.stringify([providerId, model, new URL(baseUrl).href, createHash('sha256').update(apiKey || '').digest('hex')])).digest('hex');
 const PROVIDER_PRESET_TEMPLATES = {
   comfly: {
     id: 'comfly',
@@ -615,6 +617,16 @@ export async function updateProviderRegistry(
     })), null, 2)}\n`,
     'utf8'
   );
+  // Invalidate native Responses admission entries when any bound configuration changes.
+  const admissionPath = path.join(nextRuntimeDir, 'native-codex', 'model-compatibility.json');
+  try {
+    const admission = JSON.parse(await readFile(admissionPath, 'utf8'));
+    const valid = new Set(providers.flatMap((provider) => provider.chatModels
+      .filter((model) => effectiveProviderProtocol(provider, model) === 'responses')
+      .map((model) => nativeConfigHash(provider.id, model, provider.baseUrl, provider.apiKey))));
+    const models = Array.isArray(admission.models) ? admission.models.filter((entry) => valid.has(entry.configFingerprint)) : [];
+    await writeFile(admissionPath, `${JSON.stringify({ ...admission, models }, null, 2)}\n`, { mode: 0o600 });
+  } catch { /* Missing admission is the normal first-run state. */ }
 
   return {
     providers,
