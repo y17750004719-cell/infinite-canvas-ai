@@ -15,7 +15,7 @@ function parseError(status, body) {
   return new ChatCompletionsError(message, status === 401 || status === 403 ? 'provider_unauthorized' : `provider_http_${status}`, retryable);
 }
 
-async function requestStream({ provider, body, signal }) {
+async function requestStreamOnce({ provider, body, signal }) {
   let response;
   try { response = await fetch(`${provider.baseUrl.replace(/\/$/, '')}/chat/completions`, { method: 'POST', headers: { authorization: `Bearer ${provider.apiKey || ''}`, 'content-type': 'application/json', accept: 'text/event-stream' }, body: JSON.stringify({ ...body, stream: true }), signal }); }
   catch (error) { throw new ChatCompletionsError(error?.message || 'Provider connection failed', 'provider_transport', true); }
@@ -39,6 +39,15 @@ async function requestStream({ provider, body, signal }) {
   for await (const chunk of response.body) { buffer += Buffer.from(chunk).toString('utf8'); let index; while ((index = buffer.indexOf('\n')) >= 0) { const line = buffer.slice(0, index).replace(/\r$/, ''); buffer = buffer.slice(index + 1); consume(line); } }
   if (buffer.trim()) consume(buffer.trim());
   return { ...result, toolCalls: [...result.toolCalls.values()] };
+}
+
+async function requestStream(input) {
+  let lastError;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try { return await requestStreamOnce(input); }
+    catch (error) { lastError = error; if (!(error instanceof ChatCompletionsError) || !error.retryable || attempt === 1) throw error; }
+  }
+  throw lastError;
 }
 
 function userContent(input) {
