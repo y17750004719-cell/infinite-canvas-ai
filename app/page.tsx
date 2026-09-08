@@ -1383,7 +1383,7 @@ const resolveChatMessageInlineContent = (message: ChatMessage): ResolvedChatMess
 };
 type ProviderSettingsProviderId = string;
 type ProviderSettingsSource = 'runtime' | 'env';
-type ProviderProtocol = 'openai' | 'gemini';
+type ProviderProtocol = 'openai' | 'responses' | 'gemini';
 type ProviderAuthType = 'api-key' | 'xiaomi-browser';
 type ProviderImageRequestMode = 'openai' | 'openai-json';
 type ProviderImageApiKeyScope = 'all' | 'gemini' | 'gpt';
@@ -1644,7 +1644,8 @@ const getProviderSettingsProviderLabel = (providerId: ProviderSettingsProviderId
   PROVIDER_SETTINGS_PRESET_OPTIONS.find((option) => option.id === providerId)?.name || providerId || '自定义';
 
 const PROVIDER_PROTOCOL_OPTIONS = [
-  { id: 'openai', label: 'OpenAI Compatible' },
+  { id: 'openai', label: 'Chat Completions' },
+  { id: 'responses', label: 'Responses' },
   { id: 'gemini', label: 'Gemini' },
 ] as const;
 
@@ -1678,7 +1679,7 @@ const normalizeProviderSettingsModelProtocols = (
   const allowedModelSet = allowedModels ? new Set(uniqueModelIds(allowedModels)) : null;
   return Object.entries(modelProtocols || {}).reduce<Record<string, ProviderProtocol>>((result, [modelId, protocol]) => {
     const normalizedModelId = modelId.trim();
-    if (!normalizedModelId || (protocol !== 'openai' && protocol !== 'gemini')) return result;
+    if (!normalizedModelId || !['openai', 'responses', 'gemini'].includes(protocol)) return result;
     if (allowedModelSet && !allowedModelSet.has(normalizedModelId)) return result;
     result[normalizedModelId] = protocol;
     return result;

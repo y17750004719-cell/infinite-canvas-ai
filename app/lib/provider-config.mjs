@@ -8,7 +8,7 @@ export { effectiveProviderProtocol } from './provider-protocol.mjs';
 const DEFAULT_PROVIDER_ID = 'comfly';
 const DEFAULT_PROVIDER_UPDATED_AT = new Date(0).toISOString();
 const PROVIDER_ID_RE = /^[A-Za-z0-9_-]{2,40}$/;
-const SUPPORTED_PROVIDER_PROTOCOLS = new Set(['openai', 'gemini']);
+const SUPPORTED_PROVIDER_PROTOCOLS = new Set(['openai', 'responses', 'gemini']);
 const SUPPORTED_PROVIDER_AUTH_TYPES = new Set(['api-key', 'xiaomi-browser']);
 const SUPPORTED_IMAGE_REQUEST_MODES = new Set(['openai', 'openai-json']);
 const SUPPORTED_IMAGE_API_KEY_SCOPES = new Set(['all', 'gemini', 'gpt']);

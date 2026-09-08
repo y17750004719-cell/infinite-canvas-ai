@@ -1,4 +1,4 @@
-const SUPPORTED_PROVIDER_PROTOCOLS = new Set(['openai', 'gemini']);
+const SUPPORTED_PROVIDER_PROTOCOLS = new Set(['openai', 'responses', 'gemini']);
 
 function normalizeText(value) {
   return typeof value === 'string' ? value.trim() : '';

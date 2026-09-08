@@ -1,5 +1,5 @@
 export type ProviderConfigSource = 'runtime' | 'env';
-export type ProviderProtocol = 'openai' | 'gemini';
+export type ProviderProtocol = 'openai' | 'responses' | 'gemini';
 export type ProviderAuthType = 'api-key' | 'xiaomi-browser';
 export type ImageRequestMode = 'openai' | 'openai-json';
 export type ProviderImageApiKeyScope = 'all' | 'gemini' | 'gpt';

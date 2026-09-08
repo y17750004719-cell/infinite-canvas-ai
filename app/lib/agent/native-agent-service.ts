@@ -11,6 +11,7 @@ import type { RawResponseCompletedNotification } from './native-codex-protocol/v
 import type { RawResponseItemCompletedNotification } from './native-codex-protocol/v2/RawResponseItemCompletedNotification';
 import type { ThreadStartParams } from './native-codex-protocol/v2/ThreadStartParams';
 import type { TurnStartParams } from './native-codex-protocol/v2/TurnStartParams';
+import { runChatCompletionsTurn } from './chat-completions-adapter.mjs';
 
 export type NativeAgentIdentity = {
   taskId: string;
@@ -23,7 +24,7 @@ export type NativeAgentProvider = {
   model: string;
   baseUrl: string;
   apiKey: string;
-  protocol: 'openai' | 'responses';
+  protocol: 'openai' | 'responses' | 'gemini';
 };
 
 export type NativeAgentSkill = {
@@ -204,7 +205,10 @@ function safeNativeEvent(method: string, params: Record<string, any>) {
 
 export async function runNativeAgentTurn(input: RunNativeAgentTurnInput): Promise<NativeAgentTurnResult> {
   const sessionId = requiredText(input.sessionId, 'sessionId');
-  if (!['openai', 'responses'].includes(input.provider?.protocol)) {
+  if (input.provider?.protocol === 'openai') {
+    return queueSession(sessionId, () => runChatCompletionsTurn(input as any) as Promise<NativeAgentTurnResult>);
+  }
+  if (input.provider?.protocol !== 'responses') {
     throw Object.assign(new Error('Native Codex requires a validated Responses-compatible model'), {
       code: 'native_model_not_validated',
     });

@@ -1,4 +1,4 @@
-export type ProviderModelProtocol = 'openai' | 'gemini';
+export type ProviderModelProtocol = 'openai' | 'responses' | 'gemini';
 export type ProviderImageRequestMode = 'openai' | 'openai-json';
 
 export interface ProviderModelProbeResult {
@@ -16,7 +16,7 @@ export interface ProviderModelProbeResult {
 }
 
 export function normalizeProviderModelProtocol(value: unknown): ProviderModelProtocol {
-  return value === 'gemini' ? 'gemini' : 'openai';
+  return value === 'gemini' ? 'gemini' : value === 'responses' ? 'responses' : 'openai';
 }
 
 export function normalizeProviderImageRequestMode(value: unknown): ProviderImageRequestMode {
