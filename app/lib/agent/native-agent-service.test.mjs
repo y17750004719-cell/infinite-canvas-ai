@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import { createServer } from 'node:http';
+import { once } from 'node:events';
 import { runNativeAgentTurn } from './native-agent-service.ts';
 
 function fakeHost({ script }) {
@@ -252,4 +254,67 @@ test('native service settles a hung turn when the App Server process exits', asy
   const result = await runWithHost(host);
   assert.equal(result.status, 'failed');
   assert.equal(result.error.code, 'native_process_exited');
+});
+
+test('native service runs Gemini through the shared Agent tool loop and continues with a function response', async () => {
+  const requests = [];
+  const sockets = new Set();
+  const server = createServer(async (req, res) => {
+    const chunks = [];
+    for await (const chunk of req) chunks.push(chunk);
+    const payload = JSON.parse(Buffer.concat(chunks).toString('utf8'));
+    requests.push({ url: req.url, payload });
+    const continuing = JSON.stringify(payload.contents).includes('functionResponse');
+    const responsePayload = continuing
+      ? { candidates: [{ content: { parts: [{ text: 'Gemini completed after the shared tool result.' }] }, finishReason: 'STOP' }] }
+      : { candidates: [{ content: { parts: [
+          { text: 'I will inspect the supplied context with the shared business tool before answering.' },
+          { functionCall: { id: 'gemini-call-1', name: 'inspect_context', args: { scope: 'canvas' } }, thoughtSignature: 'sig-gemini-call' },
+        ] }, finishReason: 'STOP' }] };
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    res.end(`data: ${JSON.stringify(responsePayload)}\n\n`);
+  });
+  server.on('connection', (socket) => { sockets.add(socket); socket.on('close', () => sockets.delete(socket)); });
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  let executions = 0;
+  const events = [];
+  try {
+    const result = await runNativeAgentTurn({
+      sessionId: `native-gemini-${Date.now()}`,
+      identity: { taskId: 'task-gemini', operationId: 'operation-gemini', runId: 'run-gemini' },
+      provider: { id: 'gemini-test', model: 'gemini-test-model', baseUrl: `http://127.0.0.1:${server.address().port}/v1`, apiKey: 'test', protocol: 'gemini' },
+      userText: 'Inspect the canvas.',
+      images: ['data:image/png;base64,YWJj'],
+      baseInstructions: 'Base agent contract.',
+      developerInstructions: 'Developer agent contract.',
+      tools: [{ name: 'inspect_context', description: 'Inspect context.', parameters: { type: 'object', properties: { scope: { type: 'string' } }, required: ['scope'] } }],
+      executeTool: async (name, args) => {
+        executions += 1;
+        assert.equal(name, 'inspect_context');
+        assert.deepEqual(args, { scope: 'canvas' });
+        return { modelResult: { visibleObjects: 2 }, visualReferences: [{ src: 'data:image/png;base64,ZGVm' }] };
+      },
+      onEvent: (event) => events.push(event),
+    });
+    assert.equal(result.status, 'completed');
+    assert.equal(result.text, 'Gemini completed after the shared tool result.');
+    assert.equal(executions, 1);
+    assert.equal(requests.length, 2);
+    assert.ok(requests.every((request) => request.url === '/v1beta/models/gemini-test-model:streamGenerateContent?alt=sse'));
+    assert.equal(requests[0].payload.systemInstruction.parts[0].text, 'Base agent contract.\n\nDeveloper agent contract.');
+    assert.deepEqual(requests[0].payload.contents[0].parts[1], { inlineData: { mimeType: 'image/png', data: 'YWJj' } });
+    const replayedCall = requests[1].payload.contents.find((content) => content.role === 'model').parts.find((part) => part.functionCall);
+    assert.equal(replayedCall.thoughtSignature, 'sig-gemini-call');
+    const toolResponse = requests[1].payload.contents.find((content) => content.parts.some((part) => part.functionResponse));
+    assert.deepEqual(toolResponse.parts[0].functionResponse, { name: 'inspect_context', response: { visibleObjects: 2 }, id: 'gemini-call-1' });
+    assert.deepEqual(toolResponse.parts[1], { inlineData: { mimeType: 'image/png', data: 'ZGVm' } });
+    assert.equal(events.filter((event) => event.method === 'zflow/model_sample_completed').length, 2);
+    assert.ok(events.some((event) => event.method === 'item/started' && event.params.item.tool === 'inspect_context'));
+    assert.ok(events.some((event) => event.method === 'item/completed' && event.params.item.success === true));
+  } finally {
+    server.close();
+    for (const socket of sockets) socket.destroy();
+    await once(server, 'close').catch(() => {});
+  }
 });

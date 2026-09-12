@@ -219,3 +219,19 @@ test('classifyGeminiImagePayload returns unsupported_payload_shape for 200 OK pa
     'Gemini official image returned an unsupported payload shape'
   );
 });
+
+test('extractGeminiImageOutputs accepts fileData fileUri responses', () => {
+  assert.deepEqual(extractGeminiImageOutputs({ candidates: [{ content: { parts: [{ fileData: { fileUri: 'https://example.test/a.png', mimeType: 'image/png' } }] } }] }), [
+    { url: 'https://example.test/a.png', mimeType: 'image/png' },
+  ]);
+});
+
+test('extractGeminiImageOutputs accepts snake_case file_data aliases and mixed outputs', () => {
+  assert.deepEqual(extractGeminiImageOutputs({ candidates: [{ content: { parts: [
+    { file_data: { file_uri: 'https://example.test/a.jpg', mime_type: 'image/jpeg' } },
+    { inlineData: { data: 'aGVsbG8=', mimeType: 'image/png' } },
+  ] } }] }), [
+    { url: 'https://example.test/a.jpg', mimeType: 'image/jpeg' },
+    { url: 'data:image/png;base64,aGVsbG8=' },
+  ]);
+});

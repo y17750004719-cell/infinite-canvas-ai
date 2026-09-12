@@ -27,65 +27,16 @@ const DEFAULT_IMAGE_MODEL_CAPABILITY = {
   sizeOptions: undefined,
 };
 
-export const IMAGE_MODEL_CAPABILITIES = {
-  'gemini-3.1-flash-image-preview': {
-    supportsAspectRatio: true,
-    requestSupportsAspectRatio: true,
-    uiSupportsAspectRatio: true,
-    supportedSizes: IMAGE_SIZE_OPTIONS.map((option) => option.id),
-    requestModelBySize: {
-      '1024x1024': 'gemini-3.1-flash-image-preview',
-      '2048x2048': 'gemini-3.1-flash-image-preview',
-      '4096x4096': 'gemini-3.1-flash-image-preview-4k',
-    },
-  },
-  'gemini-2.5-flash-image': {
-    supportsAspectRatio: true,
-    requestSupportsAspectRatio: true,
-    uiSupportsAspectRatio: true,
-    supportedSizes: IMAGE_SIZE_OPTIONS.map((option) => option.id),
-    requestModelBySize: {
-      '1024x1024': 'gemini-2.5-flash-image',
-      '2048x2048': 'gemini-2.5-flash-image',
-      '4096x4096': 'gemini-2.5-flash-image',
-    },
-  },
-  'gemini-3-pro-image-preview': {
-    supportsAspectRatio: true,
-    requestSupportsAspectRatio: true,
-    uiSupportsAspectRatio: true,
-    supportedSizes: IMAGE_SIZE_OPTIONS.map((option) => option.id),
-    requestModelBySize: {
-      '1024x1024': 'gemini-3-pro-image-preview',
-      '2048x2048': 'gemini-3-pro-image-preview',
-      '4096x4096': 'gemini-3-pro-image-preview',
-    },
-  },
-  'gpt-image-2': {
-    supportsAspectRatio: false,
-    requestSupportsAspectRatio: false,
-    uiSupportsAspectRatio: true,
-    supportedSizes: IMAGE_SIZE_OPTIONS.map((option) => option.id),
-    requestModelBySize: {
-      '1024x1024': 'gpt-image-2',
-      '2048x2048': 'gpt-image-2',
-      '4096x4096': 'gpt-image-2',
-    },
-    sizeOptions: IMAGE_SIZE_OPTIONS,
-  },
-};
+// Kept as an empty registry-shaped export for callers that inspect capability
+// metadata; runtime routing is exclusively protocol-driven.
+export const IMAGE_MODEL_CAPABILITIES = Object.freeze({});
 
 export function normalizeImageModelCapabilityId(modelId) {
-  const normalizedModelId = typeof modelId === 'string' ? modelId.trim() : '';
-  if (/^gpt-image-2(?:[-_].*)?$/i.test(normalizedModelId)) {
-    return 'gpt-image-2';
-  }
-  return normalizedModelId;
+  return typeof modelId === 'string' ? modelId.trim() : '';
 }
 
 export function getImageModelCapability(modelId) {
-  const normalizedModelId = normalizeImageModelCapabilityId(modelId);
-  return IMAGE_MODEL_CAPABILITIES[normalizedModelId] || DEFAULT_IMAGE_MODEL_CAPABILITY;
+  return DEFAULT_IMAGE_MODEL_CAPABILITY;
 }
 
 export function imageModelSupportsAspectRatioUi(modelId) {
@@ -165,17 +116,20 @@ function customSizeForAspectRatio(resolutionTier, aspectRatio) {
   return `${Math.max(64, width)}x${Math.max(64, height)}`;
 }
 
-export function resolveImageSizeForAspectRatio(modelId, requestedSize, aspectRatio) {
-  const normalizedModelId = normalizeImageModelCapabilityId(modelId);
+export function resolveOpenAiImageSizeForAspectRatio(requestedSize, aspectRatio) {
   const normalizedRequestedSize = typeof requestedSize === 'string' ? requestedSize.trim() : '';
   const resolutionTier = normalizeImageResolutionTier(normalizedRequestedSize);
-  if (normalizedModelId !== 'gpt-image-2' || !resolutionTier) {
+  if (!resolutionTier) {
     return normalizedRequestedSize;
   }
 
   const normalizedAspectRatio = normalizeImageAspectRatio(aspectRatio);
   const mappedSize = IMAGE_RESOLUTION_SIZE_MAP[normalizedAspectRatio]?.[resolutionTier];
   return mappedSize || customSizeForAspectRatio(resolutionTier, normalizedAspectRatio) || normalizedRequestedSize;
+}
+
+export function resolveImageSizeForAspectRatio(_modelId, requestedSize, aspectRatio) {
+  return resolveOpenAiImageSizeForAspectRatio(requestedSize, aspectRatio);
 }
 
 export function resolveSupportedImageSize(modelId, requestedSize, fallbackSize = IMAGE_SIZE_OPTIONS[1].id) {
@@ -200,12 +154,7 @@ export function supportsImageModelRequestedSize(modelId, requestedSize) {
     return false;
   }
 
-  const normalizedModelId = normalizeImageModelCapabilityId(modelId);
-  if (normalizedModelId === 'gpt-image-2' && normalizeImageResolutionTier(normalizedRequestedSize)) {
-    return true;
-  }
-
-  return getSupportedImageSizeOptions(normalizedModelId).some((option) => option.id === normalizedRequestedSize);
+  return getSupportedImageSizeOptions(modelId).some((option) => option.id === normalizedRequestedSize);
 }
 
 export function supportsImageModelExactSize(modelId, requestedSize) {
@@ -214,59 +163,11 @@ export function supportsImageModelExactSize(modelId, requestedSize) {
     return false;
   }
 
-  const normalizedModelId = normalizeImageModelCapabilityId(modelId);
-  if (normalizedModelId === 'gpt-image-2') {
-    return Boolean(normalizedRequestedSize.match(/^\d+x\d+$/i) && normalizeImageResolutionTier(normalizedRequestedSize));
-  }
-
-  return supportsImageModelRequestedSize(normalizedModelId, normalizedRequestedSize);
-}
-
-export function getGptImage2SizeValidationError(size) {
-  const normalizedSize = typeof size === 'string' ? size.trim() : '';
-  const match = normalizedSize.match(/^(\d+)x(\d+)$/i);
-  if (!match) {
-    return '尺寸必须是类似 2048x1152 的 WxH 字符串';
-  }
-
-  const width = Number(match[1]);
-  const height = Number(match[2]);
-  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
-    return '尺寸宽高必须是正整数';
-  }
-
-  if (width % 16 !== 0 || height % 16 !== 0) {
-    return '尺寸宽高必须都是 16 的倍数';
-  }
-
-  const longestEdge = Math.max(width, height);
-  const shortestEdge = Math.min(width, height);
-  if (longestEdge > 3840) {
-    return '尺寸最大边不能超过 3840px';
-  }
-
-  if (shortestEdge <= 0 || longestEdge / shortestEdge > 3) {
-    return '尺寸长短边比例不能超过 3:1';
-  }
-
-  const pixels = width * height;
-  if (pixels < 655360) {
-    return '尺寸总像素不能小于 655360';
-  }
-  if (pixels > 8294400) {
-    return '尺寸总像素不能大于 8294400';
-  }
-
-  return null;
-}
-
-export function isValidGptImage2Size(size) {
-  return getGptImage2SizeValidationError(size) === null;
+  return supportsImageModelRequestedSize(modelId, normalizedRequestedSize);
 }
 
 export function supportsImageModelImageSizeConfig(modelId) {
-  const normalizedModelId = normalizeImageModelCapabilityId(modelId);
-  return getSupportedImageSizeOptions(normalizedModelId).length > 0;
+  return getSupportedImageSizeOptions(modelId).length > 0;
 }
 
 export function resolveImageRequestModel(modelId, requestedSize) {

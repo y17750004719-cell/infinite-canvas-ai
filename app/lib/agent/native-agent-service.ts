@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { loadThread, updateThreadState } from './thread-journal.mjs';
 import {
   acquireNativeCodexHost,
+  invalidateNativeCodexHost,
   nativeProviderFingerprint,
   prepareNativeTurnInput,
 } from './native-codex-host.mjs';
@@ -12,6 +13,7 @@ import type { RawResponseItemCompletedNotification } from './native-codex-protoc
 import type { ThreadStartParams } from './native-codex-protocol/v2/ThreadStartParams';
 import type { TurnStartParams } from './native-codex-protocol/v2/TurnStartParams';
 import { runChatCompletionsTurn } from './chat-completions-adapter.mjs';
+import { CURRENT_CONTRACT_VERSION } from '../compatibility-gate.mjs';
 
 export type NativeAgentIdentity = {
   taskId: string;
@@ -61,6 +63,15 @@ export type NativeAgentTurnResult = {
 };
 
 type NativeAgentHost = Awaited<ReturnType<typeof acquireNativeCodexHost>>;
+
+const DISABLED_NATIVE_CAPABILITIES = new Set([
+  'code_mode', 'code-mode', 'code_mode_host', 'code-mode-host', 'image_generation',
+  'image-generation', 'image_generation_host', 'image-generation-host',
+]);
+
+function nativeCapabilityName(value: unknown) {
+  return String(value || '').trim().toLowerCase().replace(/\//g, '_');
+}
 
 export type RunNativeAgentTurnInput = {
   sessionId: string;
@@ -205,12 +216,12 @@ function safeNativeEvent(method: string, params: Record<string, any>) {
 
 export async function runNativeAgentTurn(input: RunNativeAgentTurnInput): Promise<NativeAgentTurnResult> {
   const sessionId = requiredText(input.sessionId, 'sessionId');
-  if (input.provider?.protocol === 'openai') {
+  if (input.provider?.protocol === 'openai' || input.provider?.protocol === 'gemini') {
     return queueSession(sessionId, () => runChatCompletionsTurn(input as any) as Promise<NativeAgentTurnResult>);
   }
   if (input.provider?.protocol !== 'responses') {
-    throw Object.assign(new Error('Native Codex requires a validated Responses-compatible model'), {
-      code: 'native_model_not_validated',
+    throw Object.assign(new Error('Unsupported provider protocol'), {
+      code: 'native_protocol_unsupported',
     });
   }
   if (!Array.isArray(input.tools) || input.tools.some((tool) => !text(tool?.name))) {
@@ -264,6 +275,7 @@ export async function runNativeAgentTurn(input: RunNativeAgentTurnInput): Promis
         scopeId: host.scopeId,
         providerFingerprint: nativeProviderFingerprint(input.provider),
         source: 'app_server',
+        contractVersion: CURRENT_CONTRACT_VERSION,
       },
     });
 
@@ -353,8 +365,18 @@ export async function runNativeAgentTurn(input: RunNativeAgentTurnInput): Promis
         if (text(params?.threadId) !== threadId || (turnId && text(params?.turnId) !== turnId)) {
           return { success: false, contentItems: [{ type: 'inputText', text: JSON.stringify({ code: 'stale_native_tool_call' }) }] };
         }
+        const normalizedName = nativeCapabilityName(name);
+        const allowedTools = input.tools.map((tool) => tool.name);
         const definition = input.tools.find((tool) => tool.name === name);
-        if (!definition) return { success: false, contentItems: [{ type: 'inputText', text: JSON.stringify({ code: 'tool_not_allowed', tool: name }) }] };
+        if (!definition) {
+          const disabled = DISABLED_NATIVE_CAPABILITIES.has(normalizedName)
+            || [...DISABLED_NATIVE_CAPABILITIES].some((capability) => normalizedName.endsWith(`_${capability}`));
+          return { success: false, contentItems: [{ type: 'inputText', text: JSON.stringify({
+            // Preserve the stable legacy code for ordinary unknown tools: code: 'tool_not_allowed'.
+            code: disabled ? 'native_capability_disabled' : 'tool_not_allowed',
+            failureStage: 'tool_dispatch', retryable: false, requestedTool: name, allowedTools,
+          }) }] };
+        }
         if (pendingConfirmation) {
           return { success: false, contentItems: [{ type: 'inputText', text: JSON.stringify({ code: 'confirmation_pending' }) }] };
         }
@@ -434,6 +456,7 @@ export async function runNativeAgentTurn(input: RunNativeAgentTurnInput): Promis
       const timedOut = new Promise<NativeAgentTurnResult>((resolve) => {
         timeout = setTimeout(() => {
           abort();
+          void invalidateNativeCodexHost(host);
           resolve({
             status: 'failed', text: finalText, threadId, turnId,
             error: { code: 'native_turn_timeout', message: 'Native Codex turn timed out', retryable: true },
@@ -447,6 +470,11 @@ export async function runNativeAgentTurn(input: RunNativeAgentTurnInput): Promis
         if (timeout) clearTimeout(timeout);
       }
     } catch (error) {
+      const code = (error as { code?: string })?.code;
+      if (code === 'request_timeout' || code === 'process_exited' || code === 'transport_unavailable'
+        || code === 'stdout_error' || code === 'stdin_error' || code === 'process_error') {
+        await invalidateNativeCodexHost(host).catch(() => {});
+      }
       throw error;
     } finally {
       input.signal?.removeEventListener('abort', abort);

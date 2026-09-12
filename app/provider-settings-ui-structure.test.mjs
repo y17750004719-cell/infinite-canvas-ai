@@ -224,10 +224,24 @@ test('provider settings model rows expose per-model protocol overrides', () => {
   assert.equal(pageSource.includes('modelProtocols: nextModelProtocols,'), true);
 });
 
-test('Responses chat models expose an explicit validation action', () => {
-  assert.equal(pageSource.includes("{ id: 'responses', label: 'Responses' }"), true);
-  assert.equal(pageSource.includes("/api/settings/providers/validate-model"), true);
-  assert.equal(pageSource.includes('验证并启用'), true);
+test('saved providers are directly usable with optional connectivity actions and manual protocol overrides', () => {
+  for (const removedRoute of [
+    'api/settings/providers/validate-model/route.ts',
+    'api/settings/providers/validate-models/route.ts',
+    'api/settings/providers/validate-models/cancel/route.ts',
+  ]) assert.equal(fs.existsSync(path.join(__dirname, removedRoute)), false, removedRoute);
+  for (const removed of [
+    '/api/settings/providers/validate-model', '检测并启用', '终止检测',
+    'provider-settings:last-validation', 'providerSettingsValidation',
+    'providerSettingsBatchValidating', 'providerSettingsValidatingModel',
+    'readProviderValidationEventStream', '请先保存配置后再检测',
+  ]) assert.equal(pageSource.includes(removed), false, removed);
+  for (const retained of [
+    'handleProviderSettingsTest', 'handleProviderSettingsFetchModels',
+    'handleProviderSettingsSave', 'handleProviderSettingsModelProtocolChange',
+    'modelProtocols: nextModelProtocols,', '测试连接', '拉取模型',
+  ]) assert.equal(pageSource.includes(retained), true, retained);
+  assert.equal(pageSource.includes('disabled={providerSettingsLoading || providerSettingsSaving}'), true);
 });
 
 test('provider settings opens fetched model selection in a centered overlay instead of expanding the card', () => {

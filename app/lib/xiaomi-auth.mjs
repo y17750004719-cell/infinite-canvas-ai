@@ -4,6 +4,7 @@ import path from 'node:path';
 import { chmod, mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 
 import { readProviderRegistry, updateProviderRegistry } from './provider-config.mjs';
+import { MigrationRequiredError } from './compatibility-gate.mjs';
 import { fetchProviderModels } from './provider-models.ts';
 
 const PLATFORM_URL = 'https://platform.xiaomimimo.com';
@@ -215,7 +216,13 @@ export async function beginXiaomiLogin({ runtimeDir, now = Date.now() } = {}) {
 }
 
 async function saveXiaomiProvider(credentials, runtimeDir) {
-  const registry = await readProviderRegistry({ runtimeDir });
+  let registry;
+  try {
+    registry = await readProviderRegistry({ runtimeDir });
+  } catch (error) {
+    if (!(error instanceof MigrationRequiredError)) throw error;
+    registry = { providers: [], source: 'runtime' };
+  }
   const existing = registry.providers.find((provider) => provider.id === 'xiaomi');
   const provider = {
     id: 'xiaomi',
@@ -300,7 +307,13 @@ export async function getXiaomiLoginStatus({ state, runtimeDir = undefined, now 
 
 export async function clearXiaomiLogin(runtimeDir) {
   const login = await readLogin(runtimeDir);
-  const registry = await readProviderRegistry({ runtimeDir });
+  let registry;
+  try {
+    registry = await readProviderRegistry({ runtimeDir });
+  } catch (error) {
+    if (!(error instanceof MigrationRequiredError)) throw error;
+    registry = { providers: [] };
+  }
   const providers = registry.providers.map((provider) => provider.id === 'xiaomi' ? {
     ...provider,
     apiKey: '',

@@ -25,6 +25,77 @@ const progress = (sequence, overrides = {}) => ({
   ...overrides,
 });
 
+test('different progress names for one tool converge before and after its lifecycle', () => {
+  const identity = { runId: 'run-1', toolCallId: 'canvas-call', toolName: 'get_canvas_context', itemId: 'run-1:tool:canvas-call' };
+  let state;
+  const events = [
+    progress(1, { ...identity, stepId: 'canvas_context', status: 'pending', timestampMs: 1000 }),
+    progress(2, { ...identity, stepId: 'canvas_context', timestampMs: 2000 }),
+    progress(3, { ...identity, stepId: 'tool', timestampMs: 3000 }),
+    { ...identity, type: 'tool_start', sequence: 4, timestampMs: 4000 },
+    { ...identity, type: 'tool_result', sequence: 5, timestampMs: 5000, result: { summary: 'Canvas read' } },
+    progress(6, { ...identity, stepId: 'canvas_context', status: 'completed', timestampMs: 6000 }),
+    progress(7, { ...identity, stepId: 'agent_analysis', timestampMs: 7000 }),
+  ];
+  for (const event of events) {
+    state = reduceAgentRunProgress(state, event);
+    assert.equal(state.steps.length, 1);
+    assert.equal(state.steps[0].itemId, identity.itemId);
+  }
+  assert.equal(state.steps[0].kind, 'tool');
+  assert.equal(state.steps[0].status, 'completed');
+  assert.equal(state.steps[0].timestampMs, 1000);
+  assert.equal(state.steps[0].completedAt, 5000);
+  assert.equal(state.steps[0].completionSummary, 'Canvas read');
+  assert.equal(reduceAgentRunProgress(state, events[3]), state);
+});
+
+test('tool results remain terminal after late starts and updates, including failures', () => {
+  for (const isError of [false, true]) {
+    const identity = { runId: 'run-1', toolCallId: 'read', toolName: 'get_canvas_context' };
+    let state = reduceAgentRunProgress(null, { ...identity, type: 'tool_result', isError, sequence: 1, timestampMs: 1000 });
+    for (const type of ['tool_start', 'tool_update']) {
+      state = reduceAgentRunProgress(state, { ...identity, type, sequence: state.lastSequence + 1, timestampMs: 2000 });
+    }
+    assert.equal(state.steps.length, 1);
+    assert.equal(state.steps[0].status, isError ? 'failed' : 'completed');
+    assert.equal(state.steps[0].completedAt, 1000);
+  }
+});
+
+test('hydrate merges every duplicate tool row but retains independent related steps', () => {
+  const tool = { runId: 'run-1', toolCallId: 'image', toolName: 'generate_image', itemId: 'run-1:tool:image' };
+  const input = { ...createInitialAgentRunProgress('run-1'), lastSequence: 6, steps: [
+    { ...tool, stepId: 'generate_image', kind: 'execution', phase: 'checking', status: 'active', sequence: 1, timestampMs: 1000, startedAt: 1000 },
+    { ...tool, stepId: 'tool', kind: 'tool', phase: 'executing', status: 'completed', sequence: 2, timestampMs: 2000, lastUpdateSequence: 4, completedAt: 4000, completionSummary: 'Saved' },
+    { ...tool, stepId: 'agent_analysis', kind: 'execution', phase: 'generating', status: 'active', sequence: 5, timestampMs: 5000 },
+    { ...tool, stepId: 'image_prompt', kind: 'execution', itemType: 'image_generation', phase: 'prompt', status: 'completed', sequence: 3, timestampMs: 3000 },
+    { stepId: 'asset_delivery', kind: 'execution', itemType: 'asset_delivery', status: 'completed', sequence: 6, timestampMs: 6000, parentItemId: tool.itemId },
+    { stepId: 'confirmation', kind: 'interaction', itemType: 'approval', status: 'completed', sequence: 7, timestampMs: 7000, parentItemId: tool.itemId },
+  ] };
+  const state = reduceAgentRunProgress(input, { type: 'session_hydrate' });
+  assert.equal(state.steps.length, 4);
+  assert.equal(new Set(state.steps.map(s => s.itemId)).size, 4);
+  assert.equal(state.steps[0].status, 'completed');
+  assert.equal(state.steps[0].startedAt, 1000);
+  assert.equal(state.steps[0].completionSummary, 'Saved');
+  assert.equal(state.steps[1].stepId, 'image_prompt');
+  assert.equal(state.steps[1].parentItemId, tool.itemId);
+  assert.deepEqual(reduceAgentRunProgress(state, { type: 'session_hydrate' }), state);
+  assert.equal(input.steps.length, 6);
+});
+
+test('tool progress keeps separate runs and calls distinct while prompt preparation is a child', () => {
+  let state;
+  for (const [sequence, runId, toolCallId] of [[1, 'run-1', 'a'], [2, 'run-1', 'b'], [3, 'run-2', 'a']]) {
+    state = reduceAgentRunProgress(state, progress(sequence, { runId, toolCallId, toolName: 'generate_image', stepId: 'generate_image' }));
+  }
+  state = reduceAgentRunProgress(state, { type: 'image_prompts_ready', runId: 'run-2', toolCallId: 'a', sequence: 5, prompt: 'fixture' });
+  assert.equal(state.steps.length, 4);
+  assert.equal(new Set(state.steps.map(s => s.itemId)).size, 4);
+  assert.equal(state.steps.at(-1).parentItemId, state.steps[2].itemId);
+});
+
 test('creates an empty, hidden timeline for a new agent run', () => {
   const state = createInitialAgentRunProgress('run-immediate');
 

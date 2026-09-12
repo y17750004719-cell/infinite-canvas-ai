@@ -24,7 +24,12 @@ function identity(event) {
 }
 
 function pageEvent(event, payload = {}) {
-  return { ...payload, ...identity(event) };
+  const metadata = {};
+  for (const key of ['itemId', 'toolCallId', 'executionId', 'parentItemId']) {
+    const value = event[key] || event.item?.[key];
+    if (typeof value === 'string' && value) metadata[key] = value;
+  }
+  return { ...payload, ...metadata, ...identity(event) };
 }
 
 /**

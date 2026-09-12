@@ -71,6 +71,7 @@ import {
   resolveProviderModelSelection,
 } from '../../lib/provider-model-selection.mjs';
 import { createLogger } from '../../lib/logger';
+import { CURRENT_CONTRACT_VERSION, MigrationRequiredError, migrationErrorMeta } from '../../lib/compatibility-gate.mjs';
 import { normalizeGeneratedImageHistory } from '../../lib/generated-image-history.mjs';
 import {
   isSessionVisualAssetAvailable,
@@ -757,6 +758,8 @@ function canonicalLifecycleEvent(event: any, context: any) {
     timestampMs: Number(event.timestampMs) || Date.now(),
     ...(event.itemId ? { itemId: event.itemId } : {}),
     ...(event.toolCallId ? { toolCallId: event.toolCallId } : {}),
+    ...(event.executionId ? { executionId: event.executionId } : {}),
+    ...(event.parentItemId ? { parentItemId: event.parentItemId } : {}),
     ...(event.nativeThreadId ? { nativeThreadId: event.nativeThreadId } : {}),
     ...(event.nativeTurnId ? { nativeTurnId: event.nativeTurnId } : {}),
     ...(event.nativeItemId ? { nativeItemId: event.nativeItemId } : {}),
@@ -765,7 +768,7 @@ function canonicalLifecycleEvent(event: any, context: any) {
   if (type === 'agent_start') return [{ type: 'thread.started', ...base }, { type: 'turn.started', ...base }];
   if (type === 'tool_start') return [{ type: 'item.started', itemType: 'tool_call', item: { toolName: event.toolName }, ...base }];
   if (type === 'tool_update') return [{ type: 'item.updated', itemType: 'tool_call', item: { message: event.message, toolName: event.toolName }, ...base }];
-  if (type === 'tool_result') return [{ type: 'item.completed', itemType: 'tool_result', item: { result: event.result, error: event.error }, ...base }];
+  if (type === 'tool_result') return [{ type: 'item.completed', itemType: 'tool_result', item: { toolName: event.toolName, result: event.result, error: event.error, isError: event.isError === true }, ...base }];
   if (type === 'assistant_delta' || type === 'agent_activity_delta') return [{ type: 'item.updated', itemType: type === 'agent_activity_delta' ? 'public_commentary' : 'assistant_message', ...base, itemId: event.itemId || event.activityId || `${context.runId}:assistant`, item: { delta: event.delta || event.content || '' } }];
   if (type === 'agent_done') return [{ type: 'turn.completed', usage: event.usage || null, stopReason: event.stopReason || null, ...base }];
   if (type === 'agent_error' || type === 'agent_cancelled') return [{ type: 'turn.failed', status: type === 'agent_cancelled' ? 'cancelled' : 'failed', error: {
@@ -791,7 +794,7 @@ function canonicalLifecycleEvent(event: any, context: any) {
     'state', 'result', 'proposal', 'entityIds', 'labels', 'kind', 'confidence',
     'resolvedEntityIds', 'mustPreserveCount', 'taskSnapshot', 'recoveryRecord',
     'parameters', 'title', 'operation', 'succeeded', 'failed', 'addedToCanvas',
-    'stopReason',
+    'stopReason', 'detail', 'completionSummary', 'completedLabel',
   ];
   const payload = Object.fromEntries(publicKeys
     .filter((key) => Object.prototype.hasOwnProperty.call(event, key))
@@ -1256,6 +1259,22 @@ export async function POST(request: NextRequest) {
   let journalTurnId = runId;
   try {
     const thread = await loadThread(sessionId);
+    const suppliedVersion = (body as any).contractVersion;
+    const persistedNative = (thread.state as any).nativeCodex;
+    const persistedVersion = (thread.state as any).contractVersion || persistedNative?.contractVersion;
+    const legacyWirePresent = Object.prototype.hasOwnProperty.call(body as object, 'generationPrompt')
+      || Object.prototype.hasOwnProperty.call(body as object, 'planner')
+      || Object.prototype.hasOwnProperty.call(body as object, 'legacyProtocol');
+    if ((suppliedVersion !== undefined && suppliedVersion !== CURRENT_CONTRACT_VERSION)
+      || (persistedVersion !== undefined && persistedVersion !== CURRENT_CONTRACT_VERSION)
+      || (persistedNative && persistedVersion === undefined)
+      || legacyWirePresent) {
+      const error = new MigrationRequiredError({
+        sourceType: legacyWirePresent ? 'wire_request' : 'session',
+        sourceVersion: String(suppliedVersion || persistedVersion || 'legacy'),
+      } as any);
+      return NextResponse.json({ error: error.message, ...migrationErrorMeta(error) }, { status: 409 });
+    }
     if ((body.recoveryTaskId || body.clarificationState || body.confirmation) && !thread.state.nativeCodex) {
       return NextResponse.json({ error: '历史任务不支持原生运行时恢复，请新建请求；聊天和图片资产仍保留', code: 'history_not_resumable' }, { status: 409 });
     }
@@ -1514,7 +1533,16 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     return NextResponse.json({ error: error instanceof Error ? error.message : 'Invalid skill' }, { status: 400 });
   }
-  const providers = (await readProviderRegistry()).providers;
+  let providers;
+  try {
+    providers = (await readProviderRegistry()).providers;
+  } catch (error) {
+    const migrationMeta = migrationErrorMeta(error);
+    if (migrationMeta) {
+      return NextResponse.json({ error: error instanceof Error ? error.message : 'Migration required', ...migrationMeta }, { status: 409 });
+    }
+    throw error;
+  }
   const providerImageOptionProfiles = buildProviderImageOptionProfiles(providers);
   const requestedInterfaceImageCount = normalizeAgentImageCount(body.imageOptions?.count);
   const requestedChatModel = body.chatOptions?.model || process.env.AGENT_CHAT_MODEL || undefined;
@@ -2057,6 +2085,7 @@ export async function POST(request: NextRequest) {
       const toolItemId = (toolCallId: string) => `${runId}:tool:${toolCallId}`;
       const toolExecutionId = (toolCallId: string) => `${runId}:execution:${toolCallId}`;
       const announcedToolStarts = new Set<string>();
+      const settledToolCalls = new Set<string>();
       let activeAgentStageLabel = '正在分析当前请求';
       let lastModelTaskDescription = '';
       let activeAgentStage: { label: string; phase: AgentProgressPhase; action: string; toolName?: string; toolCallId?: string } = {
@@ -2132,7 +2161,8 @@ export async function POST(request: NextRequest) {
         failureStage?: string;
         failureCode?: string;
       }) => {
-        if (input.status === 'active' && input.label) {
+        const independentStep = ['image_brief', 'image_prompt', 'image_contract', 'asset_delivery'].includes(input.stepId);
+        if (input.status === 'active' && input.label && (!input.toolCallId || !settledToolCalls.has(input.toolCallId))) {
           activeAgentStageLabel = input.label;
           activeAgentStage = {
             label: input.label,
@@ -2144,7 +2174,11 @@ export async function POST(request: NextRequest) {
         }
         return progressTracker.update({
           ...input,
-          ...(input.toolCallId ? toolEventMetadata(input.toolCallId) : {}),
+          ...(input.toolCallId ? independentStep ? {
+            itemId: `${runId}:${input.stepId}:${input.toolCallId}`,
+            executionId: toolExecutionId(input.toolCallId),
+            parentItemId: toolItemId(input.toolCallId),
+          } : toolEventMetadata(input.toolCallId) : {}),
           ...(input.action ? { action: input.action } : {}),
         });
       };
@@ -2322,6 +2356,11 @@ export async function POST(request: NextRequest) {
       } as AgentEvent);
       const writeToolResultEvent = (id: string, name: string, result: unknown, isError = false) => {
         const metadata = toolEventMetadata(id);
+        settledToolCalls.add(id);
+        if (activeAgentStage.toolCallId === id) {
+          activeAgentStageLabel = '正在等待模型响应';
+          activeAgentStage = { label: activeAgentStageLabel, phase: 'analyzing', action: 'await_model_response' };
+        }
         lastCommentaryItemId = '';
         return writeLifecycleEvent({
           type: 'tool_result',
@@ -2594,6 +2633,9 @@ export async function POST(request: NextRequest) {
             promptHash: hashPrompt(prompt),
             ...(heartbeatToolCallId ? {
               toolCallId: heartbeatToolCallId,
+              itemId: `${runId}:image_prompt:${heartbeatToolCallId}`,
+              parentItemId: toolItemId(heartbeatToolCallId),
+              executionId: toolExecutionId(heartbeatToolCallId),
               completedLabel: imageProgress?.promptPreparation?.completedLabel,
               completionSummary: imageProgress?.promptPreparation?.completionSummary,
             } : {}),
@@ -4504,6 +4546,17 @@ export async function POST(request: NextRequest) {
                 tools: nativeTools,
                 signal: runSignal,
                 executeTool: async (toolName, args, context) => {
+                  if (/^(?:code[_-]?mode(?:[_-]?host)?|image[_-]?generation(?:[_-]?host)?)$/i.test(toolName)
+                    || /(?:^|[_:/-])(?:code[_-]?mode|image[_-]?generation)(?:[_:/-]|$)/i.test(toolName)) {
+                    await contextLogger.warn('native.capability_rejected', 'Native requested a disabled capability', {
+                      taskId, operationId, runId, sessionId, turnId: context.turnId, requestedTool: toolName,
+                      allowedTools: nativeTools.map((tool) => tool.name),
+                    });
+                    return { isError: true, modelResult: {
+                      code: 'native_capability_disabled', failureStage: 'tool_dispatch', retryable: false,
+                      requestedTool: toolName, allowedTools: nativeTools.map((tool) => tool.name),
+                    } };
+                  }
                   if (approvedConfirmation && (toolName !== approvedConfirmation.toolName
                     || hashEnvelopeValue(args) !== hashEnvelopeValue(approvedConfirmation.toolArgs))) {
                     return { isError: true, modelResult: { code: 'approval_contract_changed', retryable: false } };
@@ -4599,6 +4652,21 @@ export async function POST(request: NextRequest) {
             }
           };
           loopResult = await runMainAgentOnce();
+          const nativeStreamDisconnected = loopResult.stopReason === 'failed'
+            && toolCallRecords.length === 0
+            && /stream disconnected|upstream error|connection reset/i.test(String(loopResult.errorMessage || ''));
+          if (nativeStreamDisconnected) {
+            await contextLogger.warn('native.stream_retry', 'Native Agent stream disconnected before any tool call; retrying once', {
+              taskId, operationId, runId, sessionId, providerId: resolvedChatSelection.providerId,
+              model: resolvedChatSelection.model, protocol: effectiveProviderProtocol(resolvedChatProvider, resolvedChatSelection.model!),
+              elapsedMs: null,
+            });
+            loopResult = await runMainAgentOnce();
+            if (loopResult.stopReason === 'failed' && toolCallRecords.length === 0) {
+              loopResult.failureCode = 'provider_stream_disconnect';
+              loopResult.errorMessage = 'Agent 聊天流在调用图片工具前断开，请稍后重试；本次没有执行图片生成。';
+            }
+          }
         }
         if (loopResult.stopReason === 'failed' || loopResult.stopReason === 'cancelled') {
           throw Object.assign(new Error(loopResult.errorMessage || 'Native Agent turn failed'), {

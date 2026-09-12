@@ -4,7 +4,7 @@ import { mkdtemp, writeFile, readFile, rm, realpath } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
-import { nativeConfig, nativeProviderFingerprint, nativeProviderConfigFingerprint, assertNativeModelAdmission, prepareNativeTurnInput, NATIVE_SOURCE_COMMIT } from './native-codex-host.mjs';
+import { nativeConfig, acquireNativeCodexHost, prepareNativeTurnInput } from './native-codex-host.mjs';
 
 const provider = { id: 'fixture', model: 'vision-model', baseUrl: 'http://127.0.0.1:1/v1', protocol: 'openai' };
 async function directory(t) {
@@ -21,27 +21,14 @@ test('native config uses Responses and disables non-business tools without embed
   assert.doesNotMatch(config, /secret-not-in-config/);
   assert.throws(() => nativeConfig({ ...provider, baseUrl: 'http://user:password@localhost/' }), /native_provider_url_invalid/);
 });
-test('OpenAI-shaped settings alone never prove Responses compatibility', async (t) => {
-  await assert.rejects(assertNativeModelAdmission(provider, await directory(t)), /native_model_not_validated/);
-  await assert.rejects(assertNativeModelAdmission({ ...provider, protocol: 'gemini' }, await directory(t)), /native_protocol_unsupported/);
-});
-test('admission binds checked capabilities to model, URL and pinned native source', async (t) => {
+test('Responses starts without admission while preserving binary and protocol safeguards', async (t) => {
   const root = await directory(t);
-  const record = { fingerprint: nativeProviderFingerprint(provider), configFingerprint: nativeProviderConfigFingerprint(provider), sourceCommit: NATIVE_SOURCE_COMMIT, wireApi: 'responses',
-    checks: { streaming: true, toolContinuation: true, vision: true, cancellation: true, errors: true } };
-  await writeFile(join(root, 'model-compatibility.json'), JSON.stringify({ models: [record] }));
-  await assertNativeModelAdmission(provider, root);
-  await assert.rejects(assertNativeModelAdmission({ ...provider, model: 'another-model' }, root), /native_model_not_validated/);
-  record.checks.vision = false;
-  await writeFile(join(root, 'model-compatibility.json'), JSON.stringify({ models: [record] }));
-  await assert.rejects(assertNativeModelAdmission(provider, root), /native_model_not_validated/);
-});
-test('admission rejects a changed API key', async (t) => {
-  const root = await directory(t);
-  const checked = { ...provider, apiKey: 'secret-a', protocol: 'responses' };
-  const record = { fingerprint: nativeProviderFingerprint(checked), configFingerprint: nativeProviderConfigFingerprint(checked), sourceCommit: NATIVE_SOURCE_COMMIT, wireApi: 'responses', checks: { streaming: true, toolContinuation: true, vision: true, cancellation: true, errors: true } };
-  await writeFile(join(root, 'model-compatibility.json'), JSON.stringify({ models: [record] }));
-  await assert.rejects(assertNativeModelAdmission({ ...checked, apiKey: 'secret-b' }, root), /native_model_not_validated/);
+  const configured = { ...provider, protocol: 'responses' };
+  await assert.rejects(acquireNativeCodexHost({ provider: configured, runtimeRoot: root }), /native_binary_unverified/);
+  await writeFile(join(root, 'model-compatibility.json'), 'obsolete invalid data');
+  await assert.rejects(acquireNativeCodexHost({ provider: configured, runtimeRoot: root }), /native_binary_unverified/);
+  assert.equal(await readFile(join(root, 'model-compatibility.json'), 'utf8'), 'obsolete invalid data');
+  await assert.rejects(acquireNativeCodexHost({ provider, runtimeRoot: root }), /native_protocol_unsupported/);
 });
 test('locked Skills become immutable canonical snapshots, not arbitrary model paths', async (t) => {
   const root = await directory(t);

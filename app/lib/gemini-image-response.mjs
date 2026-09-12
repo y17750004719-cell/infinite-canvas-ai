@@ -40,6 +40,8 @@ function getPartType(part) {
   }
 
   if ('inlineData' in part || 'inline_data' in part) return 'inlineData';
+  if ('image' in part || 'media' in part) return 'image';
+  if ('image_url' in part || 'imageUrl' in part) return 'imageUrl';
   if ('text' in part) return 'text';
 
   const [firstKey] = Object.keys(part);
@@ -128,6 +130,12 @@ export function extractGeminiImageOutputs(payload) {
           ? record.inline_data
           : null;
 
+    const fileData = record.fileData && typeof record.fileData === 'object'
+      ? record.fileData
+      : record.file_data && typeof record.file_data === 'object'
+        ? record.file_data
+        : null;
+
     if (inlineData) {
       const data = typeof inlineData.data === 'string' ? inlineData.data : '';
       const mimeType = resolveInlineImageMimeType(inlineData, data);
@@ -136,6 +144,34 @@ export function extractGeminiImageOutputs(payload) {
           url: `data:${mimeType};base64,${data}`,
         });
       }
+    }
+
+    if (fileData) {
+      const fileUri = [fileData.fileUri, fileData.file_uri, fileData.uri, fileData.url]
+        .find((value) => typeof value === 'string' && value.trim());
+      const mimeType = typeof fileData.mimeType === 'string'
+        ? fileData.mimeType
+        : typeof fileData.mime_type === 'string' ? fileData.mime_type : '';
+      if (typeof fileUri === 'string' && fileUri.trim() && (!mimeType || mimeType.toLowerCase().startsWith('image/'))) {
+        outputs.push({ url: fileUri.trim(), ...(mimeType ? { mimeType: mimeType.toLowerCase() } : {}) });
+      }
+    }
+
+    const directImage = record.image || record.media || record.image_url || record.imageUrl;
+    if (typeof directImage === 'string' && directImage.trim()) {
+      outputs.push({ url: directImage.trim() });
+    } else if (directImage && typeof directImage === 'object') {
+      const url = [directImage.url, directImage.uri, directImage.src].find((value) => typeof value === 'string' && value.trim());
+      const data = directImage.b64_json || directImage.base64 || directImage.data;
+      if (typeof url === 'string') outputs.push({ url: url.trim() });
+      else if (typeof data === 'string' && data.trim()) {
+        const mimeType = resolveInlineImageMimeType(directImage, data);
+        outputs.push({ url: `data:${mimeType};base64,${data}` });
+      }
+    }
+
+    if (Array.isArray(record.images) || Array.isArray(record.data)) {
+      visit(record.images || record.data, depth + 1);
     }
 
     Object.values(record).forEach((entry) => visit(entry, depth + 1));
@@ -191,6 +227,7 @@ export function summarizeGeminiImagePayload(payload) {
     promptSafetyRatings,
     candidateSafetyRatings,
     partTypes,
+    topLevelKeys: Object.keys(record).slice(0, 32),
     hasInlineData: partTypes.includes('inlineData'),
     hasText: textParts.length > 0,
     textPreview: truncateString(textParts.join('\n'), TEXT_PREVIEW_LIMIT) || null,

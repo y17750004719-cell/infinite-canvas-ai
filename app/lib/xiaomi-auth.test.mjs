@@ -22,6 +22,13 @@ function encryptFor(publicKey, payload) {
   ]).toString('base64url');
 }
 
+async function seedCurrentRegistry(runtimeDir) {
+  await updateProviderRegistry([
+    { id: 'comfly', name: 'Comfly', baseUrl: 'https://ai.comfly.org/v1', protocol: 'openai', enabled: true, primary: true, apiKey: 'comfly-secret', imageModels: [], chatModels: [], voiceModels: [], modelProtocols: {} },
+    { id: 'xiaomi', name: 'Xiaomi', baseUrl: 'https://api.xiaomimimo.com/v1', protocol: 'openai', enabled: false, primary: false, apiKey: '', imageModels: [], chatModels: [], voiceModels: [], modelProtocols: {} },
+  ], { runtimeDir });
+}
+
 test('decryptXiaomiCode decrypts credentials and restricts the returned base URL', () => {
   const keys = crypto.generateKeyPairSync('x25519');
   const privateDer = keys.privateKey.export({ type: 'pkcs8', format: 'der' });
@@ -69,6 +76,7 @@ test('temporary callback server completes an automatic Xiaomi login', async () =
   const runtimeDir = await mkdtemp(path.join(os.tmpdir(), 'xiaomi-auto-callback-'));
   const originalFetch = globalThis.fetch;
   try {
+    await seedCurrentRegistry(runtimeDir);
     globalThis.fetch = async () => new Response(JSON.stringify({ data: [{ id: 'mimo-v2.5-pro' }] }), { status: 200 });
     const login = await beginXiaomiLogin({ runtimeDir });
     const publicKey = crypto.createPublicKey({
@@ -92,6 +100,7 @@ test('Xiaomi login stores voice models without changing primary and logout disab
   const runtimeDir = await mkdtemp(path.join(os.tmpdir(), 'xiaomi-complete-'));
   const originalFetch = globalThis.fetch;
   try {
+    await seedCurrentRegistry(runtimeDir);
     globalThis.fetch = async () => new Response(JSON.stringify({ data: [{ id: 'mimo-tts-v1', output_modalities: ['audio'] }] }), { status: 200 });
     const login = await beginXiaomiLogin({ runtimeDir, now: 1000 });
     const pk = new URL(login.authorizeUrl).searchParams.get('pk');
@@ -122,6 +131,7 @@ test('Xiaomi login consumes a callback code only once when callbacks overlap', a
   const runtimeDir = await mkdtemp(path.join(os.tmpdir(), 'xiaomi-replay-'));
   const originalFetch = globalThis.fetch;
   try {
+    await seedCurrentRegistry(runtimeDir);
     globalThis.fetch = async () => new Response(JSON.stringify({ data: [{ id: 'mimo-v2.5-pro' }] }), { status: 200 });
     const login = await beginXiaomiLogin({ runtimeDir, now: 1000 });
     const pk = new URL(login.authorizeUrl).searchParams.get('pk');
@@ -144,6 +154,7 @@ test('Xiaomi login does not select a stale chat model after a model probe failur
   const runtimeDir = await mkdtemp(path.join(os.tmpdir(), 'xiaomi-probe-failure-'));
   const originalFetch = globalThis.fetch;
   try {
+    await seedCurrentRegistry(runtimeDir);
     globalThis.fetch = async () => new Response('upstream error', { status: 502 });
     const initialRegistry = await readProviderRegistry({ runtimeDir, env: {} });
     await updateProviderRegistry(initialRegistry.providers.map((provider) => provider.id === 'xiaomi'

@@ -1,5 +1,6 @@
 import { spawn as nodeSpawn } from 'node:child_process';
 import path from 'node:path';
+import { PRODUCTION_TIMEOUT_MS } from '../production-timeouts.mjs';
 
 export const NATIVE_CODEX_ALLOWED_METHODS = Object.freeze([
   'initialize',
@@ -16,7 +17,7 @@ export const NATIVE_CODEX_ALLOWED_METHODS = Object.freeze([
 ]);
 
 const ALLOWED_METHODS = new Set(NATIVE_CODEX_ALLOWED_METHODS);
-const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+const DEFAULT_REQUEST_TIMEOUT_MS = PRODUCTION_TIMEOUT_MS;
 const DEFAULT_CLOSE_TIMEOUT_MS = 2_000;
 const DEFAULT_MAX_LINE_BYTES = 4 * 1024 * 1024;
 

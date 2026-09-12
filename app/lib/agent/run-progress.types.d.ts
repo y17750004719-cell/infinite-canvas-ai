@@ -37,6 +37,8 @@ export interface AgentRunProgressStep {
   sequence?: number;
   timestampMs?: number;
   lastUpdateSequence?: number;
+  /** Sequence of the authoritative tool result; later progress cannot reopen it. */
+  toolResultSequence?: number;
   activityId?: string;
   interactionId?: string;
   interactionType?: 'clarification' | 'confirmation';

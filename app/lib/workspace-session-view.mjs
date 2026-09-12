@@ -30,25 +30,10 @@ export const TEXT_PANEL_MODEL_OPTIONS = [
 ];
 
 export const IMAGE_CARD_MODEL_OPTIONS = [
-  {
-    id: 'gemini-3.1-flash-image-preview',
-    label: 'Gemini 3.1 Flash Image',
-  },
-  {
-    id: 'gpt-image-2',
-    label: 'GPT Image 2',
-  },
-  {
-    id: 'gemini-2.5-flash-image',
-    label: 'Gemini 2.5 Flash Image',
-  },
-  {
-    id: 'gemini-3-pro-image-preview',
-    label: 'Gemini 3 Pro Image',
-  },
+  // Populated exclusively from the current provider registry at runtime.
 ];
 
-export const IMAGE_CARD_SIZE_OPTIONS = getSupportedImageSizeOptions(IMAGE_CARD_MODEL_OPTIONS[0]?.id);
+export const IMAGE_CARD_SIZE_OPTIONS = getSupportedImageSizeOptions();
 
 export function getDefaultTextPanelModelOption() {
   return TEXT_PANEL_MODEL_OPTIONS[0];

@@ -1,4 +1,4 @@
-import { getSupportedImageSizeOptions, normalizeImageModelCapabilityId } from './image-model-capabilities.mjs';
+import { getSupportedImageSizeOptions } from './image-model-capabilities.mjs';
 
 const DEFAULT_ASPECT_RATIO_IDS = [
   '1:1',
@@ -24,39 +24,6 @@ export const DEFAULT_IMAGE_CARD_QUALITY_OPTIONS = [
   { id: 'low', label: 'Low' },
 ];
 
-const COMFLY_PROVIDER_ID = 'comfly';
-const COMFLY_DEFAULT_GPT_IMAGE_2_ASPECT_RATIOS = ['1:1', '3:2', '2:3', '16:9', '9:16', '4:3', '3:4'];
-const COMFLY_DEFAULT_GPT_IMAGE_2_SIZE_TO_ASPECTS = {
-  '1024x1024': ['1:1', '3:2', '2:3', '16:9', '9:16', '4:3', '3:4'],
-  '2048x2048': ['1:1', '3:2', '2:3', '16:9', '9:16', '4:3', '3:4'],
-  '4096x4096': ['16:9', '9:16', '4:3', '3:4'],
-};
-const COMFLY_DEFAULT_GPT_IMAGE_2_RESOLVED_SIZES = {
-  '1024x1024': {
-    '1:1': '1024x1024',
-    '3:2': '1536x1024',
-    '2:3': '1024x1536',
-    '16:9': '1280x720',
-    '9:16': '720x1280',
-    '4:3': '1344x1008',
-    '3:4': '1008x1344',
-  },
-  '2048x2048': {
-    '1:1': '2048x2048',
-    '3:2': '2048x1360',
-    '2:3': '1360x2048',
-    '16:9': '2048x1152',
-    '9:16': '1152x2048',
-    '4:3': '2048x1536',
-    '3:4': '1536x2048',
-  },
-  '4096x4096': {
-    '16:9': '3840x2160',
-    '9:16': '2160x3840',
-    '4:3': '3264x2448',
-    '3:4': '2448x3264',
-  },
-};
 function normalizeText(value) {
   return typeof value === 'string' ? value.trim() : '';
 }
@@ -109,26 +76,8 @@ function cloneModelProfile(profile) {
   };
 }
 
-function createComflyDefaultGptImage2Profile() {
-  return cloneModelProfile({
-    aspectRatios: COMFLY_DEFAULT_GPT_IMAGE_2_ASPECT_RATIOS,
-    sizeOptions: getSupportedImageSizeOptions('gpt-image-2'),
-    qualityOptions: [
-      { id: 'auto', label: 'Auto' },
-      { id: 'low', label: 'Low' },
-      { id: 'medium', label: 'Medium' },
-      { id: 'high', label: 'High' },
-    ],
-    enabledAspectRatiosBySize: COMFLY_DEFAULT_GPT_IMAGE_2_SIZE_TO_ASPECTS,
-    resolvedSizesBySizeAndAspect: COMFLY_DEFAULT_GPT_IMAGE_2_RESOLVED_SIZES,
-  });
-}
-
 function createDefaultModelProfile(modelId) {
   const normalizedModelId = normalizeText(modelId);
-  if (normalizeImageModelCapabilityId(normalizedModelId) === 'gpt-image-2') {
-    return createComflyDefaultGptImage2Profile();
-  }
   return {
     aspectRatios: [...DEFAULT_ASPECT_RATIO_IDS],
     sizeOptions: cloneSizeOptions(getSupportedImageSizeOptions(normalizedModelId)),
@@ -158,17 +107,6 @@ export function buildProviderImageOptionProfiles(providers = []) {
       providerId,
       models: modelProfiles,
     };
-  }
-
-  if (!profiles[COMFLY_PROVIDER_ID]) {
-    profiles[COMFLY_PROVIDER_ID] = {
-      providerId: COMFLY_PROVIDER_ID,
-      models: {},
-    };
-  }
-
-  if (!profiles[COMFLY_PROVIDER_ID].models['gpt-image-2']) {
-    profiles[COMFLY_PROVIDER_ID].models['gpt-image-2'] = createComflyDefaultGptImage2Profile();
   }
 
   return profiles;

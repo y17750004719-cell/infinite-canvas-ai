@@ -679,6 +679,8 @@ test('assistant chat content uses the Codex-style content axis while user messag
 });
 
 test('session hydration normalizes persisted Agent timelines before rendering them', () => {
+  assert.ok(source.includes('completedTranscriptMessages(state.turns, state.transcriptStartSequence, state.transcriptSummary, { events, threadId })'));
+  assert.ok(source.includes("const key = step.itemId || `${step.stepId}:${step.toolCallId || ''}:${index}`;"));
   assert.match(source, /type: 'session_hydrate'/);
   assert.match(source, /const normalizedProgress = message\.agentRunProgress/);
   assert.doesNotMatch(source, /上次任务因页面异常中断/);

@@ -24,8 +24,15 @@ export function nativeProviderFingerprint(provider) {
   return hash(JSON.stringify([provider.id, provider.model, new URL(provider.baseUrl).href]));
 }
 
-export function nativeProviderConfigFingerprint(provider) {
-  return hash(JSON.stringify([provider.id, provider.model, new URL(provider.baseUrl).href, hash(provider.apiKey || '')]));
+export async function invalidateNativeCodexHost(host) {
+  if (!host) return;
+  for (const [key, value] of hostPool) {
+    if (value === host || (value && typeof value.then === 'function' && await Promise.resolve(value).catch(() => null) === host)) {
+      hostPool.delete(key);
+    }
+  }
+  host.invalidated = true;
+  await host.client.close().catch(() => {});
 }
 
 export function nativeConfig(provider) {
@@ -45,23 +52,6 @@ export function nativeConfig(provider) {
   ].join('\n');
 }
 
-export async function assertNativeModelAdmission(provider, runtimeRoot) {
-  if (!provider?.id || !provider?.model || !provider?.baseUrl) throw failure('native_provider_required');
-  if (!['openai', 'responses'].includes(provider.protocol)) throw failure('native_protocol_unsupported');
-  let admission;
-  try {
-    admission = JSON.parse(await readFile(join(runtimeRoot, 'model-compatibility.json'), 'utf8'));
-  } catch {
-    throw failure('native_model_not_validated');
-  }
-  const record = admission?.models?.find((entry) => entry.fingerprint === nativeProviderFingerprint(provider));
-  if (record?.sourceCommit !== NATIVE_SOURCE_COMMIT || record.wireApi !== 'responses'
-      || record.configFingerprint !== nativeProviderConfigFingerprint(provider)
-      || !['streaming', 'toolContinuation', 'vision', 'cancellation', 'errors'].every((key) => record.checks?.[key] === true)) {
-    throw failure('native_model_not_validated');
-  }
-}
-
 async function atomicPrivateWrite(path, content) {
   const temporary = `${path}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
   await writeFile(temporary, content, { mode: 0o600 });
@@ -69,7 +59,8 @@ async function atomicPrivateWrite(path, content) {
 }
 
 export async function acquireNativeCodexHost({ provider, ownerId = 'local', runtimeRoot = resolve('runtime/native-codex') }) {
-  await assertNativeModelAdmission(provider, runtimeRoot);
+  if (!provider?.id || !provider?.model || !provider?.baseUrl) throw failure('native_provider_required');
+  if (provider.protocol !== 'responses') throw failure('native_protocol_unsupported');
   const scopeId = hash(JSON.stringify([ownerId, nativeProviderFingerprint(provider), hash(provider.apiKey || '')]));
   const key = `${resolve(runtimeRoot)}:${scopeId}`;
   const existing = hostPool.get(key);

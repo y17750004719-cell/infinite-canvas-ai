@@ -175,36 +175,6 @@ test('generate route preserves resolved non-square gpt-image-2 sizes instead of 
   );
 });
 
-test('generate route keeps provider-returned gpt-image-2 variants on the gpt-image-2 capability path', () => {
-  assert.equal(
-    routeSource.includes('from "../../lib/generate-request-flow.mjs";'),
-    true
-  );
-  assert.equal(
-    routeSource.includes('const legacyImageModel = resolveGenerateImageModelFromAllowedModels(model, allowedProviderModelIds);'),
-    true
-  );
-});
-
-test('generate route preserves provider-saved Gemini image variants instead of falling back to the static default model', () => {
-  assert.equal(
-    routeSource.includes('const allowedProviderModelIds = new Set<string>('),
-    true
-  );
-  assert.equal(
-    routeSource.includes('enabledProviders.flatMap((provider) =>'),
-    true
-  );
-  assert.equal(
-    routeSource.includes('provider.imageModels'),
-    true
-  );
-  assert.equal(
-    routeSource.includes('const legacyImageModel = resolveGenerateImageModelFromAllowedModels(model, allowedProviderModelIds);'),
-    true
-  );
-});
-
 test('generate route validates returned image dimensions against the requested gpt-image-2 size before returning success', () => {
   assert.equal(
     routeSource.includes('getImageDimensionsFromBuffer'),

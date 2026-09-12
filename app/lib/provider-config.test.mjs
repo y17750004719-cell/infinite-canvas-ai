@@ -16,26 +16,35 @@ import {
   updateProviderRegistry,
 } from './provider-config.mjs';
 
-test('readProviderRegistry falls back to Comfly plus the disabled Xiaomi login entry', async () => {
+test('saving configuration preserves legacy admission files without using them', async (t) => {
+  const runtimeDir = await mkdtemp(path.join(os.tmpdir(), 'provider-config-direct-'));
+  t.after(() => rm(runtimeDir, { recursive: true, force: true }));
+  await mkdir(path.join(runtimeDir, 'native-codex'));
+  const legacyPath = path.join(runtimeDir, 'native-codex', 'model-compatibility.json');
+  const legacy = JSON.stringify({ models: [{ configFingerprint: 'obsolete', checks: {} }] });
+  await writeFile(legacyPath, legacy);
+  await updateProviderRegistry([{
+    id: 'direct', name: 'Direct', baseUrl: 'http://127.0.0.1:1234/v1', apiKey: 'local-test',
+    enabled: true, primary: true, protocol: 'responses', chatModels: ['chat-model'],
+    modelProtocols: { 'chat-model': 'openai' },
+  }], { runtimeDir });
+  const provider = (await readProviderRegistry({ runtimeDir, env: {} })).providers[0];
+  assert.equal(provider.protocol, 'responses');
+  assert.equal(effectiveProviderProtocol(provider, 'chat-model'), 'openai');
+  assert.equal(effectiveProviderProtocol(provider, 'another-model'), 'responses');
+  assert.equal(await readFile(legacyPath, 'utf8'), legacy);
+});
+
+test('readProviderRegistry rejects missing current registry instead of using environment or legacy defaults', async () => {
   const runtimeDir = await mkdtemp(path.join(os.tmpdir(), 'provider-registry-read-'));
 
   try {
-    const result = await readProviderRegistry({
-      runtimeDir,
-      env: {
-        COMFLY_API_URL: 'https://ai.comfly.org/v1',
-        COMFLY_API_KEY: 'env-test-key',
-      },
+    await assert.rejects(() => readProviderRegistry({ runtimeDir, env: {} }), (error) => {
+      assert.equal(error.code, 'migration_required');
+      assert.equal(error.statusCode, 409);
+      assert.equal(error.sourceType, 'provider_config');
+      return true;
     });
-
-    assert.equal(result.source, 'env');
-    assert.deepEqual(
-      result.providers.map((provider) => provider.id),
-      ['comfly', 'xiaomi']
-    );
-    assert.equal(getPrimaryProvider(result.providers).id, 'comfly');
-    assert.equal(getPrimaryProvider(result.providers).apiKey, 'env-test-key');
-    assert.equal(result.providers.find((provider) => provider.id === 'xiaomi').enabled, false);
   } finally {
     await rm(runtimeDir, { recursive: true, force: true });
   }
@@ -238,25 +247,20 @@ test('readProviderRegistry migrates nano-banana IDs to image models without rena
   }
 });
 
-test('readProviderConfig remains compatible with the primary provider view', async () => {
+test('readProviderConfig rejects when the current registry is missing', async () => {
   const runtimeDir = await mkdtemp(path.join(os.tmpdir(), 'provider-config-default-'));
 
   try {
-    const result = await readProviderConfig({
-      runtimeDir,
-      env: {},
+    await assert.rejects(() => readProviderConfig({ runtimeDir, env: {} }), (error) => {
+      assert.equal(error.code, 'migration_required');
+      return true;
     });
-
-    assert.equal(result.source, 'env');
-    assert.equal(result.config.providerId, 'comfly');
-    assert.equal(result.config.baseUrl, 'https://ai.comfly.org/v1');
-    assert.equal(result.config.apiKey, '');
   } finally {
     await rm(runtimeDir, { recursive: true, force: true });
   }
 });
 
-test('readProviderRegistry migrates legacy provider-config.json into the multi-provider registry view', async () => {
+test('readProviderRegistry rejects legacy provider-config.json instead of migrating it', async () => {
   const runtimeDir = await mkdtemp(path.join(os.tmpdir(), 'provider-registry-legacy-'));
 
   try {
@@ -277,18 +281,11 @@ test('readProviderRegistry migrates legacy provider-config.json into the multi-p
       'utf8'
     );
 
-    const result = await readProviderRegistry({ runtimeDir, env: {} });
-    const primary = getPrimaryProvider(result.providers);
-
-    assert.equal(result.source, 'runtime');
-    assert.equal(primary.id, 'custom');
-    assert.equal(primary.baseUrl, 'https://supplier.example.com/v1');
-    assert.equal(primary.apiKey, 'legacy-secret');
-    assert.deepEqual(primary.modelProtocols, {
-      'gemini-3.1-flash-image-preview': 'gemini',
-      'gpt-image-2': 'openai',
+    await assert.rejects(() => readProviderRegistry({ runtimeDir, env: {} }), (error) => {
+      assert.equal(error.code, 'migration_required');
+      assert.equal(error.statusCode, 409);
+      return true;
     });
-    assert.equal(primary.updatedAt, '2026-01-01T00:00:00.000Z');
   } finally {
     await rm(runtimeDir, { recursive: true, force: true });
   }

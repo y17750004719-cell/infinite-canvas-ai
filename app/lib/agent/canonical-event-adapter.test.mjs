@@ -4,6 +4,19 @@ import { adaptCanonicalEvent } from './canonical-event-adapter.mjs';
 
 const base = { threadId: 'thread', turnId: 'turn', taskId: 'task', operationId: 'op', runId: 'run', sequence: 2, timestampMs: 10 };
 
+test('canonical progress and tool events retain stable identity and parent links', () => {
+  const ids = { itemId: 'run:tool:call', toolCallId: 'call', executionId: 'run:execution:call', parentItemId: 'commentary' };
+  for (const event of [
+    { type: 'item.started', itemType: 'tool_call', item: { toolName: 'get_canvas_context' } },
+    { type: 'item.completed', itemType: 'tool_result', item: { isError: true } },
+    { type: 'item.updated', itemType: 'public_event', item: { payload: { type: 'progress_update', stepId: 'canvas_context' } } },
+  ]) {
+    const adapted = adaptCanonicalEvent({ ...base, ...ids, ...event });
+    for (const [key, value] of Object.entries(ids)) assert.equal(adapted[key], value);
+    if (event.itemType === 'tool_result') assert.equal(adapted.isError, true);
+  }
+});
+
 test('maps canonical assistant and tool items to existing page events', () => {
   assert.equal(adaptCanonicalEvent({ ...base, type: 'thread.started' }), null);
   assert.deepEqual(adaptCanonicalEvent({ ...base, type: 'turn.started' }).type, 'agent_start');

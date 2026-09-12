@@ -1,28 +1,22 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createHash } from "node:crypto";
-import { chat, chatStream, ImageGenerationError, runImageTask, shouldUseExactImageSizeApi, shouldUseImageEditsApi } from "../../lib/api-client";
+import { chat, chatStream, ImageGenerationError, runImageTask, shouldUseImageEditsApi } from "../../lib/api-client";
 import fs from "node:fs";
 import path from "node:path";
 import { createStoredImageName, parseImageDataUrl } from "../../lib/api-security.mjs";
 import { writeImageFileWithCanvasLods } from "../../lib/canvas-image-lod-server.mjs";
 import { getImageDimensionsFromBuffer } from "../../lib/image-metadata.mjs";
 import { buildRuntimeAssetUrl, LOCAL_ASSET_ALLOWED_EXTENSIONS, resolveLocalAssetPath } from "../../lib/local-assets.mjs";
-import { getImageModelCapability, normalizeImageModelCapabilityId, supportsImageModelExactSize } from "../../lib/image-model-capabilities.mjs";
 import { readProviderRegistry } from "../../lib/provider-config.mjs";
 import { resolveProviderModelSelection } from "../../lib/provider-model-selection.mjs";
 import {
   aspectRatioFromSize,
   buildGenerateRouteErrorMeta,
   normalizeAspectRatio,
-  resolveGenerateImageModelFromAllowedModels,
   resolveIntent,
 } from "../../lib/generate-request-flow.mjs";
-import {
-  getResolutionFailureReason,
-  isOutputResolutionSufficient,
-  resolveImageGenerationFallbackSizes,
-} from "../../lib/workspace-session-view.mjs";
 import { createLogger, createRequestId, serializeError } from "../../lib/logger";
+import { CURRENT_CONTRACT_VERSION, MigrationRequiredError, migrationErrorMeta } from "../../lib/compatibility-gate.mjs";
 
 const DEBUG_API_LOGS = process.env.LOG_ALL_REQUESTS !== "0";
 const PUBLIC_DIR = path.join(process.cwd(), "public");
@@ -82,6 +76,11 @@ function getErrorDiagnostics(error: unknown) {
     errorMessage: error.message,
     failureClass: error instanceof ImageGenerationError ? error.failureClass || null : null,
     failureCode: error instanceof ImageGenerationError ? error.failureCode || null : null,
+    providerId: error instanceof ImageGenerationError ? error.providerId || null : null,
+    model: error instanceof ImageGenerationError ? error.model || null : null,
+    protocol: error instanceof ImageGenerationError ? error.protocol || null : null,
+    endpointHost: error instanceof ImageGenerationError ? error.endpointHost || null : null,
+    failureStage: error instanceof ImageGenerationError ? error.failureStage || null : null,
     retryable: error instanceof ImageGenerationError ? error.isRetryable ?? null : null,
     retryAttempt: error instanceof ImageGenerationError ? error.retryAttempt ?? null : null,
     outcomeUnknown: error instanceof ImageGenerationError ? error.outcomeUnknown ?? null : null,
@@ -227,92 +226,9 @@ type SupplierChatMessage = {
   content: string | SupplierChatContentPart[];
 };
 
-function sanitizeModelKey(model: string): string {
-  return model.toUpperCase().replace(/[^A-Z0-9]+/g, "_");
-}
-
-function parseSizeAllowlist(raw?: string): string[] {
-  if (!raw) return [];
-  return Array.from(
-    new Set(
-      raw
-        .split(",")
-        .map((part) => part.trim())
-        .filter((part) => /^\d+x\d+$/i.test(part))
-    )
-  );
-}
-
-function filterAllowlistByModelCapabilities(allowlist: string[], capabilityAllowlist: string[]): string[] {
-  if (!Array.isArray(allowlist) || allowlist.length === 0) {
-    return [];
-  }
-  if (!Array.isArray(capabilityAllowlist) || capabilityAllowlist.length === 0) {
-    return allowlist;
-  }
-
-  const capabilitySizeSet = new Set(capabilityAllowlist);
-  return allowlist.filter((size) => capabilitySizeSet.has(size));
-}
-
-function resolveImageSize(requested: unknown, model: string): string {
-  const modelEnvKey = `IMAGE_SIZE_ALLOWLIST_${sanitizeModelKey(model)}`;
-  const capability = getImageModelCapability(model);
-  const capabilityAllowlist = capability.supportedSizes;
-  const modelAllowlist = filterAllowlistByModelCapabilities(
-    parseSizeAllowlist(process.env[modelEnvKey]),
-    capabilityAllowlist
-  );
-  const globalAllowlist = filterAllowlistByModelCapabilities(
-    parseSizeAllowlist(process.env.IMAGE_SIZE_ALLOWLIST),
-    capabilityAllowlist
-  );
-  const allowlist = modelAllowlist.length > 0
-    ? modelAllowlist
-    : !capability.supportsAspectRatio && capabilityAllowlist.length > 0
-      ? capabilityAllowlist
-      : globalAllowlist.length > 0
-      ? globalAllowlist
-      : capabilityAllowlist.length > 0
-        ? capabilityAllowlist
-        : DEFAULT_IMAGE_SIZES;
-
-  const requestedSize = typeof requested === "string" ? requested.trim() : "";
-  if (!requestedSize) return allowlist[0] || capabilityAllowlist[0] || DEFAULT_IMAGE_SIZES[0];
-  if (supportsImageModelExactSize(model, requestedSize)) return requestedSize;
-  if (allowlist.includes(requestedSize)) return requestedSize;
-
-  debugWarn("Unsupported image size for current allowlist, fallback to default", {
-    requestedSize,
-    allowlist,
-    model,
-  });
-  return allowlist[0] || capabilityAllowlist[0] || DEFAULT_IMAGE_SIZES[0];
-}
-
-function isGptImage2Model(model?: string): boolean {
-  return normalizeImageModelCapabilityId(model || "") === "gpt-image-2";
-}
-
-function buildSupplierImageSizeMismatchError({
-  requestedSize,
-  requestedAspectRatio,
-  actualWidth,
-  actualHeight,
-}: {
-  requestedSize: string;
-  requestedAspectRatio: string;
-  actualWidth: number;
-  actualHeight: number;
-}): string {
-  const failureReason =
-    getResolutionFailureReason({
-      requestedSize,
-      aspectRatio: requestedAspectRatio || aspectRatioFromSize(requestedSize),
-      naturalWidth: actualWidth,
-      naturalHeight: actualHeight,
-    }) || "供应商未按请求尺寸返回图片";
-  return `供应商未按请求尺寸返回图片：请求 ${requestedSize}，实际 ${actualWidth}x${actualHeight}。${failureReason}`;
+function resolveImageSize(requested: unknown): string {
+  const value = typeof requested === "string" ? requested.trim() : "";
+  return value || DEFAULT_IMAGE_SIZES[0];
 }
 
 function loadSkillContent(skillId: string): string | null {
@@ -457,6 +373,17 @@ export async function POST(request: NextRequest) {
       await logResponse(400, { reason: "invalid_json" });
       return NextResponse.json({ status: "error", error: "Invalid JSON body" }, { status: 400 });
     }
+    const suppliedContractVersion = (body as Record<string, unknown>).contractVersion;
+    const legacyImageFields = Object.prototype.hasOwnProperty.call(body, 'generationPrompt')
+      || Object.prototype.hasOwnProperty.call(body, 'planner');
+    if ((suppliedContractVersion !== undefined && suppliedContractVersion !== CURRENT_CONTRACT_VERSION) || legacyImageFields) {
+      const error = new MigrationRequiredError({
+        sourceType: 'wire_request',
+        sourceVersion: String(suppliedContractVersion || 'legacy'),
+      } as any);
+      await logResponse(409, { mode: 'migration_required', ...migrationErrorMeta(error) });
+      return NextResponse.json({ status: 'error', error: error.message, ...migrationErrorMeta(error) }, { status: 409 });
+    }
 
     const { messages: incomingMessages, size, quality, aspect_ratio, n, reference_images, reference_labels, skill, intent, model, executionMode, providerId, imageProviderId, chatProviderId, cancelWithRequest } = body as {
       messages: Array<{ role: "user" | "assistant" | "system"; content: string }>;
@@ -594,15 +521,8 @@ export async function POST(request: NextRequest) {
 
     const resolvedExecutionMode = executionMode === "async" ? "async" : "sync";
     const providerRegistry = await readProviderRegistry();
-    const enabledProviders = providerRegistry.providers.filter((provider) => provider.enabled !== false);
-    const allowedProviderModelIds = new Set<string>(
-      enabledProviders.flatMap((provider) =>
-        Array.isArray(provider.imageModels) ? provider.imageModels.filter((model): model is string => typeof model === "string") : []
-      )
-    );
     const requestedImageProviderId = imageProviderId || providerId;
     const hasRequestedImageSelection = Boolean(requestedImageProviderId?.trim());
-    const legacyImageModel = resolveGenerateImageModelFromAllowedModels(model, allowedProviderModelIds);
     const resolvedImageSelection = hasRequestedImageSelection
       ? resolveProviderModelSelection({
           providers: providerRegistry.providers,
@@ -611,10 +531,10 @@ export async function POST(request: NextRequest) {
           requestedModel: model,
         })
       : {
-          providerId: requestedImageProviderId || null,
-          model: legacyImageModel,
+          providerId: null,
+          model: null,
           fallback: false,
-          reason: "legacy_default",
+          reason: "missing_explicit_image_selection",
         };
     const requestedChatProviderId = chatProviderId || providerId;
     const resolvedChatSelection = resolveProviderModelSelection({
@@ -659,10 +579,9 @@ export async function POST(request: NextRequest) {
 
     if (resolved.intent === "image" && hasReferenceImages) {
       const resolvedImageModel = resolvedImageSelection.model!;
-      const imageSize = resolveImageSize(size, resolvedImageModel);
-      const supportsAspectRatio = getImageModelCapability(resolvedImageModel).supportsAspectRatio;
+      const imageSize = resolveImageSize(size);
       const requestedAspectRatio = normalizeAspectRatio(aspect_ratio);
-      const resolvedAspectRatio = supportsAspectRatio ? (requestedAspectRatio || aspectRatioFromSize(imageSize)) : "";
+      const resolvedAspectRatio = requestedAspectRatio || aspectRatioFromSize(imageSize);
       const normalizedReferenceImages = reference_images
         .map((img) => normalizeChatReferenceImage(img))
         .filter((img): img is string => !!img);
@@ -748,10 +667,15 @@ export async function POST(request: NextRequest) {
             imageErrorMeta
           );
         }
+        const details = error instanceof ImageGenerationError ? {
+          failureClass: error.failureClass, failureCode: error.failureCode, isRetryable: error.isRetryable,
+          retryAttempt: error.retryAttempt, outcomeUnknown: error.outcomeUnknown, providerId: error.providerId,
+          model: error.model, protocol: error.protocol, endpointHost: error.endpointHost, failureStage: error.failureStage,
+        } : undefined;
         throw new ImageGenerationError(
           `Image task failed: ${message}`,
           routeErrorMeta.isImageGenerationError ? routeErrorMeta.statusCode : 502,
-          imageErrorMeta
+          details || imageErrorMeta
         );
       }
 
@@ -812,72 +736,35 @@ export async function POST(request: NextRequest) {
     if (resolved.intent === "image") {
       const resolvedImageModel = resolvedImageSelection.model!;
       const requestedSize = typeof size === "string" ? size : "";
-      const imageSize = resolveImageSize(size, resolvedImageModel);
-      const supportsAspectRatio = getImageModelCapability(resolvedImageModel).supportsAspectRatio;
+      const imageSize = resolveImageSize(size);
       const requestedAspectRatio = normalizeAspectRatio(aspect_ratio);
-      const resolvedAspectRatio = supportsAspectRatio ? (requestedAspectRatio || aspectRatioFromSize(imageSize)) : "";
+      const resolvedAspectRatio = requestedAspectRatio || aspectRatioFromSize(imageSize);
       debugLog("Resolved image generation dimensions", {
         reqId,
         requestedSize,
         requestedAspectRatio: requestedAspectRatio || null,
         resolvedAspectRatio,
       });
-      let actualSize = imageSize;
       let imageResult;
-      const shouldUseExactSizeApi = shouldUseExactImageSizeApi(resolvedImageModel, imageSize);
-      const fallbackSizes = shouldUseExactSizeApi ? [imageSize] : resolveImageGenerationFallbackSizes(imageSize);
       debugLog("Dispatching image generate supplier task", {
         reqId,
         n: n || 1,
         resolvedImageModel,
         requestedSize,
         resolvedAspectRatio,
-        fallbackSizes,
-        shouldUseExactSizeApi,
+        protocol: "resolved-by-provider",
       });
-      let lastError: unknown = null;
-
-      for (let index = 0; index < fallbackSizes.length; index += 1) {
-        const candidateSize = fallbackSizes[index];
-
-        try {
-          imageResult = await runImageTask({
-            providerId: resolvedImageSelection.providerId || undefined,
-            model: resolvedImageModel,
-            prompt: resolved.prompt,
-            size: candidateSize,
-            quality: typeof quality === "string" ? quality : undefined,
-            aspect_ratio: resolvedAspectRatio || undefined,
-            n: n || 1,
-            executionMode: resolvedExecutionMode,
-            signal: cancelWithRequest ? request.signal : undefined,
-          });
-          actualSize = candidateSize;
-          lastError = null;
-          break;
-        } catch (error) {
-          lastError = error;
-          const canRetryWithLowerSize =
-            index < fallbackSizes.length - 1 &&
-            error instanceof ImageGenerationError &&
-            error.outcomeUnknown !== true &&
-            error.failureCode === "invalid_tool_arguments";
-
-          if (!canRetryWithLowerSize) {
-            throw error;
-          }
-
-          const nextSize = fallbackSizes[index + 1];
-          debugWarn(`Generate at ${candidateSize} failed, fallback to ${nextSize}`, {
-            reqId,
-            reason: error.message,
-          });
-        }
-      }
-
-      if (!imageResult && lastError) {
-        throw lastError;
-      }
+      imageResult = await runImageTask({
+        providerId: resolvedImageSelection.providerId || undefined,
+        model: resolvedImageModel,
+        prompt: resolved.prompt,
+        size: imageSize,
+        quality: typeof quality === "string" ? quality : undefined,
+        aspect_ratio: resolvedAspectRatio || undefined,
+        n: n || 1,
+        executionMode: resolvedExecutionMode,
+        signal: cancelWithRequest ? request.signal : undefined,
+      });
 
       if (!imageResult.data || imageResult.data.length === 0) {
         const emptyResultMeta = {
@@ -902,42 +789,6 @@ export async function POST(request: NextRequest) {
 
       const savedImages = await saveImagesToLocal(imageResult.data.map((entry) => entry.url));
       const primarySavedImage = savedImages[0];
-      if (
-        isGptImage2Model(resolvedImageModel) &&
-        primarySavedImage &&
-        Number.isFinite(primarySavedImage.naturalWidth) &&
-        Number.isFinite(primarySavedImage.naturalHeight)
-      ) {
-        const actualWidth = Number(primarySavedImage.naturalWidth);
-        const actualHeight = Number(primarySavedImage.naturalHeight);
-        const targetAspectRatio = resolvedAspectRatio || aspectRatioFromSize(imageSize);
-        const meetsRequestedResolution = isOutputResolutionSufficient({
-          requestedSize: imageSize,
-          aspectRatio: targetAspectRatio,
-          naturalWidth: actualWidth,
-          naturalHeight: actualHeight,
-        });
-
-        if (!meetsRequestedResolution) {
-          const mismatchMessage = buildSupplierImageSizeMismatchError({
-            requestedSize: imageSize,
-            requestedAspectRatio: targetAspectRatio,
-            actualWidth,
-            actualHeight,
-          });
-          await requestLogger.warn("SUPPLIER_IMAGE_SIZE_MISMATCH", "供应商未按请求尺寸返回图片", {
-            reqId,
-            taskId: null,
-            requestedSize: imageSize,
-            requestedAspectRatio: targetAspectRatio,
-            actualWidth,
-            actualHeight,
-            actualSize: `${actualWidth}x${actualHeight}`,
-            model: resolvedImageModel,
-            warning: mismatchMessage,
-          });
-        }
-      }
       debugLog("Saved image generate outputs locally", {
         reqId,
         savedCount: savedImages.length,
@@ -953,7 +804,7 @@ export async function POST(request: NextRequest) {
           model: resolvedImageModel,
           mode: "generate",
           requestedSize: imageSize,
-          actualSize,
+          actualSize: imageSize,
           analyzedPrompt: resolved.prompt,
           supplierPromptHash,
           referenceLabels: [],
@@ -1025,6 +876,11 @@ export async function POST(request: NextRequest) {
     const errorMessage = error instanceof Error ? error.message : "Unknown error";
     const errorStack = error instanceof Error ? error.stack : "";
     const routeErrorMeta = buildGenerateRouteErrorMeta(error, ImageGenerationError);
+    const migrationMeta = migrationErrorMeta(error);
+    if (migrationMeta) {
+      await logResponse(409, { mode: "migration_required", ...migrationMeta });
+      return NextResponse.json({ status: 'error', error: errorMessage, ...migrationMeta }, { status: 409 });
+    }
     const { statusCode, failureClass, failureStage, isRetryable, retryable, retryAttempt, outcomeUnknown } = routeErrorMeta;
 
     await requestLogger.error("request.error", "Generate API error", {

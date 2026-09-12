@@ -22,3 +22,5 @@ export function supportsImageModelImageSizeConfig(modelId?: string): boolean;
 export function resolveImageRequestModel(modelId?: string, requestedSize?: string): string;
 export function getImageSizeLabel(modelId?: string, sizeId?: string): string;
 export function getGeminiImageSizeEnum(sizeId?: string): '1K' | '2K' | '4K';
+export function resolveOpenAiImageSizeForAspectRatio(requestedSize?: string, aspectRatio?: string): string;
+export function resolveImageSizeForAspectRatio(modelId?: string, requestedSize?: string, aspectRatio?: string): string;

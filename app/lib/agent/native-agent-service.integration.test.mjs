@@ -1,19 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { access, mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises';
+import { access, mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { once } from 'node:events';
 import { NativeCodexStdioClient } from './native-codex-stdio.mjs';
-import { NATIVE_DISABLED_FEATURES } from './native-codex-host.mjs';
+import { acquireNativeCodexHost, NATIVE_DISABLED_FEATURES } from './native-codex-host.mjs';
+import { updateProviderRegistry, readProviderRegistry, effectiveProviderProtocol } from '../provider-config.mjs';
 import { runNativeAgentTurn } from './native-agent-service.ts';
 
 const binaryPath = path.resolve('runtime/native-codex/target/debug/codex-app-server');
 const binaryAvailable = await access(binaryPath, constants.X_OK).then(() => true, () => false);
 
-test('real App Server performs commentary-tool-result continuation across image stages', { skip: !binaryAvailable }, async () => {
+test('saved Responses override chats without admission and continues real tools across image stages', { skip: !binaryAvailable }, async () => {
   const scratch = await mkdtemp(path.join(tmpdir(), 'native-agent-service-integration-'));
   const sessionId = `native-integration-${Date.now()}`;
   const requests = [];
@@ -58,51 +59,25 @@ test('real App Server performs commentary-tool-result continuation across image 
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
   const endpoint = `http://127.0.0.1:${server.address().port}`;
-  const config = [
-    'model = "mock-model"', 'model_provider = "zflow_provider"', 'approval_policy = "never"',
-    'sandbox_mode = "read-only"', 'web_search = "disabled"',
-    '[tools.experimental_request_user_input]', 'enabled = false',
-    '[tools.update_plan]', 'enabled = false',
-    '[orchestrator.skills]', 'enabled = false', '[orchestrator.mcp]', 'enabled = false',
-    '[skills.bundled]', 'enabled = false',
-    '[features]', ...NATIVE_DISABLED_FEATURES.map((name) => `${name} = false`),
-    '[model_providers.zflow_provider]', 'name = "Local integration provider"',
-    `base_url = ${JSON.stringify(`${endpoint}/v1`)}`, 'wire_api = "responses"',
-    'env_key = "ZFLOW_NATIVE_PROVIDER_KEY"', 'request_max_retries = 0', 'stream_max_retries = 0',
-    'supports_websockets = false',
-  ].join('\n');
-  const privateHome = path.join(scratch, 'home');
-  const cwd = path.join(scratch, 'workspace');
-  await mkdir(privateHome, { recursive: true });
-  await mkdir(cwd, { recursive: true });
-  await writeFile(path.join(privateHome, 'config.toml'), config);
-  const handlers = new Map();
-  const client = new NativeCodexStdioClient({
-    binaryPath,
-    args: ['--listen', 'stdio://', '--strict-config', '--disable-plugin-startup-tasks-for-tests'],
-    cwd,
-    env: {
-      PATH: '/usr/bin:/bin', HOME: privateHome, CODEX_HOME: privateHome,
-      CODEX_APP_SERVER_DISABLE_MANAGED_CONFIG: '1', ZFLOW_NATIVE_PROVIDER_KEY: 'local-test',
-    },
-    requestTimeoutMs: 30_000,
-    onNotification: (event) => handlers.get(event.params?.threadId)?.onNotification?.(event),
-    onServerRequest: (event) => handlers.get(event.params?.threadId)?.onToolCall?.(event),
-  });
-  await client.start({ clientInfo: { name: 'native_agent_service_test', version: '0.1.0' }, capabilities: { experimentalApi: true } });
-  const host = {
-    client, cwd, privateHome, scopeId: 'integration-scope',
-    registerThreadHandler(threadId, handler) {
-      if (handlers.has(threadId)) throw new Error('duplicate handler');
-      handlers.set(threadId, handler);
-      return () => handlers.delete(threadId);
-    },
-  };
+  const runtimeRoot = path.join(scratch, 'native-codex');
+  await mkdir(runtimeRoot, { recursive: true });
+  const manifest = JSON.parse(await readFile(path.resolve('runtime/native-codex/build-manifest.json'), 'utf8'));
+  await writeFile(path.join(runtimeRoot, 'build-manifest.json'), JSON.stringify({ ...manifest, binaryPath }));
+  await updateProviderRegistry([{
+    id: 'local', name: 'Loopback', baseUrl: `${endpoint}/v1`, apiKey: 'local-test',
+    protocol: 'openai', chatModels: ['mock-model'], modelProtocols: { 'mock-model': 'responses' },
+    enabled: true, primary: true,
+  }], { runtimeDir: scratch });
+  const saved = (await readProviderRegistry({ runtimeDir: scratch })).providers[0];
+  const configuredProvider = { ...saved, model: 'mock-model', protocol: effectiveProviderProtocol(saved, 'mock-model') };
+  assert.equal(configuredProvider.protocol, 'responses');
+  await assert.rejects(access(path.join(runtimeRoot, 'model-compatibility.json')), { code: 'ENOENT' });
+  let host;
   try {
     const result = await runNativeAgentTurn({
       sessionId,
       identity: { taskId: 'task-integration', operationId: 'operation-integration', runId: 'run-integration' },
-      provider: { id: 'local', model: 'mock-model', baseUrl: `${endpoint}/v1`, apiKey: 'local-test', protocol: 'responses' },
+      provider: configuredProvider,
       userText: 'Use my canvas reference and generate one image.',
       baseInstructions: 'You are a visual assistant.',
       developerInstructions: 'Explain the immediate action before every tool call.',
@@ -111,7 +86,7 @@ test('real App Server performs commentary-tool-result continuation across image 
         { name: 'read_relevant_context', description: 'Read approved conversation context.', parameters: { type: 'object', properties: {}, additionalProperties: false }, requiresCommentary: true },
         { name: 'generate_image', description: 'Generate and save an image.', parameters: { type: 'object', properties: {}, additionalProperties: false }, requiresCommentary: true },
       ],
-      acquireHost: async () => host,
+      acquireHost: async (args) => (host = await acquireNativeCodexHost({ ...args, runtimeRoot })),
       executeTool: async (name) => {
         toolCalls.push(name);
         if (name === 'get_canvas_context') return {
@@ -143,7 +118,7 @@ test('real App Server performs commentary-tool-result continuation across image 
     assert.deepEqual(visibleTools.sort(), ['generate_image', 'get_canvas_context', 'read_relevant_context']);
     assert.equal(visibleTools.some((name) => /shell|exec|patch|file|code|skill|plugin/i.test(name)), false);
   } finally {
-    await client.close();
+    await host?.client.close();
     await new Promise((resolve) => server.close(resolve));
     await rm(scratch, { recursive: true, force: true });
     await rm(path.join(process.cwd(), 'runtime', 'agent-threads', sessionId), { recursive: true, force: true });

@@ -11,7 +11,14 @@ import {
   normalizeImageModelCapabilityId,
   supportsImageModelRequestedSize,
   supportsImageModelImageSizeConfig,
+  resolveOpenAiImageSizeForAspectRatio,
 } from './image-model-capabilities.mjs';
+
+test('OpenAI image size conversion is protocol driven and independent of model name', () => {
+  assert.equal(resolveOpenAiImageSizeForAspectRatio('2048x2048', '3:4'), '1536x2048');
+  assert.equal(resolveOpenAiImageSizeForAspectRatio('2K', '16:9'), '2048x1152');
+  assert.equal(resolveOpenAiImageSizeForAspectRatio('2048x2048', '1:1'), '2048x2048');
+});
 
 test('preserves supplier model IDs without Nano Banana aliases', () => {
   assert.equal(normalizeImageModelCapabilityId('nano-banana-2'), 'nano-banana-2');

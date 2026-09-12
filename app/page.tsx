@@ -2243,6 +2243,7 @@ const IMAGE_PLANNING_ERROR_MESSAGES: Record<string, string> = {
   provider_http: '图片供应商返回错误，任务状态已保留，请稍后重试',
   provider_timeout: '图片供应商响应超时，任务状态已保留，请稍后重试',
   transport: '图片供应商连接中断，任务状态已保留，请稍后重试',
+  migration_required: '当前会话或配置版本已过期，请新建会话并重新配置 provider；不会自动重试旧任务',
 };
 
 const presentAgentErrorMessage = (stage?: string, message?: string, code?: string) => (
@@ -6983,8 +6984,6 @@ export default function AIWorkspace() {
   const [providerSettingsSaving, setProviderSettingsSaving] = useState(false);
   const [providerSettingsTesting, setProviderSettingsTesting] = useState(false);
   const [providerSettingsFetchingModels, setProviderSettingsFetchingModels] = useState(false);
-  const [providerSettingsValidatingModel, setProviderSettingsValidatingModel] = useState<string | null>(null);
-  const [providerSettingsModelValidation, setProviderSettingsModelValidation] = useState<Record<string, { ok: boolean; message: string }>>({});
   const [providerSettingsError, setProviderSettingsError] = useState<string | null>(null);
   const [providerSettingsProviders, setProviderSettingsProviders] = useState<ProviderSettingsItem[]>([]);
   const [providerSettingsEditableProviderIds, setProviderSettingsEditableProviderIds] = useState<string[]>([]);
@@ -16992,7 +16991,7 @@ export default function AIWorkspace() {
       try {
         const response = await fetch(`/api/agent?threadId=${encodeURIComponent(threadId)}`, { signal: controller.signal });
         if (!response.ok) return;
-        const { state } = await response.json();
+        const { state, events } = await response.json();
         if (controller.signal.aborted || currentSessionIdRef.current !== threadId || !state) return;
         setSessions((sessions) => sessions.map((session) => session.id !== threadId ? session : {
           ...session, threadId, turns: state.turns, activeTurn: state.activeTurn,
@@ -17000,7 +16999,7 @@ export default function AIWorkspace() {
           pendingApproval: state.pendingApproval, todoItems: state.todoItems, commandState: state.commandState,
         }));
         // Restore a journal-only thread without duplicating locally retained messages.
-        setChatMessages((messages) => messages.length ? messages : completedTranscriptMessages(state.turns, state.transcriptStartSequence, state.transcriptSummary) as ChatMessage[]);
+        setChatMessages((messages) => messages.length ? messages : completedTranscriptMessages(state.turns, state.transcriptStartSequence, state.transcriptSummary, { events, threadId }) as ChatMessage[]);
       } catch {
         // Historical loading failure does not cancel a live run or discard drafts.
       }
@@ -18028,33 +18027,6 @@ export default function AIWorkspace() {
       };
     });
   }, [updateSelectedProviderSettings]);
-
-  const handleProviderSettingsValidateResponsesModel = useCallback(async (modelId: string) => {
-    if (!selectedProviderSettings) return;
-    const effectiveProtocol = selectedProviderSettings.modelProtocols?.[modelId] || selectedProviderSettings.protocol;
-    if (effectiveProtocol !== 'responses') {
-      setProviderSettingsModelValidation((current) => ({ ...current, [modelId]: { ok: false, message: '请先将此模型协议设置为 Responses 并保存' } }));
-      return;
-    }
-    setProviderSettingsValidatingModel(modelId);
-    setProviderSettingsError(null);
-    try {
-      const response = await fetch('/api/settings/providers/validate-model', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ providerId: selectedProviderSettings.id, model: modelId }),
-      });
-      const data = await response.json().catch(() => null) as { ok?: boolean; message?: string } | null;
-      const ok = response.ok && data?.ok === true;
-      setProviderSettingsModelValidation((current) => ({ ...current, [modelId]: { ok, message: data?.message || '模型验证失败' } }));
-      if (!ok) setProviderSettingsError(data?.message || '模型验证失败');
-    } catch (error) {
-      const message = error instanceof Error ? error.message : '模型验证失败';
-      setProviderSettingsModelValidation((current) => ({ ...current, [modelId]: { ok: false, message } }));
-      setProviderSettingsError(message);
-    } finally {
-      setProviderSettingsValidatingModel(null);
-    }
-  }, [selectedProviderSettings]);
 
   const handleImageToolbarAction = useCallback(async (actionId: (typeof IMAGE_NODE_TOOLBAR_ACTIONS)[number]['id']) => {
     if (!selectedImageToolbarTarget?.src) return;
@@ -19929,17 +19901,6 @@ export default function AIWorkspace() {
                                           </option>
                                         ))}
                                       </select>
-                                      {((selectedProviderSettings.modelProtocols?.[model.id] || selectedProviderSettings.protocol) === 'responses') && (
-                                        <button
-                                          type="button"
-                                          className="h-7 rounded-full border border-[var(--workspace-border)] px-2 text-[10px] hover:border-[var(--workspace-accent)]"
-                                          disabled={providerSettingsValidatingModel === model.id}
-                                          onClick={() => { void handleProviderSettingsValidateResponsesModel(model.id); }}
-                                          title="验证 Responses 兼容性并启用"
-                                        >
-                                          {providerSettingsValidatingModel === model.id ? '验证中' : providerSettingsModelValidation[model.id]?.ok ? '已验证' : '验证并启用'}
-                                        </button>
-                                      )}
                                       <button
                                         type="button"
                                         className="workspace-text-muted inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full  hover:bg-[var(--workspace-control-hover)] hover:text-red-500"

@@ -1,8 +1,6 @@
 import path from 'node:path';
-import { createHash } from 'node:crypto';
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { classifyModel } from './provider-models.ts';
-import { effectiveProviderProtocol } from './provider-protocol.mjs';
+import { MigrationRequiredError } from './compatibility-gate.mjs';
 
 export { effectiveProviderProtocol } from './provider-protocol.mjs';
 
@@ -13,7 +11,6 @@ const SUPPORTED_PROVIDER_PROTOCOLS = new Set(['openai', 'responses', 'gemini']);
 const SUPPORTED_PROVIDER_AUTH_TYPES = new Set(['api-key', 'xiaomi-browser']);
 const SUPPORTED_IMAGE_REQUEST_MODES = new Set(['openai', 'openai-json']);
 const SUPPORTED_IMAGE_API_KEY_SCOPES = new Set(['all', 'gemini', 'gpt']);
-const nativeConfigHash = (providerId, model, baseUrl, apiKey) => createHash('sha256').update(JSON.stringify([providerId, model, new URL(baseUrl).href, createHash('sha256').update(apiKey || '').digest('hex')])).digest('hex');
 const PROVIDER_PRESET_TEMPLATES = {
   comfly: {
     id: 'comfly',
@@ -59,10 +56,6 @@ function resolveRuntimeDir(runtimeDir) {
 
 function resolveProviderRegistryPath(runtimeDir) {
   return path.join(resolveRuntimeDir(runtimeDir), 'api-providers.json');
-}
-
-function resolveLegacyProviderConfigPath(runtimeDir) {
-  return path.join(resolveRuntimeDir(runtimeDir), 'provider-config.json');
 }
 
 function normalizeText(value) {
@@ -176,14 +169,14 @@ function normalizeImageApiKeyScope(value) {
 }
 
 function normalizeImageApiKeys(input) {
-  const rawRows = Array.isArray(input.imageApiKeys || input.image_api_keys)
-    ? input.imageApiKeys || input.image_api_keys
-    : normalizeApiKey(input.imageApiKey || input.image_api_key)
+  const rawRows = Array.isArray(input.imageApiKeys)
+    ? input.imageApiKeys
+    : normalizeApiKey(input.imageApiKey)
       ? [
           {
             id: 'image-key-1',
-            apiKey: input.imageApiKey || input.image_api_key,
-            scope: input.imageApiKeyScope || input.image_api_key_scope,
+            apiKey: input.imageApiKey,
+            scope: input.imageApiKeyScope,
           },
         ]
       : [];
@@ -223,11 +216,6 @@ function normalizeModelList(values) {
     }
   }
   return deduped;
-}
-
-function isVoiceModelId(modelId) {
-  const normalized = normalizeText(modelId).toLowerCase();
-  return /(^|[-_])(tts|speech|voice|audio)([-_]|$)/.test(normalized) || normalized.includes('text-to-speech');
 }
 
 function normalizeModelProtocols(values) {
@@ -283,25 +271,35 @@ function normalizeProvider(input, { fallbackApiKey = '', fallbackPrimary = false
     throw new ProviderConfigError('Provider config file is invalid', 500);
   }
 
+  const legacyFields = [
+    'image_models', 'chat_models', 'voice_models', 'model_protocols',
+    'image_request_mode', 'image_generation_endpoint', 'image_edit_endpoint',
+    'image_api_keys', 'image_api_key', 'image_api_key_scope',
+    'api_key', 'auth_type', 'account_id',
+  ].filter((field) => Object.prototype.hasOwnProperty.call(input, field));
+  if (legacyFields.length > 0) {
+    throw new MigrationRequiredError({
+      sourceType: 'provider_config',
+      sourceVersion: 'legacy-fields',
+      message: `Current provider registry fields are required; legacy fields rejected: ${legacyFields.join(', ')}`,
+    });
+  }
+
   const rawBaseUrl = normalizeBaseUrl(input.baseUrl);
   const id = normalizeProviderId(input.id || input.providerId, rawBaseUrl);
   const protocol = normalizeProtocol(
     input.protocol,
     id === 'custom' ? 'openai' : PROVIDER_PRESET_TEMPLATES[id]?.protocol || 'openai'
   );
-  const imageRequestMode = normalizeImageRequestMode(input.imageRequestMode || input.image_request_mode);
+  const imageRequestMode = normalizeImageRequestMode(input.imageRequestMode);
   const updatedAt = normalizeText(input.updatedAt) || new Date().toISOString();
 
-  const configuredImageModels = normalizeModelList(input.imageModels || input.image_models);
-  const configuredChatModels = normalizeModelList(input.chatModels || input.chat_models);
-  const configuredVoiceModels = normalizeModelList(input.voiceModels || input.voice_models);
-  const migratedImageModels = configuredChatModels.filter((modelId) => classifyModel(modelId) === 'image');
-  const imageModels = normalizeModelList([...configuredImageModels, ...migratedImageModels]);
+  const configuredImageModels = normalizeModelList(input.imageModels);
+  const configuredChatModels = normalizeModelList(input.chatModels);
+  const configuredVoiceModels = normalizeModelList(input.voiceModels);
+  const imageModels = configuredImageModels;
   const imageModelSet = new Set(imageModels);
-  const migratedVoiceModels = id === 'xiaomi'
-    ? configuredChatModels.filter((modelId) => isVoiceModelId(modelId))
-    : [];
-  const voiceModels = normalizeModelList([...configuredVoiceModels, ...migratedVoiceModels]);
+  const voiceModels = configuredVoiceModels;
   const voiceModelSet = new Set(voiceModels);
 
   return {
@@ -311,11 +309,11 @@ function normalizeProvider(input, { fallbackApiKey = '', fallbackPrimary = false
     protocol,
     imageRequestMode,
     imageGenerationEndpoint: normalizeEndpointOverride(
-      input.imageGenerationEndpoint || input.image_generation_endpoint,
+      input.imageGenerationEndpoint,
       'Image generation endpoint'
     ),
     imageEditEndpoint: normalizeEndpointOverride(
-      input.imageEditEndpoint || input.image_edit_endpoint,
+      input.imageEditEndpoint,
       'Image edit endpoint'
     ),
     enabled: normalizeBoolean(input.enabled, true),
@@ -323,10 +321,10 @@ function normalizeProvider(input, { fallbackApiKey = '', fallbackPrimary = false
     imageModels,
     chatModels: configuredChatModels.filter((modelId) => !imageModelSet.has(modelId) && !voiceModelSet.has(modelId)),
     voiceModels,
-    modelProtocols: normalizeModelProtocols(input.modelProtocols || input.model_protocols),
+    modelProtocols: normalizeModelProtocols(input.modelProtocols),
     apiKey: normalizeApiKey(input.apiKey || fallbackApiKey),
-    authType: normalizeAuthType(input.authType || input.auth_type, id),
-    accountId: normalizeText(input.accountId || input.account_id),
+    authType: normalizeAuthType(input.authType, id),
+    accountId: normalizeText(input.accountId),
     imageApiKeys: normalizeImageApiKeys(input),
     updatedAt,
   };
@@ -362,59 +360,6 @@ function ensureSinglePrimary(providers) {
     ...provider,
     primary: index === winnerIndex,
   }));
-}
-
-function createDefaultProvidersFromEnv(env = process.env) {
-  const providers = ['comfly', 'xiaomi'].map((providerId) => buildProviderTemplate(providerId));
-  const comflyBaseUrl = normalizeText(env.COMFLY_API_URL);
-  const gptBestBaseUrl = normalizeText(env.GPT_BEST_BASE_URL);
-  const inferredPrimaryId = inferProviderId(comflyBaseUrl || gptBestBaseUrl || PROVIDER_PRESET_TEMPLATES.comfly.baseUrl);
-
-  const nextProviders = providers.map((provider) => {
-    const nextProvider = cloneProvider(provider);
-    if (provider.id === 'comfly' && comflyBaseUrl) {
-      nextProvider.baseUrl = normalizeBaseUrl(comflyBaseUrl);
-    }
-    if (provider.id === 'gpt-best' && gptBestBaseUrl) {
-      nextProvider.baseUrl = normalizeBaseUrl(gptBestBaseUrl);
-    }
-    nextProvider.apiKey = normalizeApiKey(env[providerKeyEnv(provider.id)]);
-    if (provider.id === 'xiaomi') nextProvider.enabled = false;
-    nextProvider.primary = provider.id === inferredPrimaryId;
-    return nextProvider;
-  });
-
-  return ensureSinglePrimary(nextProviders);
-}
-
-function normalizeLegacyProviderConfig(rawConfig, env = process.env) {
-  if (!rawConfig || typeof rawConfig !== 'object' || Array.isArray(rawConfig)) {
-    throw new ProviderConfigError('Provider config file is invalid', 500);
-  }
-
-  const baseUrl = normalizeBaseUrl(rawConfig.baseUrl);
-  const providerId = normalizeProviderId(rawConfig.providerId, baseUrl);
-  const provider = normalizeProvider(
-    {
-      ...buildProviderTemplate(providerId),
-      id: providerId,
-      baseUrl,
-      modelProtocols: rawConfig.modelProtocols || rawConfig.model_protocols,
-      apiKey: normalizeApiKey(rawConfig.apiKey) || normalizeApiKey(env[providerKeyEnv(providerId)]),
-      updatedAt: normalizeText(rawConfig.updatedAt) || new Date().toISOString(),
-      primary: true,
-    },
-    {
-      fallbackPrimary: true,
-    }
-  );
-
-  const defaults = createDefaultProvidersFromEnv(env);
-  const matchedDefaults = defaults.map((item) => (item.id === provider.id ? { ...item, ...provider, primary: true } : item));
-  if (matchedDefaults.some((item) => item.id === provider.id)) {
-    return ensureSinglePrimary(matchedDefaults);
-  }
-  return ensureSinglePrimary([...matchedDefaults, provider]);
 }
 
 function normalizeProviderArray(rawProviders) {
@@ -537,8 +482,6 @@ export async function readProviderRegistry({
   readFileImpl = readFile,
 } = {}) {
   const registryPath = resolveProviderRegistryPath(runtimeDir);
-  const legacyPath = resolveLegacyProviderConfigPath(runtimeDir);
-
   try {
     const raw = await readFileImpl(registryPath, 'utf8');
     const parsed = JSON.parse(raw);
@@ -557,28 +500,11 @@ export async function readProviderRegistry({
     }
   }
 
-  try {
-    const legacyRaw = await readFileImpl(legacyPath, 'utf8');
-    const parsedLegacy = JSON.parse(legacyRaw);
-    return {
-      providers: normalizeLegacyProviderConfig(parsedLegacy, env),
-      source: 'runtime',
-      path: legacyPath,
-    };
-  } catch (error) {
-    if (!(error && typeof error === 'object' && 'code' in error && (error.code === 'ENOENT' || error.code === 'ENOTDIR'))) {
-      if (error instanceof SyntaxError) {
-        throw new ProviderConfigError('Provider config file is invalid', 500);
-      }
-      throw error;
-    }
-  }
-
-  return {
-    providers: createDefaultProvidersFromEnv(env),
-    source: 'env',
-    path: registryPath,
-  };
+  throw new MigrationRequiredError({
+    sourceType: 'provider_config',
+    sourceVersion: 'missing-or-legacy',
+    message: 'Current provider registry is required; legacy provider configuration is no longer supported',
+  });
 }
 
 export async function updateProviderRegistry(
@@ -617,16 +543,6 @@ export async function updateProviderRegistry(
     })), null, 2)}\n`,
     'utf8'
   );
-  // Invalidate native Responses admission entries when any bound configuration changes.
-  const admissionPath = path.join(nextRuntimeDir, 'native-codex', 'model-compatibility.json');
-  try {
-    const admission = JSON.parse(await readFile(admissionPath, 'utf8'));
-    const valid = new Set(providers.flatMap((provider) => provider.chatModels
-      .filter((model) => effectiveProviderProtocol(provider, model) === 'responses')
-      .map((model) => nativeConfigHash(provider.id, model, provider.baseUrl, provider.apiKey))));
-    const models = Array.isArray(admission.models) ? admission.models.filter((entry) => valid.has(entry.configFingerprint)) : [];
-    await writeFile(admissionPath, `${JSON.stringify({ ...admission, models }, null, 2)}\n`, { mode: 0o600 });
-  } catch { /* Missing admission is the normal first-run state. */ }
 
   return {
     providers,
@@ -658,7 +574,13 @@ export async function updateProviderConfig(
     writeFileImpl = writeFile,
   } = {}
 ) {
-  const existing = await readProviderRegistry({ runtimeDir, env });
+  let existing;
+  try {
+    existing = await readProviderRegistry({ runtimeDir, env });
+  } catch (error) {
+    if (!(error instanceof MigrationRequiredError)) throw error;
+    existing = { providers: [], source: 'runtime', path: resolveProviderRegistryPath(runtimeDir) };
+  }
   const requestedBaseUrl = normalizeBaseUrl(input?.baseUrl);
   const requestedProviderId = normalizeProviderId(input?.providerId, requestedBaseUrl);
   const requestedApiKey = normalizeApiKey(input?.apiKey);

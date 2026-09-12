@@ -4,11 +4,16 @@ function normalizeText(value) {
   return typeof value === 'string' ? value.trim() : '';
 }
 
+/** @returns {'openai'|'responses'|'gemini'} */
 export function effectiveProviderProtocol(provider, model) {
+  return resolveConfiguredProviderProtocol(provider, model) || 'openai';
+}
+
+/** @returns {'openai'|'responses'|'gemini'|null} */
+export function resolveConfiguredProviderProtocol(provider, model) {
   const modelId = normalizeText(model);
-  const modelProtocol = provider?.modelProtocols?.[modelId];
-  if (SUPPORTED_PROVIDER_PROTOCOLS.has(modelProtocol)) {
-    return modelProtocol;
-  }
-  return SUPPORTED_PROVIDER_PROTOCOLS.has(provider?.protocol) ? provider.protocol : 'openai';
+  const modelProtocol = normalizeText(provider?.modelProtocols?.[modelId]).toLowerCase();
+  const providerProtocol = normalizeText(provider?.protocol).toLowerCase();
+  if (modelProtocol) return SUPPORTED_PROVIDER_PROTOCOLS.has(modelProtocol) ? modelProtocol : null;
+  return SUPPORTED_PROVIDER_PROTOCOLS.has(providerProtocol) ? providerProtocol : null;
 }

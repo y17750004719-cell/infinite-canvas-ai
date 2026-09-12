@@ -1,6 +1,7 @@
 import { classifyAgentEvent } from './event-contract.mjs';
 
 const ASSET_STEP_PATTERN = /(?:image|asset|render|generat)/i;
+const INDEPENDENT_TOOL_STEPS = new Set(['image_brief', 'image_prompt', 'image_contract', 'asset_delivery', 'agent-error', 'agent-cancelled']);
 
 const TOOL_LABELS = {
   get_conversation_memory: '读取对话记忆',
@@ -53,6 +54,7 @@ function itemTypeFromStep(step = {}) {
   if (step.kind === 'commentary') return 'commentary';
   if (step.kind === 'tool') return 'tool_call';
   if (step.kind === 'interaction') return step.interactionType === 'confirmation' ? 'approval' : 'clarification';
+  if (isToolStep(step)) return 'tool_call';
   if (step.stepId === 'skill_loading' || /skill/i.test(String(step.phase || ''))) return 'skill';
   if (step.stepId === 'asset_delivery' || /asset|delivery/i.test(String(step.phase || ''))) return 'asset_delivery';
   if (isImageGenerationStep(step) || /image|generat|prompt/i.test(`${step.stepId || ''} ${step.phase || ''}`)) return 'image_generation';
@@ -61,9 +63,76 @@ function itemTypeFromStep(step = {}) {
 }
 
 function stableItemId(step = {}, runId = '') {
-  if (typeof step.itemId === 'string' && step.itemId) return step.itemId;
+  const scope = step.runId || runId || 'run';
+  const inheritedToolId = step.toolCallId && (step.itemId === step.parentItemId
+    || step.itemId === `${scope}:tool:${step.toolCallId}`
+    || step.itemId === `${scope}:tool_call:${step.toolCallId}`
+    || step.itemId === `${scope}:image_generation:${step.toolCallId}`);
+  if (typeof step.itemId === 'string' && step.itemId && !(INDEPENDENT_TOOL_STEPS.has(step.stepId) && inheritedToolId)) return step.itemId;
+  if (isToolStep(step)) return `${scope}:tool:${step.toolCallId}`;
+  if (INDEPENDENT_TOOL_STEPS.has(step.stepId) && step.toolCallId) return `${scope}:${step.stepId}:${step.toolCallId}`;
   const identity = step.toolCallId || step.activityId || step.interactionId || step.stepId || step.sequence || 'item';
-  return `${runId || step.runId || 'run'}:${itemTypeFromStep(step)}:${identity}`;
+  return `${scope}:${itemTypeFromStep(step)}:${identity}`;
+}
+
+function isToolStep(step) {
+  return Boolean(step?.toolCallId)
+    && !['commentary', 'interaction'].includes(step.kind)
+    && !INDEPENDENT_TOOL_STEPS.has(step.stepId)
+    && !['approval', 'clarification', 'asset_delivery', 'error', 'skill'].includes(step.itemType);
+}
+
+function definedFields(value) {
+  return Object.fromEntries(Object.entries(value).filter(([, entry]) => entry !== undefined));
+}
+
+function mergeStep(existing, update, runId) {
+  const next = { ...existing, ...definedFields(update) };
+  if (existing.toolResultSequence && !update.toolResultSequence) {
+    for (const field of ['status', 'phase', 'completedAt', 'toolResultSequence']) next[field] = existing[field];
+    if (['pending', 'active', 'waiting'].includes(update.status)) {
+      for (const field of ['label', 'commentary', 'detail', 'completionSummary']) next[field] = existing[field];
+    }
+  }
+  if (existing.kind === 'tool' || update.kind === 'tool') {
+    next.kind = 'tool';
+    next.itemType = 'tool_call';
+  }
+  return withItemMetadata({
+    ...next,
+    itemId: existing.itemId || update.itemId,
+    sequence: existing.sequence ?? update.sequence,
+    timestampMs: existing.timestampMs ?? update.timestampMs,
+    startedAt: existing.startedAt ?? update.startedAt,
+  }, runId);
+}
+
+function normalizeToolSteps(steps, runId, hydrate = false) {
+  const result = [];
+  const positions = new Map();
+  for (let step of steps) {
+    if (INDEPENDENT_TOOL_STEPS.has(step.stepId) && step.toolCallId) {
+      const parent = steps.find(candidate => isToolStep(candidate)
+        && candidate.toolCallId === step.toolCallId && (candidate.runId || runId) === (step.runId || runId));
+      const parentItemId = step.parentItemId || (parent && stableItemId(parent, runId));
+      if (step.itemId === parentItemId || (!step.parentItemId && parentItemId)) {
+        step = { ...step, parentItemId, ...(step.itemId === parentItemId ? { itemId: `${step.runId || runId || 'run'}:${step.stepId}:${step.toolCallId}` } : {}) };
+      }
+    }
+    if (!isToolStep(step)) { result.push(step); continue; }
+    if (hydrate && !step.toolResultSequence && step.kind === 'tool' && ['completed', 'failed'].includes(step.status)) {
+      step = { ...step, toolResultSequence: step.lastUpdateSequence || step.sequence || 1 };
+    }
+    const key = JSON.stringify([step.runId || runId, step.toolCallId]);
+    const index = positions.get(key);
+    if (index === undefined) { positions.set(key, result.length); result.push(step); continue; }
+    const existing = result[index];
+    const newer = (step.lastUpdateSequence || step.sequence || 0) >= (existing.lastUpdateSequence || existing.sequence || 0);
+    const merged = newer ? mergeStep(existing, step, runId) : mergeStep(step, existing, runId);
+    result[index] = { ...merged, itemId: existing.itemId || merged.itemId,
+      sequence: existing.sequence, timestampMs: existing.timestampMs, startedAt: existing.startedAt ?? merged.startedAt };
+  }
+  return result;
 }
 
 function withItemMetadata(step, runId = '') {
@@ -133,14 +202,14 @@ function normalizeState(input, event = {}) {
   const now = finiteTimestamp(event.timestampMs);
   const existingSteps = Array.isArray(base.steps) ? base.steps : [];
   if (base.timelineVersion === 2) {
-    const steps = dedupePersistedErrorSteps(existingSteps).map((step) => {
+    const steps = normalizeToolSteps(dedupePersistedErrorSteps(existingSteps), base.runId, event.type === 'session_hydrate').map((step) => {
       const needsMetadata = !step?.itemId || !step?.turnId || !step?.itemType || !step?.itemStatus;
       return needsMetadata ? withItemMetadata(step, base.runId) : step;
     });
     const taskId = typeof base.taskId === 'string' && base.taskId
       ? base.taskId
       : (typeof base.runId === 'string' ? base.runId : '');
-    const normalized = steps.every((step, index) => step === existingSteps[index]) && taskId === base.taskId
+    const normalized = steps.length === existingSteps.length && steps.every((step, index) => step === existingSteps[index]) && taskId === base.taskId
       ? base
       : { ...base, taskId, steps };
     return repairPersistedTerminalState(normalized, now);
@@ -157,7 +226,7 @@ function normalizeState(input, event = {}) {
       lastUpdateSequence: finiteCount(step?.lastUpdateSequence) || firstSequence,
     }, base.runId);
   }) : [];
-  const normalizedSteps = dedupePersistedErrorSteps(steps);
+  const normalizedSteps = normalizeToolSteps(dedupePersistedErrorSteps(steps), base.runId, true);
   const normalized = {
     ...base,
     timelineVersion: 2,
@@ -265,9 +334,9 @@ function appendOrReplaceStep(state, nextStep, predicate) {
   const existing = state.steps[existingIndex];
   return {
     existing,
-    steps: state.steps.map((step, index) => index === existingIndex
-      ? withItemMetadata({ ...step, ...normalizedStep, itemId: existing.itemId || normalizedStep.itemId, sequence: existing.sequence, timestampMs: existing.timestampMs }, state.runId)
-      : step),
+    steps: state.steps.flatMap((step, index) => index === existingIndex
+      ? [mergeStep(existing, nextStep, state.runId)]
+      : predicate(step) ? [] : [step]),
   };
 }
 
@@ -288,7 +357,7 @@ function summarizeToolResult(result) {
 }
 
 function toolStepMatches(step, event) {
-  return step?.toolCallId === event.toolCallId && (!event.runId || step.runId === event.runId);
+  return isToolStep(step) && step.toolCallId === event.toolCallId && (!event.runId || step.runId === event.runId);
 }
 
 function reduceToolLifecycleEvent(state, event) {
@@ -297,6 +366,7 @@ function reduceToolLifecycleEvent(state, event) {
   if (!marker) return state;
   const matchingSteps = state.steps.filter((step) => toolStepMatches(step, event));
   const existing = matchingSteps.find((step) => step.kind === 'tool') || matchingSteps.at(-1);
+  if (existing?.toolResultSequence && event.type !== 'tool_result') return withOutcome(withAttempt(state, event, marker));
   const toolName = String(event.toolName || toolNameFromStep(existing) || '').trim();
   const status = event.type === 'tool_result' ? (event.isError ? 'failed' : 'completed') : 'active';
   const message = event.type === 'tool_update' && typeof event.message === 'string' ? event.message.trim() : '';
@@ -325,6 +395,7 @@ function reduceToolLifecycleEvent(state, event) {
     sequence: existing?.sequence || marker.sequence,
     timestampMs: existing?.timestampMs || marker.timestampMs,
     lastUpdateSequence: marker.sequence,
+    ...(event.type === 'tool_result' ? { toolResultSequence: marker.sequence, completedAt: marker.timestampMs } : {}),
   };
   const marked = withAttempt({ ...state, operationId: event.operationId || state.operationId }, event, marker);
   const matches = (step) => toolStepMatches(step, event);
@@ -420,7 +491,7 @@ export function reduceAgentRunProgress(input, inputEvent) {
     if (!marker) return state;
     const marked = completePreviousActiveSteps(withAttempt(state, event, marker), marker, (step) => step.stepId === 'image_prompt' && step.toolCallId === event.toolCallId && (!event.runId || step.runId === event.runId));
     const result = appendOrReplaceStep(marked, {
-      stepId: 'image_prompt', itemId: event.itemId, parentItemId: event.parentItemId, kind: 'execution', itemType: 'image_generation', phase: 'prompt', status: 'completed',
+      stepId: 'image_prompt', itemId: event.itemId, parentItemId: event.parentItemId || marked.steps.find(step => toolStepMatches(step, event))?.itemId, kind: 'execution', itemType: 'image_generation', phase: 'prompt', status: 'completed',
       commentary: String(event.completedLabel || '最终图片提示词已准备'), label: String(event.completedLabel || '最终图片提示词已准备'),
       ...(typeof event.completionSummary === 'string' && event.completionSummary.trim() ? { completionSummary: event.completionSummary.trim() } : {}),
       ...(typeof event.toolCallId === 'string' ? { toolCallId: event.toolCallId } : {}),
@@ -434,21 +505,22 @@ export function reduceAgentRunProgress(input, inputEvent) {
     if (!marker) return state;
     const toolName = typeof event.toolName === 'string' ? event.toolName : undefined;
     const nextStep = {
-      stepId: String(event.stepId || `step-${marker.sequence}`), itemId: event.itemId, executionId: event.executionId, parentItemId: event.parentItemId, retryability: event.retryability, kind: 'execution', phase: String(event.phase || ''), status: normalStatus(event.status),
-      commentary: String(event.label || ''), label: String(event.label || ''), sequence: marker.sequence, timestampMs: marker.timestampMs, lastUpdateSequence: marker.sequence,
+      stepId: String(event.stepId || `step-${marker.sequence}`), itemId: event.itemId, executionId: event.executionId, parentItemId: event.parentItemId, retryability: event.retryability, kind: 'execution', phase: typeof event.phase === 'string' ? event.phase : undefined, status: normalStatus(event.status),
+      commentary: typeof event.label === 'string' ? event.label : undefined, label: typeof event.label === 'string' ? event.label : undefined, sequence: marker.sequence, timestampMs: marker.timestampMs, lastUpdateSequence: marker.sequence,
       ...(typeof event.completionSummary === 'string' && event.completionSummary.trim() ? { completionSummary: event.completionSummary.trim() } : {}),
       ...(typeof event.toolCallId === 'string' ? { toolCallId: event.toolCallId } : {}),
       ...(toolName ? { tool: toolName, toolName } : {}), ...(event.detail ? { detail: event.detail } : {}), runId: event.runId || state.runId,
     };
     const marked = withAttempt({ ...state, operationId: typeof event.operationId === 'string' ? event.operationId : state.operationId }, event, marker);
-    const hasLifecycleTool = nextStep.toolCallId
-      && state.steps.some((step) => step.kind === 'tool' && toolStepMatches(step, nextStep));
-    const matches = (step) => hasLifecycleTool
+    const matches = (step) => isToolStep(nextStep)
       ? toolStepMatches(step, nextStep)
       : step.stepId === nextStep.stepId
         && (!nextStep.toolCallId || step.toolCallId === nextStep.toolCallId)
         && (!event.runId || step.runId === event.runId);
     const existing = state.steps.find(matches);
+    if (existing?.toolResultSequence && ['active', 'pending', 'waiting'].includes(nextStep.status)) {
+      return withOutcome(marked);
+    }
     if (existing?.kind === 'tool') {
       nextStep.kind = 'tool';
       nextStep.stepId = existing.stepId;
