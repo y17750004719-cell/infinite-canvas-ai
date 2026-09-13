@@ -1,8 +1,7 @@
 import { runNativeAgentTurn } from './native-agent-service.ts';
 import { invalidateNativeCodexHost, invalidateNativeCodexHostScope } from './native-codex-host.mjs';
-import { routeAgentRecovery } from './agent-recovery-routing-service.mjs';
+import { recoverNativeStreamDisconnect } from './agent-recovery-service.mjs';
 import { CODEX_MAIN_SNAPSHOT } from './codex-main-snapshot.mjs';
-import { createNativeCollaborationGateway } from './native-collaboration-gateway.mjs';
 
 /**
  * Application boundary for Codex Main's thread/turn runtime. Business tools
@@ -25,7 +24,7 @@ export async function runCodexMainTurn(input) {
       retryable: result.retryable,
       outcomeUnknown: result.outcomeUnknown,
     };
-    const recovered = await routeAgentRecovery({
+    const recovered = await recoverNativeStreamDisconnect({
       run,
       error: failure,
       sideEffectStarted,
@@ -63,17 +62,6 @@ export const runTurn = runCodexMainTurn;
 export const steerTurn = (input) => input?.steer?.(input);
 export const interruptTurn = (input) => input?.interrupt?.(input);
 export const invalidateHost = invalidateCodexMainHostScope;
-
-export function createCollaborationGateway(input = {}) {
-  return createNativeCollaborationGateway({ client: input.client, methods: input.methods, timeoutMs: input.timeoutMs });
-}
-
-export const spawnNativeAgent = (input = {}) => createCollaborationGateway(input).spawnAgent(input.params || input);
-export const sendNativeAgentInput = (input = {}) => createCollaborationGateway(input).sendInput(input.params || input);
-export const waitNativeAgent = (input = {}) => createCollaborationGateway(input).wait(input.params || input);
-export const closeNativeAgent = (input = {}) => createCollaborationGateway(input).closeAgent(input.params || input);
-export const interruptNativeAgent = (input = {}) => createCollaborationGateway(input).interruptAgent(input.params || input);
-export const listNativeAgents = (input = {}) => createCollaborationGateway(input).listAgents(input.params || input);
 
 export function codexMainRuntimeMetadata() {
   return {

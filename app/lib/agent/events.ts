@@ -2,8 +2,6 @@ import type { AgentContextEntity, AgentProposal } from './context-reference.type
 
 export type AgentIntent = 'chat' | 'image' | 'skill_action';
 
-export type OmxSubtaskStatus = 'pending' | 'starting' | 'running' | 'waiting' | 'completed' | 'failed' | 'cancelled' | 'timed_out';
-
 export type AgentLifecycleIdentity = {
   threadId?: string;
   turnId?: string;
@@ -542,11 +540,6 @@ export type AgentActivityCommit = {
 };
 
 export type AgentEvent =
-  | { type: 'omx_workflow_started'; taskId: string; runId: string; workflowId: string; mode: 'explicit' | 'automatic'; reason: string }
-  | { type: 'omx_subtask_started'; taskId: string; runId: string; subtaskId: string; role: 'explorer' | 'reviewer' | 'test_engineer' | 'verifier'; childThreadId?: string }
-  | { type: 'omx_subtask_updated'; taskId: string; runId: string; subtaskId: string; status: OmxSubtaskStatus; summary?: string }
-  | { type: 'omx_subtasks_completed'; taskId: string; runId: string; completed: number; failed: number; cancelled: number }
-  | { type: 'omx_workflow_completed'; taskId: string; runId: string; workflowId: string; summary: string }
   | {
       type: 'context_event';
       event: {
