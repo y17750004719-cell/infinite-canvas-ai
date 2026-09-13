@@ -5,6 +5,7 @@ import { NativeCodexStdioClient } from './native-codex-stdio.mjs';
 import sharp from 'sharp';
 import { parseImageDataUrl } from '../api-security.mjs';
 import { CODEX_MAIN_SNAPSHOT } from './codex-main-snapshot.mjs';
+import { createNativeCollaborationGateway } from './native-collaboration-gateway.mjs';
 
 export const NATIVE_SOURCE_COMMIT = '53c542d944c705f3a66780a19223223bee57cbb6';
 export const NATIVE_DISABLED_FEATURES = Object.freeze([
@@ -133,7 +134,9 @@ async function createHost({ provider, runtimeRoot, scopeId }) {
       wireApi: 'responses',
       disabledFeatures: [...NATIVE_DISABLED_FEATURES],
       dynamicToolMethod: CODEX_MAIN_SNAPSHOT.dynamicToolMethod,
+      collaboration: false,
     },
+    collaborationGateway: createNativeCollaborationGateway({ client }),
     registerThreadHandler(threadId, handler) {
       if (handlers.has(threadId)) throw failure('native_thread_busy');
       handlers.set(threadId, handler);

@@ -102,7 +102,7 @@ function applyEvent(state, event) {
     const id = safeId(event.id, 'subtaskId');
     const index = state.subtasks.findIndex((item) => item.id === id);
     if (index < 0) throw Object.assign(new Error('Unknown subtask'), { code: 'unknown_subtask', statusCode: 409 });
-    state.subtasks[index] = { ...state.subtasks[index], status: event.status || 'completed', summary: String(event.summary || '').slice(0, 6000), findings: Array.isArray(event.findings) ? event.findings.slice(0, 100) : [] };
+    state.subtasks[index] = { ...state.subtasks[index], status: event.status || 'completed', summary: String(event.summary || '').slice(0, 6000), evidence: Array.isArray(event.evidence) ? event.evidence.slice(0, 20) : [], findings: Array.isArray(event.findings) ? event.findings.slice(0, 100) : [] };
     if (state.subtasks.every((item) => ['completed', 'failed', 'cancelled'].includes(item.status))) { state.status = 'running'; state.currentPhase = 'findings_merged'; checkpoint(state, 'subtasks', 'Subtasks merged'); }
     return;
   }
