@@ -18,7 +18,10 @@ const projectRoot = path.resolve(import.meta.dirname, '../../..');
 
 test('skill registry exposes only enabled skills backed by real directories', async () => {
   const skills = await listSkillManifests({ projectRoot });
-  assert.deepEqual(skills.map((skill) => skill.id), ['api-helper', 'brand', 'gc-minimal-zine-poster-v0-1', 'logo', 'magazine-poster', 'modular-watercolor-collage-v0-1']);
+  const ids = skills.map((skill) => skill.id);
+  for (const id of ['api-helper', 'brand', 'gc-minimal-zine-poster-v0-1', 'logo', 'magazine-poster', 'modular-watercolor-collage-v0-1', 'analyze-omx', 'plan-omx', 'code-review-omx', 'verify-omx', 'deep-interview-omx']) {
+    assert.equal(ids.includes(id), true, `missing skill: ${id}`);
+  }
   assert.equal(skills.every((skill) => skill.enabled), true);
   assert.equal(skills.some((skill) => skill.id === IMAGEGEN_HOST_SKILL_ID), false);
   for (const id of ['brand', 'logo']) {

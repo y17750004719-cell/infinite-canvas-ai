@@ -77,5 +77,50 @@
     "executionMode": "image_pipeline",
     "promptStyle": "json-text",
     "enabled": true
+  },
+  {
+    "id": "analyze-omx",
+    "name": "OMX 分析",
+    "description": "只读分析代码库，输出证据、置信度、影响范围和未决问题。",
+    "triggerHints": ["分析", "调查", "根因", "为什么", "analyze", "investigate"],
+    "directTriggerHints": ["OMX 分析", "$analyze-omx"],
+    "allowedTools": [],
+    "enabled": true
+  },
+  {
+    "id": "plan-omx",
+    "name": "OMX 计划",
+    "description": "生成决策完整的工程实施计划、接口、风险和测试方案。",
+    "triggerHints": ["计划", "规划", "plan", "architecture"],
+    "directTriggerHints": ["OMX 计划", "$plan-omx"],
+    "allowedTools": [],
+    "enabled": true
+  },
+  {
+    "id": "code-review-omx",
+    "name": "OMX 代码审查",
+    "description": "按正确性、安全性、回归风险、可维护性和测试缺口审查代码。",
+    "triggerHints": ["代码审查", "review", "audit", "检查改动"],
+    "directTriggerHints": ["OMX 代码审查", "$code-review-omx"],
+    "allowedTools": [],
+    "enabled": true
+  },
+  {
+    "id": "verify-omx",
+    "name": "OMX 验证",
+    "description": "运行针对性测试、lint、类型检查、构建或 smoke test 并记录证据。",
+    "triggerHints": ["验证", "测试", "检查", "verify", "test"],
+    "directTriggerHints": ["OMX 验证", "$verify-omx"],
+    "allowedTools": ["run_command"],
+    "enabled": true
+  },
+  {
+    "id": "deep-interview-omx",
+    "name": "OMX 需求访谈",
+    "description": "澄清工程任务的目标、范围、约束、权衡和验收标准。",
+    "triggerHints": ["需求澄清", "访谈", "歧义", "deep interview"],
+    "directTriggerHints": ["OMX 需求访谈", "$deep-interview-omx"],
+    "allowedTools": [],
+    "enabled": true
   }
 ]
