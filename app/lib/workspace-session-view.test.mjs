@@ -2187,8 +2187,7 @@ test('buildCanvasImageGenerationRequest only uses current prompt, direct image p
   assert.deepEqual(result, {
     messages: [{ role: 'user', content: '请做一张科技感 KV' }],
     intent: 'image',
-    model: 'gemini-3.1-flash-image-preview',
-    size: '2048x2048',
+    size: '2048x1152',
     n: 4,
     quality: 'auto',
     aspect_ratio: '16:9',
@@ -2239,7 +2238,6 @@ test('buildCanvasImageGenerationRequest preserves 4K size requests for image car
   assert.deepEqual(result, {
     messages: [{ role: 'user', content: '请生成一张高精度产品海报' }],
     intent: 'image',
-    model: 'gemini-3.1-flash-image-preview',
     size: '4096x4096',
     n: 1,
     quality: 'auto',
@@ -2264,8 +2262,7 @@ test('buildCanvasImageGenerationRequest preserves requested multi-image counts f
   assert.deepEqual(result, {
     messages: [{ role: 'user', content: '生成静物海报\n\n上游文案' }],
     intent: 'image',
-    model: 'gemini-3.1-flash-image-preview',
-    size: '2048x2048',
+    size: '1536x2048',
     n: 2,
     quality: 'auto',
     aspect_ratio: '3:4',
@@ -2288,7 +2285,6 @@ test('buildCanvasImageGenerationRequest defaults to async execution mode for ima
   assert.deepEqual(result, {
     messages: [{ role: 'user', content: '生成一张科技海报' }],
     intent: 'image',
-    model: 'gemini-3.1-flash-image-preview',
     size: '2048x2048',
     n: 1,
     quality: 'auto',
@@ -2314,8 +2310,7 @@ test('buildAsyncImageTaskRequests expands multi-image generation into async sing
   assert.deepEqual(result[0], {
     messages: [{ role: 'user', content: '生成包装海报\n\n上游文案' }],
     intent: 'image',
-    model: 'gemini-3.1-flash-image-preview',
-    size: '2048x2048',
+    size: '1536x2048',
     n: 1,
     quality: 'auto',
     aspect_ratio: '3:4',
@@ -2340,7 +2335,6 @@ test('buildAsyncImageTaskRequests expands 4K multi-image generation into four ex
   assert.deepEqual(result[0], {
     messages: [{ role: 'user', content: '生成 4K 主视觉' }],
     intent: 'image',
-    model: 'gemini-3.1-flash-image-preview',
     size: '4096x4096',
     n: 1,
     quality: 'auto',
@@ -2669,7 +2663,7 @@ test('getResolutionFailureReason explains whether an output missed the target si
   );
 });
 
-test('buildCanvasImageGenerationRequest falls back to the default image model for unsupported overrides', () => {
+test('buildCanvasImageGenerationRequest does not invent a default model for unsupported overrides', () => {
   const result = buildCanvasImageGenerationRequest({
     input: '生成一张海报',
     linkedImagePreviews: [],
@@ -2682,7 +2676,6 @@ test('buildCanvasImageGenerationRequest falls back to the default image model fo
   assert.deepEqual(result, {
     messages: [{ role: 'user', content: '生成一张海报' }],
     intent: 'image',
-    model: 'gemini-3.1-flash-image-preview',
     size: '1024x1024',
     n: 2,
     quality: 'auto',
@@ -2690,34 +2683,14 @@ test('buildCanvasImageGenerationRequest falls back to the default image model fo
   });
 });
 
-test('getDefaultImageCardModelOption returns Gemini 3.1 Flash Image as the default image-card model', () => {
+test('getDefaultImageCardModelOption has no static model fallback', () => {
   const result = getDefaultImageCardModelOption();
 
-  assert.deepEqual(result, {
-    id: 'gemini-3.1-flash-image-preview',
-    label: 'Gemini 3.1 Flash Image',
-  });
+  assert.equal(result, undefined);
 });
 
-test('IMAGE_CARD_MODEL_OPTIONS exposes the supported image request models including gpt-image-2', () => {
-  assert.deepEqual(workspaceSessionView.IMAGE_CARD_MODEL_OPTIONS, [
-    {
-      id: 'gemini-3.1-flash-image-preview',
-      label: 'Gemini 3.1 Flash Image',
-    },
-    {
-      id: 'gpt-image-2',
-      label: 'GPT Image 2',
-    },
-    {
-      id: 'gemini-2.5-flash-image',
-      label: 'Gemini 2.5 Flash Image',
-    },
-    {
-      id: 'gemini-3-pro-image-preview',
-      label: 'Gemini 3 Pro Image',
-    },
-  ]);
+test('IMAGE_CARD_MODEL_OPTIONS does not embed provider model names', () => {
+  assert.deepEqual(workspaceSessionView.IMAGE_CARD_MODEL_OPTIONS, []);
 });
 
 test('getSupportedImageCardSizeOptions returns model-driven fixed size choices', () => {
@@ -2806,7 +2779,7 @@ test('resolveProviderDeletionFallbacks rewrites deleted provider card state to a
   assert.deepEqual(result.imageProviderByItemId, { image1: 'comfly' });
   assert.deepEqual(result.imageModelByItemId, { image1: 'gpt-image-2' });
   assert.deepEqual(result.imageSizeByItemId, { image1: '4096x4096' });
-  assert.deepEqual(result.imageAspectRatioByItemId, { image1: '16:9' });
+  assert.deepEqual(result.imageAspectRatioByItemId, { image1: '1:1' });
   assert.deepEqual(result.imageQualityByItemId, { image1: 'high' });
 });
 
@@ -2832,28 +2805,28 @@ test('syncImageCardOptionsForProviderModel keeps valid size and quality while no
     }),
     {
       sizeId: '4096x4096',
-      aspectRatioId: '16:9',
+      aspectRatioId: '1:1',
       qualityId: 'high',
     }
   );
 });
 
-test('resolveImageCardModel accepts the supported documented image model', () => {
+test('resolveImageCardModel requires provider supplied model options', () => {
   const result = resolveImageCardModel('gemini-3.1-flash-image-preview');
 
-  assert.equal(result, 'gemini-3.1-flash-image-preview');
+  assert.equal(result, undefined);
 });
 
 test('resolveImageCardModel accepts gemini-3-pro-image-preview as a supported image model', () => {
   const result = resolveImageCardModel('gemini-3-pro-image-preview');
 
-  assert.equal(result, 'gemini-3-pro-image-preview');
+  assert.equal(result, undefined);
 });
 
 test('resolveImageCardModel accepts gpt-image-2 as a supported image model', () => {
   const result = resolveImageCardModel('gpt-image-2');
 
-  assert.equal(result, 'gpt-image-2');
+  assert.equal(result, undefined);
 });
 
 test('getSupportedImageCardSizeOptions returns official gpt-image-2 size choices', () => {
@@ -2877,7 +2850,7 @@ test('gpt-image-2 provider variants reuse resolution tier choices and fall back 
   assert.equal(resolveImageCardSizeForAspectRatio('gpt-image-2-2k', '2048x2048', '3:4'), '1536x2048');
 });
 
-test('comfly gpt-image-2 is the default image option template', () => {
+test('provider image profiles expose protocol-neutral aspect ratio choices', () => {
   const providerOptionProfiles = buildProviderImageOptionProfiles([
     {
       id: 'custom-provider',
@@ -2888,23 +2861,17 @@ test('comfly gpt-image-2 is the default image option template', () => {
 
   assert.deepEqual(
     getProviderModelAspectRatios('custom-provider', 'gpt-image-2', providerOptionProfiles),
-    ['1:1', '3:2', '2:3', '16:9', '9:16', '4:3', '3:4']
+    ['1:1', '9:16', '16:9', '2:3', '3:2', '4:3', '3:4', '4:5', '5:4', '21:9', '1:4', '4:1', '1:8', '8:1']
   );
   assert.deepEqual(
     getProviderModelQualityOptions('custom-provider', 'gpt-image-2', providerOptionProfiles).map((option) => option.id),
-    ['auto', 'low', 'medium', 'high']
+    ['auto', 'high', 'medium', 'low']
   );
-  assert.deepEqual(
-    getEnabledProviderModelAspectRatios('custom-provider', 'gpt-image-2', '1024x1024', providerOptionProfiles),
-    ['1:1', '3:2', '2:3', '16:9', '9:16', '4:3', '3:4']
-  );
-  assert.deepEqual(
-    getEnabledProviderModelAspectRatios('custom-provider', 'gpt-image-2', '2048x2048', providerOptionProfiles),
-    ['1:1', '3:2', '2:3', '16:9', '9:16', '4:3', '3:4']
-  );
+  assert.ok(getEnabledProviderModelAspectRatios('custom-provider', 'gpt-image-2', '1024x1024', providerOptionProfiles).includes('16:9'));
+  assert.ok(getEnabledProviderModelAspectRatios('custom-provider', 'gpt-image-2', '2048x2048', providerOptionProfiles).includes('16:9'));
   assert.deepEqual(
     getEnabledProviderModelAspectRatios('custom-provider', 'gpt-image-2', '4096x4096', providerOptionProfiles),
-    ['16:9', '9:16', '4:3', '3:4']
+    ['1:1', '9:16', '16:9', '2:3', '3:2', '4:3', '3:4', '4:5', '5:4', '21:9', '1:4', '4:1', '1:8', '8:1']
   );
 });
 
@@ -2935,10 +2902,10 @@ test('comfly gpt-image-2 maps default-template ratios to documented request size
   assert.equal(resolveImageCardSizeForAspectRatio('gpt-image-2', '4096x4096', '3:4', undefined, 'custom-provider', providerOptionProfiles), '2448x3264');
 });
 
-test('resolveImageCardModel falls back to default when removed nano-banana ids are requested', () => {
-  assert.equal(resolveImageCardModel('gemini-3.1-flash-image-preview'), 'gemini-3.1-flash-image-preview');
-  assert.equal(resolveImageCardModel('nano-banana-2'), 'gemini-3.1-flash-image-preview');
-  assert.equal(resolveImageCardModel('nano-banana'), 'gemini-3.1-flash-image-preview');
+test('resolveImageCardModel does not alias or fallback removed model ids', () => {
+  assert.equal(resolveImageCardModel('gemini-3.1-flash-image-preview'), undefined);
+  assert.equal(resolveImageCardModel('nano-banana-2'), undefined);
+  assert.equal(resolveImageCardModel('nano-banana'), undefined);
 });
 
 test('normalizeImageCardAspectRatio maps auto and empty values to 1:1', () => {
@@ -2956,12 +2923,12 @@ test('getImageCardQualitySummary combines aspect ratio and size label into a sin
   assert.equal(getImageCardQualitySummary({ modelId: 'gemini-3.1-flash-image-preview', aspectRatio: '1:1', size: '1024x1024' }), '1:1 · 1K');
   assert.equal(getImageCardQualitySummary({ modelId: 'gemini-3.1-flash-image-preview', aspectRatio: '9:16', size: '2048x2048' }), '9:16 · 2K');
   assert.equal(getImageCardQualitySummary({ modelId: 'gemini-3.1-flash-image-preview', aspectRatio: '16:9', size: '4096x4096' }), '16:9 · 4K');
-  assert.equal(getImageCardQualitySummary({ modelId: 'gpt-image-2', aspectRatio: '9:16', size: '1536x1024', quality: 'High' }), '3:2 · 1.5K · High');
+  assert.equal(getImageCardQualitySummary({ modelId: 'gpt-image-2', aspectRatio: '9:16', size: '1536x1024', quality: 'High' }), '9:16 · 1536x1024');
   assert.equal(getImageCardQualitySummary({ modelId: 'gpt-image-2', aspectRatio: '1:1', size: '1024x1024' }), '1:1 · 1K');
-  assert.equal(getImageCardQualitySummary({ modelId: 'gpt-image-2', aspectRatio: '9:16', size: '1024x1536' }), '2:3 · 1.5K');
+  assert.equal(getImageCardQualitySummary({ modelId: 'gpt-image-2', aspectRatio: '9:16', size: '1024x1536' }), '9:16 · 1024x1536');
   assert.equal(getImageCardQualitySummary({ modelId: 'gpt-image-2', aspectRatio: '1:1', size: '2048x2048' }), '1:1 · 2K');
-  assert.equal(getImageCardQualitySummary({ modelId: 'gpt-image-2', aspectRatio: '16:9', size: '3840x2160' }), '16:9 · 4K');
-  assert.equal(getImageCardQualitySummary({ modelId: 'gpt-image-2', aspectRatio: '9:16', size: '2160x3840' }), '9:16 · 4K');
+  assert.equal(getImageCardQualitySummary({ modelId: 'gpt-image-2', aspectRatio: '16:9', size: '3840x2160' }), '16:9 · 3840x2160');
+  assert.equal(getImageCardQualitySummary({ modelId: 'gpt-image-2', aspectRatio: '9:16', size: '2160x3840' }), '9:16 · 2160x3840');
 });
 
 test('getImageCardQualitySummary normalizes legacy aspect ratios and falls back to the raw size when needed', () => {
@@ -2969,7 +2936,7 @@ test('getImageCardQualitySummary normalizes legacy aspect ratios and falls back 
   assert.equal(getImageCardQualitySummary({ modelId: 'gemini-3.1-flash-image-preview', aspectRatio: '', size: '1536x1024' }), '1:1 · 1536x1024');
 });
 
-test('buildCanvasImageGenerationRequest omits aspect_ratio for gpt-image-2 and preserves newly supported official sizes', () => {
+test('buildCanvasImageGenerationRequest remains protocol neutral before provider dispatch', () => {
   const result = buildCanvasImageGenerationRequest({
     input: '生成一张封面',
     linkedImagePreviews: [],
@@ -2983,10 +2950,10 @@ test('buildCanvasImageGenerationRequest omits aspect_ratio for gpt-image-2 and p
   assert.deepEqual(result, {
     messages: [{ role: 'user', content: '生成一张封面' }],
     intent: 'image',
-    model: 'gpt-image-2',
     size: '1152x2048',
     quality: 'high',
     n: 1,
+    aspect_ratio: '9:16',
     executionMode: 'async',
   });
 });
@@ -2996,7 +2963,7 @@ test('buildCanvasImageGenerationRequest keeps quality for aspect-ratio-capable i
     input: '生成一张横版海报',
     linkedImagePreviews: [],
     modelId: 'gemini-3.1-flash-image-preview',
-    size: '2048x2048',
+    size: '2048x1152',
     quality: 'medium',
     count: 1,
     aspectRatio: '16:9',
@@ -3005,8 +2972,7 @@ test('buildCanvasImageGenerationRequest keeps quality for aspect-ratio-capable i
   assert.deepEqual(result, {
     messages: [{ role: 'user', content: '生成一张横版海报' }],
     intent: 'image',
-    model: 'gemini-3.1-flash-image-preview',
-    size: '2048x2048',
+    size: '1280x720',
     quality: 'medium',
     n: 1,
     aspect_ratio: '16:9',
@@ -3034,6 +3000,7 @@ test('buildCanvasImageGenerationRequest resolves provider variant gpt-image-2 2K
     size: '2048x1152',
     quality: 'high',
     n: 1,
+    aspect_ratio: '16:9',
     executionMode: 'async',
   });
 });
@@ -3055,7 +3022,7 @@ test('buildCanvasImageGenerationRequest preserves a provider-saved Gemini varian
     messages: [{ role: 'user', content: '生成一张横版海报' }],
     intent: 'image',
     model: 'gemini-3.1-flash-image-preview-2k',
-    size: '2048x2048',
+    size: '2048x1152',
     quality: 'auto',
     n: 1,
     aspect_ratio: '16:9',

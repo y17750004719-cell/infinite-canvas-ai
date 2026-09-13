@@ -22,13 +22,16 @@ const DEFAULT_CLOSE_TIMEOUT_MS = 2_000;
 const DEFAULT_MAX_LINE_BYTES = 4 * 1024 * 1024;
 
 export class NativeCodexStdioError extends Error {
-  constructor(message, { code, method, outcomeUnknown = false, retrySafe = false } = {}) {
+  constructor(message, { code, method, outcomeUnknown = false, retrySafe = false, exitCode, signalCode, stderr } = {}) {
     super(message);
     this.name = 'NativeCodexStdioError';
     this.code = code || 'native_codex_stdio_error';
     this.method = method;
     this.outcomeUnknown = outcomeUnknown;
     this.retrySafe = retrySafe;
+    this.exitCode = exitCode;
+    this.signalCode = signalCode;
+    this.stderr = stderr;
   }
 }
 
@@ -117,6 +120,7 @@ export class NativeCodexStdioClient {
     this.closing = false;
     this.closed = false;
     this.terminalError = null;
+    this.stderrBuffer = '';
     this.nextId = 1;
     this.pending = new Map();
     this.stdoutBuffer = Buffer.alloc(0);
@@ -201,14 +205,21 @@ export class NativeCodexStdioClient {
       if (this.closed) return;
       this.closed = true;
       this.initialized = false;
-      this.terminalError ||= clientError('Native Codex process exited', { code: 'process_exited' });
+      this.terminalError ||= clientError('Native Codex process exited', {
+        code: 'process_exited',
+        exitCode: child.exitCode,
+        signalCode: child.signalCode,
+        stderr: this.stderrBuffer.slice(-4000) || undefined,
+      });
       this.#rejectAll(this.terminalError);
       this.resolveExit?.();
     };
     child.stdout.on('data', (chunk) => this.#consumeStdout(chunk));
     child.stdout.on('error', () => this.#failConnection('stdout_error'));
     child.stdin.on('error', () => this.#failConnection('stdin_error'));
-    child.stderr.on('data', () => {});
+    child.stderr.on('data', (chunk) => {
+      this.stderrBuffer = `${this.stderrBuffer}${Buffer.from(chunk).toString('utf8')}`.slice(-4000);
+    });
     child.on('error', () => this.#failConnection('process_error'));
     child.on('exit', settleProcess);
     child.on('close', settleProcess);

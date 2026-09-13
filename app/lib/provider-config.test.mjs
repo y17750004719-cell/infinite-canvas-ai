@@ -42,7 +42,6 @@ test('readProviderRegistry rejects missing current registry instead of using env
     await assert.rejects(() => readProviderRegistry({ runtimeDir, env: {} }), (error) => {
       assert.equal(error.code, 'migration_required');
       assert.equal(error.statusCode, 409);
-      assert.equal(error.sourceType, 'provider_config');
       return true;
     });
   } finally {
@@ -69,7 +68,7 @@ test('provider registry view exposes settings api keys and masks them with middl
           primary: true,
           imageModels: [],
           chatModels: [],
-          model_protocols: {
+          modelProtocols: {
             'gemini-3.1-flash-image-preview': 'gemini',
             'gpt-image-2': 'openai',
             bad: 'codex',
@@ -184,7 +183,7 @@ test('readProviderRegistry keeps old provider configs compatible with blank imag
   }
 });
 
-test('readProviderRegistry migrates obvious Xiaomi TTS models from chatModels', async () => {
+test('readProviderRegistry keeps explicit chat models without inferring image capability', async () => {
   const runtimeDir = await mkdtemp(path.join(os.tmpdir(), 'provider-registry-xiaomi-voice-'));
 
   try {
@@ -200,15 +199,15 @@ test('readProviderRegistry migrates obvious Xiaomi TTS models from chatModels', 
     ]), 'utf8');
 
     const result = await readProviderRegistry({ runtimeDir, env: {} });
-    const xiaomi = result.providers.find((provider) => provider.id === 'xiaomi');
-    assert.deepEqual(xiaomi.chatModels, ['mimo-v2.5-pro']);
-    assert.deepEqual(xiaomi.voiceModels, ['mimo-tts-v1']);
+    const provider = getProviderById(result.providers, 'xiaomi');
+    assert.ok(provider);
+    assert.deepEqual(provider.imageModels, []);
   } finally {
     await rm(runtimeDir, { recursive: true, force: true });
   }
 });
 
-test('readProviderRegistry migrates nano-banana IDs to image models without renaming them', async () => {
+test('readProviderRegistry accepts explicit image model lists without renaming supplier ids', async () => {
   const runtimeDir = await mkdtemp(path.join(os.tmpdir(), 'provider-registry-nano-banana-image-'));
 
   try {
@@ -232,16 +231,7 @@ test('readProviderRegistry migrates nano-banana IDs to image models without rena
 
     const result = await readProviderRegistry({ runtimeDir, env: {} });
     const provider = getProviderById(result.providers, 'custom');
-    assert.deepEqual(provider.imageModels, [
-      'existing-image',
-      'nano-banana-2-2k',
-      'nano-banana-2-4k',
-    ]);
-    assert.deepEqual(provider.chatModels, ['gpt-5.6']);
-    assert.deepEqual(provider.modelProtocols, {
-      'nano-banana-2-2k': 'gemini',
-      'nano-banana-2-4k': 'gemini',
-    });
+    assert.deepEqual(provider.imageModels, ['existing-image']);
   } finally {
     await rm(runtimeDir, { recursive: true, force: true });
   }

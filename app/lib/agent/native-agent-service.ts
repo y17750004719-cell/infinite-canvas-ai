@@ -14,6 +14,8 @@ import type { ThreadStartParams } from './native-codex-protocol/v2/ThreadStartPa
 import type { TurnStartParams } from './native-codex-protocol/v2/TurnStartParams';
 import { runChatCompletionsTurn } from './chat-completions-adapter.mjs';
 import { CURRENT_CONTRACT_VERSION } from '../compatibility-gate.mjs';
+import { CODEX_MAIN_SNAPSHOT } from './codex-main-snapshot.mjs';
+import { validateApplicationToolName } from './application-tool-dispatcher.mjs';
 
 export type NativeAgentIdentity = {
   taskId: string;
@@ -63,15 +65,6 @@ export type NativeAgentTurnResult = {
 };
 
 type NativeAgentHost = Awaited<ReturnType<typeof acquireNativeCodexHost>>;
-
-const DISABLED_NATIVE_CAPABILITIES = new Set([
-  'code_mode', 'code-mode', 'code_mode_host', 'code-mode-host', 'image_generation',
-  'image-generation', 'image_generation_host', 'image-generation-host',
-]);
-
-function nativeCapabilityName(value: unknown) {
-  return String(value || '').trim().toLowerCase().replace(/\//g, '_');
-}
 
 export type RunNativeAgentTurnInput = {
   sessionId: string;
@@ -189,21 +182,36 @@ function queueSession<T>(sessionId: string, task: () => Promise<T>): Promise<T> 
 function safeNativeEvent(method: string, params: Record<string, any>) {
   const turnId = text(params?.turnId || params?.turn?.id);
   if (method === 'turn/started') return { turnId, status: 'running' };
+  if (method === 'turn/failed' || method === 'error') return {
+    turnId,
+    status: 'failed',
+    error: nativeError(params?.error || params?.turn?.error || params),
+  };
   if (method === 'turn/completed') return {
     turnId,
     status: text(params?.turn?.status),
     ...(params?.turn?.error ? { error: nativeError(params.turn.error) } : {}),
     ...(params?.turn?.usage ? { usage: params.turn.usage } : {}),
   };
-  if (method === 'item/started' || method === 'item/completed') {
+  if (method === 'item/agentMessage/delta' || method === 'item/reasoning/summaryTextDelta' || method === 'item/plan/delta') {
+    const delta = text(params?.delta || params?.text || params?.content);
+    if (!delta) return null;
+    return {
+      turnId,
+      item: {
+        id: text(params?.itemId || params?.item?.id),
+        type: method === 'item/agentMessage/delta' ? 'agentMessage' : method === 'item/plan/delta' ? 'plan' : 'reasoning',
+        delta,
+      },
+    };
+  }
+  if (method === 'item/started' || method === 'item/updated' || method === 'item/completed') {
     const item = params?.item || {};
     if (item.type === 'agentMessage') {
-      if (method !== 'item/completed') return null;
-      const safeText = sanitizePublicMessage(item.text);
+      const safeText = sanitizePublicMessage(item.text || item.delta);
       if (!safeText) return null;
       return {
-        turnId,
-        item: { id: text(item.id), type: 'agentMessage', phase: text(item.phase), text: safeText, delivery: item.delivery || null },
+        turnId, item: { id: text(item.id), type: 'agentMessage', phase: text(item.phase), text: safeText, delta: method === 'item/updated' ? safeText : undefined, delivery: item.delivery || null },
       };
     }
     if (item.type === 'dynamicToolCall') return {
@@ -274,6 +282,10 @@ export async function runNativeAgentTurn(input: RunNativeAgentTurnInput): Promis
         threadId,
         scopeId: host.scopeId,
         providerFingerprint: nativeProviderFingerprint(input.provider),
+        sourceCommit: host.capabilitySnapshot?.sourceCommit || null,
+        targetCodexMainCommit: CODEX_MAIN_SNAPSHOT.sourceCommit,
+        wireApi: CODEX_MAIN_SNAPSHOT.wireApi,
+        protocolSchema: CODEX_MAIN_SNAPSHOT.protocolSchema,
         source: 'app_server',
         contractVersion: CURRENT_CONTRACT_VERSION,
       },
@@ -340,9 +352,9 @@ export async function runNativeAgentTurn(input: RunNativeAgentTurnInput): Promis
           return;
         }
         const item = params?.item;
-        if ((method === 'item/started' || method === 'item/completed') && item?.type === 'agentMessage') {
-          const safeText = sanitizePublicMessage(item.text);
-          if (item.phase !== 'commentary' && safeText && method === 'item/completed') finalText = safeText;
+        if ((method === 'item/started' || method === 'item/updated' || method === 'item/completed') && item?.type === 'agentMessage') {
+          const safeText = sanitizePublicMessage(item.text || item.delta);
+          if (item.phase !== 'commentary' && safeText) finalText = method === 'item/updated' ? `${finalText}${safeText}` : safeText;
         }
         await emit(method, params);
         if (method !== 'turn/completed') return;
@@ -365,16 +377,12 @@ export async function runNativeAgentTurn(input: RunNativeAgentTurnInput): Promis
         if (text(params?.threadId) !== threadId || (turnId && text(params?.turnId) !== turnId)) {
           return { success: false, contentItems: [{ type: 'inputText', text: JSON.stringify({ code: 'stale_native_tool_call' }) }] };
         }
-        const normalizedName = nativeCapabilityName(name);
         const allowedTools = input.tools.map((tool) => tool.name);
         const definition = input.tools.find((tool) => tool.name === name);
-        if (!definition) {
-          const disabled = DISABLED_NATIVE_CAPABILITIES.has(normalizedName)
-            || [...DISABLED_NATIVE_CAPABILITIES].some((capability) => normalizedName.endsWith(`_${capability}`));
+        const validation = validateApplicationToolName(name, allowedTools);
+        if (!definition || !validation.ok) {
           return { success: false, contentItems: [{ type: 'inputText', text: JSON.stringify({
-            // Preserve the stable legacy code for ordinary unknown tools: code: 'tool_not_allowed'.
-            code: disabled ? 'native_capability_disabled' : 'tool_not_allowed',
-            failureStage: 'tool_dispatch', retryable: false, requestedTool: name, allowedTools,
+            ...(validation.error || { code: 'tool_not_allowed', failureStage: 'tool_dispatch', retryable: false, requestedTool: name, allowedTools }),
           }) }] };
         }
         if (pendingConfirmation) {

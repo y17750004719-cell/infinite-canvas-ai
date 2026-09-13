@@ -1,5 +1,5 @@
 {
-  "sourceCommit": "98a8425e223106d6e20fb31881fd693e9c56cf63",
+  "sourceCommit": "53c542d944c705f3a66780a19223223bee57cbb6",
   "rustVersion": "1.95.0",
   "package": "codex-app-server",
   "binary": "codex-app-server",

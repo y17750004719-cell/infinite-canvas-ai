@@ -8035,7 +8035,8 @@ export default function AIWorkspace() {
       resolvedImageSelection.providerId || ''
     ) ||
     workspaceImageModelOptions[0] ||
-    createWorkspaceModelOptions([], 'image', IMAGE_CARD_MODEL_OPTIONS, getProviderSettingsProviderLabel)[0];
+    createWorkspaceModelOptions([], 'image', IMAGE_CARD_MODEL_OPTIONS, getProviderSettingsProviderLabel)[0] ||
+    { id: '', providerId: '' };
   const defaultWorkspaceTextModelOption =
     findWorkspaceModelOption(
       workspaceTextModelOptions,
@@ -8043,7 +8044,8 @@ export default function AIWorkspace() {
       resolvedChatSelection.providerId || ''
     ) ||
     workspaceTextModelOptions[0] ||
-    createWorkspaceModelOptions([], 'chat', TEXT_PANEL_MODEL_OPTIONS, getProviderSettingsProviderLabel)[0];
+    createWorkspaceModelOptions([], 'chat', TEXT_PANEL_MODEL_OPTIONS, getProviderSettingsProviderLabel)[0] ||
+    { id: '', providerId: '' };
   const selectedTextCardProviderId = selectedTextCardPanelItem
     ? (
         selectableTextProviders.find((provider) => provider.id === textCardProviderById[selectedTextCardPanelItem.id])?.id ||

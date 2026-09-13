@@ -1,23 +1,38 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-test('v5 retains workbench state while v4 resets it and binds thread to session', () => {
+test('v5 retains workbench state while legacy sessions require migration', () => {
   const base = { schemaVersion: 5, id: 'workbench', threadId: 'wrong', items: [], messages: [], viewport: { x: 0, y: 0, scale: 1 }, archived: true, pendingApproval: { itemId: 'approval' }, todoItems: [{ id: '1', content: 'Review', status: 'completed' }], commandState: { lastCommand: 'status', lastResult: {} } };
   const current = normalizeProjectSession(base);
   assert.equal(current.threadId, base.id);
   assert.deepEqual(current.todoItems, base.todoItems);
   assert.deepEqual(current.pendingApproval, base.pendingApproval);
-  const old = normalizeProjectSession({ ...base, schemaVersion: 4 });
-  assert.equal(old.archived, false);
-  assert.equal(old.pendingApproval, null);
-  assert.deepEqual(old.todoItems, []);
+  assert.throws(() => normalizeProjectSessionImpl({ ...base, schemaVersion: 4 }), (error) => {
+    assert.equal(error.code, 'migration_required');
+    assert.equal(error.statusCode, 409);
+    return true;
+  });
 });
 
 import {
-  buildPersistedSession,
-  normalizeProjectSession,
+  buildPersistedSession as buildPersistedSessionImpl,
+  normalizeProjectSession as normalizeProjectSessionImpl,
   shouldFlushScheduledSessionSave,
 } from './session-persistence.mjs';
+
+// Current runtime accepts only schema v5; fixtures that exercise current behavior
+// omit the version for brevity, so normalize them at the test boundary.
+const normalizeProjectSession = (session) => normalizeProjectSessionImpl(
+  session && Object.prototype.hasOwnProperty.call(session, 'schemaVersion')
+    ? session
+    : { schemaVersion: 5, ...session }
+);
+const buildPersistedSession = (session, input) => buildPersistedSessionImpl(
+  session && Object.prototype.hasOwnProperty.call(session, 'schemaVersion')
+    ? session
+    : { schemaVersion: 5, ...session },
+  input,
+);
 
 test('buildPersistedSession stores connections in the saved session', () => {
   const session = {
@@ -240,8 +255,8 @@ test('buildPersistedSession keeps task snapshots only on their owning assistant 
   assert.equal('activeTopicId' in result, false);
 });
 
-test('legacy sessions reset chat protocol data while retaining canvas and model selections', () => {
-  const reset = normalizeProjectSession({
+test('legacy sessions are rejected before chat state normalization', () => {
+  assert.throws(() => normalizeProjectSessionImpl({
     schemaVersion: 4,
     id: 'session-legacy-cleanup',
     name: 'Legacy canvas',
@@ -265,8 +280,12 @@ test('legacy sessions reset chat protocol data while retaining canvas and model 
     visualAssets: [{ id: 'old-asset', durableSrc: '/old.png' }],
     generatedImageHistory: [{ id: 'old-image', src: '/old.png', source: 'chat', createdAt: 1 }],
     regionSelections: [{ id: 'old-region' }],
+  }), (error) => {
+    assert.equal(error.code, 'migration_required');
+    assert.equal(error.statusCode, 409);
+    return true;
   });
-
+  /*
   assert.equal(reset.schemaVersion, 5);
   assert.equal(reset.threadId, 'session-legacy-cleanup');
   assert.deepEqual(reset.items, [{ id: 'canvas-image', type: 'image', src: '/uploads/asset.png' }]);
@@ -286,7 +305,7 @@ test('legacy sessions reset chat protocol data while retaining canvas and model 
   assert.deepEqual(reset.regionSelections, []);
   assert.equal('topics' in reset, false);
   assert.equal('activeAgentRun' in reset, false);
-  assert.equal('agentRecovery' in reset, false);
+  assert.equal('agentRecovery' in reset, false); */
 });
 
 test('buildPersistedSession keeps valid text card panel drafts for existing text card items', () => {
@@ -708,7 +727,7 @@ test('normalizeProjectSession rejects ownerless persisted assets and context eve
   assert.deepEqual(result.contextHistory.modelEvents, []);
 });
 
-test('normalizeProjectSession hard resets legacy chat data exactly once', () => {
+test('normalizeProjectSession rejects legacy chat data with migration_required', () => {
   const legacyAsset = {
     id: 'asset-1',
     topicId: 'topic-1',
@@ -719,7 +738,7 @@ test('normalizeProjectSession hard resets legacy chat data exactly once', () => 
     source: 'generated',
     createdAt: 10,
   };
-  const migrated = normalizeProjectSession({
+  assert.throws(() => normalizeProjectSessionImpl({
     schemaVersion: 3,
     id: 'session-legacy',
     name: 'Legacy canvas',
@@ -737,8 +756,12 @@ test('normalizeProjectSession hard resets legacy chat data exactly once', () => 
     generatedImageHistory: [{ id: 'history-1', src: '/uploads/generated/a.png', source: 'chat', topicId: 'topic-1', createdAt: 10 }],
     activeAgentRun: { runId: 'run-1', userMessageId: 'old-1', assistantMessageId: 'old-2', startedAt: 3, status: 'running' },
     viewport: { x: 0, y: 0, scale: 1 },
+  }), (error) => {
+    assert.equal(error.code, 'migration_required');
+    assert.equal(error.statusCode, 409);
+    return true;
   });
-
+  /*
   assert.equal(migrated.schemaVersion, 5);
   assert.deepEqual(migrated.messages, []);
   assert.equal(migrated.agentMemory, undefined);
@@ -754,20 +777,22 @@ test('normalizeProjectSession hard resets legacy chat data exactly once', () => 
     messages: [{ id: 'new-1', role: 'user', content: 'new conversation' }],
   });
   assert.equal(normalizedAgain.messages.length, 1);
-  assert.equal(normalizedAgain.messages[0].content, 'new conversation');
+  assert.equal(normalizedAgain.messages[0].content, 'new conversation'); */
 });
 
-test('normalizeProjectSession drops legacy messages when the event list is empty', () => {
-  const migrated = normalizeProjectSession({
+test('normalizeProjectSession rejects legacy messages when the event list is empty', () => {
+  assert.throws(() => normalizeProjectSessionImpl({
     schemaVersion: 3,
     id: 'session-empty-events',
     items: [],
     messages: [{ id: 'legacy-message', role: 'user', content: '保留这条消息' }],
     contextEvents: [],
     viewport: { x: 0, y: 0, scale: 1 },
+  }), (error) => {
+    assert.equal(error.code, 'migration_required');
+    assert.equal(error.statusCode, 409);
+    return true;
   });
-  assert.deepEqual(migrated.messages, []);
-  assert.deepEqual(migrated.contextEvents, []);
 });
 
 test('normalizeProjectSession preserves compact state and filters foreign context windows', () => {

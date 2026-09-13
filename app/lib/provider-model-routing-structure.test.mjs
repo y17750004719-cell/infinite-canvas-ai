@@ -5,10 +5,13 @@ import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
-const agentSource = fs.readFileSync(path.join(root, 'app/api/agent/route.ts'), 'utf8');
+const agentSource = fs.readFileSync(path.join(root, 'app/lib/agent/agent-request-runtime.ts'), 'utf8');
+const contextSource = fs.readFileSync(path.join(root, 'app/lib/agent/agent-context-service.mjs'), 'utf8');
+const combinedAgentSource = `${agentSource}\n${contextSource}`;
 const generateSource = fs.readFileSync(path.join(root, 'app/api/generate/route.ts'), 'utf8');
 
 test('agent routes user-selected chat and image models independently', () => {
+  const agentSource = combinedAgentSource;
   assert.match(agentSource, /chatOptions\?:\s*\{/);
   assert.match(agentSource, /resolveProviderModelSelection/);
   assert.match(agentSource, /purpose:\s*'chat'/);
@@ -37,6 +40,7 @@ test('generate route resolves a valid provider and model pair for each purpose',
 });
 
 test('agent validates default environment and request chat selections through one resolver', () => {
+  const agentSource = combinedAgentSource;
   assert.match(agentSource, /const resolvedChatSelection = resolveProviderModelSelection\(\{/);
   assert.match(agentSource, /const requestedChatProviderId = body\.chatOptions\?\.providerId\s*\|\|\s*process\.env\.AGENT_CHAT_PROVIDER_ID/);
   assert.match(agentSource, /requestedModel:\s*requestedChatModel/);
@@ -46,6 +50,7 @@ test('agent validates default environment and request chat selections through on
 });
 
 test('agent sends reference-image requests to the selected model without local vision gating or fallback', () => {
+  const agentSource = combinedAgentSource;
   assert.match(agentSource, /allowFallback:\s*!hasExplicitChatSelection/);
   assert.doesNotMatch(agentSource, /resolvedChatCapabilities\.supportsVision/);
   assert.doesNotMatch(agentSource, /不支持参考图输入，请切换支持视觉的规划模型/);

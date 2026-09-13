@@ -163,7 +163,7 @@ async function runSimpleRealScenario({ responseItems, tools = [], executeTool = 
   ].join('\n'));
   const handlers = new Map();
   const client = new NativeCodexStdioClient({
-    binaryPath, args: ['--listen', 'stdio://', '--strict-config', '--disable-plugin-startup-tasks-for-tests'], cwd,
+    binaryPath, args: ['--listen', 'stdio://', '--strict-config'], cwd,
     env: { PATH: '/usr/bin:/bin', HOME: privateHome, CODEX_HOME: privateHome, CODEX_APP_SERVER_DISABLE_MANAGED_CONFIG: '1', ZFLOW_NATIVE_PROVIDER_KEY: 'local-test' },
     requestTimeoutMs: 30_000,
     onNotification: (event) => handlers.get(event.params?.threadId)?.onNotification?.(event),

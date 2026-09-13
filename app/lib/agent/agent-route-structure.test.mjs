@@ -3,23 +3,40 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 
-const routePath = path.resolve(import.meta.dirname, '../../api/agent/route.ts');
+const routePath = path.resolve(import.meta.dirname, 'agent-request-runtime.ts');
+const controllerPath = path.resolve(import.meta.dirname, 'agent-request-controller.ts');
 const pagePath = path.resolve(import.meta.dirname, '../../page.tsx');
 const instructionsPath = path.resolve(import.meta.dirname, 'native-agent-instructions.mjs');
 const servicePath = path.resolve(import.meta.dirname, 'native-agent-service.ts');
 const hostPath = path.resolve(import.meta.dirname, 'native-codex-host.mjs');
 const ledgerPath = path.resolve(import.meta.dirname, 'native-business-ledger.mjs');
+const dispatcherPath = path.resolve(import.meta.dirname, 'application-tool-dispatcher.mjs');
+const recoveryPath = path.resolve(import.meta.dirname, 'agent-recovery-service.mjs');
+const managementPath = path.resolve(import.meta.dirname, 'agent-management-service.mjs');
+const replayPath = path.resolve(import.meta.dirname, 'thread-replay-service.mjs');
 const contextPath = path.resolve(import.meta.dirname, 'context-reference.mjs');
 const read = (file) => fs.readFileSync(file, 'utf8');
 
-test('all chat modes use one native Codex App Server scheduling entry', () => {
+test('all chat modes use the Codex Main runtime gateway entry', () => {
   const route = read(routePath);
   const page = read(pagePath);
-  assert.match(route, /import \{ runNativeAgentTurn \} from ['"]\.\.\/\.\.\/lib\/agent\/native-agent-service['"]/);
-  assert.equal((route.match(/runNativeAgentTurn\(/g) || []).length, 1);
+  assert.match(route, /import \{ runAgentTurn \} from ['"]\.\/agent-turn-orchestrator\.mjs['"]/);
+  assert.equal((route.match(/runAgentTurn\(/g) || []).length, 1);
+  assert.doesNotMatch(route, /from ['"]\.\/thread-journal\.mjs['"]/);
+  assert.doesNotMatch(route, /runCodexMainTurn/);
   assert.match(page, /const usesAgentRequest = true/);
   assert.doesNotMatch(route, /runZFlowAgentBrain|buildMainAgentLoopMessages|legacy\/tool-capable loop/);
   assert.doesNotMatch(route, /pi-agent-runtime|main-agent\.mjs/);
+});
+
+test('management commands and GET replay are delegated to dedicated services', () => {
+  const route = read(routePath);
+  assert.match(route, /agent-management-service\.mjs/);
+  assert.match(route, /thread-replay-service\.mjs/);
+  assert.doesNotMatch(route, /async function handleManagementCommand/);
+  assert.doesNotMatch(route, /const activeTurn = result\.state\.turns/);
+  assert.match(read(managementPath), /export async function handleManagementCommand/);
+  assert.match(read(replayPath), /export async function handleThreadReplay/);
 });
 
 test('the route remains an authenticated streaming adapter with server-owned run identity', () => {
@@ -58,8 +75,12 @@ test('native host disables coding, plugins, web search, subagents, and native im
 test('business tools execute through the native callback and image side effects use the durable ledger', () => {
   const route = read(routePath);
   const ledger = read(ledgerPath);
+  const dispatcher = read(dispatcherPath);
+  const recovery = read(recoveryPath);
   assert.match(route, /executeTool: async \(toolName, args, context\) =>/);
-  assert.match(route, /executeAgentTool\(mainAgentRegistry, toolName, args/);
+  assert.match(route, /dispatchRegisteredApplicationTool\(/);
+  assert.match(dispatcher, /executeAgentTool\(registry, requestedTool, requestedArgs/);
+  assert.match(recovery, /createRecoveryRecord/);
   assert.match(route, /executeNativeBusinessOperation\(\{/);
   assert.match(route, /tool:\s*'generate_image'/);
   assert.match(ledger, /contractHash = hashNativeBusinessContract\(contract\)/);
@@ -150,4 +171,12 @@ test('obsolete Pi scheduling and custom first-tool truncation are absent from pr
   assert.doesNotMatch(combined, /firstToolOnly|toolCalls\.slice\(0,\s*1\)|pendingToolCall\.batch/);
   assert.doesNotMatch(combined, /plannerRequestCount|Prompt Planner|runStagedImagePlanning/);
   assert.doesNotMatch(combined, /runZFlowAgentBrain|piTranscript/);
+});
+
+test('request controller is a pure transport adapter', () => {
+  const controller = read(controllerPath);
+  assert.doesNotMatch(controller, /runMainAgentOnce|executeImageRequest|executeAgentTool|createExecutionRecoveryRecord/);
+  assert.doesNotMatch(controller, /item\/(?:started|updated|completed)|appendThreadEvent|nativeCodexHost/);
+  assert.match(controller, /handleRuntimePost/);
+  assert.match(controller, /handleRuntimeGet/);
 });

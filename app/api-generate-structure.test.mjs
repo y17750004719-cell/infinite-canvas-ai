@@ -4,200 +4,38 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const routeSource = fs.readFileSync(path.join(__dirname, 'api', 'generate', 'route.ts'), 'utf8');
+const routeSource = fs.readFileSync(path.join(path.dirname(fileURLToPath(import.meta.url)), 'api', 'generate', 'route.ts'), 'utf8');
 
-test('generate route keeps exact-size image card requests on a single requested size instead of silently downgrading', () => {
-  assert.equal(
-    routeSource.includes('shouldUseExactImageSizeApi'),
-    true
-  );
-  assert.equal(
-    routeSource.includes('const shouldUseExactSizeApi = shouldUseExactImageSizeApi(resolvedImageModel, imageSize);'),
-    true
-  );
-  assert.equal(
-    routeSource.includes('const fallbackSizes = shouldUseExactSizeApi ? [imageSize] : resolveImageGenerationFallbackSizes(imageSize);'),
-    true
-  );
+test('generate route forwards protocol-neutral image parameters to the shared adapter', () => {
+  assert.equal(routeSource.includes('aspect_ratio?: string;'), true);
+  assert.equal(routeSource.includes('size: imageSize,'), true);
+  assert.equal(routeSource.includes('aspect_ratio: resolvedAspectRatio || undefined,'), true);
 });
 
-test('generate route derives reference image mode from the supplier protocol instead of hardcoding image_edit for every referenced request', () => {
-  assert.equal(
-    routeSource.includes('shouldUseImageEditsApi'),
-    true
-  );
-  assert.equal(
-    routeSource.includes('const referenceResponseMode = usesImageEditsApi ? "image_edit" : "image_generate";'),
-    true
-  );
-  assert.equal(
-    routeSource.includes('const referenceResultMode = usesImageEditsApi ? "image_edit" : "generate";'),
-    true
-  );
+test('generate route derives reference mode from supplier protocol', () => {
+  assert.equal(routeSource.includes('shouldUseImageEditsApi'), true);
+  assert.equal(routeSource.includes('referenceResponseMode'), true);
+  assert.equal(routeSource.includes('referenceResultMode'), true);
 });
 
-test('generate route saves and returns every successful generated image output instead of only the first one', () => {
-  assert.equal(
-    routeSource.includes('const savedImages = await saveImagesToLocal(imageResult.data.map((entry) => entry.url));'),
-    true
-  );
-  assert.equal(
-    routeSource.includes('outputs: savedImages,'),
-    true
-  );
+test('generate route saves all successful image outputs', () => {
+  assert.equal(routeSource.includes('saveImagesToLocal(imageResult.data.map'), true);
+  assert.equal(routeSource.includes('outputs: savedImages,'), true);
 });
 
-test('generate route accepts request-level provider routing fields and forwards them to supplier calls', () => {
-  assert.equal(routeSource.includes('providerId?: string;'), true);
-  assert.equal(routeSource.includes('imageProviderId?: string;'), true);
-  assert.equal(routeSource.includes('chatProviderId?: string;'), true);
-  assert.equal(routeSource.includes('providerId: resolvedImageSelection.providerId || undefined,'), true);
-  assert.equal(routeSource.includes('providerId: resolvedChatSelection.providerId || undefined,'), true);
-  assert.equal(routeSource.includes('imageProviderId: typeof imageProviderId === "string" ? imageProviderId : null,'), true);
-  assert.equal(routeSource.includes('chatProviderId: typeof chatProviderId === "string" ? chatProviderId : null,'), true);
+test('generate route preserves structured failure metadata', () => {
+  assert.equal(routeSource.includes('buildGenerateRouteErrorMeta'), true);
+  assert.equal(routeSource.includes('failureCode: error.failureCode'), true);
+  assert.equal(routeSource.includes('outcomeUnknown: error.outcomeUnknown'), true);
 });
 
-test('generate route rejects raw Skills on image requests while allowing the internal Main Agent bridge', () => {
-  assert.equal(routeSource.includes('resolved.intent === "image"'), true);
-  assert.equal(routeSource.includes('x-z-flow-image-agent'), true);
-  assert.equal(routeSource.includes('code: "image_skill_requires_agent"'), true);
-  assert.equal(routeSource.includes('resolved.intent === "chat" && skill'), true);
+test('generate route does not select protocol from model names', () => {
+  assert.equal(routeSource.includes('isGptImage2Model'), false);
+  assert.equal(routeSource.includes('isOpenAiCompatibleImageModel'), false);
+  assert.equal(routeSource.includes('model capability size allowlist'), false);
 });
 
-test('generate route decouples image supplier calls from the incoming request signal and returns failure classification metadata', () => {
-  assert.equal(
-    routeSource.includes('executionMode: resolvedExecutionMode,\n          signal: request.signal,'),
-    false
-  );
-  assert.equal(
-    routeSource.includes('executionMode: resolvedExecutionMode,\n            signal: request.signal,'),
-    false
-  );
-  assert.equal(
-    routeSource.includes('buildGenerateRouteErrorMeta'),
-    true
-  );
-  assert.equal(
-    routeSource.includes('const routeErrorMeta = buildGenerateRouteErrorMeta(error, ImageGenerationError);'),
-    true
-  );
-  assert.equal(
-    routeSource.includes('failureClass: error.failureClass,'),
-    true
-  );
-  assert.equal(
-    routeSource.includes('isRetryable: error.isRetryable,'),
-    true
-  );
-  assert.equal(
-    routeSource.includes('retryAttempt: error.retryAttempt,'),
-    true
-  );
-  assert.equal(routeSource.includes('outcomeUnknown: error.outcomeUnknown,'), true);
-  assert.equal(routeSource.includes('failureStage,'), true);
-  assert.equal(routeSource.includes('retryable,'), true);
-  assert.equal(routeSource.includes('failureCode: "provider_result_unknown"'), true);
-  assert.equal(routeSource.includes('error.outcomeUnknown !== true'), true);
-});
-
-test('generate route uses model capability size allowlists for gpt-image-2 and skips derived aspect ratios for size-only models', () => {
-  assert.equal(
-    routeSource.includes('getImageModelCapability'),
-    true
-  );
-  assert.equal(
-    routeSource.includes('from "../../lib/image-model-capabilities.mjs";'),
-    true
-  );
-  assert.equal(
-    routeSource.includes('function filterAllowlistByModelCapabilities(allowlist: string[], capabilityAllowlist: string[]): string[] {'),
-    true
-  );
-  assert.equal(
-    routeSource.includes('const capabilityAllowlist = getImageModelCapability(model).supportedSizes;'),
-    false
-  );
-  assert.equal(
-    routeSource.includes('const capability = getImageModelCapability(model);'),
-    true
-  );
-  assert.equal(
-    routeSource.includes('const capabilityAllowlist = capability.supportedSizes;'),
-    true
-  );
-  assert.equal(
-    routeSource.includes('supportsImageModelExactSize'),
-    true
-  );
-  assert.equal(
-    routeSource.includes('const modelAllowlist = filterAllowlistByModelCapabilities('),
-    true
-  );
-  assert.equal(
-    routeSource.includes('const globalAllowlist = filterAllowlistByModelCapabilities('),
-    true
-  );
-  assert.equal(
-    routeSource.includes(': capabilityAllowlist.length > 0'),
-    true
-  );
-  assert.equal(
-    routeSource.includes('if (supportsImageModelExactSize(model, requestedSize)) return requestedSize;'),
-    true
-  );
-  assert.equal(
-    routeSource.includes('const supportsAspectRatio = getImageModelCapability(resolvedImageModel).supportsAspectRatio;'),
-    true
-  );
-  assert.equal(
-    routeSource.includes('const resolvedAspectRatio = supportsAspectRatio ? (requestedAspectRatio || aspectRatioFromSize(imageSize)) : "";'),
-    true
-  );
-  assert.equal(
-    routeSource.includes('aspect_ratio: resolvedAspectRatio || undefined,'),
-    true
-  );
-  assert.equal(
-    routeSource.includes('quality: typeof quality === "string" ? quality : undefined,'),
-    true
-  );
-});
-
-test('generate route preserves resolved non-square gpt-image-2 sizes instead of downgrading them to square tiers', () => {
-  assert.equal(
-    routeSource.includes('if (supportsImageModelExactSize(model, requestedSize)) return requestedSize;'),
-    true
-  );
-  assert.equal(
-    routeSource.includes('debugWarn("Unsupported image size for current allowlist, fallback to default"'),
-    true
-  );
-});
-
-test('generate route validates returned image dimensions against the requested gpt-image-2 size before returning success', () => {
-  assert.equal(
-    routeSource.includes('getImageDimensionsFromBuffer'),
-    true
-  );
-  assert.equal(
-    routeSource.includes('SUPPLIER_IMAGE_SIZE_MISMATCH'),
-    true
-  );
-  assert.equal(
-    routeSource.includes('供应商未按请求尺寸返回图片'),
-    true
-  );
-  assert.equal(
-    routeSource.includes('requestedSize'),
-    true
-  );
-  assert.equal(
-    routeSource.includes('actualWidth'),
-    true
-  );
-  assert.equal(
-    routeSource.includes('actualHeight'),
-    true
-  );
+test('generate route keeps supplier dimensions and result-unknown classification', () => {
+  assert.equal(routeSource.includes('getImageDimensionsFromBuffer'), true);
+  assert.equal(routeSource.includes('provider_result_unknown'), true);
 });

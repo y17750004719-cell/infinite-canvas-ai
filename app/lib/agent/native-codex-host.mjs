@@ -4,8 +4,9 @@ import { resolve, join } from 'node:path';
 import { NativeCodexStdioClient } from './native-codex-stdio.mjs';
 import sharp from 'sharp';
 import { parseImageDataUrl } from '../api-security.mjs';
+import { CODEX_MAIN_SNAPSHOT } from './codex-main-snapshot.mjs';
 
-export const NATIVE_SOURCE_COMMIT = '98a8425e223106d6e20fb31881fd693e9c56cf63';
+export const NATIVE_SOURCE_COMMIT = '53c542d944c705f3a66780a19223223bee57cbb6';
 export const NATIVE_DISABLED_FEATURES = Object.freeze([
   'shell_tool', 'unified_exec', 'view_image', 'sleep_tool', 'deferred_executor',
   'code_mode', 'code_mode_host', 'code_mode_only', 'multi_agent', 'multi_agent_v2',
@@ -33,6 +34,20 @@ export async function invalidateNativeCodexHost(host) {
   }
   host.invalidated = true;
   await host.client.close().catch(() => {});
+}
+
+// Invalidate an existing pooled host without creating a new one. Recovery uses
+// this boundary before replaying a turn after a transport-level disconnect.
+export async function invalidateNativeCodexHostScope({ provider, ownerId = 'local', runtimeRoot = resolve('runtime/native-codex') } = {}) {
+  if (!provider?.id || !provider?.model || !provider?.baseUrl) return false;
+  const scopeId = hash(JSON.stringify([ownerId, nativeProviderFingerprint(provider), hash(provider.apiKey || '')]));
+  const key = `${resolve(runtimeRoot)}:${scopeId}`;
+  const existing = hostPool.get(key);
+  if (!existing) return false;
+  hostPool.delete(key);
+  const host = await Promise.resolve(existing).catch(() => null);
+  if (host) await invalidateNativeCodexHost(host);
+  return Boolean(host);
 }
 
 export function nativeConfig(provider) {
@@ -97,7 +112,7 @@ async function createHost({ provider, runtimeRoot, scopeId }) {
   const handlers = new Map();
   const client = new NativeCodexStdioClient({
     binaryPath: resolve(manifest.binaryPath), cwd,
-    args: ['--listen', 'stdio://', '--strict-config', '--disable-plugin-startup-tasks-for-tests'],
+    args: ['--listen', 'stdio://', '--strict-config'],
     // Only the child receives this private home; parent shell and app config stay unchanged.
     env: { PATH: '/usr/bin:/bin', HOME: privateHome, CODEX_HOME: privateHome,
       CODEX_APP_SERVER_DISABLE_MANAGED_CONFIG: '1', ZFLOW_NATIVE_PROVIDER_KEY: provider.apiKey || '' },
@@ -112,6 +127,13 @@ async function createHost({ provider, runtimeRoot, scopeId }) {
   await client.start({ clientInfo: { name: 'zflow_native', version: '0.1.0' }, capabilities: { experimentalApi: true } });
   return {
     client, cwd, scopeId, privateHome,
+    capabilitySnapshot: {
+      sourceCommit: NATIVE_SOURCE_COMMIT,
+      targetCodexMainCommit: CODEX_MAIN_SNAPSHOT.sourceCommit,
+      wireApi: 'responses',
+      disabledFeatures: [...NATIVE_DISABLED_FEATURES],
+      dynamicToolMethod: CODEX_MAIN_SNAPSHOT.dynamicToolMethod,
+    },
     registerThreadHandler(threadId, handler) {
       if (handlers.has(threadId)) throw failure('native_thread_busy');
       handlers.set(threadId, handler);

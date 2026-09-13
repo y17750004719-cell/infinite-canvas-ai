@@ -3,8 +3,9 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import ts from 'typescript';
 import { adaptCanonicalEvent } from './canonical-event-adapter.mjs';
+import { projectNativeEvent } from './native-event-projector.mjs';
 
-const source = ts.createSourceFile('route.ts', readFileSync(new URL('../../api/agent/route.ts', import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true);
+const source = ts.createSourceFile('agent-request-runtime.ts', readFileSync(new URL('./agent-request-runtime.ts', import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true);
 function declaration(name) {
   let found;
   function visit(node) {
@@ -20,7 +21,7 @@ function evaluate(code) {
 }
 
 test('server and client preserve tool identity, failure, and public progress descriptions end to end', () => {
-  const convert = evaluate(`${declaration('canonicalLifecycleEvent')} return canonicalLifecycleEvent;`);
+  const convert = projectNativeEvent;
   const identity = { threadId: 'thread', turnId: 'turn', taskId: 'task', operationId: 'op', runId: 'run', itemId: 'run:tool:call', toolCallId: 'call', executionId: 'exec', parentItemId: 'commentary', timestampMs: 1000 };
   for (const event of [
     { type: 'tool_start', toolName: 'get_canvas_context' },

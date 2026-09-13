@@ -1,6 +1,7 @@
 import { normalizeGeneratedImageHistory } from './generated-image-history.mjs';
 import { normalizeAgentConversationMemory, normalizeSessionChatMessages } from './chat-message-persistence.mjs';
 import { buildReplayableContext, normalizeContextEvents } from './agent/context-events.mjs';
+import { MigrationRequiredError, CURRENT_CONTRACT_VERSION } from './compatibility-gate.mjs';
 
 const isRecord = (value) => typeof value === 'object' && value !== null;
 const cloneValue = (value) => {
@@ -116,55 +117,16 @@ const normalizeContextHistory = (history, sessionId, fallbackEvents, fallbackWin
   };
 };
 
-function resetLegacySession(session) {
-  const source = isRecord(session) ? session : {};
-  const id = typeof source.id === 'string' && source.id.trim()
-    ? source.id.trim()
-    : `session-${Date.now()}`;
-
-  return {
-    schemaVersion: 5,
-    id,
-    name: typeof source.name === 'string' ? source.name : '未命名画布',
-    createdAt: Number.isFinite(Number(source.createdAt)) ? Number(source.createdAt) : Date.now(),
-    updatedAt: Number.isFinite(Number(source.updatedAt)) ? Number(source.updatedAt) : Date.now(),
-    items: Array.isArray(source.items) ? source.items : [],
-    connections: Array.isArray(source.connections) ? source.connections : [],
-    textCardPanelDrafts: isRecord(source.textCardPanelDrafts) ? source.textCardPanelDrafts : {},
-    textCardProviderById: isRecord(source.textCardProviderById) ? source.textCardProviderById : {},
-    textCardModelById: isRecord(source.textCardModelById) ? source.textCardModelById : {},
-    imageCardPanelDrafts: isRecord(source.imageCardPanelDrafts) ? source.imageCardPanelDrafts : {},
-    imageCardProviderById: isRecord(source.imageCardProviderById) ? source.imageCardProviderById : {},
-    imageCardModelById: isRecord(source.imageCardModelById) ? source.imageCardModelById : {},
-    imageCardSizeById: isRecord(source.imageCardSizeById) ? source.imageCardSizeById : {},
-    imageCardQualityById: isRecord(source.imageCardQualityById) ? source.imageCardQualityById : {},
-    imageCardCountById: isRecord(source.imageCardCountById) ? source.imageCardCountById : {},
-    imageCardAspectRatioById: isRecord(source.imageCardAspectRatioById) ? source.imageCardAspectRatioById : {},
-    chatProviderId: source.chatProviderId,
-    chatModelId: source.chatModelId,
-    imageProviderId: source.imageProviderId,
-    imageModelId: source.imageModelId,
-    viewport: isRecord(source.viewport) ? source.viewport : { x: 0, y: 0, scale: 1 },
-    messages: [],
-    threadId: id,
-    turns: [],
-    activeTurn: null,
-    lastSequence: 0,
-    transcriptStartSequence: 0,
-    transcriptSummary: null,
-    threadStatus: 'idle',
-    archived: false,
-    pendingApproval: null,
-    todoItems: [],
-    commandState: { lastCommand: null, lastResult: null },
-    activeSkill: null,
-    activeSkillExplicit: false,
-    visualAssets: [],
-    generatedImageHistory: [],
-    contextEvents: [],
-    compactedWindows: [],
-    regionSelections: [],
-  };
+function requireCurrentSession(session) {
+  if (Number(session?.schemaVersion) !== 5) {
+    throw new MigrationRequiredError({
+      sourceType: 'session',
+      sourceVersion: String(session?.schemaVersion || 'unknown'),
+      requiredVersion: CURRENT_CONTRACT_VERSION,
+      message: 'Current session schema is required; legacy sessions must be restarted.',
+    });
+  }
+  return session;
 }
 
 function normalizeThreadState(session) {
@@ -428,7 +390,7 @@ export function normalizeImageCardAspectRatioById(values, items) {
 }
 
 export function normalizeProjectSession(session) {
-  const currentSession = Number(session?.schemaVersion) === 5 ? session : resetLegacySession(session);
+  const currentSession = requireCurrentSession(session);
   const cleanedSession = normalizeThreadState(currentSession);
   const normalizedItems = Array.isArray(cleanedSession?.items) ? cleanedSession.items : [];
   const normalizedChat = normalizeSessionChatMessages(cleanedSession);
@@ -476,7 +438,7 @@ export function buildPersistedSession(session, patch) {
     ...patch,
   });
   const nextSession = normalizeThreadState(
-    Number(mergedSession?.schemaVersion) === 5 ? mergedSession : resetLegacySession(mergedSession)
+    requireCurrentSession(mergedSession)
   );
 
   const normalizedItems = Array.isArray(nextSession.items) ? nextSession.items : [];

@@ -192,7 +192,7 @@ test('image contract ratio takes precedence over prompt and shared canvas ratio'
   assert.equal(resolved.ratioSource, 'contract');
 });
 
-test('unsupported prompt ratios fall back through the image-card provider profile', () => {
+test('unsupported prompt ratios remain explicit for protocol adapters to handle', () => {
   const profiles = buildProviderImageOptionProfiles([
     { id: 'comfly', imageModels: ['gpt-image-2'] },
   ]);
@@ -205,8 +205,8 @@ test('unsupported prompt ratios fall back through the image-card provider profil
   });
 
   assert.equal(resolved.requestedAspectRatio, '5:4');
-  assert.equal(resolved.aspectRatio, '3:4');
-  assert.equal(resolved.ratioFallback, true);
+  assert.equal(resolved.aspectRatio, '5:4');
+  assert.equal(resolved.ratioFallback, false);
 });
 
 test('agent generation requests are the canvas image-card builder output', () => {
@@ -247,6 +247,7 @@ test('agent generation requests are the canvas image-card builder output', () =>
     size: '2048x1536',
     n: 1,
     quality: 'auto',
+    aspect_ratio: '4:3',
     executionMode: 'async',
     reference_images: ['/reference.png'],
     reference_labels: ['image1'],
@@ -382,12 +383,12 @@ test('agent Gemini requests preserve the 2K tier and native aspect ratio', () =>
     intent: 'image',
     model: 'gemini-3.1-flash-image-preview',
     imageProviderId: 'custom',
-    size: '2048x2048',
+    size: '2048x1152',
     quality: 'auto',
     n: 1,
     aspect_ratio: '16:9',
     executionMode: 'async',
   });
-  assert.equal(resolved.options.requestSize, '2048x2048');
-  assert.deepEqual(resolved.options.requestSizes, ['2048x2048']);
+  assert.equal(resolved.options.requestSize, '2048x1152');
+  assert.deepEqual(resolved.options.requestSizes, ['2048x1152']);
 });

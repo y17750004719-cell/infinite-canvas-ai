@@ -59,7 +59,7 @@ let finish;
 const finished = new Promise((resolveFinished) => { finish = resolveFinished; });
 const client = new NativeCodexStdioClient({
   binaryPath,
-  args: ['--listen', 'stdio://', '--strict-config', '--disable-plugin-startup-tasks-for-tests'],
+  args: ['--listen', 'stdio://', '--strict-config'],
   cwd: scratch,
   env: { PATH: '/usr/bin:/bin', HOME: scratch, CODEX_HOME: scratch,
     ZFLOW_NATIVE_PROVIDER_KEY: 'local-test-only', CODEX_APP_SERVER_DISABLE_MANAGED_CONFIG: '1' },
