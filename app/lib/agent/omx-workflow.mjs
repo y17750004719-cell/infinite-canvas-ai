@@ -25,7 +25,7 @@ const safeId = (value, label = 'taskId') => {
 const clone = (value) => structuredClone(value);
 const fileFor = (taskId) => path.join(root, safeId(taskId), 'state.json');
 
-function initialState({ taskId, objective, workflowId, runId = randomUUID() }) {
+function initialState({ taskId, objective, workflowId, runId = randomUUID(), trigger = null }) {
   if (!WORKFLOWS.has(workflowId)) throw Object.assign(new Error('Unknown OMX workflow'), { code: 'unknown_workflow', statusCode: 400 });
   const now = Date.now();
   return {
@@ -35,6 +35,10 @@ function initialState({ taskId, objective, workflowId, runId = randomUUID() }) {
     workflowId,
     status: 'running',
     objective: String(objective || '').trim().slice(0, 12000),
+    trigger,
+    parentRunId: null,
+    activeSubtasks: [],
+    resultSummary: null,
     currentPhase: 'started',
     startedAt: now,
     updatedAt: now,
@@ -62,13 +66,13 @@ export async function getOmxWorkflow(taskId) {
   catch (error) { if (error.code === 'ENOENT') return null; throw error; }
 }
 
-export async function startOmxWorkflow({ taskId, objective, workflowId, runId }) {
+export async function startOmxWorkflow({ taskId, objective, workflowId, runId, trigger = null }) {
   return queue(taskId, async () => {
     const existing = await getOmxWorkflow(taskId);
     if (existing && !['completed', 'failed', 'cancelled'].includes(existing.status)) {
       throw Object.assign(new Error('Workflow already active'), { code: 'workflow_active', statusCode: 409 });
     }
-    return persist(initialState({ taskId, objective, workflowId, runId }));
+    return persist(initialState({ taskId, objective, workflowId, runId, trigger }));
   });
 }
 
