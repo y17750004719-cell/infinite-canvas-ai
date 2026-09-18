@@ -1,5 +1,4 @@
 import { createAgentRecoveryRecord } from './recovery.mjs';
-import { appendThreadEvent } from './thread-journal.mjs';
 
 export function isRetryablePlannerProviderError(error = {}) {
   const candidate = error && typeof error === 'object' ? error : {};
@@ -16,9 +15,30 @@ export function classifyAgentFailureCode(error, stage = '') {
   const value = error && typeof error === 'object' ? error : {};
   const explicit = typeof value.code === 'string' ? value.code : '';
   const failureCode = typeof value.failureCode === 'string' ? value.failureCode : '';
-  if (/^[a-z][a-z0-9_]{1,100}$/.test(explicit)) return explicit;
-  if (['provider_unavailable', 'provider_http', 'provider_timeout', 'transport', 'invalid_tool_arguments', 'decision_commentary_missing', 'empty_model_response'].includes(failureCode)) return failureCode;
+  if (/^[a-z][a-z0-9_]{1,100}$/.test(explicit)) {
+    if (explicit === 'native_capability_disabled' || explicit === 'code_mode_host_disabled') return 'native_tool_host_disabled';
+    if (explicit === 'native_turn_timeout' || explicit === 'request_timeout') return 'provider_timeout';
+    if (explicit === 'native_model_not_validated' || explicit === 'model_not_validated') return 'native_model_not_validated';
+    if (explicit === 'native_provider_unavailable') return 'provider_unavailable';
+    return explicit;
+  }
+  if (['provider_unavailable', 'provider_http', 'provider_timeout', 'transport', 'invalid_tool_arguments', 'decision_commentary_missing', 'empty_model_response', 'native_tool_host_disabled', 'provider_overloaded', 'native_stream_disconnected', 'provider_permission_denied', 'provider_schema_invalid'].includes(failureCode)) return failureCode;
   const message = error instanceof Error ? error.message.toLowerCase() : String(error || '').toLowerCase();
+  if (message.includes('code-mode host is disabled') || message.includes('code mode host is disabled')
+    || message.includes('code_mode_host_disabled') || message.includes('native capability disabled')) {
+    return 'native_tool_host_disabled';
+  }
+  if (message.includes('servers are currently overloaded') || message.includes('server is overloaded')
+    || message.includes('upstream overloaded') || message.includes('service overloaded')) {
+    return 'provider_overloaded';
+  }
+  if (message.includes('stream disconnected') || message.includes('stream disconnect')) {
+    // Native's bare disconnect is a lifecycle failure. Older provider adapters
+    // append an upstream/socket detail; retain their established wire code.
+    return message.includes('upstream error') || message.includes('socket')
+      ? 'provider_stream_disconnect'
+      : 'native_stream_disconnected';
+  }
   if (message.includes('图片引用已失效') || message.includes('未知图片引用') || message.includes('unknown reference')) return 'invalid_reference';
   if (message.includes('no enabled channel for model') || message.includes('no available compatible accounts')) return 'provider_unavailable';
   if (message.includes('closing turn') || message.includes('terminal control') || String(stage) === 'terminal_contract') return 'terminal_contract';
@@ -34,53 +54,98 @@ export function classifyAgentFailureCode(error, stage = '') {
 
 export function classifyAgentFailure(error = {}, context = {}) {
   const code = String(error.code || 'native_unknown_outcome');
-  const streamDisconnect = /stream disconnected|upstream error/i.test(String(error.message || ''));
-  return { ...context, code: streamDisconnect ? 'provider_stream_disconnect' : code, failureStage: error.failureStage || 'native_runtime', retryable: error.retryable === true || streamDisconnect, outcomeUnknown: error.outcomeUnknown === true };
+  const message = String(error.message || error.errorMessage || '').toLowerCase();
+  const streamDisconnect = /stream disconnected|upstream error|econnreset|socket (?:closed|hang up)|connection (?:closed|reset)/i.test(message);
+  const normalizedByMessage = classifyAgentFailureCode(error, error.failureStage || context.failureStage || '');
+  const nonRetryable = new Set([
+    'native_model_not_validated', 'provider_unavailable', 'provider_permission_denied',
+    'provider_schema_invalid', 'invalid_tool_arguments', 'decision_commentary_missing',
+    'native_tool_host_disabled',
+  ]);
+  // Keep the legacy aggregate code for callers that use this classifier to
+  // decide retry policy; the detailed classifier exposes native_stream_disconnected.
+  const normalizedCode = normalizedByMessage === 'native_stream_disconnected'
+    ? 'provider_stream_disconnect'
+    : normalizedByMessage || (streamDisconnect ? 'provider_stream_disconnect' : code);
+  return {
+    ...context,
+    code: normalizedCode,
+    failureStage: error.failureStage || 'native_runtime',
+    retryable: !nonRetryable.has(normalizedCode) && (error.retryable === true || streamDisconnect),
+    outcomeUnknown: error.outcomeUnknown === true,
+  };
 }
-export function shouldRetryTurn({ error, sideEffectStarted = false, attempt = 0 } = {}) {
-  if (sideEffectStarted || attempt >= 1) return false;
-  const classified = classifyAgentFailure(error);
-  return classified.retryable && !classified.outcomeUnknown;
-}
+
+export const NATIVE_REQUEST_MAX_RETRIES = 4;
+export const NATIVE_STREAM_MAX_RETRIES = 5;
+
+const NATIVE_RETRY_BLOCKED_CODES = new Set([
+  'cancelled',
+  'skill_lock_failed',
+  'native_model_not_validated',
+  'provider_unavailable',
+  'provider_permission_denied',
+  'provider_schema_invalid',
+  'invalid_reference',
+  'invalid_tool_arguments',
+  'decision_commentary_missing',
+  'native_tool_host_disabled',
+  'native_session_busy',
+]);
 
 /**
- * Run a Native turn once more only for a pre-tool stream disconnect. The
- * caller supplies host invalidation so the second attempt cannot reuse the
- * connection that produced the disconnect. Unknown outcomes and any tool
- * side effect are terminal by design.
+ * Decide whether one application-level Native retry is safe. Request and
+ * stream retry budgets intentionally match Codex Main's observable defaults,
+ * while the application adds a stricter business-side-effect gate.
  */
-export async function recoverNativeStreamDisconnect({ run, invalidate, error, sideEffectStarted = false, attempt = 0 } = {}) {
+export function resolveNativeRetryDecision({
+  error,
+  state = {},
+  requestRetries = 0,
+  streamRetries = 0,
+  requestMaxRetries = NATIVE_REQUEST_MAX_RETRIES,
+  streamMaxRetries = NATIVE_STREAM_MAX_RETRIES,
+} = {}) {
   const classified = classifyAgentFailure(error);
-  if (!shouldRetryTurn({ error: classified, sideEffectStarted, attempt })) {
-    return { recovered: false, result: error, failure: classified };
-  }
-  await invalidate?.();
-  const result = await run();
-  const resultFailure = result?.status === 'failed'
-    ? classifyAgentFailure({
-      code: result.failureCode || result.error?.code,
-      message: result.errorMessage || result.error?.message,
-      retryable: result.retryable ?? result.error?.retryable,
-      outcomeUnknown: result.outcomeUnknown ?? result.error?.outcomeUnknown,
-    })
-    : null;
-  return { recovered: true, result, failure: resultFailure };
-}
-export async function reconcileImageSideEffect({ completed = false, outcomeUnknown = false } = {}) {
-  return { status: completed ? 'completed' : outcomeUnknown ? 'unknown' : 'not_started', retryable: !completed && !outcomeUnknown };
+  const code = String(classified.code || 'native_unknown_outcome');
+  const assetCount = Number(state.assetCount || 0);
+  const blockedByState = state.cancelled === true
+    || state.outcomeUnknown === true
+    || classified.outcomeUnknown === true
+    || state.providerRequestStarted === true
+    || state.sideEffectStarted === true
+    || assetCount > 0
+    || state.confirmationPending === true;
+  if (blockedByState) return { retry: false, reason: 'business_state_unsafe', code, classified };
+  if (NATIVE_RETRY_BLOCKED_CODES.has(code)) return { retry: false, reason: 'failure_not_retryable', code, classified };
+
+  const retryable = classified.retryable === true || code === 'provider_overloaded';
+  if (!retryable) return { retry: false, reason: 'failure_not_retryable', code, classified };
+
+  const lane = state.responseStarted === true ? 'stream' : 'request';
+  const retries = lane === 'stream' ? streamRetries : requestRetries;
+  const maxRetries = lane === 'stream' ? streamMaxRetries : requestMaxRetries;
+  if (retries >= maxRetries) return { retry: false, reason: 'budget_exhausted', lane, retries, maxRetries, code, classified };
+  return { retry: true, reason: 'retryable_transport_failure', lane, retries, maxRetries, code, classified };
 }
 
-export function sideEffectKey({ threadId, turnId, toolCallId, operationId } = {}) {
-  return [threadId, turnId, operationId, toolCallId].filter(Boolean).join(':');
+export function nativeRetryDelayMs(retryNumber) {
+  const normalized = Math.max(1, Number(retryNumber) || 1);
+  return Math.min(2_000, 200 * (2 ** (normalized - 1)));
 }
 
-export async function persistRecoveryRecord({ threadId, identity = {}, record, journal = { appendThreadEvent }, idempotency = new Set() } = {}) {
-  if (!threadId || !record) throw new TypeError('threadId and recovery record are required');
-  const key = `recovery:${threadId}:${identity.operationId || record.operationId || ''}`;
-  if (idempotency.has(key)) return { persisted: false, record };
-  const event = await journal.appendThreadEvent(threadId, { type: 'turn.failed', ...identity, status: 'failed', recovery: record, error: record.failure || record.error || { code: 'agent_failed' } });
-  idempotency.add(key);
-  return { persisted: true, record, event };
+export function createNativeRequestExhaustedError(error, decision = {}) {
+  return Object.assign(new Error('主模型请求在生图工具调用前断开，图片供应商尚未收到请求，可安全重试。'), {
+    code: 'native_request_exhausted',
+    failureCode: 'native_request_exhausted',
+    failureStage: 'native_request',
+    retryable: true,
+    outcomeUnknown: false,
+    retryLane: decision.lane || 'request',
+    retries: decision.retries,
+    maxRetries: decision.maxRetries,
+    cause: error,
+  });
 }
 
 export function createRecoveryRecord(input = {}) {

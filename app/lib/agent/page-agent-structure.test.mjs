@@ -249,9 +249,13 @@ test('every chat-generated image is materialized in both chat and the canvas', (
   assert.match(source, /await runGeneratedAssetPreloadQueue\(/);
   assert.match(source, /concurrency: 2/);
   assert.match(source, /signal: controller\.signal/);
-  assert.match(source, /loadedAssets\.length > 0[\s\S]{0,5000}setChatMessages\(prev => \[\.\.\.prev, \.\.\.imageMessages\]\)/);
+  const deliveryCommit = source.slice(source.indexOf('if (loadedAssets.length > 0)'), source.indexOf("console.info('[generated-asset-preload-perf]'"));
+  assert.match(deliveryCommit, /setChatMessages\(\(prev\) => \{/);
+  assert.match(deliveryCommit, /sourceItemId: sessionLiveStateRef\.current\.items\.find/);
+  assert.match(source, /imageMessages\.filter\(\(message\) => !getGeneratedAssetDeliveryPresence\(/);
   assert.match(source, /const canvasItems = loadedAssets\.map/);
-  assert.match(source, /recordCurrentCanvasUndoSnapshot\(\);\s*setItems\(prev => \[\.\.\.prev, \.\.\.canvasItems\]\)/);
+  assert.match(source, /recordCurrentCanvasUndoSnapshot\(\);\s*setItems\(\(prev\) => \{/);
+  assert.match(source, /canvasItems\.filter\(\(item\) => !getGeneratedAssetDeliveryPresence\(item, \[\], prev\)\.canvas\)/);
   assert.match(source, /type: 'assets_settled'/);
   assert.match(source, /type: 'assets_settled',[\s\S]{0,80}origin: 'client'/);
   assert.match(source, /setImageCount\(\(prev\) => prev \+ loadedAssets\.length\)/);
@@ -259,10 +263,26 @@ test('every chat-generated image is materialized in both chat and the canvas', (
   assert.doesNotMatch(source, /\[Generated image\$\{/);
   assert.match(source, /currentSessionIdRef\.current !== generationSessionId/);
   assert.match(source, /processedAgentActionKeysForRun\.add\(key\)/);
-  assert.match(source, /for \(const key of processedAgentActionKeysForRun\)[\s\S]{0,180}processedAgentActionsRef\.current\.delete\(key\)/);
+  assert.doesNotMatch(source, /for \(const key of processedAgentActionKeysForRun\)[\s\S]{0,180}processedAgentActionsRef\.current\.delete\(key\)/);
+  assert.match(source, /if \(presence\.chat && presence\.canvas\)/);
+  assert.match(source, /sessionLiveStateRef\.current\.chatMessages,[\s\S]{0,80}sessionLiveStateRef\.current\.items/);
   assert.match(source, /generateAbortRef\.current === runController/);
   assert.match(source, /pendingAssistantMessageIdRef\.current === assistantPlaceholderId/);
   assert.match(source, /recordCurrentCanvasUndoSnapshot\(\);\s*setItems\(prev => \[\.\.\.prev, newItem\]\);/);
+});
+
+test('session hydration replays undelivered persisted assets into chat and canvas without generating again', () => {
+  const start = source.indexOf('const restorePendingGeneratedAssets = useCallback');
+  const end = source.indexOf('const applyResolvedSessionState = useCallback', start);
+  const restore = source.slice(start, end);
+  assert.match(restore, /collectPendingGeneratedAssetDeliveries/);
+  assert.match(restore, /preloadGeneratedAsset\(asset, \{ signal, timeoutMs: 15_000 \}\)/);
+  assert.match(restore, /if \(!presence\.chat\) imageMessages\.push/);
+  assert.match(restore, /if \(!presence\.canvas\) canvasItems\.push/);
+  assert.match(restore, /setChatMessages\([\s\S]*setItems\([\s\S]*appendGeneratedImageHistoryForSession[\s\S]*scheduleCurrentSessionSaveRef\.current\(\)/);
+  assert.doesNotMatch(restore, /fetch\(|generate_image|handleGenerate\(/);
+  assert.match(source, /restorePendingGeneratedAssets\(hydratedSession, \[\], controller\.signal\)/);
+  assert.match(source, /restorePendingGeneratedAssets\(hydratedSession, events \|\| \[\], controller\.signal\)/);
 });
 
 test('agent batch assets render in completion order while retaining their original labels', () => {
@@ -281,6 +301,8 @@ test('generated asset preload failures always settle the agent delivery state', 
   assert.match(source, /const settleGeneratedAssetDelivery = \(\) => \{/);
   assert.match(source, /currentSessionIdRef\.current !== generationSessionId[\s\S]{0,900}generatedAssetPreloadFailureCount \+= freshAssets\.length[\s\S]{0,200}settleGeneratedAssetDelivery\(\)/);
   assert.match(source, /Generated asset preload queue failed:[\s\S]{0,700}generatedAssetPreloadFailureCount \+= freshAssets\.length[\s\S]{0,800}settleGeneratedAssetDelivery\(\)/);
+  assert.match(source, /catch \(error\) \{\s*await generatedAssetPreloadChain;\s*console\.error\('Generation failed:'/);
+  assert.match(source, /finally \{\s*await generatedAssetPreloadChain;\s*stopStreamTypewriter\(\)/);
 });
 
 test('clarification and confirmation preserve waiting agent progress', () => {
@@ -543,7 +565,7 @@ test('canvas selection references render as compact composer tokens and submit a
   assert.match(source, /workspace-reference-token/);
   assert.match(globalStyles, /\.workspace-reference-token\s*\{[\s\S]{0,180}background:\s*transparent/);
   assert.match(source, /parseChatEditorSegments/);
-  assert.match(source, /materializeChatMessageInlineContent/);
+  assert.match(source, /\? resolveChatMessageInlineContent\(msg\)/);
   assert.doesNotMatch(source, /inlineContent: currentInlineContent/);
   assert.match(source, /referenceContext: currentReferenceContext/);
   assert.match(source, /userInlineContent\.map/);
@@ -679,7 +701,7 @@ test('assistant chat content uses the Codex-style content axis while user messag
 });
 
 test('session hydration normalizes persisted Agent timelines before rendering them', () => {
-  assert.ok(source.includes('completedTranscriptMessages(state.turns, state.transcriptStartSequence, state.transcriptSummary, { events, threadId })'));
+  assert.ok(source.includes('reconcileHydratedChatMessages(messages, state, { events, threadId })'));
   assert.ok(source.includes("const key = step.itemId || `${step.stepId}:${step.toolCallId || ''}:${index}`;"));
   assert.match(source, /type: 'session_hydrate'/);
   assert.match(source, /const normalizedProgress = message\.agentRunProgress/);

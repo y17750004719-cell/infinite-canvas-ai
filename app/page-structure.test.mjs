@@ -1152,7 +1152,6 @@ test('image card provider selection updates provider and re-syncs model size asp
 
   const providerSelectBlock = pageSource.slice(providerSelectStart, providerSelectEnd);
 
-  assert.equal(providerSelectBlock.includes('const nextProvider = selectableImageProviders.find((provider) => provider.id === providerId);'), true);
   assert.equal(providerSelectBlock.includes('const nextModel = findWorkspaceModelOption(workspaceImageModelOptions, \'\', providerId);'), true);
   assert.equal(providerSelectBlock.includes('const resolvedModelId = resolveWorkspaceImageCardModel('), true);
   assert.equal(providerSelectBlock.includes('const syncedOptions = syncImageCardOptionsForProviderModel('), true);
@@ -1240,7 +1239,8 @@ test('node selection flows move selected canvas items to the front of the persis
 });
 
 test('right chat panel renders through a page-level portal above canvas overlays', () => {
-  assert.equal(pageSource.includes('const CANVAS_OVERLAY_Z = '), true);
+  assert.match(pageSource, /const CHAT_PANEL_Z = 180/);
+  assert.match(pageSource, /className="pointer-events-none fixed left-0 top-0 z-\[115\]"/);
   assert.equal(pageSource.includes('const CHAT_PANEL_Z = '), true);
   assert.equal(pageSource.includes('createPortal('), true);
   assert.equal(pageSource.includes('document.body'), true);

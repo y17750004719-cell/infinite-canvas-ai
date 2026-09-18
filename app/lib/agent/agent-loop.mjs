@@ -1,3 +1,5 @@
+import { enrichGeneratedAssetDeliveryAction } from './generated-asset-delivery.mjs';
+
 function finiteCount(value, fallback = 0) {
   return Number.isFinite(Number(value)) ? Math.max(0, Math.floor(Number(value))) : fallback;
 }
@@ -39,6 +41,13 @@ export function createAgentToolResultViews(toolName, rawResult) {
     };
   }
   if (toolName === 'generate_image') {
+    if (value.success === false || value.status === 'failed' || value.code === 'skill_lock_failed') {
+      const message = sanitizeModelValue(String(value.message || value.error || 'Image generation failed'));
+      return {
+        modelResult: { error: message, code: value.code || 'image_execution_failed', retryable: false },
+        publicResult: { kind: 'tool_error', toolName, status: 'failed', message, code: value.code || 'image_execution_failed' },
+      };
+    }
     const outputs = Array.isArray(value?.result?.outputs)
       ? value.result.outputs
       : Array.isArray(value?.assets)
@@ -116,6 +125,11 @@ function extractAgentImageAssets(rawResult) {
       ...(Number.isFinite(item?.naturalWidth) ? { naturalWidth: item.naturalWidth } : {}),
       ...(Number.isFinite(item?.naturalHeight) ? { naturalHeight: item.naturalHeight } : {}),
       ...(typeof item?.assetId === 'string' && item.assetId ? { assetId: item.assetId } : {}),
+      ...(typeof item?.slotId === 'string' && item.slotId ? { slotId: item.slotId } : {}),
+      ...(typeof item?.versionId === 'string' && item.versionId ? { versionId: item.versionId } : {}),
+      ...(typeof item?.parentVersionId === 'string' && item.parentVersionId ? { parentVersionId: item.parentVersionId } : {}),
+      ...(Number.isFinite(item?.providerReturnedAt) ? { providerReturnedAt: item.providerReturnedAt } : {}),
+      ...(Number.isFinite(item?.locallyStoredAt) ? { locallyStoredAt: item.locallyStoredAt } : {}),
       ...(typeof item?.previewSrc === 'string' && item.previewSrc ? { previewSrc: item.previewSrc } : {}),
       ...(item?.promptTrace && typeof item.promptTrace === 'object'
         ? { promptTrace: item.promptTrace }
@@ -189,14 +203,14 @@ export function createAgentToolResultEvents({
         : '';
       events.push({
         type: 'client_action',
-        action: {
+        action: enrichGeneratedAssetDeliveryAction({
           type: 'add_generated_assets',
           runId,
           assets,
           ...(providerId ? { providerId } : {}),
           ...(sourceReferenceId ? { sourceReferenceId } : {}),
           ...(presentation ? { presentation } : {}),
-        },
+        }),
       });
     }
   }

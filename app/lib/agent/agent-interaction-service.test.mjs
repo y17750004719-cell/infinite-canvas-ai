@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createInteractionService, validateVisualSkillSelection, validateConfirmation, resolveClarification, validateClarificationResponse, resolveContextSelection, resolveRecoveryContinuation, selectSkillFromInput } from './agent-interaction-service.mjs';
+import { createInteractionService, prepareAgentInteraction, validateVisualSkillSelection, validateConfirmation, resolveClarification, validateClarificationResponse, resolveContextSelection, resolveRecoveryContinuation, selectSkillFromInput } from './agent-interaction-service.mjs';
 
 test('visual Skill selection requires high confidence and image pipeline skill', () => {
   const skill = { id: 'poster', name: 'Poster', executionMode: 'image_pipeline' };
@@ -25,6 +25,18 @@ test('interaction service loads and emits selected Skill through injected depend
   assert.equal(events[0].type, 'skill_selected');
 });
 
+test('Skill loading failures are hard, structured lock failures', async () => {
+  const service = createInteractionService({ loadSkillContent: async () => { throw new Error('manifest missing'); } });
+  const result = await service.selectVisualSkill({
+    args: { skillId: 'poster', confidence: 'high' },
+    skills: [{ id: 'poster', name: 'Poster', executionMode: 'image_pipeline', allowedTools: ['generate_image'] }],
+  });
+  assert.equal(result.isError, true);
+  assert.equal(result.failureCode, 'skill_lock_failed');
+  assert.equal(result.retryable, false);
+  assert.equal(result.failureStage, 'interaction');
+});
+
 test('interaction boundaries reject stale or out-of-contract responses', () => {
   assert.equal(validateClarificationResponse({ request: { options: [{ id: 'a' }] }, response: { selectedOptionId: 'b' } }).ok, false);
   assert.equal(resolveContextSelection({ candidates: [{ id: 'a' }], selectedId: 'b' }).ok, false);
@@ -39,4 +51,20 @@ test('interaction persistence hooks are injectable', async () => {
   assert.deepEqual(await service.loadState('k'), { key: 'k' });
   assert.deepEqual(await service.saveConfirmation({ id: 'c' }), { id: 'c', saved: true });
   assert.equal(calls.length, 1);
+});
+
+test('explicit Skill requests never fall back to automatic selection', async () => {
+  await assert.rejects(
+    () => prepareAgentInteraction({
+      body: { activeSkillExplicit: true, skillSelectionSource: 'manual_ui' },
+      skillManifests: [{ id: 'poster', name: 'Poster' }],
+    }),
+    (error) => error.code === 'skill_lock_failed' && error.retryable === false,
+  );
+  const result = await prepareAgentInteraction({
+    body: { activeSkillExplicit: true, skillSelectionSource: 'manual_ui', activeSkillId: 'poster' },
+    skillManifests: [{ id: 'poster', name: 'Poster' }],
+  });
+  assert.equal(result.selectedSkill.id, 'poster');
+  assert.equal(result.skillSelectionMethod, 'manual_text');
 });

@@ -5,11 +5,12 @@ import { NativeCodexStdioClient } from './native-codex-stdio.mjs';
 import sharp from 'sharp';
 import { parseImageDataUrl } from '../api-security.mjs';
 import { CODEX_MAIN_SNAPSHOT } from './codex-main-snapshot.mjs';
+import { APPLICATION_TOOL_CAPABILITY_SNAPSHOT } from './application-tool-dispatcher.mjs';
 
 export const NATIVE_SOURCE_COMMIT = '53c542d944c705f3a66780a19223223bee57cbb6';
 export const NATIVE_DISABLED_FEATURES = Object.freeze([
   'shell_tool', 'unified_exec', 'view_image', 'sleep_tool', 'deferred_executor',
-  'code_mode', 'code_mode_host', 'code_mode_only', 'multi_agent', 'multi_agent_v2',
+  'code_mode_host', 'code_mode_only', 'multi_agent', 'multi_agent_v2',
   'hooks', 'plugins', 'recommended_plugins', 'tool_suggest', 'apps',
   'image_generation', 'web_search_request', 'web_search_cached', 'standalone_web_search',
   'request_permissions_tool', 'memories', 'goals', 'token_budget', 'current_time_reminder',
@@ -19,6 +20,22 @@ const hash = (value) => createHash('sha256').update(value).digest('hex');
 
 function failure(code) {
   return Object.assign(new Error(code), { code, failureStage: 'native_runtime', retryable: false });
+}
+
+/**
+ * Assert the boundary between the Native runtime and application tools. The
+ * Native binary may expose code-mode capabilities, but this application must
+ * never enable or route through them.
+ */
+export function assertNativeCapabilitySnapshot(snapshot, { providerProtocol = 'responses' } = {}) {
+  if (!snapshot || snapshot.wireApi !== providerProtocol
+      || snapshot.dynamicToolMethod !== APPLICATION_TOOL_CAPABILITY_SNAPSHOT.dynamicToolMethod
+      || snapshot.applicationToolsEnabled !== true
+      || snapshot.codeModeEnabled !== false
+      || snapshot.nativeImageGenerationEnabled !== false) {
+    throw failure('native_capability_mismatch');
+  }
+  return snapshot;
 }
 
 export function nativeProviderFingerprint(provider) {
@@ -60,6 +77,10 @@ export function nativeConfig(provider) {
     '[orchestrator.skills]', 'enabled = false', '[orchestrator.mcp]', 'enabled = false',
     '[skills.bundled]', 'enabled = false',
     '[features]', ...NATIVE_DISABLED_FEATURES.map((key) => `${key} = false`),
+    // Some pinned Codex models advertise `code_mode_only`.  The app-server
+    // still exposes flat application functions when the code-mode feature is
+    // disabled with an explicit direct-only namespace policy.
+    '[features.code_mode]', 'enabled = false', 'direct_only_tool_namespaces = ["functions"]',
     '[model_providers.zflow_provider]', 'name = "Application Responses provider"',
     `base_url = ${JSON.stringify(endpoint.href.replace(/\/$/, ''))}`, 'wire_api = "responses"',
     'env_key = "ZFLOW_NATIVE_PROVIDER_KEY"', 'request_max_retries = 0', 'stream_max_retries = 0',
@@ -125,15 +146,20 @@ async function createHost({ provider, runtimeRoot, scopeId }) {
     },
   });
   await client.start({ clientInfo: { name: 'zflow_native', version: '0.1.0' }, capabilities: { experimentalApi: true } });
-  return {
-    client, cwd, scopeId, privateHome,
-    capabilitySnapshot: {
+  const capabilitySnapshot = Object.freeze({
       sourceCommit: NATIVE_SOURCE_COMMIT,
       targetCodexMainCommit: CODEX_MAIN_SNAPSHOT.sourceCommit,
       wireApi: 'responses',
       disabledFeatures: [...NATIVE_DISABLED_FEATURES],
       dynamicToolMethod: CODEX_MAIN_SNAPSHOT.dynamicToolMethod,
-    },
+      applicationToolsEnabled: APPLICATION_TOOL_CAPABILITY_SNAPSHOT.applicationToolsEnabled,
+      codeModeEnabled: APPLICATION_TOOL_CAPABILITY_SNAPSHOT.codeModeEnabled,
+      nativeImageGenerationEnabled: APPLICATION_TOOL_CAPABILITY_SNAPSHOT.nativeImageGenerationEnabled,
+    });
+  assertNativeCapabilitySnapshot(capabilitySnapshot, { providerProtocol: provider.protocol });
+  return {
+    client, cwd, scopeId, privateHome,
+    capabilitySnapshot,
     registerThreadHandler(threadId, handler) {
       if (handlers.has(threadId)) throw failure('native_thread_busy');
       handlers.set(threadId, handler);

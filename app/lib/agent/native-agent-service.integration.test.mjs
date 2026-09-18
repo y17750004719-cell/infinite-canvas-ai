@@ -203,16 +203,16 @@ test('real App Server completes an ordinary no-tool request in one sample', { sk
   assert.equal(requests.length, 1);
 });
 
-test('real App Server cannot execute a side-effect tool after two samples omit commentary', { skip: !binaryAvailable }, async () => {
+test('real App Server uses the safe fallback for generate_image when samples omit commentary', { skip: !binaryAvailable }, async () => {
   let executions = 0;
   const { result, requests } = await runSimpleRealScenario({
     tools: [{ name: 'generate_image', description: 'Generate.', parameters: { type: 'object', properties: {}, additionalProperties: false }, requiresCommentary: true }],
     executeTool: async () => { executions += 1; return { modelResult: { completed: true } }; },
-    responseItems: (index) => index <= 2
-      ? [{ type: 'response.output_item.done', item: { type: 'function_call', call_id: `missing-commentary-${index}`, name: 'generate_image', arguments: '{}' } }]
+    responseItems: (index) => index === 1
+      ? [{ type: 'response.output_item.done', item: { type: 'function_call', call_id: 'missing-commentary-1', name: 'generate_image', arguments: '{}' } }]
       : [{ type: 'response.output_item.done', item: { id: 'fallback', type: 'message', role: 'assistant', phase: 'final_answer', content: [{ type: 'output_text', text: 'Stopped.' }] } }],
   });
-  assert.equal(executions, 0);
+  assert.equal(executions, 1);
   assert.ok(requests.length >= 2);
   assert.notEqual(result.status, 'waiting');
 });

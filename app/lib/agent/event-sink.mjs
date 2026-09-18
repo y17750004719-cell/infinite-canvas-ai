@@ -12,7 +12,11 @@ export function createEventSink({ journal, streamController, encoder = new TextE
     persistCanonicalEvents({ threadId, events = [] } = {}) {
       for (const event of events) {
         tail = tail.then(async () => {
-          const identity = event.eventId || (event.sequence !== undefined ? `${threadId}:${event.sequence}` : null);
+          // Sequence numbers are scoped to a turn/run; include event type and
+          // stable identities so a failed turn cannot suppress a later event.
+          const identity = event.eventId || (event.sequence !== undefined
+            ? `${threadId}:${event.runId || ''}:${event.turnId || ''}:${event.sequence}:${event.type || ''}`
+            : null);
           if (identity && persisted.has(identity)) return;
           const saved = await journal.appendThreadEvent(threadId, event);
           if (identity) persisted.add(identity);

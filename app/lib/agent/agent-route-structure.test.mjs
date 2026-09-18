@@ -15,13 +15,20 @@ const recoveryPath = path.resolve(import.meta.dirname, 'agent-recovery-service.m
 const managementPath = path.resolve(import.meta.dirname, 'agent-management-service.mjs');
 const replayPath = path.resolve(import.meta.dirname, 'thread-replay-service.mjs');
 const contextPath = path.resolve(import.meta.dirname, 'context-reference.mjs');
+const admissionPath = path.resolve(import.meta.dirname, 'agent-request-admission-service.mjs');
+const streamRunPath = path.resolve(import.meta.dirname, 'agent-request-stream-run-service.mjs');
+const mainAgentFlowPath = path.resolve(import.meta.dirname, 'agent-main-agent-flow.mjs');
+const confirmationPath = path.resolve(import.meta.dirname, 'agent-confirmation-continuation-service.mjs');
+const executionContextPath = path.resolve(import.meta.dirname, 'agent-request-execution-context-service.mjs');
 const read = (file) => fs.readFileSync(file, 'utf8');
 
 test('all chat modes use the Codex Main runtime gateway entry', () => {
   const route = read(routePath);
   const page = read(pagePath);
-  assert.match(route, /import \{ runAgentTurn \} from ['"]\.\/agent-turn-orchestrator\.mjs['"]/);
-  assert.equal((route.match(/runAgentTurn\(/g) || []).length, 1);
+  const mainAgentFlow = read(mainAgentFlowPath);
+  assert.match(route, /import \{ runMainAgentFlow \} from ['"]\.\/agent-main-agent-flow\.mjs['"]/);
+  assert.match(route, /runMainAgent: runMainAgentFlow/);
+  assert.match(mainAgentFlow, /runAgentTurn\(\{ startKeepalive, request \}\)/);
   assert.doesNotMatch(route, /from ['"]\.\/thread-journal\.mjs['"]/);
   assert.doesNotMatch(route, /runCodexMainTurn/);
   assert.match(page, /const usesAgentRequest = true/);
@@ -41,12 +48,13 @@ test('management commands and GET replay are delegated to dedicated services', (
 
 test('the route remains an authenticated streaming adapter with server-owned run identity', () => {
   const route = read(routePath);
-  assert.match(route, /error: 'sessionId is required'/);
-  assert.match(route, /const runId = randomUUID\(\)/);
+  const admission = read(admissionPath);
+  assert.match(admission, /error: 'sessionId is required'/);
+  assert.match(admission, /const runId = randomUUID\(\)/);
   assert.match(route, /registerActiveAgentRun\(runId, initialAgentIdentity\)/);
   assert.match(route, /application\/x-ndjson/);
   assert.match(route, /writeLifecycleEvent/);
-  assert.match(route, /code: 'stale_operation'/);
+  assert.match(admission, /code: 'stale_operation'/);
 });
 
 test('native service exposes only registered dynamic business tools and no execution environment', () => {
@@ -62,7 +70,7 @@ test('native service exposes only registered dynamic business tools and no execu
 
 test('native host disables coding, plugins, web search, subagents, and native image generation', () => {
   const host = read(hostPath);
-  for (const capability of ['shell_tool', 'unified_exec', 'code_mode', 'multi_agent', 'plugins', 'image_generation', 'web_search_request']) {
+  for (const capability of ['shell_tool', 'unified_exec', 'multi_agent', 'plugins', 'image_generation', 'web_search_request']) {
     assert.match(host, new RegExp(`'${capability}'`));
   }
   assert.match(host, /approval_policy = "never"/);
@@ -70,6 +78,8 @@ test('native host disables coding, plugins, web search, subagents, and native im
   assert.match(host, /wire_api = "responses"/);
   assert.match(host, /request_max_retries = 0/);
   assert.match(host, /stream_max_retries = 0/);
+  assert.match(host, /\[features\.code_mode\]/);
+  assert.match(host, /direct_only_tool_namespaces = \["functions"\]/);
 });
 
 test('business tools execute through the native callback and image side effects use the durable ledger', () => {
@@ -77,35 +87,56 @@ test('business tools execute through the native callback and image side effects 
   const ledger = read(ledgerPath);
   const dispatcher = read(dispatcherPath);
   const recovery = read(recoveryPath);
-  assert.match(route, /executeTool: async \(toolName, args, context\) =>/);
-  assert.match(route, /dispatchRegisteredApplicationTool\(/);
+  assert.doesNotMatch(route, /createToolCallback:/);
+  assert.doesNotMatch(route, /dispatchRegisteredApplicationTool\(/);
+  assert.match(read(path.resolve(import.meta.dirname, 'agent-turn-execution-service.mjs')), /createDynamicToolCallback/);
   assert.match(dispatcher, /executeAgentTool\(registry, requestedTool, requestedArgs/);
   assert.match(recovery, /createRecoveryRecord/);
-  assert.match(route, /executeNativeBusinessOperation\(\{/);
-  assert.match(route, /tool:\s*'generate_image'/);
+  assert.doesNotMatch(route, /executeNativeBusinessOperation\(\{/);
+  assert.match(dispatcher, /generate_image/);
+  assert.match(read(new URL('./agent-image-execution-flow.mjs', import.meta.url)), /executeNativeBusinessOperation/);
   assert.match(ledger, /contractHash = hashNativeBusinessContract\(contract\)/);
   assert.match(ledger, /if \(existing\.status === 'completed'\) return existing\.result/);
   assert.match(ledger, /Business operation result is unknown; explicit reconciliation is required/);
 });
 
-test('reference images are materialized, decoded, and sent as native structured image input', () => {
+test('request runtime keeps Native image execution and delivery state in live refs', () => {
   const route = read(routePath);
+  for (const name of [
+    'skillContent',
+    'skillContentHash',
+    'nativeGeneratedImageResult',
+    'nativeImageFailure',
+    'directGenerateImageCall',
+    'directGenerateImageCallId',
+    'directImageExecution',
+    'lockedImageToolArgs',
+  ]) {
+    assert.match(route, new RegExp(`${name}: ref\\('${name}'`));
+  }
+  // The registry is created before the Native loop; it must receive the same
+  // live refs, otherwise the image handler sees a stale empty Skill hash and
+  // its result setters become no-ops.
+  assert.ok((route.match(/skillContentHash: ref\('skillContentHash'/g) || []).length >= 2);
+  assert.ok((route.match(/nativeGeneratedImageResult: ref\('nativeGeneratedImageResult'/g) || []).length >= 2);
+});
+
+test('reference images are materialized, decoded, and sent as native structured image input', () => {
+  const nativeFlow = read(path.resolve(import.meta.dirname, 'agent-native-turn-flow.mjs'));
   const host = read(hostPath);
-  assert.match(route, /await materializeSessionVisualAsset\(\{/);
-  assert.match(route, /await readSessionVisualAsset\(asset\)/);
-  assert.match(route, /nativeImages\.push\(`data:\$\{asset\.mimeType\};base64,/);
-  assert.match(route, /images: nativeImages/);
+  assert.match(nativeFlow, /materializeNativeImages/);
+  assert.match(nativeFlow, /images/);
   assert.match(host, /input\.push\(\{ type: 'image', url: image \}\)/);
   assert.match(host, /parseImageDataUrl/);
   assert.match(host, /native_image_payload_invalid/);
 });
 
 test('ImageGen and a locked visual Skill are injected as verified native Skill inputs', () => {
-  const route = read(routePath);
+  const streamRun = read(streamRunPath);
   const host = read(hostPath);
-  assert.match(route, /id: IMAGEGEN_HOST_SKILL_ID/);
-  assert.match(route, /\.\.\.\(selectedSkill && skillContent/);
-  assert.match(route, /content: skillContent, hash: skillContentHash/);
+  assert.match(streamRun, /id: imagegenHostSkillId/);
+  assert.match(streamRun, /get\('selectedSkill', selectedSkill\) && skillContent/);
+  assert.match(streamRun, /content: skillContent, hash: skillContentHash/);
   assert.match(host, /native_skill_hash_mismatch/);
   assert.match(host, /native_skill_context_limit/);
   assert.match(host, /input\.push\(\{ type: 'skill', name, path \}\)/);
@@ -113,20 +144,21 @@ test('ImageGen and a locked visual Skill are injected as verified native Skill i
 
 test('model-selected visual Skills require high confidence and return complete locked rules', () => {
   const route = read(routePath);
-  assert.match(route, /name: 'select_visual_skill'/);
-  assert.match(route, /if \(args\.confidence !== 'high'\)/);
-  assert.match(route, /const content = await loadSkillContent\(skill\.id\)/);
-  assert.match(route, /content, contentHash: skillContentHash, truncated: false/);
+  assert.match(read(mainAgentFlowPath), /name: 'select_visual_skill'/);
+  const interaction = read(path.resolve(import.meta.dirname, 'agent-interaction-service.mjs'));
+  assert.match(interaction, /confidence !== 'high'/);
+  assert.match(interaction, /loadSkillContent/);
+  assert.match(interaction, /contentHash/);
   assert.doesNotMatch(route, /findDirectSkillMatches\(|selectSkillForPrompt\(/);
 });
 
 test('native public items are projected to the existing timeline without exposing raw response items', () => {
-  const route = read(routePath);
   const service = read(servicePath);
-  assert.match(route, /event\.method === 'item\/started'/);
-  assert.match(route, /event\.method === 'item\/completed'/);
-  assert.match(route, /type === 'dynamicToolCall'/);
-  assert.match(route, /type === 'agentMessage'/);
+  const execution = read(path.resolve(import.meta.dirname, 'agent-turn-execution-service.mjs'));
+  assert.match(execution, /item\/started/);
+  assert.match(execution, /item\/completed/);
+  assert.match(execution, /dynamicToolCall/);
+  assert.match(execution, /agentMessage/);
   assert.match(service, /method: 'zflow\/model_sample_completed'/);
   assert.match(service, /PRIVATE_TEXT_PATTERN/);
 });
@@ -139,12 +171,15 @@ test('HTTP disconnect is not wired directly to native cancellation', () => {
 
 test('confirmation and recovery retain durable business identities', () => {
   const route = read(routePath);
-  assert.match(route, /saveNativeConfirmation/);
-  assert.match(route, /loadNativeConfirmation/);
-  assert.match(route, /claimNativeConfirmation/);
-  assert.match(route, /taskId, operationId, runId/);
+  assert.match(route, /createConfirmationContinuationService/);
+  const confirmation = read(confirmationPath);
+  const executionContext = read(executionContextPath);
+  assert.match(confirmation, /saveConfirmation/);
+  assert.match(confirmation, /loadConfirmation/);
+  assert.match(confirmation, /claimConfirmation/);
+  assert.match(read(streamRunPath), /identity: \{ taskId, operationId, runId \}/);
   assert.match(route, /recoveryBaseRecord/);
-  assert.match(route, /activeVersions/);
+  assert.match(executionContext, /activeVersions:/);
 });
 
 test('local context resolution uses explicit stable IDs rather than semantic history guessing', () => {

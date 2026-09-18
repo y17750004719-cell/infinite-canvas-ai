@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import Image from 'next/image';
 import { useRouter, useParams } from 'next/navigation';
 import { ArrowLeft, Edit3, Trash2, Sparkles, Image as ImageIcon, Type, Square, FolderOpen, ArrowRight } from 'lucide-react';

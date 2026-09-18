@@ -1,11 +1,15 @@
 export function classifyImagePostRetry({
   kind,
   status = undefined,
+  failureCode = null,
   streamUnsupported = false,
   callerAborted = false,
   attempt = 1,
   maxAttempts = 1,
 }) {
+  if (failureCode === 'provider_permission_denied') {
+    return { retry: false, retryWithoutStream: false, outcomeUnknown: false, failureCode };
+  }
   if (callerAborted) {
     return { retry: false, retryWithoutStream: false, outcomeUnknown: false, failureCode: null };
   }

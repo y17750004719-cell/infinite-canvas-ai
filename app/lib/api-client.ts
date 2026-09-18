@@ -215,7 +215,7 @@ export interface UnifiedImageRequest {
 
 export class ImageGenerationError extends Error {
   failureClass?: "transport" | "timeout" | "upstream_http" | "payload" | "unknown";
-  failureCode?: "provider_unavailable" | "provider_http" | "provider_timeout" | "provider_result_unknown" | "gemini_payload_unsupported" | "gemini_empty_result" | "transport" | "invalid_tool_arguments" | "provider_protocol_unsupported";
+  failureCode?: "provider_permission_denied" | "provider_unavailable" | "provider_http" | "provider_timeout" | "provider_result_unknown" | "gemini_payload_unsupported" | "gemini_empty_result" | "transport" | "invalid_tool_arguments" | "provider_protocol_unsupported";
   isRetryable?: boolean;
   retryAttempt?: number;
   outcomeUnknown?: boolean;
@@ -230,7 +230,7 @@ export class ImageGenerationError extends Error {
     public statusCode?: number,
     meta?: {
       failureClass?: "transport" | "timeout" | "upstream_http" | "payload" | "unknown";
-      failureCode?: "provider_unavailable" | "provider_http" | "provider_timeout" | "provider_result_unknown" | "gemini_payload_unsupported" | "gemini_empty_result" | "transport" | "invalid_tool_arguments" | "provider_protocol_unsupported";
+      failureCode?: "provider_permission_denied" | "provider_unavailable" | "provider_http" | "provider_timeout" | "provider_result_unknown" | "gemini_payload_unsupported" | "gemini_empty_result" | "transport" | "invalid_tool_arguments" | "provider_protocol_unsupported";
       isRetryable?: boolean;
       retryAttempt?: number;
       outcomeUnknown?: boolean;
@@ -533,10 +533,18 @@ function classifyGeminiImageTransportFailure(error: unknown): {
 
 function classifyImageProviderHttpFailure(status: number, errorText: string): {
   failureClass: "upstream_http";
-  failureCode: "provider_unavailable" | "provider_http" | "invalid_tool_arguments";
+  failureCode: "provider_permission_denied" | "provider_unavailable" | "provider_http" | "invalid_tool_arguments";
   isRetryable: boolean;
 } {
   const normalized = errorText.toLowerCase();
+  if (
+    normalized.includes('permission_error')
+    || normalized.includes('permission denied')
+    || normalized.includes('insufficient permission')
+    || normalized.includes('not authorized')
+  ) {
+    return { failureClass: "upstream_http", failureCode: "provider_permission_denied", isRetryable: false };
+  }
   if (normalized.includes('no enabled channel for model') || normalized.includes('no available compatible accounts')) {
     return { failureClass: "upstream_http", failureCode: "provider_unavailable", isRetryable: false };
   }
@@ -1279,7 +1287,7 @@ async function generateGeminiOfficialImage(request: UnifiedImageRequest): Promis
 
 async function generateOpenAiCompatibleImage(request: UnifiedImageRequest): Promise<GenerationResponse> {
   const requestedModel = request.requestedModel || request.model;
-  const { provider, providerTargets, apiKey, imageGenerationUrl, imageEditUrl, taskBaseUrl } = await getProviderTransport({
+  const { provider, apiKey, imageGenerationUrl, imageEditUrl, taskBaseUrl } = await getProviderTransport({
     providerId: request.providerId,
     model: requestedModel,
     purpose: "image",
@@ -2282,7 +2290,7 @@ export async function chat(
   request: ChatRequest
 ): Promise<ChatResponse> {
   request = normalizeChatRequest(request);
-  const { provider, providerTargets, apiKey, protocol, headers, chatBaseUrl } = await getProviderTransport({
+  const { provider, apiKey, protocol, headers, chatBaseUrl } = await getProviderTransport({
     providerId: request.providerId,
     model: request.model,
     purpose: "chat",
@@ -2474,7 +2482,7 @@ export async function* chatStream(
   request: ChatStreamRequest
 ): AsyncGenerator<ChatStreamEvent, void, unknown> {
   request = normalizeChatRequest(request);
-  const { provider, providerTargets, apiKey, protocol, headers, chatBaseUrl } = await getProviderTransport({
+  const { provider, apiKey, protocol, headers, chatBaseUrl } = await getProviderTransport({
     providerId: request.providerId,
     model: request.model,
     purpose: "chat",

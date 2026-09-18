@@ -1,20 +1,58 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
+import { rm } from 'node:fs/promises';
 import path from 'node:path';
 import { createServer } from 'node:http';
 import { once } from 'node:events';
-import { runNativeAgentTurn } from './native-agent-service.ts';
+import { runNativeAgentTurn, normalizeNativeToolCall, markNativeContextForRotation } from './native-agent-service.ts';
+import { loadThread, updateThreadState } from './thread-journal.mjs';
+
+test('normalizes provider function/custom tool calls to item/tool/call', () => {
+  const result = normalizeNativeToolCall({
+    threadId: 'thread-1', turnId: 'turn-1',
+    item: { type: 'custom_tool_call', call_id: 'call-1', name: 'generate_image', arguments: '{"prompt":"x"}' },
+  });
+  assert.deepEqual(result, {
+    ok: true, protocol: 'item/tool/call', threadId: 'thread-1', turnId: 'turn-1',
+    callId: 'call-1', tool: 'generate_image', arguments: { prompt: 'x' },
+  });
+});
+
+test('rejects code-mode tools before they reach the Native host', () => {
+  const result = normalizeNativeToolCall({
+    threadId: 'thread-1', turnId: 'turn-1', callId: 'call-1', tool: 'exec', arguments: {},
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, 'tool_not_allowed');
+  assert.equal(result.error.retryable, false);
+  const hostResult = normalizeNativeToolCall({
+    threadId: 'thread-1', turnId: 'turn-1', callId: 'call-2', tool: 'code_mode_host', arguments: {},
+  });
+  assert.equal(hostResult.ok, false);
+  assert.equal(hostResult.error.code, 'native_tool_host_disabled');
+});
+
+test('rejects malformed provider tool arguments without retry', () => {
+  const result = normalizeNativeToolCall({
+    threadId: 'thread-1', turnId: 'turn-1', callId: 'call-1', tool: 'generate_image', arguments: '{bad',
+  });
+  assert.equal(result.ok, false);
+  assert.equal(result.error.code, 'provider_tool_protocol_invalid');
+  assert.equal(result.error.retryable, false);
+});
 
 function fakeHost({ script }) {
   const handlers = new Map();
+  const requests = [];
+  let threadSequence = 0;
   let resolveExit;
   const client = {
     exitPromise: new Promise((resolve) => { resolveExit = resolve; }),
     async request(method, params) {
+      requests.push({ method, params });
       if (method === 'thread/start' || method === 'thread/resume') {
-        return { thread: { id: params.threadId || 'native-thread-1' } };
+        if (method === 'thread/start') threadSequence += 1;
+        return { thread: { id: params.threadId || `native-thread-${threadSequence}` } };
       }
       if (method === 'turn/start') {
         setImmediate(() => script({ handler: handlers.get(params.threadId), threadId: params.threadId, turnId: 'native-turn-1' }));
@@ -36,6 +74,7 @@ function fakeHost({ script }) {
       return () => handlers.delete(threadId);
     },
     exit: () => resolveExit(),
+    requests,
   };
 }
 
@@ -90,24 +129,213 @@ test('native service requires commentary from the same upstream sample and conti
   assert.equal(JSON.stringify(events).includes('function_call'), false);
 });
 
-test('native service blocks side effects when the originating sample omitted commentary', async () => {
+test('native service correlates canonical commentary with a generate_image call', async () => {
+  let executions = 0;
+  const events = [];
+  const host = fakeHost({ script: async ({ handler, threadId, turnId }) => {
+    await handler.onNotification({ method: 'item/started', params: {
+      threadId, turnId, item: { id: 'commentary-1', type: 'agentMessage', phase: 'commentary', text: 'I will submit the validated image request now.' },
+    } });
+    await handler.onNotification({ method: 'item/completed', params: {
+      threadId, turnId, item: { id: 'call-canonical', type: 'dynamicToolCall', tool: 'generate_image', status: 'in_progress' },
+    } });
+    const response = await handler.onToolCall({ params: { threadId, turnId, callId: 'call-canonical', tool: 'generate_image', arguments: {} } });
+    assert.equal(response.success, true);
+    await handler.onNotification({ method: 'turn/completed', params: { threadId, turn: { id: turnId, status: 'completed' } } });
+  } });
+  const result = await runWithHost(host, {
+    executeTool: async () => { executions += 1; return { modelResult: { completed: true } }; },
+    onEvent: (event) => events.push(event),
+  });
+  assert.equal(result.status, 'completed');
+  assert.equal(executions, 1);
+  assert.equal(events.some((event) => event.method === 'zflow/tool/progress' && event.params?.commentaryFallbackUsed === true), false);
+});
+
+test('native service uses a server commentary fallback for generate_image without commentary', async () => {
+  let executions = 0;
+  const events = [];
+  const host = fakeHost({ script: async ({ handler, threadId, turnId }) => {
+    await handler.onNotification({ method: 'rawResponseItem/completed', params: {
+      threadId, turnId, item: { type: 'function_call', name: 'generate_image', arguments: '{}', call_id: 'call-fallback' },
+    } });
+    await handler.onNotification({ method: 'rawResponse/completed', params: { threadId, turnId, responseId: 'response-fallback' } });
+    const response = await handler.onToolCall({ params: { threadId, turnId, callId: 'call-fallback', tool: 'generate_image', arguments: {} } });
+    assert.equal(response.success, true);
+    await handler.onNotification({ method: 'turn/completed', params: { threadId, turn: { id: turnId, status: 'completed' } } });
+  } });
+  const result = await runWithHost(host, {
+    executeTool: async (_name, _args, context) => {
+      executions += 1;
+      assert.equal(context.commentaryFallbackUsed, true);
+      return { modelResult: { completed: true } };
+    },
+    onEvent: (event) => events.push(event),
+  });
+  assert.equal(result.status, 'completed');
+  assert.equal(executions, 1);
+  assert.equal(events.filter((event) => event.method === 'zflow/tool/progress' && event.params?.commentaryFallbackUsed === true).length, 1);
+});
+
+test('native service resumes a bounded generation without resending a resident image', async () => {
+  const referencePixels = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=';
+  const host = fakeHost({ script: async ({ handler, threadId, turnId }) => {
+    await handler.onNotification({ method: 'item/completed', params: {
+      threadId, turnId, item: { id: `answer-${host.requests.length}`, type: 'agentMessage', phase: 'final_answer', text: 'Done.' },
+    } });
+    await handler.onNotification({ method: 'turn/completed', params: { threadId, turn: { id: turnId, status: 'completed' } } });
+  } });
+  const sessionId = `native-bounded-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const makeInput = () => ({
+    sessionId,
+    identity: { taskId: 'task-bounded', operationId: 'operation-bounded', runId: 'run-bounded' },
+    provider: { id: 'test', model: 'test-model', baseUrl: 'http://127.0.0.1:1/v1', apiKey: 'test', protocol: 'responses' },
+    userText: 'Use this image.', images: [referencePixels], baseInstructions: 'Test.', developerInstructions: 'Explain before tools.',
+    tools: [], acquireHost: async () => host, executeTool: async () => ({}),
+  });
+  try {
+    assert.equal((await runNativeAgentTurn(makeInput())).status, 'completed');
+    assert.equal((await runNativeAgentTurn(makeInput())).status, 'completed');
+    const threadMethods = host.requests.filter((request) => request.method === 'thread/start' || request.method === 'thread/resume');
+    assert.deepEqual(threadMethods.map((request) => request.method), ['thread/start', 'thread/resume']);
+    const turns = host.requests.filter((request) => request.method === 'turn/start');
+    assert.equal(JSON.stringify(turns[0].params.input).includes(referencePixels), true);
+    assert.equal(JSON.stringify(turns[1].params.input).includes(referencePixels), false);
+    assert.match(JSON.stringify(turns[1].params.input), /already resident/);
+    const stored = await loadThread(sessionId);
+    assert.equal(stored.state.nativeCodex.contextLedger.generation, 1);
+    assert.equal(stored.state.nativeCodex.contextLedger.turnCount, 2);
+    assert.equal(stored.state.nativeCodex.contextLedger.imageOccurrences, 2);
+    assert.equal(stored.state.nativeCodex.contextLedger.uniqueImageHashes.length, 1);
+  } finally {
+    await rm(path.join(process.cwd(), 'runtime', 'agent-threads', sessionId), { recursive: true, force: true });
+  }
+});
+
+test('native service rotates a legacy persisted thread and emits bounded-context diagnostics', async () => {
+  const host = fakeHost({ script: async ({ handler, threadId, turnId }) => {
+    await handler.onNotification({ method: 'turn/completed', params: { threadId, turn: { id: turnId, status: 'completed' } } });
+  } });
+  const sessionId = `native-legacy-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const events = [];
+  try {
+    await updateThreadState(sessionId, { nativeCodex: {
+      threadId: 'old-unbounded-thread', scopeId: 'test-scope',
+      providerFingerprint: 'test\u0000test-model\u0000http://127.0.0.1:1/v1\u0000responses',
+    } });
+    const result = await runNativeAgentTurn({
+      sessionId,
+      identity: { taskId: 'task-legacy', operationId: 'operation-legacy', runId: 'run-legacy' },
+      provider: { id: 'test', model: 'test-model', baseUrl: 'http://127.0.0.1:1/v1', apiKey: 'test', protocol: 'responses' },
+      userText: 'Generate a cat.', baseInstructions: 'Test.', developerInstructions: 'Explain before tools.', tools: [],
+      acquireHost: async () => host, executeTool: async () => ({}), onEvent: (event) => events.push(event),
+    });
+    assert.equal(result.status, 'completed');
+    const threadMethods = host.requests.filter((request) => request.method === 'thread/start' || request.method === 'thread/resume');
+    assert.deepEqual(threadMethods.map((request) => request.method), ['thread/start']);
+    const diagnostic = events.find((event) => event.method === 'zflow/native_context_prepared');
+    assert.equal(diagnostic.params.rotationReason, 'legacy_thread');
+    assert.equal(diagnostic.params.nativeGeneration, 1);
+  } finally {
+    await rm(path.join(process.cwd(), 'runtime', 'agent-threads', sessionId), { recursive: true, force: true });
+  }
+});
+
+test('adapter retry can force the next Native attempt onto a new generation', async () => {
+  const sessionId = `native-retry-rotation-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  try {
+    await updateThreadState(sessionId, { nativeCodex: {
+      threadId: 'thread-before-retry', scopeId: 'scope', providerFingerprint: 'provider', generation: 2,
+      contextLedger: {
+        version: 1, generation: 2, nativeThreadId: 'thread-before-retry', turnCount: 3,
+        estimatedInputTokens: 100, serializedInputBytes: 100, imageOccurrences: 0,
+        uniqueImageHashes: [], residentAssetIds: [], summaryVersion: 0, lastTurnStatus: 'completed',
+      },
+    } });
+    assert.equal(await markNativeContextForRotation(sessionId, 'adapter_retry'), true);
+    const stored = await loadThread(sessionId);
+    assert.equal(stored.state.nativeCodex.contextLedger.forcedRotationReason, 'adapter_retry');
+    assert.equal(stored.state.nativeCodex.contextLedger.lastTurnStatus, 'transport_incomplete');
+  } finally {
+    await rm(path.join(process.cwd(), 'runtime', 'agent-threads', sessionId), { recursive: true, force: true });
+  }
+});
+
+test('native service blocks ordinary side effects when the originating sample omitted commentary', async () => {
   let executions = 0;
   const host = fakeHost({ script: async ({ handler, threadId, turnId }) => {
     await handler.onNotification({ method: 'rawResponseItem/completed', params: {
-      threadId, turnId, item: { type: 'function_call', name: 'generate_image', arguments: '{}', call_id: 'call-1' },
+      threadId, turnId, item: { type: 'function_call', name: 'read_relevant_context', arguments: '{}', call_id: 'call-1' },
     } });
     await handler.onNotification({ method: 'rawResponse/completed', params: { threadId, turnId, responseId: 'response-1' } });
-    const response = await handler.onToolCall({ params: { threadId, turnId, callId: 'call-1', tool: 'generate_image', arguments: {} } });
+    const response = await handler.onToolCall({ params: { threadId, turnId, callId: 'call-1', tool: 'read_relevant_context', arguments: {} } });
     assert.equal(response.success, false);
     assert.match(response.contentItems[0].text, /decision_commentary_missing/);
     await handler.onNotification({ method: 'turn/completed', params: { threadId, turn: { id: turnId, status: 'failed', error: { message: 'stopped' } } } });
   } });
-  const result = await runWithHost(host, { executeTool: async () => { executions += 1; return {}; } });
+  const result = await runWithHost(host, {
+    tools: [{ name: 'read_relevant_context', description: 'Read context.', parameters: { type: 'object' }, requiresCommentary: true, commentaryPolicy: 'server_fallback' }],
+    executeTool: async () => { executions += 1; return {}; },
+  });
   assert.equal(result.status, 'failed');
   assert.equal(executions, 0);
 });
 
-test('native service rejects unsafe commentary and does not project it publicly', async () => {
+test('native service does not reuse prior-sample commentary for a later ordinary tool call', async () => {
+  let executions = 0;
+  const host = fakeHost({ script: async ({ handler, threadId, turnId }) => {
+    await handler.onNotification({ method: 'rawResponseItem/completed', params: {
+      threadId, turnId, item: { type: 'message', role: 'assistant', phase: 'commentary', content: [{ type: 'output_text', text: 'I will read the approved context before continuing this request.' }] },
+    } });
+    await handler.onNotification({ method: 'rawResponseItem/completed', params: {
+      threadId, turnId, item: { type: 'function_call', name: 'read_relevant_context', arguments: '{}', call_id: 'call-with-commentary' },
+    } });
+    const first = await handler.onToolCall({ params: { threadId, turnId, callId: 'call-with-commentary', tool: 'read_relevant_context', arguments: {} } });
+    assert.equal(first.success, true);
+    await handler.onNotification({ method: 'rawResponse/completed', params: { threadId, turnId, responseId: 'response-1' } });
+    await handler.onNotification({ method: 'rawResponseItem/completed', params: {
+      threadId, turnId, item: { type: 'function_call', name: 'read_relevant_context', arguments: '{}', call_id: 'call-without-commentary' },
+    } });
+    const second = await handler.onToolCall({ params: { threadId, turnId, callId: 'call-without-commentary', tool: 'read_relevant_context', arguments: {} } });
+    assert.equal(second.success, false);
+    assert.match(second.contentItems[0].text, /decision_commentary_missing/);
+    await handler.onNotification({ method: 'turn/completed', params: { threadId, turn: { id: turnId, status: 'failed', error: { message: 'stopped' } } } });
+  } });
+  const result = await runWithHost(host, {
+    tools: [{ name: 'read_relevant_context', description: 'Read context.', parameters: { type: 'object' }, requiresCommentary: true }],
+    executeTool: async () => { executions += 1; return {}; },
+  });
+  assert.equal(result.status, 'failed');
+  assert.equal(executions, 1);
+});
+
+test('native service fails fast when the application tool host is disabled', async () => {
+  const host = fakeHost({ script: async ({ handler, threadId, turnId }) => {
+    await handler.onNotification({ method: 'rawResponseItem/completed', params: {
+      threadId, turnId, item: { type: 'message', role: 'assistant', phase: 'commentary', content: [{ type: 'output_text', text: 'I will generate the image now.' }] },
+    } });
+    await handler.onNotification({ method: 'rawResponseItem/completed', params: {
+      threadId, turnId, item: { type: 'function_call', name: 'generate_image', arguments: '{}', call_id: 'call-disabled' },
+    } });
+    await handler.onNotification({ method: 'rawResponse/completed', params: { threadId, turnId, responseId: 'response-disabled' } });
+    const response = await handler.onToolCall({ params: { threadId, turnId, callId: 'call-disabled', tool: 'generate_image', arguments: {} } });
+    assert.equal(response.success, false);
+    assert.match(response.contentItems[0].text, /native_tool_host_disabled/);
+  } });
+  const started = Date.now();
+  const result = await runWithHost(host, {
+    turnTimeoutMs: 1000,
+    executeTool: async () => ({ isError: true, modelResult: {
+      code: 'native_capability_disabled', message: 'code-mode host is disabled',
+    } }),
+  });
+  assert.ok(Date.now() - started < 500, 'disabled host should not wait for turn timeout');
+  assert.equal(result.status, 'failed');
+  assert.equal(result.error.code, 'native_tool_host_disabled');
+  assert.equal(result.error.retryable, false);
+});
+
+test('native service rejects unsafe commentary for ordinary tools and does not project it publicly', async () => {
   let executions = 0;
   const events = [];
   const host = fakeHost({ script: async ({ handler, threadId, turnId }) => {
@@ -119,14 +347,15 @@ test('native service rejects unsafe commentary and does not project it publicly'
       threadId, turnId, item: { id: 'commentary-1', type: 'agentMessage', phase: 'commentary', text: unsafeText },
     } });
     await handler.onNotification({ method: 'rawResponseItem/completed', params: {
-      threadId, turnId, item: { type: 'function_call', name: 'generate_image', arguments: '{}', call_id: 'call-unsafe' },
+      threadId, turnId, item: { type: 'function_call', name: 'read_relevant_context', arguments: '{}', call_id: 'call-unsafe' },
     } });
-    const response = await handler.onToolCall({ params: { threadId, turnId, callId: 'call-unsafe', tool: 'generate_image', arguments: {} } });
+    const response = await handler.onToolCall({ params: { threadId, turnId, callId: 'call-unsafe', tool: 'read_relevant_context', arguments: {} } });
     assert.equal(response.success, false);
     assert.match(response.contentItems[0].text, /decision_commentary_missing/);
     await handler.onNotification({ method: 'turn/completed', params: { threadId, turn: { id: turnId, status: 'failed', error: { message: 'stopped' } } } });
   } });
   const result = await runWithHost(host, {
+    tools: [{ name: 'read_relevant_context', description: 'Read context.', parameters: { type: 'object' }, requiresCommentary: true }],
     executeTool: async () => { executions += 1; return {}; },
     onEvent: (event) => events.push(event),
   });
@@ -136,21 +365,24 @@ test('native service rejects unsafe commentary and does not project it publicly'
   assert.equal(events.some((event) => event.method === 'item/completed' && event.params?.item?.phase === 'commentary'), false);
 });
 
-test('native service rejects empty or too-short commentary before side effects', async () => {
+test('native service rejects empty or too-short commentary for ordinary tools', async () => {
   let executions = 0;
   const host = fakeHost({ script: async ({ handler, threadId, turnId }) => {
     await handler.onNotification({ method: 'rawResponseItem/completed', params: {
       threadId, turnId, item: { type: 'message', role: 'assistant', phase: 'commentary', content: [{ type: 'output_text', text: 'Generating now.' }] },
     } });
     await handler.onNotification({ method: 'rawResponseItem/completed', params: {
-      threadId, turnId, item: { type: 'function_call', name: 'generate_image', arguments: '{}', call_id: 'call-short' },
+      threadId, turnId, item: { type: 'function_call', name: 'read_relevant_context', arguments: '{}', call_id: 'call-short' },
     } });
-    const response = await handler.onToolCall({ params: { threadId, turnId, callId: 'call-short', tool: 'generate_image', arguments: {} } });
+    const response = await handler.onToolCall({ params: { threadId, turnId, callId: 'call-short', tool: 'read_relevant_context', arguments: {} } });
     assert.equal(response.success, false);
     assert.match(response.contentItems[0].text, /decision_commentary_missing/);
     await handler.onNotification({ method: 'turn/completed', params: { threadId, turn: { id: turnId, status: 'failed', error: { message: 'stopped' } } } });
   } });
-  await runWithHost(host, { executeTool: async () => { executions += 1; return {}; } });
+  await runWithHost(host, {
+    tools: [{ name: 'read_relevant_context', description: 'Read context.', parameters: { type: 'object' }, requiresCommentary: true }],
+    executeTool: async () => { executions += 1; return {}; },
+  });
   assert.equal(executions, 0);
 });
 
@@ -227,6 +459,39 @@ test('native service returns immediately when cancelled before sampling', async 
   });
   assert.equal(result.status, 'cancelled');
   assert.equal(acquired, false);
+});
+
+test('native service rejects a concurrent turn without queueing and releases the session', async () => {
+  const sessionId = `native-busy-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  let releaseTurn;
+  const gate = new Promise((resolve) => { releaseTurn = resolve; });
+  const host = fakeHost({ script: async ({ handler, threadId, turnId }) => {
+    await gate;
+    await handler.onNotification({ method: 'turn/completed', params: { threadId, turn: { id: turnId, status: 'completed' } } });
+  } });
+  const makeInput = () => ({
+    sessionId,
+    identity: { taskId: 'task-busy', operationId: 'operation-busy', runId: `run-${Math.random()}` },
+    provider: { id: 'test', model: 'test-model', baseUrl: 'http://127.0.0.1:1/v1', apiKey: 'test', protocol: 'responses' },
+    userText: 'Hello.', baseInstructions: 'Test.', developerInstructions: 'Test.', tools: [],
+    executeTool: async () => ({}), acquireHost: async () => host,
+  });
+  try {
+    const first = runNativeAgentTurn(makeInput());
+    await new Promise((resolve) => setImmediate(resolve));
+    const busy = await runNativeAgentTurn(makeInput());
+    assert.equal(busy.status, 'failed');
+    assert.equal(busy.turnId, null);
+    assert.equal(busy.error.code, 'native_session_busy');
+    assert.equal(busy.error.retryable, true);
+    releaseTurn();
+    const completed = await first;
+    assert.equal(completed.status, 'completed');
+    const next = await runNativeAgentTurn(makeInput());
+    assert.equal(next.status, 'completed');
+  } finally {
+    await rm(path.join(process.cwd(), 'runtime', 'agent-threads', sessionId), { recursive: true, force: true });
+  }
 });
 
 test('native service does not report a confirmation gate as successful tool completion', async () => {

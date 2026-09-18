@@ -5,7 +5,7 @@ import ts from 'typescript';
 import { adaptCanonicalEvent } from './canonical-event-adapter.mjs';
 import { projectNativeEvent } from './native-event-projector.mjs';
 
-const source = ts.createSourceFile('agent-request-runtime.ts', readFileSync(new URL('./agent-request-runtime.ts', import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true);
+const source = ts.createSourceFile('agent-request-execution-state.mjs', readFileSync(new URL('./agent-request-execution-state.mjs', import.meta.url), 'utf8'), ts.ScriptTarget.Latest, true);
 function declaration(name) {
   let found;
   function visit(node) {
@@ -44,7 +44,8 @@ test('tool settlement clears heartbeat ownership and independent phases receive 
     const runId = 'run';
     let lastCommentaryItemId = 'commentary';
     const events = [];
-    const progressTracker = { update: value => events.push(value), stamp: () => ({}) };
+    const tracker = { update: value => events.push(value), stamp: () => ({}) };
+    const stamp = () => tracker.stamp();
     const writeLifecycleEvent = value => events.push(value);
     ${['toolItemId', 'toolExecutionId', 'settledToolCalls', 'toolEventMetadata'].map(declaration).join('\n')}
     let activeAgentStageLabel = 'Initial';

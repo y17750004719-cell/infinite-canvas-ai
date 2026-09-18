@@ -1,3 +1,6 @@
+import { validateAgentToolArguments } from './tool-registry.mjs';
+import { dispatchRegisteredApplicationTool } from './application-tool-dispatcher.mjs';
+
 /**
  * Boundary for executing one Native Responses turn.
  *
@@ -125,11 +128,16 @@ export function createDynamicToolCallback({
   approvedConfirmation,
   hashArguments = (value) => JSON.stringify(value ?? {}),
   dispatch,
+  registry,
   validate,
+  nativeTools = [],
+  onSkillSelection,
   resolveAllowedTools,
   executionContext = {},
 } = {}) {
-  if (typeof dispatch !== 'function') throw new TypeError('createDynamicToolCallback requires dispatch');
+  const dispatchTool = typeof dispatch === 'function'
+    ? dispatch
+    : (input) => dispatchRegisteredApplicationTool({ ...input, registry });
   return async (toolName, args = {}, context = {}) => {
     if (approvedConfirmation && (
       toolName !== approvedConfirmation.toolName
@@ -141,7 +149,14 @@ export function createDynamicToolCallback({
       ? resolveAllowedTools()
       : executionContext.allowedTools;
     if (typeof validate === 'function') validate(toolName, args, allowedTools);
-    return dispatch({
+    else {
+      const nativeTool = nativeTools.find((tool) => tool?.name === toolName);
+      if (nativeTool) validateAgentToolArguments(nativeTool.parameters || { type: 'object' }, args, toolName);
+    }
+    if (toolName === 'select_visual_skill' && typeof onSkillSelection === 'function') {
+      return onSkillSelection({ args, context, allowedTools, tool: nativeTools.find((entry) => entry?.name === toolName) });
+    }
+    return dispatchTool({
       name: toolName,
       args,
       allowedTools,

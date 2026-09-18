@@ -17,6 +17,17 @@ export class ChatCompletionsError extends Error {
   }
 }
 
+function commentaryPolicyFor(tool, name) {
+  return name === 'generate_image' && tool?.commentaryPolicy === 'server_fallback'
+    ? 'server_fallback'
+    : name === 'generate_image' ? 'server_fallback' : 'required';
+}
+
+function isMeaningfulCommentary(value) {
+  const text = clean(value);
+  return text.length >= 20 && /[A-Za-z\u3400-\u9fff]/.test(text);
+}
+
 function parseError(status, body) {
   const message = clean(body?.error?.message) || `Chat Completions request failed (${status})`;
   const retryable = [408, 429, 500, 502, 503, 504].includes(status);
@@ -234,15 +245,67 @@ export async function runChatCompletionsTurn(input) {
   for (let sample = 1; sample <= maxTurns; sample += 1) {
     if (input.signal?.aborted) return { status: 'cancelled', text: finalText, turnId };
     const result = await requestAgentStream({ provider: input.provider, body: { model: input.provider.model, messages, tools: toolDefinitions(tools), max_tokens: 4096 }, signal: input.signal });
+    if (result.text?.trim()) {
+      await input.onEvent?.({
+        method: 'item/completed',
+        params: {
+          turnId,
+          item: {
+            id: `${turnId}:assistant:${sample}`,
+            type: 'agentMessage',
+            phase: result.toolCalls.length ? 'commentary' : 'final_answer',
+            text: result.text,
+          },
+        },
+        ...input.identity,
+        threadId: input.threadId || '',
+        turnId,
+      });
+    }
     await input.onEvent?.({ method: 'zflow/model_sample_completed', params: { modelSampleIndex: sample, protocol: isGemini ? 'gemini' : 'chat_completions', hadPublicCommentary: result.text.length >= 20, promptHash: hash(JSON.stringify(messages)) }, ...input.identity, threadId: input.threadId || '', turnId });
     if (!result.toolCalls.length) { finalText = result.text.trim(); return { status: 'completed', text: finalText, threadId: input.threadId || '', turnId }; }
     const call = result.toolCalls[0];
     if (!call.id || !call.name) throw new ChatCompletionsError('Tool call is missing identity', 'provider_tool_call_invalid');
-    if (!result.text.trim() || result.text.trim().length < 20) throw new ChatCompletionsError('decision_commentary_missing: model task description is required before a tool call', 'decision_commentary_missing', sample === 1);
+    const definition = tools.find((tool) => tool.name === call.name);
+    if (!definition) throw new ChatCompletionsError(`Tool is not allowed: ${call.name}`, 'tool_not_allowed');
+    const hasCommentary = isMeaningfulCommentary(result.text);
+    const commentaryPolicy = commentaryPolicyFor(definition, call.name);
+    const commentaryFallbackUsed = !hasCommentary && commentaryPolicy === 'server_fallback';
+    if (!hasCommentary && !commentaryFallbackUsed) {
+      throw new ChatCompletionsError('decision_commentary_missing: model task description is required before a tool call', 'decision_commentary_missing', sample === 1);
+    }
+    if (commentaryFallbackUsed) {
+      try {
+        await input.onEvent?.({
+          method: 'zflow/tool/progress',
+          params: {
+            status: 'active',
+            phase: 'preparing',
+            message: '正在提交已验证的图片生成请求。',
+            callId: call.id,
+            tool: call.name,
+            commentarySource: null,
+            commentaryFallbackUsed: true,
+          },
+          ...input.identity,
+          threadId: input.threadId || '',
+          turnId,
+        });
+      } catch {
+        // Progress projection is advisory; it must never block image dispatch.
+      }
+    }
     await input.onEvent?.({ method: 'item/started', params: { turnId, item: { id: call.id, type: 'dynamicToolCall', tool: call.name, status: 'in_progress' } }, ...input.identity, threadId: input.threadId || '', turnId });
     let args; try { args = call.arguments ? JSON.parse(call.arguments) : {}; } catch { throw new ChatCompletionsError('Tool arguments are malformed', 'invalid_tool_arguments'); }
-    const definition = tools.find((tool) => tool.name === call.name); if (!definition) throw new ChatCompletionsError(`Tool is not allowed: ${call.name}`, 'tool_not_allowed');
-    const toolResult = await input.executeTool(call.name, args, { threadId: input.threadId || '', turnId, toolCallId: call.id, signal: input.signal, onProgress: (event) => input.onEvent?.({ method: 'zflow/tool/progress', params: { ...event, callId: call.id, tool: call.name }, ...input.identity, threadId: input.threadId || '', turnId }) });
+    const toolResult = await input.executeTool(call.name, args, {
+      threadId: input.threadId || '',
+      turnId,
+      toolCallId: call.id,
+      commentarySource: hasCommentary ? 'chat_completion_message' : null,
+      commentaryFallbackUsed,
+      signal: input.signal,
+      onProgress: (event) => input.onEvent?.({ method: 'zflow/tool/progress', params: { ...event, callId: call.id, tool: call.name }, ...input.identity, threadId: input.threadId || '', turnId }),
+    });
     await input.onEvent?.({ method: 'item/completed', params: { turnId, item: { id: call.id, type: 'dynamicToolCall', tool: call.name, status: toolResult?.isError ? 'failed' : 'completed', success: !toolResult?.isError } }, ...input.identity, threadId: input.threadId || '', turnId });
     messages.push({
       role: 'assistant', content: result.text || null,

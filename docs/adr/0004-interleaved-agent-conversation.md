@@ -4,6 +4,11 @@
 
 Accepted
 
+Runtime update (2026-09-17): the Pi implementation described below has been
+replaced by the Native runtime and application-owned turn orchestration. The
+timeline and delivery decisions remain in force; Pi is no longer a dependency.
+The former Pi-only contract test was removed during verified dead-code cleanup.
+
 ## Context
 
 Agent progress currently appears as a collapsible activity record. This separates

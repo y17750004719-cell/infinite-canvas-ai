@@ -156,6 +156,7 @@ test('rejects pending requests when the child exits', async (t) => {
   await assert.rejects(client.request('thread/resume', { threadId: 'thread-1' }), {
     code: 'process_exited',
   });
+  assert.equal(client.pendingRequestCount, 0);
 });
 
 test('sanitizes spawn failures and completes startup cleanup', async () => {
@@ -183,14 +184,17 @@ test('marks a timed-out turn start as outcome unknown and never retries it', asy
     client.request('turn/start', { threadId: 'thread-1', input: [] }, { timeoutMs: 40 }),
     (error) => error.code === 'request_timeout' && error.outcomeUnknown === true && error.retrySafe === false,
   );
+  assert.equal(client.pendingRequestCount, 0);
 });
 
 test('malformed server JSON terminates the connection and clears pending requests', async (t) => {
   const { client } = await createFixture(t, 'malformed');
   await assert.rejects(client.request('skills/list', {}), { code: 'malformed_json' });
+  assert.equal(client.pendingRequestCount, 0);
   await assert.rejects(client.request('thread/read', { marker: 'late' }), {
     code: 'malformed_json',
   });
+  assert.equal(client.pendingRequestCount, 0);
 });
 
 test('terminates the connection when an unterminated line exceeds the byte limit', async (t) => {

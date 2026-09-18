@@ -150,3 +150,11 @@ test('buildGenerateRouteErrorMeta preserves unknown provider result metadata', (
     },
   );
 });
+
+test('buildGenerateRouteErrorMeta preserves local delivery metadata on plain save errors', () => {
+  const error = Object.assign(new Error('failed to save generated asset'), {
+    failureStage: 'local_delivery',
+    providerRequestStarted: true,
+  });
+  assert.equal(buildGenerateRouteErrorMeta(error, class TestImageGenerationError extends Error {} ).failureStage, 'local_delivery');
+});

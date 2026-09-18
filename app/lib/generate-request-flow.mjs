@@ -112,7 +112,7 @@ export function buildGenerateRouteErrorMeta(error, ImageGenerationErrorClass) {
 
   const failureClass = isImageGenerationError && error.failureClass ? error.failureClass : 'unknown';
   const outcomeUnknown = isImageGenerationError ? error.outcomeUnknown === true : false;
-  const failureStage = isImageGenerationError && typeof error.failureStage === 'string' && error.failureStage
+  const failureStage = typeof error?.failureStage === 'string' && error.failureStage
     ? error.failureStage
     : failureClass === 'payload'
       ? 'provider_result_parse'

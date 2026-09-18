@@ -1,6 +1,6 @@
 'use client';
 
-import React, { memo } from 'react';
+import { memo } from 'react';
 import { RefreshCw, Trash2 } from 'lucide-react';
 import type { CanvasItem } from '../../lib/canvas-types';
 import { imageNormalizedToItemLocal } from '../../lib/image-region-selection.mjs';

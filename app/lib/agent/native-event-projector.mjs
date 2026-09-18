@@ -38,7 +38,23 @@ export function projectNativeEvent(event = {}, context = {}) {
   if (type === 'tool_result') return [{ type: 'item.completed', itemType: 'tool_result', item: { toolName: event.toolName, result: event.result, error: event.error, isError: event.isError === true }, ...base }];
   if (type === 'assistant_delta' || type === 'agent_activity_delta') return [{ type: 'item.updated', itemType: type === 'agent_activity_delta' ? 'public_commentary' : 'assistant_message', itemId: event.itemId || event.activityId || `${context.runId}:assistant`, item: { delta: event.delta || event.content || '' }, ...base }];
   if (type === 'agent_done') return [{ type: 'turn.completed', usage: event.usage || null, stopReason: event.stopReason || null, ...base }];
-  if (type === 'agent_error' || type === 'agent_cancelled') return [{ type: 'turn.failed', status: type === 'agent_cancelled' ? 'cancelled' : 'failed', error: { message: event.message || 'Agent run failed', code: event.code || null, failureStage: event.failureStage || event.stage, failureCode: event.failureCode || event.code, retryable: event.retryable === true, outcomeUnknown: event.outcomeUnknown === true }, ...base }];
+  if (type === 'agent_error' || type === 'agent_cancelled' || type === 'error') {
+    const failureCode = event.failureCode || event.error?.failureCode || event.code || event.error?.code || null;
+    const failureStage = event.failureStage || event.stage || event.error?.failureStage || null;
+    const retryable = event.retryable ?? event.error?.retryable;
+    const outcomeUnknown = event.outcomeUnknown ?? event.error?.outcomeUnknown;
+    const message = event.message || event.error?.message || 'Agent run failed';
+    return [{
+      type: 'turn.failed',
+      status: type === 'agent_cancelled' ? 'cancelled' : 'failed',
+      failureCode,
+      failureStage,
+      ...(retryable !== undefined ? { retryable: retryable === true } : {}),
+      ...(outcomeUnknown !== undefined ? { outcomeUnknown: outcomeUnknown === true } : {}),
+      error: { message, code: event.code || event.error?.code || failureCode, failureStage, failureCode, retryable: retryable === true, outcomeUnknown: outcomeUnknown === true },
+      ...base,
+    }];
+  }
   if (type === 'confirmation_required' || type === 'clarification_required') return [{ type: 'item.started', itemType: type === 'confirmation_required' ? 'confirmation' : 'clarification', item: { ...(event.request && typeof event.request === 'object' ? { request: event.request } : {}), ...(event.state && typeof event.state === 'object' ? { state: event.state } : {}), ...(event.message ? { message: event.message } : {}) }, ...base }];
   if (type.startsWith('thread/') || type.startsWith('turn/') || type.startsWith('item/') || type.startsWith('tool/')) {
     return [{ type: 'item.updated', itemType: type.startsWith('tool/') ? 'tool_event' : 'public_event', itemId: event.itemId || event.eventId || `${context.runId}:event:${type}`, item: { eventType: type, payload: Object.fromEntries(Object.entries(event).filter(([key]) => key !== 'type')) }, ...base }];

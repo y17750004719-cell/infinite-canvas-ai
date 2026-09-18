@@ -66,6 +66,13 @@ test('drops non-string enum values unsupported by Gemini Schema', () => {
   );
 });
 
+test('keeps only string enum members when a schema mixes numeric and string values', () => {
+  assert.deepEqual(
+    toGeminiSchema({ type: 'string', enum: ['draft', 1, 'published', null] }),
+    { type: 'STRING', enum: ['draft', 'published'], nullable: true },
+  );
+});
+
 test('Gemini compatibility assertion rejects OpenAI-only schema fields recursively', () => {
   assert.throws(
     () => assertGeminiSchemaCompatible({ type: 'OBJECT', properties: { value: { type: 'STRING', additionalProperties: false } } }),

@@ -15,6 +15,13 @@ export interface ProviderModelSelectionProvider {
   primary?: boolean;
   chatModels?: string[];
   imageModels?: string[];
+  baseUrl?: string;
+  protocol?: string;
+  imageRequestMode?: string;
+  imageGenerationEndpoint?: string;
+  imageEditEndpoint?: string;
+  modelProtocols?: Record<string, string>;
+  modelCapabilities?: Record<string, unknown>;
 }
 
 export interface ProviderModelSelection {
@@ -22,6 +29,17 @@ export interface ProviderModelSelection {
   model: string | null;
   fallback: boolean;
   reason: ProviderModelSelectionReason;
+}
+
+export interface ResolvedProviderSelection extends ProviderModelSelection {
+  providerName: string | null;
+  baseUrl: string | null;
+  protocol: string | null;
+  capability: ProviderModelPurpose;
+  providerFingerprint: string;
+  modelFingerprint: string;
+  enabled: boolean;
+  validated: boolean;
 }
 
 export interface AlternativeProviderModelSelection {
@@ -44,3 +62,21 @@ export function resolveProviderModelSelection(options?: {
   requestedModel?: string;
   allowFallback?: boolean;
 }): ProviderModelSelection;
+
+export function fingerprintProviderSelection(
+  provider: ProviderModelSelectionProvider,
+  model: string,
+  purpose?: ProviderModelPurpose,
+): string;
+
+export function resolveProviderSelection(options?: {
+  providers?: ProviderModelSelectionProvider[];
+  purpose?: ProviderModelPurpose;
+  requestedProviderId?: string;
+  requestedModel?: string;
+  allowFallback?: boolean;
+  requiresToolCalling?: boolean;
+  requiresRequiredToolChoice?: boolean;
+  excludeUnavailable?: boolean;
+  onDiagnostic?: (event: Record<string, unknown>) => void;
+}): ResolvedProviderSelection;

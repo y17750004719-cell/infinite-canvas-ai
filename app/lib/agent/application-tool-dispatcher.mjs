@@ -52,13 +52,18 @@ export function validateApplicationToolName(name, allowedTools = []) {
   const requestedTool = String(name || '').trim();
   const allowed = Array.isArray(allowedTools) ? allowedTools.filter(Boolean) : [];
   if (allowed.includes(requestedTool)) return { ok: true, requestedTool, allowedTools: allowed };
-  const disabled = DISABLED_NATIVE_TOOLS.has(normalizeName(requestedTool));
+  const normalized = normalizeName(requestedTool);
+  const disabled = DISABLED_NATIVE_TOOLS.has(normalized);
+  // `exec` is a Native/code-mode tool, not an application capability. Keep
+  // it out of the code-mode host and report the normal registry rejection so
+  // callers cannot mistake it for a recoverable application capability.
+  const code = normalized === 'exec' ? 'tool_not_allowed' : (disabled ? 'native_capability_disabled' : 'tool_not_allowed');
   return {
     ok: false,
     requestedTool,
     allowedTools: allowed,
     error: {
-      code: disabled ? 'native_capability_disabled' : 'tool_not_allowed',
+      code,
       failureStage: 'tool_dispatch',
       retryable: false,
       requestedTool,
@@ -66,6 +71,13 @@ export function validateApplicationToolName(name, allowedTools = []) {
     },
   };
 }
+
+export const APPLICATION_TOOL_CAPABILITY_SNAPSHOT = Object.freeze({
+  dynamicToolMethod: 'item/tool/call',
+  applicationToolsEnabled: true,
+  codeModeEnabled: false,
+  nativeImageGenerationEnabled: false,
+});
 
 export function isApplicationImageTool(name) {
   return String(name || '').trim() === 'generate_image';

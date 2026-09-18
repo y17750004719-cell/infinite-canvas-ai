@@ -345,6 +345,7 @@ export type AgentClientAction = {
   sourceReferenceId?: string;
   sourceTaskId?: string;
   sourceVersionId?: string;
+  deliveryEventAt?: number;
   presentation?: {
     title: string;
     summary: string;
@@ -353,6 +354,7 @@ export type AgentClientAction = {
   assets: Array<{
     src: string;
     assetId?: string;
+    deliveryId?: string;
     originalSrc?: string;
     naturalWidth?: number;
     naturalHeight?: number;
@@ -365,6 +367,9 @@ export type AgentClientAction = {
     versionId?: string;
     parentVersionId?: string;
     previewSrc?: string;
+    providerReturnedAt?: number;
+    locallyStoredAt?: number;
+    deliveryEventAt?: number;
   }>;
   batch?: { total: number; settled: number; succeeded: number; failed: number };
 } | {

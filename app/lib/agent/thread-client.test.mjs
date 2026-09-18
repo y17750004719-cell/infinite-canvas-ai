@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mergeThreadEvents, completedTranscriptMessages } from './thread-client.mjs';
+import { mergeThreadEvents, completedTranscriptMessages, reconcileHydratedChatMessages } from './thread-client.mjs';
 import { adaptCanonicalEvent } from './canonical-event-adapter.mjs';
 import { reduceAgentRunProgress } from './run-progress.mjs';
 
@@ -65,4 +65,58 @@ test('journal restoration rebuilds public progress events into a replayable time
   assert.ok(progressMessage);
   assert.ok(progressMessage.agentRunProgress.steps.some((step) => step.label === '图片引用失效'));
   assert.equal(progressMessage.agentRunProgress.outcome, 'running');
+});
+
+test('hydration reconciles a locally running assistant with a failed journal turn', () => {
+  const messages = [{
+    id: 'assistant-1', role: 'assistant', content: '', taskStatus: 'running',
+    agentRunProgress: { taskId: 'task-1', runId: 'run-1', operationId: 'op-1', outcome: 'running', steps: [], lastSequence: 1 },
+  }];
+  const [message] = reconcileHydratedChatMessages(messages, {
+    activeTurn: null,
+    threadStatus: 'error',
+    turns: [{ turnId: 'turn-1', taskId: 'task-1', runId: 'run-1', operationId: 'op-1', status: 'failed', startSequence: 1, completedAt: 3, error: { code: 'tool_dispatch', message: '工具参数无效' }, items: [] }],
+  });
+  assert.equal(message.taskStatus, 'failed');
+  assert.equal(message.agentRunProgress.outcome, 'failed');
+  assert.equal(message.content, '');
+});
+
+test('hydration reconciles completed and cancelled turns without duplicating messages', () => {
+  const base = (runId, operationId) => ({ taskId: runId, runId, operationId, outcome: 'running', steps: [], lastSequence: 1 });
+  const messages = [
+    { id: 'assistant-completed', role: 'assistant', content: 'done', taskStatus: 'running', agentRunProgress: base('run-completed', 'op-completed') },
+    { id: 'assistant-cancelled', role: 'assistant', content: '', taskStatus: 'running', agentRunProgress: base('run-cancelled', 'op-cancelled') },
+  ];
+  const turns = [
+    { turnId: 'turn-completed', taskId: 'run-completed', runId: 'run-completed', operationId: 'op-completed', status: 'completed', startSequence: 1, completedAt: 2, items: [] },
+    { turnId: 'turn-cancelled', taskId: 'run-cancelled', runId: 'run-cancelled', operationId: 'op-cancelled', status: 'cancelled', startSequence: 3, completedAt: 4, items: [] },
+  ];
+  const result = reconcileHydratedChatMessages(messages, { activeTurn: null, threadStatus: 'idle', turns });
+  assert.deepEqual(result.map((message) => [message.id, message.taskStatus, message.agentRunProgress.outcome]), [
+    ['assistant-completed', 'completed', 'completed'],
+    ['assistant-cancelled', 'cancelled', 'cancelled'],
+  ]);
+  assert.equal(result.length, 2);
+});
+
+test('legacy running message converges to the newest terminal turn when the journal has no active turn', () => {
+  const [message] = reconcileHydratedChatMessages([
+    { id: 'legacy-assistant', role: 'assistant', content: '处理中', taskStatus: 'running' },
+  ], {
+    activeTurn: null,
+    threadStatus: 'error',
+    turns: [{ turnId: 'turn-legacy', runId: 'run-legacy', operationId: 'op-legacy', status: 'failed', startSequence: 1, completedAt: 9, items: [] }],
+  });
+  assert.equal(message.taskStatus, 'failed');
+  assert.equal(message.agentRunProgress.outcome, 'failed');
+});
+
+test('journal-only hydration reconstructs terminal progress', () => {
+  const result = reconcileHydratedChatMessages([], {
+    activeTurn: null,
+    threadStatus: 'idle',
+    turns: [{ turnId: 'turn-done', taskId: 'task-done', runId: 'run-done', operationId: 'op-done', status: 'completed', startSequence: 1, completedAt: 2, items: [{ itemId: 'assistant', type: 'assistant_message', content: '已完成' }] }],
+  });
+  assert.equal(result.some((message) => message.content === '已完成'), true);
 });

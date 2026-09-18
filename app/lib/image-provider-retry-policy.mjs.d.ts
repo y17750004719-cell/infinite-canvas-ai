@@ -4,12 +4,13 @@ export interface ImagePostRetryDecision {
   retry: boolean;
   retryWithoutStream: boolean;
   outcomeUnknown: boolean;
-  failureCode: 'provider_result_unknown' | null;
+  failureCode: 'provider_permission_denied' | 'provider_result_unknown' | null;
 }
 
 export function classifyImagePostRetry(input: {
   kind: ImagePostFailureKind;
   status?: number;
+  failureCode?: 'provider_permission_denied' | null;
   streamUnsupported?: boolean;
   callerAborted?: boolean;
   attempt?: number;

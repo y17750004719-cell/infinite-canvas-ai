@@ -118,6 +118,8 @@ test('public tool event helper keeps image URLs only in client actions', () => {
   assert.deepEqual(events.map((event) => event.type), ['tool_result', 'client_action']);
   assert.doesNotMatch(JSON.stringify(events[0]), /https?:\/\/|token=secret/);
   assert.match(JSON.stringify(events[1]), /loop\.png/);
+  assert.match(events[1].action.assets[0].deliveryId, /^generated-delivery:run-loop:/);
+  assert.ok(Number.isFinite(events[1].action.deliveryEventAt));
 });
 
 test('public tool event helper forwards valid image presentation only to the client action', () => {

@@ -18,6 +18,8 @@ test('native config uses Responses and disables non-business tools without embed
   assert.match(config, /\[orchestrator.skills\]\nenabled = false/);
   assert.match(config, /\[skills.bundled\]\nenabled = false/);
   assert.match(config, /image_generation = false/);
+  assert.match(config, /\[features\.code_mode\]\nenabled = false\ndirect_only_tool_namespaces = \["functions"\]/);
+  assert.match(config, /code_mode_host = false/);
   assert.doesNotMatch(config, /secret-not-in-config/);
   assert.throws(() => nativeConfig({ ...provider, baseUrl: 'http://user:password@localhost/' }), /native_provider_url_invalid/);
 });

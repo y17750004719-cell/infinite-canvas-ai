@@ -9,10 +9,9 @@ import gsap from 'gsap';
 import { ScrollToPlugin } from 'gsap/ScrollToPlugin';
 import { useGSAP } from '@gsap/react';
 import { 
-  MousePointer2, Type, Image as ImageIcon,
-  Paperclip,
+  Type, Image as ImageIcon,
   Send, Sparkles, X, ChevronDown, ChevronLeft, ChevronRight, Trash2, Edit3, ArrowLeft, Plus, SlidersHorizontal, Copy, Check, CheckCircle2, XCircle, Loader2, CircleDashed, Video, Pencil, Package2, Workflow, Clock3, Eye, EyeOff, Moon, Sun, MessageCircle,
-  MoreHorizontal, Upload, Library, Search, BrainCircuit, Settings2, ArrowUp, ArrowDown, Square, Pin
+  MoreHorizontal, Upload, Library, Search, BrainCircuit, Settings2, ArrowUp, ArrowDown, Square
 } from 'lucide-react';
 import { GeneratedImageHistoryEntry, ProjectSession } from './lib/db';
 import type { ContextCompactionRecord, ContextCompactionSummary, ContextEvent } from './lib/db';
@@ -21,7 +20,7 @@ import type { SessionVisualAsset } from './lib/db';
 import type { TaskSnapshot } from './lib/db';
 import { parseSlashCommand, isManagementCommand } from './lib/agent/commands.mjs';
 import { readCommandResponse, formatCommandResult } from './lib/agent/command-client.mjs';
-import { completedTranscriptMessages } from './lib/agent/thread-client.mjs';
+import { reconcileHydratedChatMessages } from './lib/agent/thread-client.mjs';
 import { adaptCanonicalEvent, isCanonicalEvent } from './lib/agent/canonical-event-adapter.mjs';
 
 function normalizeContextCompactionRecords(value: unknown, sessionId: string): ContextCompactionRecord[] {
@@ -127,13 +126,10 @@ import {
   areCanvasPointsFullyContained,
   getCanvasDragDelta,
   getCanvasMarqueePath,
-  getRotatedRectAabb,
   hasCanvasDragIntent,
-  isRectIntersecting,
   matchesCanvasItemDragTransaction,
   normalizeCanvasMarqueeRect,
   projectCanvasPointToViewport,
-  projectScreenRectToCanvas,
   resolveCanvasFixedOverlayAnchors,
   resolveCanvasItemDragReleasePositions,
   resolveCanvasMarqueeSelection,
@@ -156,6 +152,7 @@ import {
   shouldShowAgentRunProgress,
 } from './lib/agent/run-progress.mjs';
 import { preloadGeneratedAsset } from './lib/agent/preload-generated-assets.mjs';
+import { buildGeneratedAssetDeliveryId, collectPendingGeneratedAssetDeliveries, getGeneratedAssetDeliveryPresence } from './lib/agent/generated-asset-delivery.mjs';
 import { applyQueuedChatMessageUpdates } from './lib/chat-stream-update-batcher.mjs';
 import { runGeneratedAssetPreloadQueue } from './lib/generated-asset-preload-queue.mjs';
 import { buildAgentContextEntities } from './lib/agent/context-reference.mjs';
@@ -197,8 +194,6 @@ import {
   createWorkspaceModelOptions,
   finalizeManualTextCardItem,
   findWorkspaceModelOption,
-  getDefaultImageCardModelOption,
-  getDefaultTextPanelModelOption,
   getDisplayableTextCardPanelDraft,
   getGeneratedImageHistoryEntries,
   getDirectImagePreviewsForTextCard,
@@ -210,7 +205,6 @@ import {
   getImageCardFrameSizeForAspectRatio,
   getImageCardItemSizeForFrameSize,
   getImageCardItemSizeForNaturalImage,
-  getImageCardQualitySummary,
   getSupportedImageCardSizeOptions,
   getSelectedImageToolbarSource,
   getCurrentImageCardOutput,
@@ -233,7 +227,6 @@ import {
   removeCanvasTextGenerationEntry,
   resolveFloatingPopoverOffset,
   resolveImageCardSize,
-  resolveImageCardSizeForAspectRatio,
   resolveProviderDeletionFallbacks,
   resolveWorkspaceImageCardModel,
   resolveWorkspaceTextPanelChatModel,
@@ -256,7 +249,6 @@ import { useWorkspaceSessionController } from './hooks/useWorkspaceSessionContro
 
 gsap.registerPlugin(useGSAP, ScrollToPlugin);
 
-const CANVAS_OVERLAY_Z = 120;
 const CHAT_PANEL_Z = 180;
 const GLOBAL_NOTICE_Z = 220;
 const CANVAS_CLIPBOARD_PASTE_OFFSET = { x: 32, y: 32 };
@@ -434,6 +426,12 @@ type ChatMessageInlineSegment =
 
 interface ChatMessage {
   id: string;
+  deliveryId?: string;
+  assetId?: string;
+  providerReturnedAt?: number;
+  locallyStoredAt?: number;
+  deliveryEventAt?: number;
+  chatCommittedAt?: number;
   role: 'user' | 'assistant' | 'skill';
   content: string;
   reasoningContent?: string;
@@ -1306,24 +1304,6 @@ const replaceChatComposerTextPreservingReferences = (
   return mergeAdjacentChatComposerText(next);
 };
 
-const materializeChatMessageInlineContent = (
-  segments: ChatComposerSegment[],
-  referenceTokens: ChatReferenceToken[]
-): ChatMessageInlineSegment[] => {
-  const tokenById = new Map(referenceTokens.map((token) => [token.id, token]));
-  return segments.flatMap((segment): ChatMessageInlineSegment[] => {
-    if (segment.type === 'text') {
-      return segment.text ? [{ type: 'text', text: segment.text }] : [];
-    }
-    const token = tokenById.get(segment.tokenId);
-    if (!token) return [];
-    return [{
-      type: 'reference',
-      referenceId: token.id,
-    }];
-  });
-};
-
 type ResolvedChatMessageInlineSegment =
   | { type: 'text'; text: string }
   | {
@@ -1400,16 +1380,6 @@ interface ProviderSettingsImageApiKeyRow extends ProviderSettingsImageApiKey {
   isVisible: boolean;
 }
 
-interface ProviderSettingsCompatibilityResponse {
-  providerId: ProviderSettingsProviderId;
-  baseUrl: string;
-  apiKey?: string;
-  hasApiKey: boolean;
-  maskedApiKey: string;
-  source: ProviderSettingsSource;
-  updatedAt?: string;
-}
-
 interface ProviderSettingsItem {
   id: string;
   name: string;
@@ -1455,13 +1425,6 @@ interface ProviderFetchedModelsResult extends ProviderConnectionTestResult {
 }
 
 type ProviderSettingsModelPickerCategory = 'all' | 'image' | 'chat' | 'voice';
-
-interface WorkspaceModelOption {
-  id: string;
-  label: string;
-  providerId: string;
-  providerName: string;
-}
 
 type ChatPanelModelPurpose = 'chat' | 'image';
 
@@ -1617,12 +1580,6 @@ const ChatPanelModelSelector = memo(function ChatPanelModelSelector({
     </div>
   );
 });
-
-const tools = [
-  { id: 'select', icon: MousePointer2, label: '选择' },
-  { id: 'text', icon: Type, label: '文字' },
-  { id: 'image', icon: ImageIcon, label: '图片' },
-];
 
 const DEFAULT_QUICK_ACTIONS = [
   { id: 'logo', label: 'Logo 与品牌', description: '生成 Logo 与基础品牌方向。' },
@@ -1880,7 +1837,6 @@ const IMAGE_CARD_COUNT_MIN = 1;
 const IMAGE_CARD_COUNT_MAX = 9;
 const NODE_SELECTED_OUTLINE_COLOR = 'rgba(23, 23, 23, 0.74)';
 const NODE_SELECTED_OUTLINE_WIDTH = 2;
-const VIEWPORT_ZOOM_DURATION_MS = 140;
 type WorkspaceTheme = 'light' | 'dark';
 const WORKSPACE_THEME_STORAGE_KEY = 'zo-design-workspace-theme';
 const DEFAULT_WORKSPACE_THEME: WorkspaceTheme = 'light';
@@ -2021,53 +1977,6 @@ const getConstrainedImageDisplaySize = (
   };
 };
 
-const FLOATING_TOOLBAR_VIEWPORT_PADDING = 20;
-
-const clampFloatingPanelToViewport = ({
-  left,
-  top,
-  width,
-  height,
-  viewportWidth,
-  viewportHeight,
-  padding = FLOATING_TOOLBAR_VIEWPORT_PADDING,
-}: {
-  left: number;
-  top: number;
-  width: number;
-  height: number;
-  viewportWidth: number;
-  viewportHeight: number;
-  padding?: number;
-}) => {
-  if (!Number.isFinite(left) || !Number.isFinite(top)) {
-    return { left: 0, top: 0 };
-  }
-
-  if (
-    !Number.isFinite(width) ||
-    width <= 0 ||
-    !Number.isFinite(height) ||
-    height <= 0 ||
-    !Number.isFinite(viewportWidth) ||
-    viewportWidth <= 0 ||
-    !Number.isFinite(viewportHeight) ||
-    viewportHeight <= 0
-  ) {
-    return { left, top };
-  }
-
-  const minLeft = padding;
-  const maxLeft = Math.max(minLeft, viewportWidth - width - padding);
-  const minTop = padding;
-  const maxTop = Math.max(minTop, viewportHeight - height - padding);
-
-  return {
-    left: Math.min(Math.max(left, minLeft), maxLeft),
-    top: Math.min(Math.max(top, minTop), maxTop),
-  };
-};
-
 const createImageCanvasItem = ({
   id,
   src,
@@ -2131,6 +2040,8 @@ const createGeneratedImageHistoryEntry = ({
   slotId,
   versionId,
   parentVersionId,
+  assetId,
+  deliveryId,
 }: {
   src: string;
   previewSrc?: string;
@@ -2154,11 +2065,15 @@ const createGeneratedImageHistoryEntry = ({
   slotId?: string;
   versionId?: string;
   parentVersionId?: string;
+  assetId?: string;
+  deliveryId?: string;
 }): GeneratedImageHistoryEntry => {
   const normalizedCreatedAt = buildGeneratedImageHistorySortKey(timestamp, sequence);
 
   return {
-    id: `generated-history-${normalizedCreatedAt}-${Math.random().toString(36).slice(2, 8)}`,
+    id: deliveryId ? `generated-history:${deliveryId}` : `generated-history-${normalizedCreatedAt}-${Math.random().toString(36).slice(2, 8)}`,
+    deliveryId,
+    assetId,
     src,
     previewSrc,
     naturalWidth,
@@ -2240,6 +2155,13 @@ const IMAGE_PLANNING_ERROR_MESSAGES: Record<string, string> = {
   invalid_reference: '原参考图已失效，请重新选择参考图后继续',
   provider_unavailable: '图片供应商当前没有可用模型通道或账户，请切换供应商/模型后重试',
   invalid_tool_arguments: '图片参数未通过校验，任务状态已保留，请重新提交',
+  decision_commentary_missing: '图片请求未提交供应商，工具协议校验失败，可安全重试',
+  tool_dispatch: '图片请求未提交供应商，工具协议校验失败，可安全重试',
+  skill_lock_failed: '已选视觉 Skill 内容发生变化，请重新锁定 Skill',
+  native_skill_hash_mismatch: '已选视觉 Skill 内容发生变化，请重新锁定 Skill',
+  image_execution_incomplete: '图片请求未返回可交付资产，请安全重试',
+  image_provider_failed: '图片供应商返回错误，未生成可交付资产',
+  provider_result_unknown: '图片供应商返回未知结果，未生成可交付资产，请查看任务状态后再试',
   provider_http: '图片供应商返回错误，任务状态已保留，请稍后重试',
   provider_timeout: '图片供应商响应超时，任务状态已保留，请稍后重试',
   transport: '图片供应商连接中断，任务状态已保留，请稍后重试',
@@ -2391,18 +2313,6 @@ const stopCanvasWheelFromScrollableRegion: React.WheelEventHandler<HTMLElement> 
   }
 };
 
-const getOriginalImageCopyPayload = (item: CanvasItem) => {
-  if (item.type !== 'image' || !item.src) {
-    return null;
-  }
-
-  return {
-    src: item.src,
-    naturalWidth: item.naturalWidth ?? item.width,
-    naturalHeight: item.naturalHeight ?? item.height,
-  };
-};
-
 const normalizeCanvasItems = (items: CanvasItem[]): CanvasItem[] =>
   items.map((item) => {
     if (item.type === 'text' && item.textVariant === 'card') {
@@ -2474,10 +2384,6 @@ const getTextCardFrameBounds = (item: CanvasItem) => ({
   width: Math.max(0, item.width - TEXT_CARD_FRAME_INSET_X * 2),
   height: Math.max(0, item.height - TEXT_CARD_FRAME_TOP - TEXT_CARD_FRAME_BOTTOM),
 });
-
-const getTextCardFrameCornerRadius = (_item: CanvasItem) => CANVAS_NODE_CORNER_RADIUS;
-
-const getItemCornerRadius = (_item: CanvasItem) => CANVAS_NODE_CORNER_RADIUS;
 
 const getCanvasItemsVisualBounds = (items: CanvasItem[]) => {
   if (!Array.isArray(items) || items.length === 0) {
@@ -3487,7 +3393,6 @@ const CanvasNodesContent = memo(function CanvasNodesContent({
   tool,
   items,
   connections,
-  hoveredCanvasItemId,
   activeCanvasTextGenerationItemIds,
   activeCanvasImageGenerationItemIds,
   activeCanvasTextGenerations,
@@ -4103,7 +4008,6 @@ const CanvasAnnotationsContent = memo(function CanvasAnnotationsContent({
   items,
   selectedIds,
   selectedId,
-  hoveredCanvasItemId,
   editingAnnotationTextId,
   editingAnnotationTextRef,
   draftStroke,
@@ -6640,9 +6544,13 @@ export default function AIWorkspace() {
   const [generationClockMs, setGenerationClockMs] = useState(() => Date.now());
   const [canvasTextGenerationErrorById, setCanvasTextGenerationErrorById] = useState<Record<string, string>>({});
   const [canvasImageGenerationErrorById, setCanvasImageGenerationErrorById] = useState<Record<string, string>>({});
-  const [hasStartedChat, setHasStartedChat] = useState(false);
+  const [, setHasStartedChat] = useState(false);
   const [showAvatarMenu, setShowAvatarMenu] = useState(false);
   const [activeSkill, setActiveSkillState] = useState<{ id: string; label: string } | null>(null);
+  // Keep the selected Skill available synchronously when a user selects it and
+  // submits before React has committed the next render.
+  const activeSkillRef = useRef<{ id: string; label: string } | null>(null);
+  const activeSkillExplicitRef = useRef(false);
   const [generationMode, setGenerationMode] = useState<GenerationMode>(PROMPT_PIPELINE_AGENT_ENABLED ? 'agent' : 'chat');
   const [chatProviderId, setChatProviderIdState] = useState('');
   const [chatModelId, setChatModelIdState] = useState('');
@@ -6681,7 +6589,6 @@ export default function AIWorkspace() {
   const [imageAspectRatio, setImageAspectRatio] = useState('1:1');
   const [imageAspectRatioLocked, setImageAspectRatioLocked] = useState(false);
   const [hideWelcomeByCenterSkillPick, setHideWelcomeByCenterSkillPick] = useState(false);
-  const [referenceImages, setReferenceImages] = useState<string[]>([]);
   const [chatReferenceTokens, setChatReferenceTokens] = useState<ChatReferenceToken[]>([]);
   const chatReferenceTokensRef = useRef<ChatReferenceToken[]>([]);
   const [regionSelections, setRegionSelectionsState] = useState<RegionSelection[]>([]);
@@ -6703,8 +6610,6 @@ export default function AIWorkspace() {
     current: { x: number; y: number };
   } | null>(null);
   const dismissedCanvasReferenceIdsRef = useRef<Set<string>>(new Set());
-  const [draggingImageIndex, setDraggingImageIndex] = useState<number | null>(null);
-  const [dragOverImageIndex, setDragOverImageIndex] = useState<number | null>(null);
   const processedAgentActionsRef = useRef(new Set<string>());
   const processedAgentCompletionSummariesRef = useRef(new Set<string>());
   const pendingAgentConfirmationsRef = useRef(new Set<string>());
@@ -7698,8 +7603,14 @@ export default function AIWorkspace() {
     [applySessionLiveStateUpdate]
   );
   const setActiveSkill = useCallback(
-    (value: React.SetStateAction<{ id: string; label: string } | null>) =>
-      applySessionLiveStateUpdate('activeSkill', value, setActiveSkillState),
+    (value: React.SetStateAction<{ id: string; label: string } | null>) => {
+      const nextValue = typeof value === 'function'
+        ? (value as (previous: { id: string; label: string } | null) => { id: string; label: string } | null)(activeSkillRef.current)
+        : value;
+      activeSkillRef.current = nextValue;
+      activeSkillExplicitRef.current = Boolean(nextValue);
+      applySessionLiveStateUpdate('activeSkill', nextValue, setActiveSkillState);
+    },
     [applySessionLiveStateUpdate]
   );
   const setChatProviderId = useCallback(
@@ -7740,20 +7651,6 @@ export default function AIWorkspace() {
         setGeneratedImageHistoryBySessionState
       ),
     [applySessionLiveStateUpdate]
-  );
-  const setViewport = useCallback(
-    (value: React.SetStateAction<{ x: number; y: number; scale: number }>) => {
-      cancelPendingCanvasCommitSchedule();
-      const nextValue = resolveStateUpdate(value, sessionLiveStateRef.current.viewport);
-      syncSessionLiveState({ viewport: nextValue });
-      stageCanvasCommit({
-        viewport: nextValue,
-        viewportToken: interactionCommitTokenRef.current,
-      });
-      if (!isCanvasCommitBlocked()) flushPendingCanvasCommit('direct-viewport');
-      return nextValue;
-    },
-    [cancelPendingCanvasCommitSchedule, flushPendingCanvasCommit, isCanvasCommitBlocked, stageCanvasCommit, syncSessionLiveState]
   );
   const canvasItemMembershipKey = React.useMemo(
     () => items.map((item) => item.id).join('\u0000'),
@@ -8702,11 +8599,6 @@ export default function AIWorkspace() {
 
     mediaQuery.addListener(updateReducedMotion);
     return () => mediaQuery.removeListener(updateReducedMotion);
-  }, []);
-
-  const inferSessionSkill = useCallback((session: ProjectSession | null): { id: string; label: string } | null => {
-    if (!session) return null;
-    return session.activeSkillExplicit ? session.activeSkill || null : null;
   }, []);
 
   const getAssistantSelectableHost = useCallback((node: Node | null): HTMLElement | null => {
@@ -10328,41 +10220,6 @@ export default function AIWorkspace() {
     });
   };
 
-  const reorderChatImages = (fromIndex: number, toIndex: number) => {
-    if (fromIndex === toIndex) return;
-    setChatReferenceTokens((prev) => {
-      const next = [...prev];
-      const [moved] = next.splice(fromIndex, 1);
-      next.splice(toIndex, 0, moved);
-      return next;
-    });
-  };
-
-  const handleReferenceDragStart = (index: number) => {
-    setDraggingImageIndex(index);
-  };
-
-  const handleReferenceDragOver = (e: React.DragEvent<HTMLDivElement>, index: number) => {
-    e.preventDefault();
-    if (dragOverImageIndex !== index) {
-      setDragOverImageIndex(index);
-    }
-  };
-
-  const handleReferenceDrop = (e: React.DragEvent<HTMLDivElement>, index: number) => {
-    e.preventDefault();
-    if (draggingImageIndex !== null) {
-      reorderChatImages(draggingImageIndex, index);
-    }
-    setDraggingImageIndex(null);
-    setDragOverImageIndex(null);
-  };
-
-  const handleReferenceDragEnd = () => {
-    setDraggingImageIndex(null);
-    setDragOverImageIndex(null);
-  };
-
   const handlePanelReferenceDragStart = useCallback(
     (e: React.DragEvent<HTMLDivElement>, targetItemId: string, sourceItemId: string) => {
       e.stopPropagation();
@@ -10431,22 +10288,6 @@ export default function AIWorkspace() {
     setDraggingPanelReference(null);
     setDragOverPanelReference(null);
   }, []);
-
-  const addShape = (shapeType: 'rectangle' | 'circle') => {
-    const newItem: CanvasItem = {
-      id: `shape-${Date.now()}`,
-      type: 'shape',
-      ...getSpawnPosition({ width: 100, height: 100 }),
-      width: 100,
-      height: 100,
-      rotation: 0,
-      fill: '#3b82f6',
-      visible: true,
-      locked: false,
-    };
-    recordCurrentCanvasUndoSnapshot();
-    setItems(prev => [...prev, newItem]);
-  };
 
   const addText = () => {
     const newItem: CanvasItem = {
@@ -10955,12 +10796,6 @@ export default function AIWorkspace() {
     if (selectedId === id) setSelectedId(null);
     setSelectedIds(prev => prev.filter(selected => selected !== id));
   }, [recordCurrentCanvasUndoSnapshot, selectedId, setConnections, setItems]);
-
-  const deleteConnection = (connectionId: string) => {
-    recordCurrentCanvasUndoSnapshot();
-    setConnections((prev) => prev.filter((connection) => connection.id !== connectionId));
-    setSelectedConnectionIds((prev) => prev.filter((id) => id !== connectionId));
-  };
 
   const getCanvasRelativePoint = (clientX: number, clientY: number) => {
     const canvasRect = canvasMetricsRef.current;
@@ -13880,7 +13715,8 @@ export default function AIWorkspace() {
               content: trimmedInput || '请根据所附参考图生成一张新图片。',
             }],
             intent: 'image',
-            activeSkillId: activeSkill?.id,
+            activeSkillId: activeSkillRef.current?.id,
+            ...(activeSkillRef.current?.id ? { skillSelectionSource: 'manual_ui', activeSkillExplicit: true } : {}),
             referenceImages: linkedImagePreviews.map((preview) => preview.src),
             referenceContext,
             canvasContext: {
@@ -14073,7 +13909,6 @@ export default function AIWorkspace() {
       activeCanvasImageGenerations,
       appendGeneratedImageHistoryForSession,
       defaultWorkspaceImageModelOption.providerId,
-      activeSkill?.id,
       chatModelId,
       chatProviderId,
       imageCardProviderById,
@@ -14331,7 +14166,17 @@ export default function AIWorkspace() {
     const lockedSkill = lockedSkillId
       ? quickActions.find((skill) => skill.id === lockedSkillId) || { id: lockedSkillId, label: lockedSkillId }
       : null;
-    const currentSkill = options?.skill ?? retrySourceMessage?.skill ?? lockedSkill ?? activeSkill;
+    const requestSkillSnapshot = options?.skill ?? retrySourceMessage?.skill ?? lockedSkill ?? activeSkillRef.current ?? activeSkill;
+    if (activeSkillExplicitRef.current && !requestSkillSnapshot?.id) {
+      setChatMessages((previous) => [...previous, {
+        id: `msg-${Date.now()}-skill-lock-error`,
+        role: 'assistant',
+        content: '当前 Skill 状态已失效，请重新选择后再试。',
+        taskStatus: 'failed',
+      }]);
+      return;
+    }
+    const currentSkill = requestSkillSnapshot;
     const selectedChatProviderId = resolvedChatSelection.providerId || chatProviderId || undefined;
     const selectedChatModelId = resolvedChatSelection.model || chatModelId || undefined;
     const selectedImageProviderId = resolvedImageSelection.providerId || imageProviderId || undefined;
@@ -14458,6 +14303,7 @@ export default function AIWorkspace() {
     setHasStartedChat(true);
     const processedAgentActionKeysForRun = new Set<string>();
     let runController: AbortController | null = null;
+    let generatedAssetPreloadChain = Promise.resolve();
     let latestTaskSnapshot: TaskSnapshot | undefined;
     let latestRecoveryRecord: AgentRecoveryRecord | undefined;
 
@@ -14760,6 +14606,7 @@ export default function AIWorkspace() {
         agentMemory: requestSessionMemory,
         recentFailedTask: recentRecoveryTask,
         activeSkillId: currentSkill?.id,
+        ...(currentSkill?.id ? { skillSelectionSource: 'manual_ui', activeSkillExplicit: true } : {}),
         referenceImages: referencesForRequest,
         referenceContext: referenceContextForRequest,
         canvasContext: {
@@ -14863,7 +14710,6 @@ export default function AIWorkspace() {
         let nextGeneratedImageNumber = currentImageCount + 1;
         let progressEventRouter = createAgentProgressEventRouter();
         let suppressAssistantContentForDecision = false;
-        let generatedAssetPreloadChain = Promise.resolve();
         const activityTextById = new Map<string, string>();
         let promotedFinalActivityText = '';
         let promotedFinalReplayOffset = 0;
@@ -14981,6 +14827,7 @@ export default function AIWorkspace() {
                 taskId?: string;
                 contractVersion?: number;
                 batchId?: string;
+                deliveryEventAt?: number;
                 presentation?: { title?: string; summary?: string; operation?: 'generate' | 'edit' };
                 assets?: Array<{
                   id?: string;
@@ -14996,6 +14843,7 @@ export default function AIWorkspace() {
                   batchId?: string;
                   createdAt?: number;
                   assetId?: string;
+                  deliveryId?: string;
                   src?: string;
                   previewSrc?: string;
                   naturalWidth?: number;
@@ -15008,6 +14856,9 @@ export default function AIWorkspace() {
                   versionId?: string;
                   parentVersionId?: string;
                   promptTrace?: ChatMessage['promptTrace'];
+                  providerReturnedAt?: number;
+                  locallyStoredAt?: number;
+                  deliveryEventAt?: number;
                 }>;
                 batch?: { total?: number; settled?: number; succeeded?: number; failed?: number };
               };
@@ -15606,6 +15457,7 @@ export default function AIWorkspace() {
                 (asset): asset is {
                   src: string;
                   assetId?: string;
+                  deliveryId?: string;
                   naturalWidth?: number;
                   naturalHeight?: number;
                   model?: string;
@@ -15617,12 +15469,19 @@ export default function AIWorkspace() {
                   versionId?: string;
                   parentVersionId?: string;
                   promptTrace?: ChatMessage['promptTrace'];
+                  providerReturnedAt?: number;
+                  locallyStoredAt?: number;
+                  deliveryEventAt?: number;
                 } => Boolean(asset.src)
               );
-              const getAssetActionKey = (asset: typeof assets[number]) => {
-                const itemKey = asset.itemId || (typeof asset.index === 'number' ? `index-${asset.index}` : asset.src);
-                return `${actionRunId}:${itemKey}:${asset.src}`;
-              };
+              const getAssetActionKey = (asset: typeof assets[number], index = 0) => asset.deliveryId
+                || buildGeneratedAssetDeliveryId({
+                  runId: actionRunId,
+                  taskId: event.action.taskId,
+                  batchId: event.action.batchId,
+                  asset,
+                  index,
+                });
               const batchTotal = typeof event.action.batch?.total === 'number'
                 ? Math.max(0, event.action.batch.total)
                 : 0;
@@ -15637,9 +15496,18 @@ export default function AIWorkspace() {
               if (typeof event.action.batch?.failed === 'number') {
                 generatedAssetFailureCount = Math.max(generatedAssetFailureCount, event.action.batch.failed);
               }
-              const freshAssets = assets.filter((asset) => {
-                const key = getAssetActionKey(asset);
+              const freshAssets = assets.filter((asset, index) => {
+                const key = getAssetActionKey(asset, index);
                 if (processedAgentActionsRef.current.has(key)) return false;
+                const presence = getGeneratedAssetDeliveryPresence(
+                  { ...asset, deliveryId: key },
+                  sessionLiveStateRef.current.chatMessages,
+                  sessionLiveStateRef.current.items,
+                );
+                if (presence.chat && presence.canvas) {
+                  processedAgentActionsRef.current.add(key);
+                  return false;
+                }
                 processedAgentActionsRef.current.add(key);
                 processedAgentActionKeysForRun.add(key);
                 return true;
@@ -15697,6 +15565,8 @@ export default function AIWorkspace() {
                   });
                   const preloadFailureCount = failedAssets.length;
                   generatedAssetPreloadFailureCount += preloadFailureCount;
+                  let chatCommittedAt: number | null = null;
+                  let canvasCommittedAt: number | null = null;
                   if (loadedAssets.length > 0) {
                   const firstImageNumber = nextGeneratedImageNumber;
                   nextGeneratedImageNumber += loadedAssets.length;
@@ -15707,12 +15577,20 @@ export default function AIWorkspace() {
                     || loadedAssets.find(({ asset }) => asset.model)?.asset.model
                     || generatedAssetModel
                     || selectedImageModelId;
+                  chatCommittedAt = Date.now();
                   const imageMessages: ChatMessage[] = loadedAssets.map(({ asset }, index) => ({
-                    id: `${assistantId}-asset-${asset.itemId || asset.index || firstStreamedOrdinal + index}-${Date.now()}`,
+                    id: `generated-chat:${getAssetActionKey(asset, firstStreamedOrdinal + index)}`,
+                    deliveryId: getAssetActionKey(asset, firstStreamedOrdinal + index),
                     role: 'assistant',
                     content: '',
                     imageUrl: asset.src,
                     ...(asset.assetId ? { assetId: asset.assetId } : {}),
+                    ...(Number.isFinite(asset.providerReturnedAt) ? { providerReturnedAt: asset.providerReturnedAt } : {}),
+                    ...(Number.isFinite(asset.locallyStoredAt) ? { locallyStoredAt: asset.locallyStoredAt } : {}),
+                    deliveryEventAt: Number.isFinite(asset.deliveryEventAt)
+                      ? asset.deliveryEventAt
+                      : event.action.deliveryEventAt,
+                    chatCommittedAt,
                     imageName: asset.label || `image ${firstImageNumber + index}`,
                     model: asset.model || resolvedModel,
                     ...(event.action?.providerId ? { imageProviderId: event.action.providerId } : {}),
@@ -15725,6 +15603,7 @@ export default function AIWorkspace() {
                       ? { imageOperation: event.action.presentation.operation }
                       : {}),
                   }));
+                  canvasCommittedAt = Date.now();
                   const canvasItems = loadedAssets.map(({ asset, naturalWidth, naturalHeight }, index) => {
                     const displaySize = getConstrainedImageDisplaySize(naturalWidth, naturalHeight);
                     const spawnPosition = getSpawnPosition(
@@ -15732,25 +15611,41 @@ export default function AIWorkspace() {
                       firstStreamedOrdinal + index,
                       currentViewport
                     );
-                    return createImageCanvasItem({
-                      id: `generated-${Date.now()}-${asset.itemId || asset.index || firstStreamedOrdinal + index}-${index}`,
+                    return {
+                      ...createImageCanvasItem({
+                      id: `generated-canvas:${getAssetActionKey(asset, firstStreamedOrdinal + index)}`,
                       src: asset.src,
                       naturalWidth,
                       naturalHeight,
                       x: spawnPosition.x,
                       y: spawnPosition.y,
-                    });
+                      }),
+                      deliveryId: getAssetActionKey(asset, firstStreamedOrdinal + index),
+                      ...(asset.assetId ? { assetId: asset.assetId } : {}),
+                      ...(Number.isFinite(asset.providerReturnedAt) ? { providerReturnedAt: asset.providerReturnedAt } : {}),
+                      ...(Number.isFinite(asset.locallyStoredAt) ? { locallyStoredAt: asset.locallyStoredAt } : {}),
+                      deliveryEventAt: Number.isFinite(asset.deliveryEventAt)
+                        ? asset.deliveryEventAt
+                        : event.action.deliveryEventAt,
+                      canvasCommittedAt,
+                    };
                   });
                   appendGeneratedImageHistoryForSession(
                     generationSessionId,
                     loadedAssets.map(({ asset, naturalWidth, naturalHeight }, index) => createGeneratedImageHistoryEntry({
                       src: asset.src,
                       ...(asset.assetId ? { assetId: asset.assetId } : {}),
+                      deliveryId: getAssetActionKey(asset, firstStreamedOrdinal + index),
                       previewSrc: asset.previewSrc || asset.src,
                       naturalWidth,
                       naturalHeight,
                       source: 'chat',
-                      messageId: imageMessages[index]?.id,
+                      messageId: sessionLiveStateRef.current.chatMessages.find((message) => getGeneratedAssetDeliveryPresence(
+                        { ...asset, deliveryId: getAssetActionKey(asset, firstStreamedOrdinal + index) }, [message], [],
+                      ).chat)?.id || imageMessages[index]?.id,
+                      sourceItemId: sessionLiveStateRef.current.items.find((item) => getGeneratedAssetDeliveryPresence(
+                        { ...asset, deliveryId: getAssetActionKey(asset, firstStreamedOrdinal + index) }, [], [item],
+                      ).canvas)?.id || canvasItems[index]?.id,
                       operation: event.action?.presentation?.operation,
                       sourceReferenceId: event.action?.sourceReferenceId,
                       sourceTaskId: event.action?.sourceTaskId,
@@ -15767,10 +15662,17 @@ export default function AIWorkspace() {
                     })),
                   );
                   flushQueuedChatMessageUpdates();
-                  setChatMessages(prev => [...prev, ...imageMessages]);
+                  setChatMessages((prev) => {
+                    return [...prev, ...imageMessages.filter((message) => !getGeneratedAssetDeliveryPresence(
+                      { ...message, src: message.imageUrl }, prev, [],
+                    ).chat)];
+                  });
                   recordCurrentCanvasUndoSnapshot();
-                  setItems(prev => [...prev, ...canvasItems]);
+                  setItems((prev) => {
+                    return [...prev, ...canvasItems.filter((item) => !getGeneratedAssetDeliveryPresence(item, [], prev).canvas)];
+                  });
                     setImageCount((prev) => prev + loadedAssets.length);
+                    scheduleCurrentSessionSaveRef.current();
                   }
                   settleGeneratedAssetDelivery();
                   if (canvasPerformanceEnabledRef.current) {
@@ -15779,6 +15681,11 @@ export default function AIWorkspace() {
                       loaded: loadedAssets.length,
                       failed: failedAssets.length,
                       durationMs: performance.now() - preloadStartedAt,
+                      providerReturnedAt: freshAssets.map((asset) => asset.providerReturnedAt || null),
+                      locallyStoredAt: freshAssets.map((asset) => asset.locallyStoredAt || null),
+                      deliveryEventAt: event.action.deliveryEventAt || null,
+                      chatCommittedAt,
+                      canvasCommittedAt,
                     });
                   }
                 }).catch((error) => {
@@ -15901,6 +15808,8 @@ export default function AIWorkspace() {
 
             if (event.type === 'agent_error') {
               agentTerminalReceived = true;
+              await generatedAssetPreloadChain;
+              flushQueuedChatMessageUpdates();
               const publicFailureMessage = presentAgentErrorMessage(event.stage, event.message || event.error, event.code);
               if (event.recoveryRecord) latestRecoveryRecord = event.recoveryRecord;
               updatePendingAssistantMessageImmediately((msg) => {
@@ -16181,6 +16090,7 @@ export default function AIWorkspace() {
       }
       
     } catch (error) {
+      await generatedAssetPreloadChain;
       console.error('Generation failed:', error);
 
       const conflictCode = error && typeof error === 'object' && 'code' in error
@@ -16262,11 +16172,9 @@ export default function AIWorkspace() {
             content: `生成失败: ${failureMessage}`,
           });
     } finally {
+      await generatedAssetPreloadChain;
       stopStreamTypewriter();
       if (usesAgentRequest) setActiveAgentRunMarker(undefined);
-      for (const key of processedAgentActionKeysForRun) {
-        processedAgentActionsRef.current.delete(key);
-      }
       if (!runController || generateAbortRef.current === runController) {
         if (runController) generateAbortRef.current = null;
         setIsGenerating(false);
@@ -16776,10 +16684,74 @@ export default function AIWorkspace() {
     });
   }, []);
 
+  const hydratedGeneratedAssetSessionRef = useRef<ProjectSession | null>(null);
+  const restorePendingGeneratedAssets = useCallback(async (
+    session: ProjectSession,
+    events: unknown[],
+    signal: AbortSignal,
+  ) => {
+    const live = sessionLiveStateRef.current;
+    const pendingAssets = collectPendingGeneratedAssetDeliveries({
+      ...session,
+      messages: live.chatMessages,
+      generatedImageHistory: live.generatedImageHistoryBySession[session.id] || session.generatedImageHistory,
+    }, events).filter((asset) => {
+      const presence = getGeneratedAssetDeliveryPresence(asset, live.chatMessages, live.items);
+      return !presence.chat || !presence.canvas;
+    });
+    if (pendingAssets.length === 0) return;
+    const loaded = await runGeneratedAssetPreloadQueue(
+      pendingAssets,
+      (asset) => preloadGeneratedAsset(asset, { signal, timeoutMs: 15_000 }),
+      { concurrency: 2, signal },
+    );
+    if (signal.aborted || currentSessionIdRef.current !== session.id) return;
+    const loadedAssets = loaded.flatMap((result) => result.status === 'fulfilled' ? [result.value] : []);
+    if (loadedAssets.length === 0) return;
+    const committedAt = Date.now();
+    const imageMessages: ChatMessage[] = [];
+    const canvasItems: CanvasItem[] = [];
+    const history: GeneratedImageHistoryEntry[] = [];
+    for (const { asset, naturalWidth, naturalHeight } of loadedAssets) {
+      const current = sessionLiveStateRef.current;
+      const presence = getGeneratedAssetDeliveryPresence(asset, current.chatMessages, current.items);
+      const messageId = current.chatMessages.find((message) => getGeneratedAssetDeliveryPresence(asset, [message], []).chat)?.id
+        || `generated-chat:${asset.deliveryId}`;
+      const canvasId = current.items.find((item) => getGeneratedAssetDeliveryPresence(asset, [], [item]).canvas)?.id
+        || `generated-canvas:${asset.deliveryId}`;
+      if (!presence.chat) imageMessages.push({
+        id: messageId, role: 'assistant', content: '', imageUrl: asset.src,
+        assetId: asset.assetId, deliveryId: asset.deliveryId,
+        imageName: asset.label || '已生成图片', model: asset.model,
+        providerReturnedAt: asset.providerReturnedAt, locallyStoredAt: asset.locallyStoredAt,
+        deliveryEventAt: asset.deliveryEventAt, chatCommittedAt: committedAt,
+      });
+      if (!presence.canvas) canvasItems.push({
+        ...createImageCanvasItem({
+          id: canvasId, src: asset.src, naturalWidth, naturalHeight,
+          ...getSpawnPosition(getConstrainedImageDisplaySize(naturalWidth, naturalHeight), canvasItems.length, current.viewport),
+        }),
+        assetId: asset.assetId, deliveryId: asset.deliveryId,
+        providerReturnedAt: asset.providerReturnedAt, locallyStoredAt: asset.locallyStoredAt,
+        deliveryEventAt: asset.deliveryEventAt, canvasCommittedAt: committedAt,
+      });
+      history.push(createGeneratedImageHistoryEntry({
+        ...asset, naturalWidth, naturalHeight, source: 'chat',
+        timestamp: asset.createdAt || committedAt, messageId, sourceItemId: canvasId,
+      }));
+    }
+    if (imageMessages.length) setChatMessages((messages) => [...messages, ...imageMessages]);
+    if (canvasItems.length) setItems((items) => [...items, ...canvasItems]);
+    appendGeneratedImageHistoryForSession(session.id, history);
+    setImageCount((count) => count + canvasItems.length);
+    scheduleCurrentSessionSaveRef.current();
+  }, [appendGeneratedImageHistoryForSession, getSpawnPosition, setChatMessages, setItems]);
+
   const applyResolvedSessionState = useCallback((resolvedState: any) => {
     flushPendingCanvasCommit('session-switch');
     resetPendingCanvasInteractionCommits();
     isHydratingSessionRef.current = true;
+    hydratedGeneratedAssetSessionRef.current = resolvedState.normalizedSession || null;
     const interruptedRun = resolvedState.normalizedSession?.activeAgentRun?.status === 'running'
       ? resolvedState.normalizedSession.activeAgentRun as NonNullable<ProjectSession['activeAgentRun']>
       : null;
@@ -16830,6 +16802,8 @@ export default function AIWorkspace() {
     setContextModelEventsState(resolvedState.normalizedSession?.contextHistory?.modelEvents || resolvedState.normalizedSession?.contextEvents || []);
     setCompactedWindowsState(resolvedState.normalizedSession?.compactedWindows || []);
     setActiveContextWindowState(resolvedState.normalizedSession?.activeContextWindow);
+    activeSkillRef.current = resolvedState.activeSkill || null;
+    activeSkillExplicitRef.current = Boolean(resolvedState.activeSkill);
     setActiveSkillState(resolvedState.activeSkill || null);
     setChatProviderIdState(resolvedState.normalizedSession?.chatProviderId || '');
     setChatModelIdState(resolvedState.normalizedSession?.chatModelId || '');
@@ -16991,23 +16965,44 @@ export default function AIWorkspace() {
     const threadId = currentSessionId;
     void (async () => {
       try {
+        const hydratedSession = hydratedGeneratedAssetSessionRef.current;
+        if (hydratedSession?.id === threadId) {
+          await restorePendingGeneratedAssets(hydratedSession, [], controller.signal);
+        }
         const response = await fetch(`/api/agent?threadId=${encodeURIComponent(threadId)}`, { signal: controller.signal });
         if (!response.ok) return;
         const { state, events } = await response.json();
         if (controller.signal.aborted || currentSessionIdRef.current !== threadId || !state) return;
+        const liveRun = activeAgentRunMarkerRef.current;
+        const liveRunMatchesJournal = !isGeneratingRef.current || !liveRun || (Array.isArray(state.turns) && state.turns.some((turn: any) => (
+          (liveRun.operationId && turn.operationId === liveRun.operationId)
+          || (liveRun.runId && (turn.runId === liveRun.runId || turn.runIds?.includes?.(liveRun.runId)))
+          || (liveRun.taskId && turn.taskId === liveRun.taskId)
+        )));
+        // A response that predates a newly started live run must not replace
+        // its running message with stale journal state.
+        if (!liveRunMatchesJournal) return;
         setSessions((sessions) => sessions.map((session) => session.id !== threadId ? session : {
           ...session, threadId, turns: state.turns, activeTurn: state.activeTurn,
           lastSequence: state.lastSequence, threadStatus: state.threadStatus, archived: state.archived,
           pendingApproval: state.pendingApproval, todoItems: state.todoItems, commandState: state.commandState,
         }));
-        // Restore a journal-only thread without duplicating locally retained messages.
-        setChatMessages((messages) => messages.length ? messages : completedTranscriptMessages(state.turns, state.transcriptStartSequence, state.transcriptSummary, { events, threadId }) as ChatMessage[]);
+        // Journal turn state is authoritative for terminal status, even when
+        // local persistence already contains a stale running assistant row.
+        setChatMessages((messages) => reconcileHydratedChatMessages(messages, state, { events, threadId }) as ChatMessage[]);
+        if (!isGeneratingRef.current && !state.activeTurn) {
+          activeAgentRunMarkerRef.current = undefined;
+          setActiveAgentRunMarker(undefined);
+        }
+        if (hydratedSession?.id === threadId) {
+          await restorePendingGeneratedAssets(hydratedSession, events || [], controller.signal);
+        }
       } catch {
         // Historical loading failure does not cancel a live run or discard drafts.
       }
     })();
     return () => controller.abort();
-  }, [currentSessionId, setChatMessages, setSessions]);
+  }, [currentSessionId, restorePendingGeneratedAssets, setChatMessages, setSessions]);
 
   const getCurrentSession = () => sessions.find(s => s.id === currentSessionId);
   const sessionsWithGeneratedImageHistory = React.useMemo(() => {
@@ -17136,6 +17131,8 @@ export default function AIWorkspace() {
   }, [cancelAllRecognitions, currentSessionId, viewMode]);
 
   const setActiveSkillForCurrentSession = (skill: { id: string; label: string } | null) => {
+    activeSkillRef.current = skill;
+    activeSkillExplicitRef.current = Boolean(skill);
     setActiveSkill(skill);
     if (!skill && chatMessages.length === 0) {
       setHideWelcomeByCenterSkillPick(false);
@@ -17167,16 +17164,6 @@ export default function AIWorkspace() {
       setEditingSessionId(null);
     }
   }, [persistRenameSession]);
-
-  const handleToolClick = (toolId: string) => {
-    if (toolId === 'image') {
-      addImageCard();
-    } else if (toolId === 'text') {
-      addText();
-    } else {
-      setTool(toolId as Tool);
-    }
-  };
 
   const handleAddNodeMenuAction = (optionId: 'text' | 'image' | 'video') => {
     if (optionId === 'video') return;
@@ -19069,7 +19056,6 @@ export default function AIWorkspace() {
         }}
         onSelectImageCardProvider={(providerId) => {
           if (!selectedImageCardPanelItem) return;
-          const nextProvider = selectableImageProviders.find((provider) => provider.id === providerId);
           const nextModel = findWorkspaceModelOption(workspaceImageModelOptions, '', providerId);
           const resolvedModelId = resolveWorkspaceImageCardModel(
             nextModel?.id || '',
@@ -20855,7 +20841,6 @@ export default function AIWorkspace() {
                                 type="button"
                                 className="workspace-control-chip ml-1 rounded-md px-2 py-0.5 text-[11px]"
                                 onClick={() => {
-                                  const messageIndex = chatMessages.findIndex((item) => item.id === msg.id);
                                   const clickedRecovery = msg.agentRecovery;
                                   const recovery: AgentRecoveryRecord | null = clickedRecovery
                                     ? getLatestAgentRecoveryForTask(chatMessages, clickedRecovery.taskId) as AgentRecoveryRecord | null || clickedRecovery

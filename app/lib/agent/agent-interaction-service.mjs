@@ -1,3 +1,5 @@
+import { resolveExplicitSkillDirective } from './skill-registry.mjs';
+
 /**
  * Request-scoped interaction helpers used by the Native tool dispatcher.
  *
@@ -95,11 +97,14 @@ export function resolveRecoveryContinuation({ record, decision, mode, revision }
   };
 }
 
-export function selectSkillFromInput({ activeSkillId, clarificationRequest, clarificationResponse, state, skills = [], explicitSkill } = {}) {
+export function selectSkillFromInput({ activeSkillId, clarificationRequest, clarificationResponse, state, skills = [], explicitSkill, latestUserMessage } = {}) {
   const manifests = Array.isArray(skills) ? skills : [];
-  if (explicitSkill?.type === 'clear') return { selectedSkill: null, skillSource: null, method: 'manual_text', candidateIds: [] };
-  if (explicitSkill?.type === 'select') {
-    const selectedSkill = manifests.find((item) => item?.id === explicitSkill.id || item?.id === explicitSkill.manifest?.id);
+  const resolvedExplicitSkill = explicitSkill === undefined
+    ? resolveExplicitSkillDirective(String(latestUserMessage || ''), manifests)
+    : explicitSkill;
+  if (resolvedExplicitSkill?.type === 'clear') return { selectedSkill: null, skillSource: null, method: 'manual_text', candidateIds: [] };
+  if (resolvedExplicitSkill?.type === 'select') {
+    const selectedSkill = manifests.find((item) => item?.id === resolvedExplicitSkill.id || item?.id === resolvedExplicitSkill.manifest?.id);
     if (!selectedSkill) return { error: { code: 'skill_unavailable', failureStage: 'interaction', retryable: false } };
     return { selectedSkill, skillSource: 'explicit_text', method: 'manual_text', candidateIds: [selectedSkill.id] };
   }
@@ -116,22 +121,146 @@ export function selectSkillFromInput({ activeSkillId, clarificationRequest, clar
   return { selectedSkill, skillSource: selectedSkill ? (state?.skillSource || 'manual_ui') : null, method: selectedSkill ? 'manual_ui' : 'none', candidateIds: selectedSkill ? [selectedSkill.id] : [] };
 }
 
+/**
+ * Resolve request-level confirmation and Skill input before Native execution.
+ * All persistence and side effects are injected by the request runtime.
+ * @param {any} options
+ * @returns {Promise<any>}
+ */
+export async function prepareAgentInteraction(options = {}) {
+  const {
+    body = {}, latestUserMessage = '', activeClarificationState, skillManifests = [],
+    getConfirmation, claimConfirmation, claimStoredConfirmation,
+    assertLockedImageSkill, providers, sessionId, runId, progressTracker,
+  } = options;
+  let approvedConfirmation = null;
+  let selectedSkill = null;
+  let skillSource = null;
+  let skillSelectionMethod = 'none';
+  let skillCandidateIds = [];
+  let activeSkillChange;
+  let runReferenceContext = options.runReferenceContext;
+  let executionReferenceImages = options.executionReferenceImages || [];
+  const explicitSkillRequested = body.skillSelectionSource === 'manual_ui'
+    || body.skillSelectionSource === 'explicit_text'
+    || body.activeSkillExplicit === true;
+  if (explicitSkillRequested && !String(body.activeSkillId || '').trim()) {
+    const error = Object.assign(new Error('Explicit Skill selection is missing; choose the Skill again'), {
+      code: 'skill_lock_failed',
+      failureStage: 'skill_selection',
+      retryable: false,
+    });
+    throw error;
+  }
+  if (body.confirmation?.confirmationId) {
+    approvedConfirmation = await getConfirmation?.(body.confirmation.confirmationId) || null;
+    if (!approvedConfirmation || approvedConfirmation.sessionId !== sessionId) throw new Error('Confirmation is unavailable for this session');
+    await claimConfirmation?.({ record: approvedConfirmation, requestedToolName: body.confirmation.toolName, userMessage: latestUserMessage, providers });
+    await claimStoredConfirmation?.({ sessionId, confirmationId: body.confirmation.confirmationId, runId, contract: approvedConfirmation.toolArgs });
+    selectedSkill = approvedConfirmation.skillId
+      ? skillManifests.find((skill) => skill.id === approvedConfirmation.skillId) || null
+      : null;
+    if (approvedConfirmation.skillId && !selectedSkill) throw new Error('Confirmed Skill is unavailable');
+    skillSource = approvedConfirmation.skillSource;
+    body.activeSkillId = selectedSkill?.id;
+    body.imageOptions = approvedConfirmation.imageOptions || body.imageOptions;
+    runReferenceContext = approvedConfirmation.referenceContext;
+    executionReferenceImages = [...(approvedConfirmation.referenceImages || [])];
+    if (approvedConfirmation.toolName === 'generate_image') await assertLockedImageSkill?.(selectedSkill, approvedConfirmation.skillContentHash);
+  }
+  if (activeClarificationState?.operationId) {
+    progressTracker?.resume?.({ operationId: activeClarificationState.operationId, lastSequence: activeClarificationState.lastSequence });
+    skillSource = activeClarificationState.skillSource ?? skillSource;
+  }
+  const isSkillSelectionResponse = Boolean(
+    body.clarificationResponse && body.clarificationRequest?.dimension === 'skill_selection' && activeClarificationState,
+  );
+  const skillSelection = selectSkillFromInput({
+    activeSkillId: body.activeSkillId,
+    clarificationRequest: isSkillSelectionResponse ? body.clarificationRequest : undefined,
+    clarificationResponse: isSkillSelectionResponse ? body.clarificationResponse : undefined,
+    state: activeClarificationState,
+    skills: skillManifests,
+    latestUserMessage: isSkillSelectionResponse ? '' : latestUserMessage,
+    explicitSkill: explicitSkillRequested
+      ? { type: 'select', id: String(body.activeSkillId).trim() }
+      : undefined,
+  });
+  if (skillSelection.error) {
+    throw Object.assign(new Error(skillSelection.error.code), skillSelection.error);
+  }
+  if (explicitSkillRequested && !skillSelection.selectedSkill) {
+    throw Object.assign(new Error('Explicit Skill could not be locked'), {
+      code: 'skill_lock_failed', failureStage: 'skill_selection', retryable: false,
+    });
+  }
+  selectedSkill = skillSelection.selectedSkill || null;
+  skillSource = skillSelection.skillSource;
+  skillSelectionMethod = skillSelection.method;
+  skillCandidateIds = skillSelection.candidateIds || [];
+  if (isSkillSelectionResponse && activeClarificationState) {
+    if (selectedSkill) {
+      activeClarificationState.skillId = selectedSkill.id;
+      activeClarificationState.skillSource = skillSource;
+    } else {
+      delete activeClarificationState.skillId;
+      activeClarificationState.skillSource = null;
+    }
+  }
+  if (skillSelectionMethod === 'manual_text' || skillSelectionMethod === 'user_choice') {
+    activeSkillChange = selectedSkill ? { id: selectedSkill.id, label: selectedSkill.name } : null;
+  }
+  return {
+    approvedConfirmation, selectedSkill, skillSource, skillSelectionMethod, skillCandidateIds,
+    activeSkillChange, runReferenceContext, executionReferenceImages,
+  };
+}
+
 export function createInteractionService({ loadSkillContent, emitEvent, logger, persistState, loadState, persistConfirmation, claimConfirmation, requestUserDecision, requestContextSelection, resolveFailedTaskRecovery, requestMainAgentContext, rewindAgentAnalysis } = {}) {
   const delegate = (handler) => async ({ args, context } = {}) => {
     if (typeof handler !== 'function') return { isError: true, modelResult: { code: 'interaction_unavailable', failureStage: 'interaction', retryable: false } };
     return handler(args, context);
   };
   return {
-    async selectVisualSkill({ args, skills, selectedSkill, imageStarted, context = {} } = {}) {
-      const result = validateVisualSkillSelection({ args, skills, selectedSkill, imageStarted });
-      if (!result.locked) return result;
-      if (typeof loadSkillContent !== 'function') {
-        return { isError: true, failureCode: 'skill_loader_unavailable', failureStage: 'tool_dispatch', retryable: false };
+    async loadSkill(skillId, options = {}) {
+      if (typeof loadSkillContent !== 'function') throw new Error('skill_loader_unavailable');
+      const content = await loadSkillContent(skillId, options);
+      if (!String(content || '').trim()) throw new Error('skill_empty');
+      return { content: String(content), contentHash: await hashText(content) };
+    },
+    async assertLockedSkill(skill, expectedHash = null) {
+      if (!skill) return { content: '', contentHash: '' };
+      if (skill.executionMode !== 'image_pipeline' || !skill.allowedTools?.includes('generate_image')) {
+        throw new Error('The locked Skill is not allowed to generate images');
       }
-      const content = await loadSkillContent(result.skill.id);
-      if (!String(content || '').trim()) {
-        return { isError: true, failureCode: 'skill_empty', failureStage: 'tool_dispatch', retryable: false };
+      const loaded = await this.loadSkill(skill.id);
+      if (expectedHash && expectedHash !== loaded.contentHash) {
+        throw new Error('The locked Skill content changed after this task was created');
       }
+      return loaded;
+    },
+  async selectVisualSkill({ args, skills, selectedSkill, imageStarted, context = {} } = {}) {
+    const result = validateVisualSkillSelection({ args, skills, selectedSkill, imageStarted });
+    if (!result.locked) return result;
+    if (typeof loadSkillContent !== 'function') {
+        return { isError: true, failureCode: 'skill_lock_failed', failureStage: 'interaction', retryable: false, reason: 'skill_loader_unavailable' };
+    }
+    let content;
+    try {
+      content = await loadSkillContent(result.skill.id);
+    } catch (error) {
+      return {
+        isError: true,
+        failureCode: 'skill_lock_failed',
+        failureStage: 'interaction',
+        retryable: false,
+        skillId: result.skill.id,
+        reason: error instanceof Error ? error.message : String(error),
+      };
+    }
+    if (!String(content || '').trim()) {
+        return { isError: true, failureCode: 'skill_lock_failed', failureStage: 'interaction', retryable: false, reason: 'skill_empty', skillId: result.skill.id };
+    }
       const contentHash = await hashText(content);
       emitEvent?.({ type: 'skill_selected', skillId: result.skill.id, label: result.skill.name, source: 'auto', ...context });
       await logger?.info?.('skill.loaded', 'Visual Skill selected by Native Agent', { skillId: result.skill.id, contentHash, ...context });
@@ -142,6 +271,7 @@ export function createInteractionService({ loadSkillContent, emitEvent, logger, 
     resolveContextSelection,
     resolveRecoveryContinuation,
     selectSkillFromInput,
+    prepareAgentInteraction,
     request_user_decision: delegate(requestUserDecision),
     request_context_selection: delegate(requestContextSelection),
     resolve_failed_task_recovery: delegate(resolveFailedTaskRecovery),

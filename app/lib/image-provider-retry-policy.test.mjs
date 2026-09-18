@@ -98,3 +98,11 @@ test('authentication, permission, and throttling failures never trigger stream f
     });
   }
 });
+
+test('provider permission errors never retry the same provider', () => {
+  assert.deepEqual(classifyImagePostRetry({
+    kind: 'http', status: 500, failureCode: 'provider_permission_denied', attempt: 1, maxAttempts: 3,
+  }), {
+    retry: false, retryWithoutStream: false, outcomeUnknown: false, failureCode: 'provider_permission_denied',
+  });
+});

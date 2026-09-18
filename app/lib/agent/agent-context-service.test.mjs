@@ -30,3 +30,22 @@ test('context preparation rejects stale snapshots before provider work', async (
   assert.equal(result.response.status, 409);
   assert.equal(result.response.payload.code, 'revision_conflict');
 });
+
+test('explicit image intent overrides neutral message inference', async () => {
+  const result = await prepareAgentContext({
+    body: { messages: [{ role: 'user', content: '请准备一个视觉方案' }], intent: 'image' },
+    sessionId: 'session-image-intent',
+    latestUserMessage: '请准备一个视觉方案',
+    skillProviderService: {
+      listSkillManifests: async () => [],
+      prepareProviderSelection: async () => ({
+        providers: [{ id: 'provider', name: 'Provider', baseUrl: 'https://example.test', protocol: 'responses' }],
+        providerImageOptionProfiles: {},
+        selection: { providerId: 'provider', model: 'model' },
+        resolvedSelection: { providerId: 'provider', model: 'model', protocol: 'responses', capability: 'chat', validated: true },
+      }),
+    },
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.value.conversationIntent.intent, 'image');
+});

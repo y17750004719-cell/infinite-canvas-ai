@@ -164,6 +164,14 @@ test('appendGeneratedImageHistoryEntries preserves existing entries and skips du
   );
 });
 
+test('normalizeGeneratedImageHistory preserves stable delivery identity', () => {
+  const [entry] = normalizeGeneratedImageHistory([{
+    id: 'history-1', deliveryId: 'generated-delivery:version-1',
+    src: '/runtime/version-1.png', createdAt: 1, source: 'chat',
+  }]);
+  assert.equal(entry.deliveryId, 'generated-delivery:version-1');
+});
+
 test('appendMissingGeneratedHistoryEntries skips duplicates by src even when ids differ', () => {
   const result = appendMissingGeneratedHistoryEntries(
     [

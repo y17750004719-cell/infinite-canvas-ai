@@ -81,6 +81,7 @@ export function normalizeGeneratedImageHistory(entries) {
 
     return [{
       id,
+      ...(toSafeString(entry?.deliveryId) ? { deliveryId: toSafeString(entry.deliveryId) } : {}),
       src,
       ...(toSafeString(entry?.assetId) ? { assetId: toSafeString(entry.assetId) } : {}),
       previewSrc: toSafeString(entry?.previewSrc) || src,

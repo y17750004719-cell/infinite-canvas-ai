@@ -129,6 +129,10 @@ export class NativeCodexStdioClient {
     this.resolveExit = null;
   }
 
+  get pendingRequestCount() {
+    return this.pending.size;
+  }
+
   async start(initializeParams) {
     if (this.started) throw clientError('Native Codex client already started', { code: 'already_started' });
     this.started = true;

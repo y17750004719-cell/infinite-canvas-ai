@@ -65,8 +65,8 @@ test('generate_image exposes a strict direct execution contract and forwards the
     'operation', 'prompt', 'referenceIds', 'targetReferenceId', 'outputCount', 'aspectRatio', 'deliveryMode', 'panelCount',
   ]);
   assert.deepEqual(modelTool.function.parameters.properties.numLastImagesToInclude, {
-    type: 'integer',
-    enum: [1],
+    type: ['integer', 'null'],
+    enum: [1, null],
     description: 'For edit operations only, explicitly continue from the most recent image in the current canvas session. Mutually exclusive with non-empty referenceIds and targetReferenceId; the runtime resolves the image.',
   });
   assert.equal(modelTool.function.parameters.properties.items.items.additionalProperties, false);
@@ -124,6 +124,20 @@ test('generate_image exposes a strict direct execution contract and forwards the
     allowedTools: ['generate_image'], runId: 'run-image-recent',
   });
   assert.deepEqual(calls.at(-1), [recentImageArgs, 'run-image-recent', undefined]);
+  await executeAgentTool(registry, 'generate_image', { ...recentImageArgs, numLastImagesToInclude: null }, {
+    allowedTools: ['generate_image'], runId: 'run-image-null',
+  });
+  const normalizedNullArgs = { ...recentImageArgs };
+  delete normalizedNullArgs.numLastImagesToInclude;
+  assert.deepEqual(calls.at(-1), [normalizedNullArgs, 'run-image-null', undefined]);
+  await assert.rejects(
+    () => executeAgentTool(registry, 'generate_image', { ...recentImageArgs, operation: 'generate' }, { allowedTools: ['generate_image'] }),
+    /仅可用于图片编辑/,
+  );
+  await assert.rejects(
+    () => executeAgentTool(registry, 'generate_image', { ...recentImageArgs, referenceIds: ['canvas:reference'] }, { allowedTools: ['generate_image'] }),
+    /不能与显式图片引用同时使用/,
+  );
   await assert.rejects(
     () => executeAgentTool(registry, 'generate_image', { ...recentImageArgs, numLastImagesToInclude: 2 }, { allowedTools: ['generate_image'] }),
     /allowed value/,

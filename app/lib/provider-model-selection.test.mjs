@@ -3,8 +3,10 @@ import test from 'node:test';
 
 import {
   listAlternativeProviderModelSelections,
+  fingerprintProviderSelection,
   resolveProviderModelCapabilities,
   resolveProviderModelSelection,
+  resolveProviderSelection,
 } from './provider-model-selection.mjs';
 
 const providers = [
@@ -46,6 +48,41 @@ test('keeps an exact enabled provider and chat model pair', () => {
       reason: 'exact',
     }
   );
+});
+
+test('returns a validated immutable provider selection snapshot and safe diagnostic', () => {
+  const diagnostics = [];
+  const result = resolveProviderSelection({
+    providers,
+    purpose: 'chat',
+    requestedProviderId: 'secondary',
+    requestedModel: 'shared-chat',
+    onDiagnostic: (event) => diagnostics.push(event),
+  });
+  assert.equal(result.providerId, 'secondary');
+  assert.equal(result.providerName, 'secondary');
+  assert.equal(result.capability, 'chat');
+  assert.equal(result.validated, true);
+  assert.equal(result.providerFingerprint, fingerprintProviderSelection(providers[1], 'shared-chat'));
+  assert.equal(Object.isFrozen(result), true);
+  assert.equal(diagnostics[0].event, 'provider.selection.resolved');
+  assert.equal('apiKey' in diagnostics[0], false);
+});
+
+test('rejects an unavailable model with structured selection diagnostics', () => {
+  const diagnostics = [];
+  const result = resolveProviderSelection({
+    providers: [{ id: 'bee', enabled: true, chatModels: ['gpt-5.6'], baseUrl: 'https://beeapi.test' }],
+    purpose: 'chat',
+    requestedProviderId: 'bee',
+    requestedModel: 'gpt-5.6',
+    allowFallback: false,
+    excludeUnavailable: true,
+    onDiagnostic: (event) => diagnostics.push(event),
+  });
+  assert.equal(result.validated, false);
+  assert.equal(result.reason, 'no_capable_provider');
+  assert.equal(diagnostics[0].event, 'provider.selection.rejected');
 });
 
 test('falls back to the first purpose model on the requested provider', () => {

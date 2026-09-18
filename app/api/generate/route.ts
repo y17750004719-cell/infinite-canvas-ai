@@ -24,7 +24,6 @@ const RUNTIME_DIR = path.join(process.cwd(), "runtime");
 const GENERATED_UPLOADS_DIR = path.join(RUNTIME_DIR, "uploads", "generated");
 const MAX_REFERENCE_IMAGE_BYTES = 12 * 1024 * 1024;
 const MAX_SAVED_IMAGE_BYTES = 20 * 1024 * 1024;
-const ALLOWED_PUBLIC_IMAGE_EXTENSIONS = [".png", ".jpg", ".jpeg", ".webp", ".gif"];
 const generateLogger = createLogger("api.generate", { route: "/api/generate" });
 
 function toLogDetails(payload?: unknown): Record<string, unknown> | undefined {
@@ -38,12 +37,6 @@ function toLogDetails(payload?: unknown): Record<string, unknown> | undefined {
 function debugLog(message: string, payload?: unknown) {
   if (DEBUG_API_LOGS) {
     void generateLogger.info("debug", message, toLogDetails(payload));
-  }
-}
-
-function debugWarn(message: string, payload?: unknown) {
-  if (DEBUG_API_LOGS) {
-    void generateLogger.warn("warn", message, toLogDetails(payload));
   }
 }
 
@@ -337,6 +330,13 @@ function attachImagesToLatestUserMessage(
 export async function POST(request: NextRequest) {
   const reqId = createRequestId("gen");
   const startedAt = Date.now();
+  let requestMetadata: {
+    toolCallId: string | null;
+    selectedSkillId: string | null;
+    commentarySource: string | null;
+    commentaryFallbackUsed: boolean;
+  } = { toolCallId: null, selectedSkillId: null, commentarySource: null, commentaryFallbackUsed: false };
+  let resolvedIntentForDiagnostics: string | null = null;
   const requestLogger = createLogger("api.generate", {
     route: "/api/generate",
     requestId: reqId,
@@ -385,7 +385,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ status: 'error', error: error.message, ...migrationErrorMeta(error) }, { status: 409 });
     }
 
-    const { messages: incomingMessages, size, quality, aspect_ratio, n, reference_images, reference_labels, skill, intent, model, executionMode, providerId, imageProviderId, chatProviderId, cancelWithRequest } = body as {
+    const { messages: incomingMessages, size, quality, aspect_ratio, n, reference_images, reference_labels, skill, selectedSkillId, toolCallId, commentarySource, commentaryFallbackUsed, intent, model, executionMode, providerId, imageProviderId, chatProviderId, cancelWithRequest } = body as {
       messages: Array<{ role: "user" | "assistant" | "system"; content: string }>;
       size?: string;
       quality?: string;
@@ -394,6 +394,10 @@ export async function POST(request: NextRequest) {
       reference_images?: string[];
       reference_labels?: string[];
       skill?: string;
+      selectedSkillId?: string | null;
+      toolCallId?: string;
+      commentarySource?: string | null;
+      commentaryFallbackUsed?: boolean;
       intent?: GenerateIntent;
       model?: string;
       executionMode?: "sync" | "async";
@@ -403,6 +407,12 @@ export async function POST(request: NextRequest) {
       cancelWithRequest?: boolean;
       stream?: boolean;
     };
+    requestMetadata = {
+      toolCallId: typeof toolCallId === "string" ? toolCallId : null,
+      selectedSkillId: typeof selectedSkillId === "string" ? selectedSkillId : (typeof skill === "string" ? skill : null),
+      commentarySource: typeof commentarySource === "string" ? commentarySource : null,
+      commentaryFallbackUsed: commentaryFallbackUsed === true,
+    };
 
     if (DEBUG_API_LOGS) {
       await requestLogger.info("request.start", "Generate API request started", {
@@ -410,6 +420,10 @@ export async function POST(request: NextRequest) {
         messageCount: Array.isArray(incomingMessages) ? incomingMessages.length : 0,
         hasReferenceImages: Array.isArray(reference_images) && reference_images.length > 0,
         skill: typeof skill === "string" ? skill : null,
+        selectedSkillId: typeof selectedSkillId === "string" ? selectedSkillId : null,
+        toolCallId: typeof toolCallId === "string" ? toolCallId : null,
+        commentarySource: typeof commentarySource === "string" ? commentarySource : null,
+        commentaryFallbackUsed: commentaryFallbackUsed === true,
         intent: intent || "auto",
         model: typeof model === "string" ? model : null,
         executionMode: executionMode === "async" ? "async" : "sync",
@@ -431,6 +445,7 @@ export async function POST(request: NextRequest) {
       .map((msg) => msg.content);
     const latestRawUserMessage = [...userMessageTexts].reverse()[0] || "";
     const resolved = resolveIntent(intent, latestRawUserMessage, hasReferenceImages);
+    resolvedIntentForDiagnostics = resolved.intent;
     const supplierPromptHash = hashPrompt(resolved.prompt);
 
     if (
@@ -502,15 +517,6 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    const latestUserContent = [...messages].reverse().find((msg) => msg.role === "user")?.content;
-    const latestUserMessage = typeof latestUserContent === "string"
-      ? latestUserContent
-      : Array.isArray(latestUserContent)
-        ? latestUserContent
-            .filter((part) => part.type === "text")
-            .map((part) => part.text)
-            .join("\n")
-        : "";
     debugLog("Resolved generation intent", {
       reqId,
       requestedIntent: intent || "auto",
@@ -622,6 +628,11 @@ export async function POST(request: NextRequest) {
         resolvedAspectRatio: resolvedAspectRatio,
         imageSize,
         supplierEndpointMode: referenceResponseMode,
+        toolCallId: toolCallId || null,
+        selectedSkillId: selectedSkillId || skill || null,
+        executionReached: true,
+        providerRequestStarted: true,
+        failureStage: "provider_request",
       });
 
       let imageResult;
@@ -705,9 +716,24 @@ export async function POST(request: NextRequest) {
         reqId,
         dataCount: imageResult.data.length,
         urlPresencePreview: imageResult.data.slice(0, 2).map((entry) => typeof entry?.url === "string" && entry.url.length > 0),
+        toolCallId: toolCallId || null,
+        selectedSkillId: selectedSkillId || skill || null,
+        executionReached: true,
+        providerRequestStarted: true,
+        assetCount: imageResult.data.length,
+        failureStage: null,
       });
 
-      const savedImages = await saveImagesToLocal(imageResult.data.map((entry) => entry.url));
+      let savedImages;
+      try {
+        savedImages = await saveImagesToLocal(imageResult.data.map((entry) => entry.url));
+      } catch (error) {
+        throw Object.assign(error instanceof Error ? error : new Error(String(error)), {
+          failureStage: 'local_delivery',
+          providerRequestStarted: true,
+          assetCount: 0,
+        });
+      }
       const primarySavedImage = savedImages[0];
       debugLog("Saved reference-based generation outputs locally", {
         reqId,
@@ -715,7 +741,11 @@ export async function POST(request: NextRequest) {
         savedFiles: savedImages.map((image) => image.filename),
       });
 
-      await logResponse(200, { mode: referenceResponseMode, skill: skill || null });
+      await logResponse(200, {
+        mode: referenceResponseMode, skill: skill || null,
+        toolCallId: toolCallId || null, selectedSkillId: selectedSkillId || skill || null,
+        executionReached: true, providerRequestStarted: true, assetCount: savedImages.length, failureStage: null,
+      });
       return NextResponse.json({
         status: "completed",
         result: {
@@ -753,6 +783,11 @@ export async function POST(request: NextRequest) {
         requestedSize,
         resolvedAspectRatio,
         protocol: "resolved-by-provider",
+        toolCallId: toolCallId || null,
+        selectedSkillId: selectedSkillId || skill || null,
+        executionReached: true,
+        providerRequestStarted: true,
+        failureStage: "provider_request",
       });
       imageResult = await runImageTask({
         providerId: resolvedImageSelection.providerId || undefined,
@@ -785,9 +820,24 @@ export async function POST(request: NextRequest) {
         reqId,
         dataCount: imageResult.data.length,
         urlPresencePreview: imageResult.data.slice(0, 2).map((entry) => typeof entry?.url === "string" && entry.url.length > 0),
+        toolCallId: toolCallId || null,
+        selectedSkillId: selectedSkillId || skill || null,
+        executionReached: true,
+        providerRequestStarted: true,
+        assetCount: imageResult.data.length,
+        failureStage: null,
       });
 
-      const savedImages = await saveImagesToLocal(imageResult.data.map((entry) => entry.url));
+      let savedImages;
+      try {
+        savedImages = await saveImagesToLocal(imageResult.data.map((entry) => entry.url));
+      } catch (error) {
+        throw Object.assign(error instanceof Error ? error : new Error(String(error)), {
+          failureStage: 'local_delivery',
+          providerRequestStarted: true,
+          assetCount: 0,
+        });
+      }
       const primarySavedImage = savedImages[0];
       debugLog("Saved image generate outputs locally", {
         reqId,
@@ -795,7 +845,11 @@ export async function POST(request: NextRequest) {
         savedFiles: savedImages.map((image) => image.filename),
       });
 
-      await logResponse(200, { mode: "image_generate", skill: skill || null });
+      await logResponse(200, {
+        mode: "image_generate", skill: skill || null,
+        toolCallId: toolCallId || null, selectedSkillId: selectedSkillId || skill || null,
+        executionReached: true, providerRequestStarted: true, assetCount: savedImages.length, failureStage: null,
+      });
       return NextResponse.json({
         status: "completed",
         result: {
@@ -892,6 +946,10 @@ export async function POST(request: NextRequest) {
       retryable,
       retryAttempt,
       outcomeUnknown,
+      ...requestMetadata,
+      executionReached: resolvedIntentForDiagnostics === "image",
+      providerRequestStarted: resolvedIntentForDiagnostics === "image" && (failureStage === "provider_request" || failureStage === "provider_result_parse" || failureStage === "provider_execution" || failureStage === "timeout" || failureStage === "upstream_http" || failureStage === "transport" || failureStage === "local_delivery"),
+      assetCount: 0,
       error: serializeError(error),
       ...getErrorDiagnostics(error),
     });
@@ -906,6 +964,10 @@ export async function POST(request: NextRequest) {
       retryable,
       retryAttempt,
       outcomeUnknown,
+      ...requestMetadata,
+      executionReached: resolvedIntentForDiagnostics === "image",
+      providerRequestStarted: resolvedIntentForDiagnostics === "image" && (failureStage === "provider_request" || failureStage === "provider_result_parse" || failureStage === "provider_execution" || failureStage === "timeout" || failureStage === "upstream_http" || failureStage === "transport" || failureStage === "local_delivery"),
+      assetCount: 0,
     });
 
     return NextResponse.json({

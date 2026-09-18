@@ -9,10 +9,12 @@ const servicePath = path.resolve(import.meta.dirname, 'image-tool-service.mjs');
 
 test('image route is hidden behind the application image service boundary', () => {
   const controller = fs.readFileSync(controllerPath, 'utf8');
+  const imageRuntime = fs.readFileSync(path.resolve(import.meta.dirname, 'agent-image-runtime-context-service.mjs'), 'utf8');
   const service = fs.readFileSync(servicePath, 'utf8');
   assert.doesNotMatch(controller, /api\/generate\/route/);
   assert.doesNotMatch(controller, /generatePost/);
-  assert.match(controller, /executeImageRequest\(/);
+  assert.doesNotMatch(controller, /requestImageGeneration/);
+  assert.match(imageRuntime, /requestImageGeneration/);
   assert.match(service, /POST as generateImage/);
   assert.match(service, /dispatchImageGeneration/);
 });

@@ -2,7 +2,6 @@ import { randomUUID } from 'node:crypto';
 import { appendThreadEvent, loadThread, queryThread, updateThreadState, forkThread } from './thread-journal-service.mjs';
 import {
   commandErrorResponse,
-  commandUsage,
   parseHistoryCommandArgs,
   searchHistoryPages,
 } from './commands.mjs';

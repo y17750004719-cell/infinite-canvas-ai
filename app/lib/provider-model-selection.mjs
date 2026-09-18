@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { effectiveProviderProtocol } from './provider-protocol.mjs';
 
 function normalizeText(value) {
@@ -13,6 +14,52 @@ function getPurposeModels(provider, purpose) {
 
 function normalizeCapabilityInput(value) {
   return Array.isArray(value) ? value.map(normalizeText).filter(Boolean) : [];
+}
+
+function stableSerialize(value) {
+  if (Array.isArray(value)) return `[${value.map(stableSerialize).join(',')}]`;
+  if (value && typeof value === 'object') {
+    return `{${Object.entries(value)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, item]) => `${JSON.stringify(key)}:${stableSerialize(item)}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(value) ?? 'null';
+}
+
+/**
+ * Create a non-secret identity for the provider/model capability snapshot.
+ * API keys and auth headers are deliberately excluded.
+ */
+export function fingerprintProviderSelection(provider, model, purpose = 'chat') {
+  if (!provider || !normalizeText(model)) return '';
+  const payload = {
+    id: normalizeText(provider.id),
+    name: normalizeText(provider.name),
+    enabled: provider.enabled !== false,
+    baseUrl: normalizeText(provider.baseUrl),
+    protocol: effectiveProviderProtocol(provider, model),
+    purpose,
+    model: normalizeText(model),
+    models: getPurposeModels(provider, purpose),
+    modelProtocols: provider.modelProtocols || {},
+    capabilities: provider.modelCapabilities?.[model] || null,
+    ...(purpose === 'image' ? {
+      imageRequestMode: normalizeText(provider.imageRequestMode),
+      imageGenerationEndpoint: normalizeText(provider.imageGenerationEndpoint),
+      imageEditEndpoint: normalizeText(provider.imageEditEndpoint),
+    } : {}),
+  };
+  return createHash('sha256').update(stableSerialize(payload)).digest('hex');
+}
+
+function emitSelectionDiagnostic(onDiagnostic, event, details) {
+  if (typeof onDiagnostic !== 'function') return;
+  try {
+    onDiagnostic({ event, ...details });
+  } catch {
+    // Diagnostics must never make provider selection fail.
+  }
 }
 
 export function resolveProviderModelCapabilities(provider, model) {
@@ -213,4 +260,65 @@ export function resolveProviderModelSelection({
     fallback: true,
     reason: 'no_capable_provider',
   };
+}
+
+/**
+ * Resolve an immutable, request-safe provider selection snapshot. The legacy
+ * resolver above remains intentionally unchanged for compatibility callers.
+ */
+export function resolveProviderSelection({ onDiagnostic, ...options } = {}) {
+  const purpose = options.purpose === 'image' ? 'image' : 'chat';
+  const selection = resolveProviderModelSelection({ ...options, purpose });
+  const providers = Array.isArray(options.providers) ? options.providers : [];
+  const provider = providers.find((candidate) => normalizeText(candidate?.id) === selection.providerId) || null;
+  const capabilities = provider && selection.model
+    ? resolveProviderModelCapabilities(provider, selection.model)
+    : null;
+  const enabled = Boolean(provider && provider.enabled !== false);
+  const validated = Boolean(
+    enabled
+      && selection.providerId
+      && selection.model
+      && getPurposeModels(provider, purpose).includes(selection.model)
+      && (!options.excludeUnavailable || capabilities?.available !== false)
+      && (!options.requiresToolCalling || capabilities?.supportsToolCalling)
+      && (!options.requiresRequiredToolChoice || capabilities?.supportsRequiredToolChoice),
+  );
+  const providerFingerprint = provider && selection.model
+    ? fingerprintProviderSelection(provider, selection.model, purpose)
+    : '';
+  const resolved = Object.freeze({
+    providerId: selection.providerId,
+    providerName: normalizeText(provider?.name) || selection.providerId || null,
+    baseUrl: normalizeText(provider?.baseUrl) || null,
+    model: selection.model,
+    protocol: provider && selection.model ? effectiveProviderProtocol(provider, selection.model) : null,
+    capability: purpose,
+    providerFingerprint,
+    modelFingerprint: providerFingerprint,
+    enabled,
+    validated,
+    fallback: selection.fallback,
+    reason: selection.reason,
+  });
+  emitSelectionDiagnostic(onDiagnostic, validated ? 'provider.selection.resolved' : 'provider.selection.rejected', {
+    providerId: resolved.providerId,
+    model: resolved.model,
+    protocol: resolved.protocol,
+    capability: resolved.capability,
+    providerFingerprint: resolved.providerFingerprint,
+    reason: resolved.reason,
+    validated: resolved.validated,
+  });
+  if (!validated && provider && selection.model) {
+    emitSelectionDiagnostic(onDiagnostic, 'provider.capability.mismatch', {
+      providerId: resolved.providerId,
+      model: resolved.model,
+      protocol: resolved.protocol,
+      capability: resolved.capability,
+      providerFingerprint: resolved.providerFingerprint,
+      reason: resolved.reason,
+    });
+  }
+  return resolved;
 }

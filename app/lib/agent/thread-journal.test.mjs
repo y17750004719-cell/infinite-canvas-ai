@@ -1,7 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises';
-import os from 'node:os';
+import { readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { appendThreadEvent, loadThread, queryThread, forkThread, updateThreadState, queueThreadInput, consumeThreadInputs, sanitizeJournalEvent } from './thread-journal.mjs';
 

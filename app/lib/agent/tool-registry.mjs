@@ -2,57 +2,6 @@ import { AGENT_IMAGE_ASPECT_RATIO_IDS } from './image-options.mjs';
 import { TODO_READ_TOOL, TODO_UPDATE_TOOL } from './todo-tools.mjs';
 
 const CONFIDENCE_SCHEMA = { type: 'string', enum: ['high', 'medium', 'low'] };
-const VISUAL_REFERENCE_ROLE_SCHEMA = {
-  type: 'string',
-  enum: ['edit_target', 'style_reference', 'content_reference', 'layout_reference', 'unresolved'],
-};
-const VISUAL_SUMMARY_SCHEMA = {
-  type: ['object', 'null'],
-  properties: {
-    version: { type: 'integer', enum: [1] },
-    references: {
-      type: 'array',
-      maxItems: 4,
-      items: {
-        type: 'object',
-        properties: {
-          referenceId: { type: 'string', minLength: 1 },
-          description: { type: 'string', minLength: 1, maxLength: 2000 },
-          salientSubjects: { type: 'array', maxItems: 24, items: { type: 'string', maxLength: 500 } },
-          visibleText: { type: 'array', maxItems: 24, items: { type: 'string', maxLength: 500 } },
-        },
-        required: ['referenceId', 'description', 'salientSubjects', 'visibleText'],
-        additionalProperties: false,
-      },
-    },
-  },
-  required: ['version', 'references'],
-  additionalProperties: false,
-};
-const CLARIFICATION_SCHEMA = {
-  type: ['object', 'null'],
-  properties: {
-    dimension: { type: 'string', minLength: 1 },
-    question: { type: 'string', minLength: 1 },
-    reason: { type: 'string' },
-    options: {
-      type: 'array', minItems: 2, maxItems: 4,
-      items: {
-        type: 'object',
-        properties: {
-          id: { type: 'string', minLength: 1 },
-          label: { type: 'string', minLength: 1 },
-          answer: { type: 'string', minLength: 1 },
-          description: { type: 'string' },
-        },
-        required: ['id', 'label', 'answer'],
-        additionalProperties: false,
-      },
-    },
-  },
-  required: ['dimension', 'question', 'options'],
-  additionalProperties: false,
-};
 
 const PUBLIC_PROGRESS_COPY_SCHEMA = {
   type: 'object',
@@ -94,6 +43,26 @@ function stripPublicProgress(args) {
   if (!args || typeof args !== 'object' || Array.isArray(args)) return args || {};
   const { publicProgress: _publicProgress, ...toolArgs } = args;
   return toolArgs;
+}
+
+// Native models may serialize an optional image-history selector as null.
+// Canonicalize that representation before schema validation and execution so
+// null and an omitted field have the same, safe meaning.
+function normalizeToolArguments(toolName, args) {
+  if (toolName !== 'generate_image' || !args || typeof args !== 'object' || Array.isArray(args)) return args;
+  if (!Object.prototype.hasOwnProperty.call(args, 'numLastImagesToInclude') || args.numLastImagesToInclude !== null) return args;
+  const normalized = { ...args };
+  delete normalized.numLastImagesToInclude;
+  return normalized;
+}
+
+function validateToolArgumentRelationships(toolName, args) {
+  if (toolName !== 'generate_image' || !args || typeof args !== 'object' || Array.isArray(args)) return;
+  if (args.numLastImagesToInclude !== 1) return;
+  if (args.operation !== 'edit') throw new Error('Invalid arguments for generate_image: numLastImagesToInclude 仅可用于图片编辑');
+  if ((Array.isArray(args.referenceIds) && args.referenceIds.length > 0) || (typeof args.targetReferenceId === 'string' && args.targetReferenceId.trim())) {
+    throw new Error('Invalid arguments for generate_image: numLastImagesToInclude 不能与显式图片引用同时使用');
+  }
 }
 
 function schemaTypeMatches(value, type) {
@@ -180,6 +149,7 @@ export function createAgentToolRegistry({
   const registry = new Map([
     ['generate_image', {
       name: 'generate_image',
+      commentaryPolicy: 'server_fallback',
       requiresConfirmation: false,
       readOnly: false,
       terminal: true,
@@ -197,8 +167,8 @@ export function createAgentToolRegistry({
           },
           targetReferenceId: { type: ['string', 'null'], minLength: 1, maxLength: 200 },
           numLastImagesToInclude: {
-            type: 'integer',
-            enum: [1],
+            type: ['integer', 'null'],
+            enum: [1, null],
             description: 'For edit operations only, explicitly continue from the most recent image in the current canvas session. Mutually exclusive with non-empty referenceIds and targetReferenceId; the runtime resolves the image.',
           },
           outputCount: { type: 'integer', minimum: 1, maximum: 100 },
@@ -652,6 +622,7 @@ export function getAgentModelTools(registry, allowedTools = []) {
       countAgainstToolBudget: tool.countAgainstToolBudget !== false,
       mayRequireConfirmation: tool.mayRequireConfirmation === true,
       requiresConfirmation: tool.requiresConfirmation === true,
+      ...(tool.commentaryPolicy ? { commentaryPolicy: tool.commentaryPolicy } : {}),
     }));
 }
 
@@ -662,8 +633,9 @@ export async function executeAgentTool(registry, toolName, args, context = {}) {
     throw new Error(`Tool is not allowed: ${toolName}`);
   }
   const publicProgress = args?.publicProgress;
-  const toolArgs = stripPublicProgress(args);
+  const toolArgs = normalizeToolArguments(toolName, stripPublicProgress(args));
   validateAgentToolArguments(tool.parameters, toolArgs, toolName);
+  validateToolArgumentRelationships(toolName, toolArgs);
   if (tool.requiresConfirmation && context.confirmed !== true) {
     return {
       confirmationRequired: true,

@@ -1,4 +1,6 @@
 const LIFECYCLE = new Set(['thread.started', 'turn.started', 'item.started', 'item.updated', 'item.completed', 'turn.completed', 'turn.failed', 'error']);
+const TERMINAL_TURN_STATUSES = new Set(['completed', 'failed', 'cancelled', 'interrupted']);
+const IDENTITY_KEYS = ['operationId', 'turnId', 'runId', 'taskId'];
 import { reduceAgentRunProgress } from './run-progress.mjs';
 import { adaptCanonicalEvent } from './canonical-event-adapter.mjs';
 
@@ -52,4 +54,128 @@ export function completedTranscriptMessages(turns, transcriptStartSequence = 0, 
     if (progress && progress.steps?.length) visible.push({ id: `journal:${turn.turnId}:progress`, role: 'assistant', content: '', agentRunProgress: progress });
     return visible;
   })];
+}
+
+function identityValue(value) {
+  return typeof value === 'string' && value.trim() ? value.trim() : null;
+}
+
+function turnIdentity(turn = {}) {
+  return {
+    operationId: identityValue(turn.operationId),
+    turnId: identityValue(turn.turnId),
+    runId: identityValue(turn.runId) || (Array.isArray(turn.runIds) ? identityValue(turn.runIds.at(-1)) : null),
+    taskId: identityValue(turn.taskId),
+  };
+}
+
+function messageIdentity(message = {}) {
+  const progress = message.agentRunProgress && typeof message.agentRunProgress === 'object' ? message.agentRunProgress : {};
+  const snapshot = message.taskSnapshot && typeof message.taskSnapshot === 'object' ? message.taskSnapshot : {};
+  const recovery = message.agentRecovery && typeof message.agentRecovery === 'object' ? message.agentRecovery : {};
+  const clarification = message.agentClarification?.request || {};
+  const confirmation = message.agentConfirmation || {};
+  return {
+    operationId: identityValue(progress.operationId) || identityValue(snapshot.operationId) || identityValue(recovery.operationId) || identityValue(clarification.operationId) || identityValue(confirmation.operationId),
+    turnId: identityValue(progress.turnId) || identityValue(snapshot.turnId) || identityValue(clarification.turnId) || identityValue(confirmation.turnId),
+    runId: identityValue(progress.runId) || identityValue(snapshot.runId) || identityValue(recovery.runId),
+    taskId: identityValue(progress.taskId) || identityValue(snapshot.taskId) || identityValue(recovery.taskId) || identityValue(clarification.taskId) || identityValue(confirmation.taskId) || identityValue(message.taskKey),
+  };
+}
+
+function findTurnForMessage(message, turns) {
+  const messageIds = messageIdentity(message);
+  for (const key of IDENTITY_KEYS) {
+    const value = messageIds[key];
+    if (!value) continue;
+    const match = turns.find((turn) => {
+      const ids = turnIdentity(turn);
+      if (key === 'runId' && Array.isArray(turn.runIds) && turn.runIds.some((runId) => identityValue(runId) === value)) return true;
+      return ids[key] === value;
+    });
+    if (match) return match;
+  }
+  return null;
+}
+
+function terminalProgressEvent(turn, state = {}, message = {}) {
+  const ids = turnIdentity(turn);
+  const persistedSequence = Number(message.agentRunProgress?.lastSequence || 0);
+  const sequence = Math.max(1, Number(
+    turn.completedSequence
+    || turn.endSequence
+    || Math.max(Number(turn.startSequence || 0) + 1, Number(state.lastSequence || 0) + 1, persistedSequence + 1),
+  ));
+  const timestampMs = Number(turn.completedAt || turn.updatedAt || turn.startedAt || Date.now());
+  const identity = {
+    taskId: ids.taskId || ids.runId || ids.turnId || 'journal-task',
+    operationId: ids.operationId || ids.runId || ids.turnId || 'journal-operation',
+    runId: ids.runId || ids.turnId || 'journal-run',
+    sequence,
+    timestampMs: Number.isFinite(timestampMs) ? timestampMs : Date.now(),
+  };
+  if (turn.status === 'cancelled') return { ...identity, type: 'agent_cancelled' };
+  if (turn.status === 'completed') return { ...identity, type: 'agent_done' };
+  return {
+    ...identity,
+    type: 'agent_error',
+    message: typeof turn.error?.message === 'string' ? turn.error.message : 'Agent run failed',
+    code: typeof turn.error?.code === 'string' ? turn.error.code : undefined,
+  };
+}
+
+function reconcileMessageWithTerminalTurn(message, turn, state) {
+  if (!turn || !TERMINAL_TURN_STATUSES.has(turn.status)) return message;
+  const event = terminalProgressEvent(turn, state, message);
+  const progress = reduceAgentRunProgress(message.agentRunProgress || null, event);
+  const taskStatus = turn.status === 'completed'
+    ? 'completed'
+    : turn.status === 'cancelled'
+      ? 'cancelled'
+      : 'failed';
+  return {
+    ...message,
+    taskStatus,
+    ...(progress ? { agentRunProgress: progress } : {}),
+  };
+}
+
+function isRunningMessage(message) {
+  return message?.taskStatus === 'running' || ['running', 'waiting'].includes(message?.agentRunProgress?.outcome);
+}
+
+/**
+ * Merge journal-backed terminal state into locally persisted messages. This is
+ * intentionally pure so refresh, session restore, and tests share one rule.
+ */
+export function reconcileHydratedChatMessages(messages, state = {}, options = {}) {
+  const local = Array.isArray(messages) ? messages : [];
+  const turns = Array.isArray(state.turns) ? state.turns : [];
+  const journalMessages = completedTranscriptMessages(turns, state.transcriptStartSequence, state.transcriptSummary, options);
+  if (local.length === 0) return journalMessages;
+
+  const merged = [...local];
+  const localIds = new Set(local.map((message) => message?.id).filter(Boolean));
+  for (const journalMessage of journalMessages) {
+    if (localIds.has(journalMessage.id)) continue;
+    const journalTurn = turns.find((turn) => journalMessage.id === `journal:${turn.turnId}:progress`);
+    const sameIdentity = journalTurn && merged.some((message) => findTurnForMessage(message, [journalTurn]));
+    const sameContent = journalMessage.content && merged.some((message) => message.role === journalMessage.role && message.content === journalMessage.content);
+    if (!sameIdentity && !sameContent) merged.push(journalMessage);
+  }
+
+  const terminalTurns = turns.filter((turn) => TERMINAL_TURN_STATUSES.has(turn.status));
+  const lastRunningAssistantIndex = merged.reduce((last, message, index) => (
+    message?.role === 'assistant' && isRunningMessage(message) ? index : last
+  ), -1);
+  return merged.map((message, index) => {
+    let turn = findTurnForMessage(message, turns);
+    // Legacy local messages may have lost their run identity. Only repair the
+    // newest running assistant when the server has no active turn, avoiding a
+    // broad guess across unrelated historical messages.
+    if (!turn && index === lastRunningAssistantIndex && state.activeTurn == null && terminalTurns.length > 0) {
+      turn = [...terminalTurns].sort((left, right) => Number(right.completedAt || 0) - Number(left.completedAt || 0))[0];
+    }
+    return reconcileMessageWithTerminalTurn(message, turn, state);
+  });
 }

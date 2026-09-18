@@ -29,6 +29,11 @@ export interface ChatMessage {
   agentRunProgress?: import('./agent/run-progress.types').AgentRunProgress;
   imageUrl?: string;
   assetId?: string;
+  deliveryId?: string;
+  providerReturnedAt?: number;
+  locallyStoredAt?: number;
+  deliveryEventAt?: number;
+  chatCommittedAt?: number;
   skill?: { id: string; label: string };
   referenceImages?: string[];
   referenceContext?: {
@@ -291,6 +296,7 @@ export interface ContextWindowState {
 
 export interface GeneratedImageHistoryEntry {
   id: string;
+  deliveryId?: string;
   src: string;
   assetId?: string;
   previewSrc?: string;

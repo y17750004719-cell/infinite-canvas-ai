@@ -36,3 +36,28 @@ test('Chat Completions rejects a tool call without a model task description', as
   server.listen(0, '127.0.0.1'); await once(server, 'listening');
   try { await assert.rejects(runChatCompletionsTurn({ provider: { baseUrl: `http://127.0.0.1:${server.address().port}/v1`, model: 'm' }, userText: 'x', baseInstructions: '', developerInstructions: '', tools: [{ name: 'x', description: 'x', parameters: {} }], executeTool: async () => ({}) }), /decision_commentary_missing/); } finally { await new Promise((resolve) => server.close(resolve)); }
 });
+
+test('Chat Completions uses the server fallback for generate_image without commentary', async () => {
+  let requests = 0;
+  const server = createServer((_req, res) => {
+    requests += 1;
+    res.writeHead(200, { 'content-type': 'text/event-stream' });
+    const payload = requests === 1
+      ? { choices: [{ delta: { tool_calls: [{ index: 0, id: 'image-call', function: { name: 'generate_image', arguments: '{}' } }] } }] }
+      : { choices: [{ delta: { content: '完成。' }, finish_reason: 'stop' }] };
+    res.end(`data: ${JSON.stringify(payload)}\n\ndata: [DONE]\n\n`);
+  });
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  const events = [];
+  try {
+    const result = await runChatCompletionsTurn({
+      provider: { baseUrl: `http://127.0.0.1:${server.address().port}/v1`, model: 'm' },
+      userText: '生成图片', baseInstructions: '', developerInstructions: '',
+      tools: [{ name: 'generate_image', description: 'Generate.', parameters: { type: 'object' }, requiresCommentary: true, commentaryPolicy: 'server_fallback' }],
+      executeTool: async (_name, _args, context) => { assert.equal(context.commentaryFallbackUsed, true); return { modelResult: { completed: true } }; },
+      onEvent: (event) => events.push(event),
+    });
+    assert.equal(result.status, 'completed');
+    assert.ok(events.some((event) => event.method === 'zflow/tool/progress' && event.params?.commentaryFallbackUsed === true));
+  } finally { await new Promise((resolve) => server.close(resolve)); }
+});

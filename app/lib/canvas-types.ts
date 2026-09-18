@@ -8,6 +8,12 @@ export type CanvasItemType = 'image' | 'frame' | 'shape' | 'text' | 'stroke';
 
 export interface CanvasItem {
   id: string;
+  deliveryId?: string;
+  assetId?: string;
+  providerReturnedAt?: number;
+  locallyStoredAt?: number;
+  deliveryEventAt?: number;
+  canvasCommittedAt?: number;
   type: CanvasItemType;
   x: number;
   y: number;
