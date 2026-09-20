@@ -73,55 +73,6 @@ export const getCanvasMarqueePath = (rect) => {
   return `M ${left} ${top} H ${right} V ${bottom} H ${left} Z`;
 };
 
-export const projectScreenRectToCanvas = (rect, viewport) => ({
-  left: (rect.x - viewport.x) / viewport.scale,
-  right: (rect.x + rect.width - viewport.x) / viewport.scale,
-  top: (rect.y - viewport.y) / viewport.scale,
-  bottom: (rect.y + rect.height - viewport.y) / viewport.scale,
-});
-
-export const isRectIntersecting = (first, second) => (
-  first.left <= second.right &&
-  first.right >= second.left &&
-  first.top <= second.bottom &&
-  first.bottom >= second.top
-);
-
-export const getRotatedRectAabb = (rect, rotationDegrees, origin) => {
-  const center = origin ?? {
-    x: rect.left + rect.width / 2,
-    y: rect.top + rect.height / 2,
-  };
-  const radians = (Number(rotationDegrees) || 0) * Math.PI / 180;
-  const cosine = Math.cos(radians);
-  const sine = Math.sin(radians);
-  const right = rect.left + rect.width;
-  const bottom = rect.top + rect.height;
-  const corners = [
-    [rect.left, rect.top],
-    [right, rect.top],
-    [right, bottom],
-    [rect.left, bottom],
-  ];
-  let minX = Infinity;
-  let maxX = -Infinity;
-  let minY = Infinity;
-  let maxY = -Infinity;
-
-  for (const [x, y] of corners) {
-    const offsetX = x - center.x;
-    const offsetY = y - center.y;
-    const rotatedX = center.x + offsetX * cosine - offsetY * sine;
-    const rotatedY = center.y + offsetX * sine + offsetY * cosine;
-    minX = Math.min(minX, rotatedX);
-    maxX = Math.max(maxX, rotatedX);
-    minY = Math.min(minY, rotatedY);
-    maxY = Math.max(maxY, rotatedY);
-  }
-
-  return { left: minX, right: maxX, top: minY, bottom: maxY };
-};
-
 export const areCanvasPointsFullyContained = (rect, points) => {
   const right = rect.x + rect.width;
   const bottom = rect.y + rect.height;
@@ -166,10 +117,6 @@ export const resolveCanvasItemDragReleasePositions = ({
   }
   return positions;
 };
-
-export const ownsCanvasItemVisualHandoff = ({ token, itemIds, visualTokens }) => (
-  itemIds.every((itemId) => visualTokens.get(itemId) === token)
-);
 
 export const shouldCancelCanvasPointerSessionOnLostCapture = ({
   eventPointerId,

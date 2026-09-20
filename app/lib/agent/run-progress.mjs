@@ -579,6 +579,9 @@ export function reduceAgentRunProgress(input, inputEvent) {
       timestampMs: marker.timestampMs,
       completedAt: marker.timestampMs,
       lastUpdateSequence: marker.sequence,
+      ...(typeof event.skillContentHash === 'string' && event.skillContentHash.trim()
+        ? { skillContentHash: event.skillContentHash.trim().slice(0, 64), detail: { skillContentHash: event.skillContentHash.trim().slice(0, 64) } }
+        : {}),
     };
     const result = appendOrReplaceStep(marked, nextStep, (step) => step.stepId === nextStep.stepId);
     return withOutcome({ ...marked, steps: result.steps });

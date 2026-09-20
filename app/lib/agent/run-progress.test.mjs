@@ -107,6 +107,21 @@ test('creates an empty, hidden timeline for a new agent run', () => {
   assert.equal(shouldShowAgentRunProgress(state), false);
 });
 
+test('skill selection progress retains the locked Skill content hash for recovery', () => {
+  const hash = 'a'.repeat(64);
+  const state = reduceAgentRunProgress(null, {
+    type: 'skill_selected',
+    skillId: 'poster',
+    label: 'Poster',
+    skillContentHash: hash,
+    runId: 'run-skill',
+    sequence: 1,
+    timestampMs: 100,
+  });
+  assert.equal(state.steps[0].skillContentHash, hash);
+  assert.equal(state.steps[0].detail.skillContentHash, hash);
+});
+
 test('streams provisional activity and keeps commentary commits in the timeline', () => {
   let state = createInitialAgentRunProgress('run-activity');
   state = reduceAgentRunProgress(state, {

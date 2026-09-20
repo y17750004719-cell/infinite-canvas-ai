@@ -34,7 +34,7 @@ export interface ChatMessage {
   locallyStoredAt?: number;
   deliveryEventAt?: number;
   chatCommittedAt?: number;
-  skill?: { id: string; label: string };
+  skill?: { id: string; label: string; skillContentHash?: string };
   referenceImages?: string[];
   referenceContext?: {
     references: Array<{

@@ -570,7 +570,7 @@ export type AgentEvent =
       kind: string;
     }
   | { type: 'brief_compiled'; resolvedEntityIds: string[]; summary: string; mustPreserveCount: number }
-  | { type: 'skill_selected'; skillId: string; label: string; source: 'manual_ui' | 'explicit_text' | 'user_confirmation' | 'recovery' | 'manual' | 'auto' }
+  | { type: 'skill_selected'; skillId: string; label: string; source: 'manual_ui' | 'explicit_text' | 'user_confirmation' | 'recovery' | 'manual' | 'auto'; skillContentHash?: string }
   | { type: 'active_skill_changed'; skill: { id: string; label: string } | null }
   | {
       type: 'image_parameters_locked';

@@ -206,6 +206,81 @@ export function normalizeAgentRecoveryRecord(value) {
   };
 }
 
+const normalizeSkillLockPair = (value) => {
+  const input = record(value);
+  const skillId = bounded(input?.skillId, 160);
+  const skillContentHash = bounded(input?.skillContentHash, 64);
+  return skillId && /^[a-f0-9]{64}$/i.test(skillContentHash)
+    ? { skillId, skillContentHash }
+    : null;
+};
+
+const skillLockPairFromJournalEvent = (event, recovery) => {
+  const input = record(event);
+  if (!input) return null;
+  if (input.threadId && input.threadId !== recovery.sessionId) return null;
+  if (input.taskId !== recovery.taskId || input.operationId !== recovery.operationId) return null;
+  const payload = input.type === 'skill_selected'
+    ? input
+    : input.item?.eventType === 'skill_selected'
+      ? input.item.payload
+      : input.recoveryRecord || input.error?.recoveryRecord;
+  return normalizeSkillLockPair(payload);
+};
+
+/**
+ * Backfill legacy recovery records from evidence scoped to the same source
+ * message and operation. A durable journal selection is authoritative over
+ * client-supplied message metadata, and Skill ids/hashes are always adopted
+ * as an inseparable lock pair.
+ */
+export function enrichAgentRecoverySkillMetadata(value, {
+  messages = [],
+  journalEvents = [],
+  sessionId,
+} = {}) {
+  const recovery = normalizeAgentRecoveryRecord(value);
+  if (!recovery || (sessionId && recovery.sessionId !== sessionId)) return recovery;
+  const entries = Array.isArray(messages) ? messages : [];
+  const sourceIndex = entries.findIndex((message) => (
+    message?.role === 'user' && message?.id === recovery.sourceUserMessageId
+  ));
+  if (sourceIndex < 0) return recovery;
+
+  const durablePair = [...(Array.isArray(journalEvents) ? journalEvents : [])]
+    .reverse()
+    .map((event) => skillLockPairFromJournalEvent(event, recovery))
+    .find(Boolean);
+  const existingPair = normalizeSkillLockPair(recovery);
+  const sourcePair = normalizeSkillLockPair({
+    skillId: entries[sourceIndex]?.skill?.id,
+    skillContentHash: entries[sourceIndex]?.skill?.skillContentHash,
+  });
+  const clarificationState = entries[sourceIndex]?.agentClarificationResponsePayload?.clarification?.state;
+  const clarificationPair = normalizeSkillLockPair({
+    skillId: clarificationState?.skillId,
+    skillContentHash: clarificationState?.skillContentHash,
+  });
+  const progressPair = entries.slice(sourceIndex + 1).reverse().flatMap((message) => {
+    if (message?.role !== 'assistant' || message?.taskSnapshot?.taskId !== recovery.taskId) return [];
+    if (message?.agentRunProgress?.operationId !== recovery.operationId) return [];
+    const step = [...(message.agentRunProgress.steps || [])].reverse().find((entry) => (
+      entry?.itemType === 'skill' || String(entry?.stepId || '').startsWith('skill:')
+    ));
+    if (!step) return [];
+    return [normalizeSkillLockPair({
+      skillId: String(step.stepId || '').startsWith('skill:')
+        ? String(step.stepId).slice('skill:'.length)
+        : step.skillId,
+      skillContentHash: step.skillContentHash || step.detail?.skillContentHash,
+    })].filter(Boolean);
+  })[0] || null;
+  const pair = durablePair || existingPair || sourcePair || clarificationPair || progressPair;
+  if (!pair) return recovery;
+  if (pair.skillId === recovery.skillId && pair.skillContentHash === recovery.skillContentHash) return recovery;
+  return normalizeAgentRecoveryRecord({ ...recovery, ...pair });
+}
+
 export function createAgentRecoveryRecord(input = {}) {
   const taskId = input.taskId || input.runId;
   const runId = input.runId || input.taskId;

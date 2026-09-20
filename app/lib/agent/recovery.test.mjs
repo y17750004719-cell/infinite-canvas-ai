@@ -4,9 +4,103 @@ import assert from 'node:assert/strict';
 import {
   classifyAgentFailure,
   createAgentRecoveryRecord,
+  enrichAgentRecoverySkillMetadata,
   normalizeAgentRecoveryRecord,
   sanitizeAgentFailureMessage,
 } from './recovery.mjs';
+
+const recoveryWithoutSkill = () => createAgentRecoveryRecord({
+  taskId: 'task-1', runId: 'run-1', operationId: 'operation-1', sessionId: 'topic-1',
+  sourceUserMessageId: 'user-1', status: 'failed', resumeRoute: 'main_agent', intent: 'image',
+  originalRequest: '生成海报', failureStage: 'tool_dispatch', failureMessage: 'failed',
+});
+
+test('legacy recovery adopts a paired Skill lock from the same task progress', () => {
+  const hash = 'a'.repeat(64);
+  const result = enrichAgentRecoverySkillMetadata(recoveryWithoutSkill(), {
+    messages: [
+      { id: 'user-1', role: 'user', content: '生成海报' },
+      {
+        role: 'assistant', taskSnapshot: { taskId: 'task-1' },
+        agentRunProgress: {
+          operationId: 'operation-1',
+          steps: [{ stepId: 'skill:poster', itemType: 'skill', skillContentHash: hash }],
+        },
+      },
+    ],
+  });
+  assert.equal(result.skillId, 'poster');
+  assert.equal(result.skillContentHash, hash);
+});
+
+test('legacy recovery rejects cross-task progress and unpaired Skill metadata', () => {
+  const result = enrichAgentRecoverySkillMetadata(recoveryWithoutSkill(), {
+    messages: [
+      { id: 'user-1', role: 'user', content: '生成海报', skill: { id: 'source-only' } },
+      {
+        role: 'assistant', taskSnapshot: { taskId: 'other-task' },
+        agentRunProgress: {
+          operationId: 'operation-1',
+          steps: [{ stepId: 'skill:other', itemType: 'skill', skillContentHash: 'b'.repeat(64) }],
+        },
+      },
+    ],
+  });
+  assert.equal(result.skillId, null);
+  assert.equal(result.skillContentHash, undefined);
+});
+
+test('matching journal Skill lock overrides changed client metadata', () => {
+  const durableHash = 'c'.repeat(64);
+  const result = enrichAgentRecoverySkillMetadata({
+    ...recoveryWithoutSkill(), skillId: 'client-skill', skillContentHash: 'd'.repeat(64),
+  }, {
+    sessionId: 'topic-1',
+    messages: [{
+      id: 'user-1', role: 'user', content: '生成海报',
+      skill: { id: 'client-skill', skillContentHash: 'd'.repeat(64) },
+    }],
+    journalEvents: [{
+      type: 'item.updated', threadId: 'topic-1', taskId: 'task-1', operationId: 'operation-1', runId: 'run-1',
+      item: { eventType: 'skill_selected', payload: { skillId: 'poster', skillContentHash: durableHash } },
+    }],
+  });
+  assert.equal(result.skillId, 'poster');
+  assert.equal(result.skillContentHash, durableHash);
+});
+
+test('matching journal failure recovery record is authoritative for its Skill lock', () => {
+  const durableHash = 'e'.repeat(64);
+  const result = enrichAgentRecoverySkillMetadata(recoveryWithoutSkill(), {
+    sessionId: 'topic-1',
+    messages: [{ id: 'user-1', role: 'user', content: '生成海报' }],
+    journalEvents: [{
+      type: 'agent_error', threadId: 'topic-1', taskId: 'task-1', operationId: 'operation-1', runId: 'run-2',
+      recoveryRecord: { skillId: 'poster', skillContentHash: durableHash },
+    }],
+  });
+  assert.equal(result.skillId, 'poster');
+  assert.equal(result.skillContentHash, durableHash);
+});
+
+test('journal Skill lock cannot cross operation or session identity', () => {
+  const result = enrichAgentRecoverySkillMetadata(recoveryWithoutSkill(), {
+    sessionId: 'topic-1',
+    messages: [{ id: 'user-1', role: 'user', content: '生成海报' }],
+    journalEvents: [
+      {
+        type: 'item.updated', threadId: 'topic-2', taskId: 'task-1', operationId: 'operation-1', runId: 'run-1',
+        item: { eventType: 'skill_selected', payload: { skillId: 'wrong-session', skillContentHash: 'e'.repeat(64) } },
+      },
+      {
+        type: 'item.updated', threadId: 'topic-1', taskId: 'task-1', operationId: 'operation-2', runId: 'run-1',
+        item: { eventType: 'skill_selected', payload: { skillId: 'wrong-operation', skillContentHash: 'f'.repeat(64) } },
+      },
+    ],
+  });
+  assert.equal(result.skillId, null);
+  assert.equal(result.skillContentHash, undefined);
+});
 
 test('recovery records are bounded and keep stable task state', () => {
   const record = createAgentRecoveryRecord({

@@ -42,19 +42,6 @@ export interface ResolvedProviderSelection extends ProviderModelSelection {
   validated: boolean;
 }
 
-export interface AlternativeProviderModelSelection {
-  providerId: string;
-  providerName: string;
-  model: string;
-}
-
-export function listAlternativeProviderModelSelections(options?: {
-  providers?: ProviderModelSelectionProvider[];
-  currentProviderId?: string;
-  currentModel?: string;
-  limit?: number;
-}): AlternativeProviderModelSelection[];
-
 export function resolveProviderModelSelection(options?: {
   providers?: ProviderModelSelectionProvider[];
   purpose?: ProviderModelPurpose;

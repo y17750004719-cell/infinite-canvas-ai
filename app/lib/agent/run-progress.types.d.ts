@@ -51,6 +51,7 @@ export interface AgentRunProgressStep {
   commentaryItemId?: string;
   executionId?: string;
   retryability?: 'retryable' | 'requires_change' | 'unknown';
+  skillContentHash?: string;
   phase: string;
   status: AgentRunStepStatus;
   label: string;
@@ -189,6 +190,6 @@ export type AgentRunProgressEvent =
   | { type: 'confirmation_required'; taskId?: string; runId?: string; operationId?: string; request?: { confirmationId?: string; toolName?: string; message?: string; taskId?: string; operationId?: string; expectedSequence?: number }; itemId?: string; parentItemId?: string; sequence?: number; timestampMs?: number }
   | { type: 'clarification_required'; taskId?: string; runId?: string; operationId?: string; message?: string; request?: { id?: string; taskId?: string; operationId?: string; lastSequence?: number; question?: string; toolName?: string }; itemId?: string; parentItemId?: string; sequence?: number; timestampMs?: number }
   | { type: 'intent_resolved'; intent: 'chat' | 'image' | 'skill_action' }
-  | { type: 'skill_selected'; skillId: string; label: string; sequence?: number; timestampMs?: number; runId?: string }
+  | { type: 'skill_selected'; skillId: string; label: string; sequence?: number; timestampMs?: number; runId?: string; skillContentHash?: string }
   | { type: 'active_skill_changed'; skill: { id: string; label: string } | null; sequence?: number; timestampMs?: number; runId?: string }
   | { type: string; [key: string]: unknown };

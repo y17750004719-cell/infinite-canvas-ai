@@ -21,11 +21,3 @@ export function preloadGeneratedAsset(
   asset: GeneratedAssetInput,
   options?: GeneratedAssetPreloadOptions,
 ): Promise<PreloadedGeneratedAsset>;
-
-export function preloadGeneratedAssets(
-  assets: GeneratedAssetInput[],
-  options?: GeneratedAssetPreloadOptions,
-): Promise<{
-  fulfilled: PreloadedGeneratedAsset[];
-  failed: Array<{ asset: GeneratedAssetInput; error: unknown }>;
-}>;

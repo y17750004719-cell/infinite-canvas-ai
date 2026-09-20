@@ -36,7 +36,3 @@ export async function prepareAgentTurnContext({
     developerInstructions: String(developerInstructions || ''),
   };
 }
-
-export function createContextPreparationService(dependencies = {}) {
-  return { prepare: (input = {}) => prepareAgentTurnContext({ ...dependencies, ...input }) };
-}

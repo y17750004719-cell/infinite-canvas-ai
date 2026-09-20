@@ -2,42 +2,6 @@ export const IMAGE_PIPELINE_ROUTE = '/api/generate';
 
 import { settleCanvasImageGenerationRequests } from '../workspace-session-view.mjs';
 
-/** Image side-effect boundary. The caller supplies the durable ledger and
- * provider executor; this module owns task normalization and result shape. */
-export function normalizeImagePipelineRequest(request = {}) {
-  return {
-    ...request,
-    operation: request.operation === 'edit' ? 'edit' : 'generate',
-    referenceIds: Array.from(new Set((Array.isArray(request.referenceIds) ? request.referenceIds : []).map(String).filter(Boolean))),
-    items: Array.isArray(request.items) ? request.items : [],
-  };
-}
-
-export async function executeImagePipeline({ request, execute, ledger, operationKey, context = {} } = {}) {
-  if (typeof execute !== 'function') throw new TypeError('image pipeline requires an executor');
-  const normalized = normalizeImagePipelineRequest(request);
-  const run = () => execute(normalized, context);
-  const result = typeof ledger === 'function'
-    ? await ledger({ operationKey, request: normalized, execute: run })
-    : await run();
-  const payload = result && typeof result === 'object' ? result : { value: result };
-  const failed = payload.status === 'failed' || payload.outcomeUnknown === true;
-  return {
-    status: payload.outcomeUnknown ? 'unknown' : failed ? 'failed' : payload.partial ? 'partial' : 'completed',
-    assets: Array.isArray(payload.assets) ? payload.assets : [],
-    completedTaskIdentities: Array.isArray(payload.completedTaskIdentities) ? payload.completedTaskIdentities : [],
-    remainingTaskIdentities: Array.isArray(payload.remainingTaskIdentities) ? payload.remainingTaskIdentities : [],
-    requestStats: payload.requestStats || null,
-    presentation: payload.presentation || null,
-    recoveryRecord: payload.recoveryRecord || null,
-    ...payload,
-  };
-}
-
-export function createImagePipelineService(dependencies = {}) {
-  return { execute: (input = {}) => executeImagePipeline({ ...dependencies, ...input }) };
-}
-
 /**
  * Execute a planned set of independent image requests.  Concurrency and
  * ordering are owned by the image service; callers provide only the durable

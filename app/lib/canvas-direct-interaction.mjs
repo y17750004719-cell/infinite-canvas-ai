@@ -25,22 +25,6 @@ export const applyDirectZoom = (
   };
 };
 
-export const applyDirectItemDrag = ({ items, itemIds, startPositions, delta }) => {
-  const movedIds = new Set(itemIds);
-  let changed = false;
-  const nextItems = items.map((item) => {
-    if (!movedIds.has(item.id)) return item;
-    const start = startPositions[item.id];
-    if (!start) return item;
-    const x = start.x + delta.x;
-    const y = start.y + delta.y;
-    if (item.x === x && item.y === y) return item;
-    changed = true;
-    return { ...item, x, y };
-  });
-  return changed ? nextItems : items;
-};
-
 export const applyDirectItemResize = ({
   item,
   startWidth,

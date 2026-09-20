@@ -9,15 +9,6 @@ export const AGENT_LIFECYCLE_EVENT_TYPES = new Set([
   'agent_completion_summary', 'agent_done', 'agent_error', 'agent_cancelled',
 ]);
 
-export const CODEX_LIFECYCLE_EVENT_TYPES = new Set([
-  'thread.started', 'turn.started', 'item.started', 'item.updated',
-  'item.completed', 'turn.completed', 'turn.failed', 'error',
-]);
-
-export function isCodexLifecycleEvent(value) {
-  return Boolean(value && typeof value.type === 'string' && CODEX_LIFECYCLE_EVENT_TYPES.has(value.type));
-}
-
 export function isAgentLifecycleEvent(value) {
   return Boolean(value && typeof value.type === 'string' && AGENT_LIFECYCLE_EVENT_TYPES.has(value.type));
 }

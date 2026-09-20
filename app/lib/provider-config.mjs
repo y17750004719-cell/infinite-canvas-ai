@@ -62,17 +62,6 @@ function normalizeText(value) {
   return typeof value === 'string' ? value.trim() : '';
 }
 
-function providerKeyEnv(providerId) {
-  const normalizedProviderId = normalizeText(providerId).toLowerCase();
-  if (normalizedProviderId === 'comfly') {
-    return 'COMFLY_API_KEY';
-  }
-  if (normalizedProviderId === 'gpt-best') {
-    return 'GPT_BEST_API_KEY';
-  }
-  return `API_PROVIDER_${normalizedProviderId.replace(/[^A-Za-z0-9]/g, '_').toUpperCase()}_KEY`;
-}
-
 function inferProviderId(baseUrl) {
   const normalizedBaseUrl = normalizeText(baseUrl).toLowerCase();
   if (normalizedBaseUrl.includes('gpt-best')) {

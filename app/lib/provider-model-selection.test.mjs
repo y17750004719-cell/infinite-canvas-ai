@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
-  listAlternativeProviderModelSelections,
   fingerprintProviderSelection,
   resolveProviderModelCapabilities,
   resolveProviderModelSelection,
@@ -168,21 +167,6 @@ test('ignores disabled providers and reports when no enabled model is available'
       fallback: true,
       reason: 'no_capable_provider',
     }
-  );
-});
-
-test('lists consent-gated alternative chat models with primary provider first', () => {
-  assert.deepEqual(
-    listAlternativeProviderModelSelections({
-      providers,
-      currentProviderId: 'secondary',
-      currentModel: 'secondary-chat',
-      limit: 3,
-    }),
-    [
-      { providerId: 'primary', providerName: 'primary', model: 'primary-chat' },
-      { providerId: 'secondary', providerName: 'secondary', model: 'shared-chat' },
-    ],
   );
 });
 

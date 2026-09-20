@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { CODEX_MAIN_SNAPSHOT, isCodexMainSnapshot } from './codex-main-snapshot.mjs';
+import { CODEX_MAIN_SNAPSHOT } from './codex-main-snapshot.mjs';
 import { validateApplicationToolName, isApplicationImageTool, APPLICATION_TOOL_CAPABILITY_SNAPSHOT } from './application-tool-dispatcher.mjs';
 import { assertNativeCapabilitySnapshot } from './native-codex-host.mjs';
 import fs from 'node:fs';
@@ -10,7 +10,6 @@ test('Codex Main snapshot is explicit and manual', () => {
   assert.equal(CODEX_MAIN_SNAPSHOT.wireApi, 'responses');
   assert.equal(CODEX_MAIN_SNAPSHOT.sourceCommit, '53c542d944c705f3a66780a19223223bee57cbb6');
   assert.ok(CODEX_MAIN_SNAPSHOT.supportedRequests.includes('turn/start'));
-  assert.equal(isCodexMainSnapshot(CODEX_MAIN_SNAPSHOT), true);
 });
 
 test('application dispatcher only permits registered tools and rejects native capabilities', () => {

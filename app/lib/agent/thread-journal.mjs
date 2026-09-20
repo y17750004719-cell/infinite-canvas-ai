@@ -75,12 +75,6 @@ function compactValue(value, depth = 0) {
   return undefined;
 }
 
-export function sanitizeJournalValue(value) {
-  const context = { redactions: 0 };
-  const sanitized = sanitizeValue(value, context, new WeakSet());
-  return { value: sanitized, redactions: context.redactions };
-}
-
 export function sanitizeJournalEvent(event) {
   const context = { redactions: 0 };
   const sanitized = sanitizeValue(event, context, new WeakSet());

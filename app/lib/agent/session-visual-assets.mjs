@@ -11,8 +11,6 @@ import {
   LOCAL_ASSET_ALLOWED_EXTENSIONS,
   resolveLocalAssetPath,
 } from '../local-assets.mjs';
-export { normalizeSessionVisualAssets } from './session-visual-asset-metadata.mjs';
-
 export const SESSION_VISUAL_ASSET_MAX_BYTES = 12 * 1024 * 1024;
 export const SESSION_VISUAL_ASSET_DIRECTORY = 'uploads/session-assets';
 // Keep pathological dimensions from consuming excessive memory in downstream

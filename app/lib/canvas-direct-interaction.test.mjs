@@ -2,7 +2,6 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
-  applyDirectItemDrag,
   applyDirectItemResize,
   applyDirectPan,
   applyDirectZoom,
@@ -24,20 +23,6 @@ test('direct zoom uses Infinite-Canvas wheel steps and preserves the anchor', ()
   assert.equal((anchor.x - zoomed.x) / zoomed.scale, 100);
   assert.equal((anchor.y - zoomed.y) / zoomed.scale, 100);
   assert.ok(Math.abs(applyDirectZoom(zoomed, 1, anchor).scale - 0.9936) < 1e-12);
-});
-
-test('direct item drag preserves references for untouched items', () => {
-  const fixed = { id: 'fixed', x: 1, y: 2 };
-  const moved = { id: 'moved', x: 10, y: 20 };
-  const items = [fixed, moved];
-  const next = applyDirectItemDrag({
-    items,
-    itemIds: ['moved'],
-    startPositions: { moved: { x: 10, y: 20 } },
-    delta: { x: 5, y: -4 },
-  });
-  assert.equal(next[0], fixed);
-  assert.deepEqual(next[1], { id: 'moved', x: 15, y: 16 });
 });
 
 test('direct resize supports free and aspect-ratio-preserving sizes', () => {

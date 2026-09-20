@@ -53,20 +53,6 @@ export async function invalidateNativeCodexHost(host) {
   await host.client.close().catch(() => {});
 }
 
-// Invalidate an existing pooled host without creating a new one. Recovery uses
-// this boundary before replaying a turn after a transport-level disconnect.
-export async function invalidateNativeCodexHostScope({ provider, ownerId = 'local', runtimeRoot = resolve('runtime/native-codex') } = {}) {
-  if (!provider?.id || !provider?.model || !provider?.baseUrl) return false;
-  const scopeId = hash(JSON.stringify([ownerId, nativeProviderFingerprint(provider), hash(provider.apiKey || '')]));
-  const key = `${resolve(runtimeRoot)}:${scopeId}`;
-  const existing = hostPool.get(key);
-  if (!existing) return false;
-  hostPool.delete(key);
-  const host = await Promise.resolve(existing).catch(() => null);
-  if (host) await invalidateNativeCodexHost(host);
-  return Boolean(host);
-}
-
 export function nativeConfig(provider) {
   const endpoint = new URL(provider.baseUrl);
   if (!['https:', 'http:'].includes(endpoint.protocol) || endpoint.username || endpoint.password) throw failure('native_provider_url_invalid');

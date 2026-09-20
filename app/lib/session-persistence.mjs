@@ -394,7 +394,6 @@ export function normalizeProjectSession(session) {
   const cleanedSession = normalizeThreadState(currentSession);
   const normalizedItems = Array.isArray(cleanedSession?.items) ? cleanedSession.items : [];
   const normalizedChat = normalizeSessionChatMessages(cleanedSession);
-  const normalizedTopics = [];
   const ownedContextEvents = filterOwnedContextEvents(cleanedSession?.contextEvents, cleanedSession?.id);
   const replay = buildReplayableContext({ sessionId: cleanedSession?.id, events: ownedContextEvents, messages: normalizedChat.messages, mergeMessages: true });
   const contextHistory = normalizeContextHistory(filterOwnedContextHistory(cleanedSession?.contextHistory, cleanedSession?.id), cleanedSession?.id, replay.events, cleanedSession?.compactedWindows, cleanedSession?.activeContextWindow);

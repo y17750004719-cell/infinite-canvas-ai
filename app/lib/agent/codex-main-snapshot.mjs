@@ -48,7 +48,3 @@ export const CODEX_MAIN_SNAPSHOT = Object.freeze({
     'realtime',
   ]),
 });
-
-export function isCodexMainSnapshot(value) {
-  return Boolean(value && value.sourceCommit === CODEX_MAIN_SNAPSHOT.sourceCommit);
-}

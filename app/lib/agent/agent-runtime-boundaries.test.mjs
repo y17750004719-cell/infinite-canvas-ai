@@ -4,7 +4,6 @@ import { prepareAgentTurnContext } from './agent-context-preparation-service.mjs
 import {
   buildImageCompletionSummary,
   executeImageBatch,
-  executeImagePipeline,
   persistImageAssets,
 } from './agent-image-pipeline-service.mjs';
 import { createAgentStreamOrchestrator } from './agent-stream-orchestrator.mjs';
@@ -44,6 +43,42 @@ test('request context flow rejects legacy contracts before invoking preparation'
   assert.equal(prepared, false);
 });
 
+test('request context flow restores a legacy Skill lock from the matching thread journal', async () => {
+  const durableHash = 'a'.repeat(64);
+  let preparedInput;
+  const recovery = {
+    version: 1, taskId: 'task-1', runId: 'run-old', operationId: 'operation-1', sessionId: 's',
+    sourceUserMessageId: 'user-1', status: 'failed', resumeRoute: 'main_agent', intent: 'image',
+    originalRequest: '生成海报', failure: { stage: 'tool_dispatch', kind: 'protocol', message: 'failed', retryability: 'retryable' },
+    skillId: null, contextEntityIds: [], visualReferenceIds: [], completedAssetCount: 0, createdAt: 1,
+  };
+  const flow = createAgentRequestContextFlow({
+    loadThread: async () => ({
+      state: {
+        contractVersion: 1,
+        nativeCodex: { contractVersion: 1 },
+        turns: [{ turnId: 'turn-old', operationId: 'operation-1', status: 'failed' }],
+      },
+      events: [{
+        type: 'item.updated', threadId: 's', taskId: 'task-1', operationId: 'operation-1', runId: 'run-old',
+        item: { eventType: 'skill_selected', payload: { skillId: 'poster', skillContentHash: durableHash } },
+      }],
+    }),
+    prepare: async (input) => { preparedInput = input; return { ok: true, value: {} }; },
+    contractVersion: 1,
+  });
+  const result = await flow.prepare({
+    body: {
+      messages: [{ id: 'user-1', role: 'user', content: '生成海报' }],
+      recoveryTaskId: 'task-1', operationId: 'operation-1',
+    },
+    sessionId: 's', latestUserMessage: '重试生成', normalizedRecentFailedTask: recovery,
+  });
+  assert.equal(result.ok, true);
+  assert.equal(preparedInput.normalizedRecentFailedTask.skillId, 'poster');
+  assert.equal(preparedInput.normalizedRecentFailedTask.skillContentHash, durableHash);
+});
+
 test('context preparation returns a stable Native turn shape without side effects', async () => {
   const result = await prepareAgentTurnContext({
     request: { userText: 'hello' },
@@ -52,15 +87,6 @@ test('context preparation returns a stable Native turn shape without side effect
   assert.equal(result.userText, 'hello');
   assert.deepEqual(result.contextEntityIds, ['a']);
   assert.equal(result.images.length, 1);
-});
-
-test('image pipeline normalizes requests and returns structured side-effect results', async () => {
-  const result = await executeImagePipeline({
-    request: { referenceIds: ['a', 'a'], operation: 'edit' },
-    execute: async (request) => ({ assets: [{ id: 'asset-1' }], requestStats: { succeeded: 1 }, operation: request.operation }),
-  });
-  assert.equal(result.status, 'completed');
-  assert.deepEqual(result.assets, [{ id: 'asset-1' }]);
 });
 
 test('image pipeline owns batch settlement while preserving request order', async () => {

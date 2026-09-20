@@ -161,10 +161,10 @@ test('server-selected Skills annotate the sent message without repopulating the 
   assert.ok(activeSkillChangeStart >= 0 && skillSelectedStart > activeSkillChangeStart);
   assert.doesNotMatch(source.slice(activeSkillChangeStart, skillSelectedStart), /setActiveSkillForCurrentSession/);
   assert.match(source, /event\.type === 'skill_selected' && event\.label/);
-  assert.match(source, /if \(!currentSkill\)/);
+  assert.match(source, /selectedSkillMessageId = requestedRecoveryRecord\?\.sourceUserMessageId \|\| userMessage\.id/);
   assert.match(source, /type: 'skill_selected'/);
   assert.match(source, /updatePendingAssistantMessageImmediately\(\(msg\) => updateAgentRunProgress/);
-  assert.match(source, /message\.id === userMessage\.id \? \{ \.\.\.message, skill: selectedSkill \}/);
+  assert.match(source, /message\.id === selectedSkillMessageId \? \{ \.\.\.message, skill: selectedSkill \}/);
   assert.match(source, /setChatInput\(''\);\s*setActiveSkillForCurrentSession\(null\);/);
   assert.match(source, /pendingAgentClarification\.request\.dimension !== 'skill_selection'/);
 });
@@ -363,6 +363,12 @@ test('cancellation and clarification recovery preserve progress state', () => {
   assert.ok(abortStart >= 0 && failureStart > abortStart);
   assert.doesNotMatch(source.slice(abortStart, failureStart), /agentRunProgress:\s*undefined/);
   assert.match(source, /updateAgentRunProgress\(msg, \{ type: 'agent_error'(?:, runId: [^}]+)? \}\)/);
+});
+
+test('image recovery reuses the recorded Skill contract instead of forcing manual selection', () => {
+  assert.match(source, /isRecoveryRequest\s*\? \{ skillSelectionSource: 'recovery' \}/);
+  assert.match(source, /recoverySkillContentHash/);
+  assert.match(source, /skillContentHash: selectedSkill\.skillContentHash/);
 });
 
 test('stale interactions close the prompt and expose explicit recovery', () => {

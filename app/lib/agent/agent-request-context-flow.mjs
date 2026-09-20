@@ -1,6 +1,7 @@
 import { CURRENT_CONTRACT_VERSION, MigrationRequiredError, migrationErrorMeta } from '../compatibility-gate.mjs';
 import { resolveContinuationTurn } from './thread-turn-service.mjs';
 import { prepareAgentContext } from './agent-context-service.mjs';
+import { enrichAgentRecoverySkillMetadata } from './recovery.mjs';
 
 const invalid = (payload, status = 400) => ({ ok: false, response: { payload, status } });
 
@@ -50,6 +51,11 @@ export function createAgentRequestContextFlow(dependencies = {}) {
         return invalid({ error: error instanceof Error ? error.message : 'Unable to load thread', code: 'thread_unavailable' }, 500);
       }
       const state = thread?.state || {};
+      const durableRecentFailedTask = enrichAgentRecoverySkillMetadata(normalizedRecentFailedTask, {
+        messages: body.messages,
+        journalEvents: thread?.events,
+        sessionId,
+      });
       const suppliedVersion = body.contractVersion;
       const persistedNative = state.nativeCodex;
       const persistedVersion = state.contractVersion || persistedNative?.contractVersion;
@@ -89,7 +95,7 @@ export function createAgentRequestContextFlow(dependencies = {}) {
         sessionId,
         latestUserMessage,
         runtimeReferenceContext,
-        normalizedRecentFailedTask,
+        normalizedRecentFailedTask: durableRecentFailedTask,
       });
       if (!prepared?.ok) return prepared;
       return {
@@ -106,9 +112,4 @@ export function createAgentRequestContextFlow(dependencies = {}) {
       };
     },
   };
-}
-
-export async function prepareAgentRequestContext(input = {}) {
-  const flow = createAgentRequestContextFlow(input);
-  return flow.prepare(input);
 }

@@ -31,34 +31,7 @@ export function extractAgentImageCount(input?: string): {
   matchedText?: string;
   reason?: string;
 };
-export function resolveAgentImageCountDecision(input?: {
-  prompt?: string;
-  rawPrompt?: string;
-  plannedCount?: number;
-  interfaceCount?: number;
-  clarifiedCount?: number;
-  clarifiedSource?: 'clarification' | 'prompt' | 'interface' | 'default' | 'batch';
-  batchPlan?: { totalCount: number; completedCount: number; remainingCount: number; batchSize: number };
-  proceedWithCurrent?: boolean;
-}): {
-  status: 'resolved' | 'ambiguous' | 'overflow';
-  count?: number;
-  totalCount?: number;
-  source: 'clarification' | 'prompt' | 'interface' | 'default' | 'batch';
-  candidates: number[];
-  matchedText?: string;
-  reason?: string;
-  batchPlan?: { totalCount: number; completedCount: number; remainingCount: number; batchSize: number };
-};
-
 export function normalizeAgentImageCount(requestedCount?: number): number;
-
-export function resolveAgentImageBatchContinuation<T extends { id: string }>(input?: {
-  currentItems?: T[];
-  remainingItems?: T[];
-  failedItemIds?: string[];
-  batchSize?: number;
-}): { pendingCount: number; nextItems: T[]; remainingItems: T[] };
 
 export function resolveAgentImageOptions(input?: {
   prompt?: string;

@@ -4,7 +4,7 @@ const publicKeys = [
   'skill', 'source', 'stepId', 'phase', 'status', 'toolCallId', 'toolName', 'isError',
   'activityId', 'disposition', 'event', 'action', 'request', 'state', 'result', 'proposal',
   'entityIds', 'labels', 'kind', 'confidence', 'resolvedEntityIds', 'mustPreserveCount',
-  'taskSnapshot', 'recoveryRecord', 'parameters', 'title', 'operation', 'succeeded', 'failed',
+  'taskSnapshot', 'recoveryRecord', 'parameters', 'title', 'operation', 'succeeded', 'failed', 'skillContentHash',
   'addedToCanvas', 'stopReason', 'detail', 'completionSummary', 'completedLabel',
 ];
 

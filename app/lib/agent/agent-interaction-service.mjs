@@ -141,6 +141,7 @@ export async function prepareAgentInteraction(options = {}) {
   let activeSkillChange;
   let runReferenceContext = options.runReferenceContext;
   let executionReferenceImages = options.executionReferenceImages || [];
+  const recoveryRequest = body.skillSelectionSource === 'recovery' && Boolean(body.recoveryTaskId);
   const explicitSkillRequested = body.skillSelectionSource === 'manual_ui'
     || body.skillSelectionSource === 'explicit_text'
     || body.activeSkillExplicit === true;
@@ -176,12 +177,12 @@ export async function prepareAgentInteraction(options = {}) {
     body.clarificationResponse && body.clarificationRequest?.dimension === 'skill_selection' && activeClarificationState,
   );
   const skillSelection = selectSkillFromInput({
-    activeSkillId: body.activeSkillId,
+    activeSkillId: recoveryRequest ? undefined : body.activeSkillId,
     clarificationRequest: isSkillSelectionResponse ? body.clarificationRequest : undefined,
     clarificationResponse: isSkillSelectionResponse ? body.clarificationResponse : undefined,
-    state: activeClarificationState,
+    state: recoveryRequest ? null : activeClarificationState,
     skills: skillManifests,
-    latestUserMessage: isSkillSelectionResponse ? '' : latestUserMessage,
+    latestUserMessage: recoveryRequest || isSkillSelectionResponse ? '' : latestUserMessage,
     explicitSkill: explicitSkillRequested
       ? { type: 'select', id: String(body.activeSkillId).trim() }
       : undefined,
@@ -231,11 +232,22 @@ export function createInteractionService({ loadSkillContent, emitEvent, logger, 
     async assertLockedSkill(skill, expectedHash = null) {
       if (!skill) return { content: '', contentHash: '' };
       if (skill.executionMode !== 'image_pipeline' || !skill.allowedTools?.includes('generate_image')) {
-        throw new Error('The locked Skill is not allowed to generate images');
+        throw Object.assign(new Error('The locked Skill is not allowed to generate images'), {
+          code: 'skill_lock_failed', failureStage: 'skill_selection', retryable: false,
+        });
       }
-      const loaded = await this.loadSkill(skill.id);
+      let loaded;
+      try {
+        loaded = await this.loadSkill(skill.id);
+      } catch (error) {
+        throw Object.assign(new Error(error instanceof Error ? error.message : 'Skill could not be loaded'), {
+          code: 'skill_lock_failed', failureStage: 'skill_selection', retryable: false,
+        });
+      }
       if (expectedHash && expectedHash !== loaded.contentHash) {
-        throw new Error('The locked Skill content changed after this task was created');
+        throw Object.assign(new Error('The locked Skill content changed after this task was created'), {
+          code: 'skill_lock_failed', failureStage: 'skill_selection', retryable: false,
+        });
       }
       return loaded;
     },
@@ -243,7 +255,7 @@ export function createInteractionService({ loadSkillContent, emitEvent, logger, 
     const result = validateVisualSkillSelection({ args, skills, selectedSkill, imageStarted });
     if (!result.locked) return result;
     if (typeof loadSkillContent !== 'function') {
-        return { isError: true, failureCode: 'skill_lock_failed', failureStage: 'interaction', retryable: false, reason: 'skill_loader_unavailable' };
+      return { isError: true, failureCode: 'skill_lock_failed', failureStage: 'skill_selection', retryable: false, reason: 'skill_loader_unavailable' };
     }
     let content;
     try {
@@ -252,20 +264,28 @@ export function createInteractionService({ loadSkillContent, emitEvent, logger, 
       return {
         isError: true,
         failureCode: 'skill_lock_failed',
-        failureStage: 'interaction',
+        failureStage: 'skill_selection',
         retryable: false,
         skillId: result.skill.id,
         reason: error instanceof Error ? error.message : String(error),
       };
     }
     if (!String(content || '').trim()) {
-        return { isError: true, failureCode: 'skill_lock_failed', failureStage: 'interaction', retryable: false, reason: 'skill_empty', skillId: result.skill.id };
+      return { isError: true, failureCode: 'skill_lock_failed', failureStage: 'skill_selection', retryable: false, reason: 'skill_empty', skillId: result.skill.id };
     }
-      const contentHash = await hashText(content);
-      emitEvent?.({ type: 'skill_selected', skillId: result.skill.id, label: result.skill.name, source: 'auto', ...context });
-      await logger?.info?.('skill.loaded', 'Visual Skill selected by Native Agent', { skillId: result.skill.id, contentHash, ...context });
-      return { modelResult: { skillId: result.skill.id, content, contentHash, truncated: false }, skill: result.skill, content, contentHash };
-    },
+    const contentHash = await hashText(content);
+    emitEvent?.({
+      type: 'skill_selected',
+      skillId: result.skill.id,
+      label: result.skill.name,
+      source: 'auto',
+      contentHash,
+      skillContentHash: contentHash,
+      ...context,
+    });
+    await logger?.info?.('skill.loaded', 'Visual Skill selected by Native Agent', { skillId: result.skill.id, contentHash, ...context });
+    return { locked: true, modelResult: { skillId: result.skill.id, content, contentHash, truncated: false }, skill: result.skill, content, contentHash };
+  },
     resolveClarification,
     validateClarificationResponse,
     resolveContextSelection,

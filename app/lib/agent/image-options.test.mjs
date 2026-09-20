@@ -10,8 +10,6 @@ import {
   extractAgentImageFileCounts,
   extractExplicitImageAspectRatio,
   parseAgentImageCountNumber,
-  resolveAgentImageBatchContinuation,
-  resolveAgentImageCountDecision,
   resolveAgentImageOptions,
 } from './image-options.mjs';
 import { buildAsyncImageTaskRequests } from '../workspace-session-view.mjs';
@@ -75,46 +73,6 @@ test('agent image count parser surfaces conflicting deliverable counts', () => {
   assert.deepEqual(result.candidates, [3, 5]);
   assert.equal(parseAgentImageCountNumber('二十一'), 21);
   assert.equal(parseAgentImageCountNumber('twenty-one'), 21);
-});
-
-test('agent image count decisions prefer clarification, prompt, explicit interface, then default', () => {
-  assert.deepEqual(resolveAgentImageCountDecision({ prompt: '共5期', interfaceCount: 1 }), {
-    status: 'resolved',
-    count: 5,
-    totalCount: 5,
-    source: 'prompt',
-    candidates: [5],
-    matchedText: '5期',
-  });
-  assert.equal(resolveAgentImageCountDecision({ prompt: '生成封面', interfaceCount: 4 }).count, 4);
-  assert.equal(resolveAgentImageCountDecision({ prompt: '生成封面', interfaceCount: 1 }).count, 1);
-  assert.equal(resolveAgentImageCountDecision({ prompt: '共5期', clarifiedCount: 3 }).count, 3);
-  assert.deepEqual(resolveAgentImageCountDecision({ prompt: '共5期', interfaceCount: 2 }).candidates, [5, 2]);
-  assert.equal(resolveAgentImageCountDecision({
-    rawPrompt: '请生成4张',
-    prompt: '杂志封面',
-    interfaceCount: 1,
-  }).count, 4);
-  assert.equal(resolveAgentImageCountDecision({
-    rawPrompt: '把4个方案放在一张图里',
-    plannedCount: 1,
-    interfaceCount: 1,
-  }).count, 1);
-});
-
-test('agent image count decisions restore per-batch counts from remaining successful outputs', () => {
-  const plan = { totalCount: 20, completedCount: 9, remainingCount: 11, batchSize: 9 };
-  assert.deepEqual(resolveAgentImageCountDecision({ prompt: '生成20张', batchPlan: plan }), {
-    status: 'resolved',
-    count: 9,
-    totalCount: 20,
-    source: 'batch',
-    batchPlan: plan,
-    candidates: [20],
-  });
-  assert.equal(resolveAgentImageCountDecision({
-    batchPlan: { ...plan, completedCount: 18, remainingCount: 2 },
-  }).count, 2);
 });
 
 test('explicit image ratio parsing supports colon variants and uses the last ratio', () => {
@@ -335,34 +293,6 @@ test('agent series generation creates one request per distinct issue prompt', ()
     'Vogue dog issue with green background',
   ]);
   assert.ok(resolved.requests.every((request) => request.n === 1));
-});
-
-test('series batch continuation retries failed issues before later untouched issues', () => {
-  const currentItems = Array.from({ length: 9 }, (_, index) => ({ id: `issue-${index + 1}` }));
-  const remainingItems = Array.from({ length: 11 }, (_, index) => ({ id: `issue-${index + 10}` }));
-  const continuation = resolveAgentImageBatchContinuation({
-    currentItems,
-    remainingItems,
-    failedItemIds: ['issue-2', 'issue-8'],
-  });
-  assert.equal(continuation.pendingCount, 13);
-  assert.deepEqual(continuation.nextItems.map((item) => item.id), [
-    'issue-2',
-    'issue-8',
-    'issue-10',
-    'issue-11',
-    'issue-12',
-    'issue-13',
-    'issue-14',
-    'issue-15',
-    'issue-16',
-  ]);
-  assert.deepEqual(continuation.remainingItems.map((item) => item.id), [
-    'issue-17',
-    'issue-18',
-    'issue-19',
-    'issue-20',
-  ]);
 });
 
 test('agent Gemini requests preserve the 2K tier and native aspect ratio', () => {

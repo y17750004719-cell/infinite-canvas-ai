@@ -94,13 +94,16 @@ export async function resolveRequestInteraction({
       && body?.clarificationRequest?.dimension === 'skill_selection'
       && activeClarificationState,
   );
+  const recoveryRequest = body?.skillSelectionSource === 'recovery' && Boolean(body?.recoveryTaskId);
   const skillSelection = interactionService.selectSkillFromInput({
-    activeSkillId: body?.activeSkillId,
+    // Recovery is authoritative from the server-side recovery record. Do not
+    // let a stale UI Skill selection override that record before routing.
+    activeSkillId: recoveryRequest ? undefined : body?.activeSkillId,
     clarificationRequest: isSkillSelectionResponse ? body.clarificationRequest : undefined,
     clarificationResponse: isSkillSelectionResponse ? body.clarificationResponse : undefined,
-    state: activeClarificationState,
+    state: recoveryRequest ? null : activeClarificationState,
     skills: skillManifests,
-    latestUserMessage: isSkillSelectionResponse ? '' : latestUserMessage,
+    latestUserMessage: recoveryRequest || isSkillSelectionResponse ? '' : latestUserMessage,
   });
   if (skillSelection.error) throw new Error(skillSelection.error.code);
   nextSelectedSkill = skillSelection.selectedSkill || null;

@@ -3,17 +3,39 @@ import assert from 'node:assert/strict';
 import {
   buildReplayableContext,
   compactContext,
-  compactContextAsync,
   contextEventFromAgentEvent,
   aggregateAssistantTextEvents,
   normalizeToolCallPairs,
   estimateContextTokens,
-  migrateMessagesToContextEvents,
+  requestMessagesToContextEvents,
   normalizeCompactedWindows,
-  replayContextEvents,
-  buildResponseItems,
   validateCompactionSummary,
 } from './context-events.mjs';
+
+test('current context preserves user text and durable image identity without a serializer', () => {
+  const context = buildReplayableContext({
+    sessionId: 'session-1',
+    events: [
+      { type: 'user_text', sequence: 1, content: 'Use this image' },
+      { type: 'image_input', sequence: 2, assetId: 'asset-1' },
+    ],
+    visualAssets: [{ id: 'asset-1', durableSrc: '/api/session-visual-assets/asset-1' }],
+  });
+  assert.deepEqual(context.modelEvents.map(event => event.content || event.assetId), ['Use this image', 'asset-1']);
+  assert.equal(context.visualAssets[0].durableSrc, '/api/session-visual-assets/asset-1');
+});
+
+test('live compaction keeps recent events and records the bounded window', () => {
+  const replay = compactContext(buildReplayableContext({
+    sessionId: 'session-1',
+    events: Array.from({ length: 6 }, (_, index) => ({
+      type: 'user_text', sequence: index + 1, content: 'x'.repeat(500),
+    })),
+  }), { contextWindow: 1024, reserveTokens: 0, threshold: 0.5, keepRecent: 2 });
+  assert.equal(replay.activeWindow.compactCount, 1);
+  assert.equal(replay.events.at(-1).sequence, 6);
+  assert.ok(estimateContextTokens(replay.events) < 6 * 130);
+});
 
 test('modelEvents is the active replay source while auditEvents remains complete', () => {
   const replay = buildReplayableContext({
@@ -23,20 +45,20 @@ test('modelEvents is the active replay source while auditEvents remains complete
   });
   assert.deepEqual(replay.events.map((event) => event.eventId), ['new']);
   assert.deepEqual(replay.auditEvents.map((event) => event.eventId), ['old']);
-  assert.deepEqual(replayContextEvents(replay), [{ role: 'user', content: 'new' }]);
+  assert.deepEqual(replay.modelEvents.map(event => event.content), ['new']);
 });
 
-test('provider-neutral response items preserve tool and image semantics', () => {
-  const items = buildResponseItems({ sessionId: 's1', events: [
+test('current context preserves tool and image event identities', () => {
+  const context = buildReplayableContext({ sessionId: 's1', events: [
     { eventId: 'u', sessionId: 's1', sequence: 1, type: 'user_text', content: 'look' },
     { eventId: 'i', sessionId: 's1', sequence: 2, type: 'image_input', assetId: 'asset-1' },
     { eventId: 'c', sessionId: 's1', sequence: 3, type: 'tool_call', toolCallId: 'call-1', toolName: 'inspect', arguments: { x: 1 } },
     { eventId: 'r', sessionId: 's1', sequence: 4, type: 'tool_result', toolCallId: 'call-1', result: { ok: true } },
     { eventId: 'o', sessionId: 's1', sequence: 5, type: 'image_output', toolCallId: 'call-1', assetId: 'asset-2' },
   ] });
-  assert.deepEqual(items.map((item) => item.type), ['text', 'local_image', 'tool_call', 'tool_result', 'tool_result_image']);
-  assert.equal(items[2].callId, 'call-1');
-  assert.equal(items[4].assetId, 'asset-2');
+  assert.deepEqual(context.modelEvents.map((item) => item.type), ['user_text', 'image_input', 'tool_call', 'tool_result', 'image_output']);
+  assert.equal(context.modelEvents[2].toolCallId, 'call-1');
+  assert.equal(context.modelEvents[4].assetId, 'asset-2');
 });
 
 test('compaction summary validation rejects malformed payloads', () => {
@@ -144,26 +166,28 @@ test('generated asset client actions become image output events with stable asse
 });
 
 test('legacy messages migrate idempotently and preserve image position', () => {
-  const events = migrateMessagesToContextEvents([
+  const events = requestMessagesToContextEvents([
     { role: 'user', content: '第一轮', referenceContext: { references: [{ id: 'r1', src: '/api/session-visual-assets/asset-1', assetId: 'asset-1' }] } },
     { role: 'assistant', content: '收到' },
   ], { sessionId: 's1' });
   assert.deepEqual(events.map((event) => event.type), ['user_text', 'image_input', 'assistant_text']);
-  assert.deepEqual(replayContextEvents({ events }), [
-    { role: 'user', content: [{ type: 'text', text: '第一轮' }, { type: 'image_url', image_url: { url: '/api/session-visual-assets/asset-1' } }] },
-    { role: 'assistant', content: '收到' },
-  ]);
-  assert.equal(migrateMessagesToContextEvents([], { sessionId: 's1' }).length, 0);
+  assert.equal(events[0].content, '第一轮');
+  assert.equal(events[1].src, '/api/session-visual-assets/asset-1');
+  assert.equal(events[1].assetId, 'asset-1');
+  assert.equal(events[2].content, '收到');
+  assert.deepEqual(buildReplayableContext({ sessionId: 's1', events }).modelEvents, events);
+  assert.equal(requestMessagesToContextEvents([], { sessionId: 's1' }).length, 0);
 });
 
 test('legacy base64 image data is not persisted or replayed to the provider', () => {
-  const events = migrateMessagesToContextEvents([
+  const events = requestMessagesToContextEvents([
     { role: 'user', content: '图片', referenceContext: { references: [{ id: 'r1', src: 'data:image/png;base64,secret', assetId: 'asset-1' }] } },
   ], { sessionId: 's1' });
   assert.equal(events[1].src, undefined);
-  assert.deepEqual(replayContextEvents({ events, visualAssets: [{ id: 'asset-1', sessionId: 's1', durableSrc: '/api/session-visual-assets/asset-1', contentHash: 'hash', mimeType: 'image/png', byteSize: 1, source: 'upload', createdAt: 1 }] }), [
-    { role: 'user', content: [{ type: 'text', text: '图片' }, { type: 'image_url', image_url: { url: '/api/session-visual-assets/asset-1' } }] },
-  ]);
+  const context = buildReplayableContext({ events, visualAssets: [{ id: 'asset-1', sessionId: 's1', durableSrc: '/api/session-visual-assets/asset-1', contentHash: 'hash', mimeType: 'image/png', byteSize: 1, source: 'upload', createdAt: 1 }] });
+  assert.equal(context.modelEvents[1].assetId, 'asset-1');
+  assert.equal(context.visualAssets[0].durableSrc, '/api/session-visual-assets/asset-1');
+  assert.doesNotMatch(JSON.stringify(context), /data:image|base64|secret/);
 });
 
 test('compactContext keeps recent events and records bounded window state', () => {
@@ -236,7 +260,7 @@ test('compactContext does not add an empty summary event when all events are ret
   assert.equal(compacted.compactedWindows.length, 1);
 });
 
-test('compaction summaries remain boundary events and replay as system context', () => {
+test('compaction summaries remain boundary events without changing the audit history', () => {
   const compacted = compactContext({
     sessionId: 'session-summary',
     events: [
@@ -247,11 +271,11 @@ test('compaction summaries remain boundary events and replay as system context',
   const summary = compacted.modelEvents.find((event) => event.source === 'compact_summary');
   assert.ok(summary);
   assert.equal(summary.type, 'compaction');
-  const replayed = replayContextEvents(compacted);
-  assert.ok(replayed.some((message) => message.role === 'system' && /compacted/i.test(message.content)));
+  assert.match(summary.content, /user_text/);
+  assert.deepEqual(compacted.auditEvents.map(event => event.eventId), ['u1', 'a1']);
 });
 
-test('compactContextAsync replaces only the newest summary and preserves prior records', async () => {
+test('current compaction appends the supplied summary and preserves prior records', () => {
   const replay = {
     sessionId: 'session-async',
     events: Array.from({ length: 12 }, (_, index) => ({
@@ -268,9 +292,9 @@ test('compactContextAsync replaces only the newest summary and preserves prior r
     }],
     activeWindow: { sessionId: 'session-async', startSequence: 1, endSequence: 12, compactCount: 1, summaryVersion: 1, estimatedTokens: 1, model: 'm', contextWindow: 100 },
   };
-  const compacted = await compactContextAsync(replay, {
+  const compacted = compactContext(replay, {
     model: 'm', contextWindow: 100, reserveTokens: 20, threshold: 0.1, keepRecent: 2,
-    summarize: async () => ({ task: 'new', constraints: [], decisions: [], completedActions: [], pendingActions: [], toolFacts: [], imageAssets: [] }),
+    structuredSummary: { task: 'new', constraints: [], decisions: [], completedActions: [], pendingActions: [], toolFacts: [], imageAssets: [] },
   });
   assert.equal(compacted.compactionRecords.length, 2);
   assert.equal(compacted.compactionRecords[0].compactionId, 'old');
@@ -319,18 +343,20 @@ test('replayable context does not duplicate the latest message after lifecycle e
   assert.deepEqual(replay.events.map((event) => event.type), ['user_text', 'assistant_text', 'image_output']);
 });
 
-test('replay preserves tool call/result protocol messages', () => {
-  const messages = replayContextEvents({
+test('current compaction preserves tool arguments and matching results', () => {
+  const context = compactContext({
     events: [
       { eventId: 'u1', sessionId: 's1', sequence: 1, type: 'user_text', source: 'test', content: '查一下' },
       { eventId: 'c1', sessionId: 's1', sequence: 2, type: 'tool_call', source: 'test', toolCallId: 'call-1', toolName: 'read_context', arguments: { scope: 'project' } },
       { eventId: 'r1', sessionId: 's1', sequence: 3, type: 'tool_result', source: 'test', toolCallId: 'call-1', toolName: 'read_context', result: { ok: true } },
     ],
   });
-  assert.deepEqual(messages.slice(1), [
-    { role: 'assistant', content: '', tool_calls: [{ id: 'call-1', type: 'function', function: { name: 'read_context', arguments: '{"scope":"project"}' } }] },
-    { role: 'tool', tool_call_id: 'call-1', name: 'read_context', content: '{"ok":true}' },
-  ]);
+  const [call, result] = context.modelEvents.slice(1);
+  assert.equal(call.type, 'tool_call');
+  assert.equal(result.type, 'tool_result');
+  assert.equal(call.toolCallId, result.toolCallId);
+  assert.deepEqual(call.arguments, { scope: 'project' });
+  assert.deepEqual(result.result, { ok: true });
 });
 
 test('compact keeps a tool call when its result is in the recent window', () => {

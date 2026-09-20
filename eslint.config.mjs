@@ -3,7 +3,7 @@ import nextVitals from 'eslint-config-next/core-web-vitals';
 export default [
   ...nextVitals,
   {
-    files: ['app/lib/agent/*.mjs'],
+    files: ['app/**/*.mjs', 'scripts/**/*.mjs'],
     rules: {
       'no-unused-vars': ['error', {
         args: 'none',

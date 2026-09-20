@@ -5,7 +5,6 @@ import {
   getImageModelCapability,
   getSupportedImageSizeOptions,
   resolveOpenAiImageSizeForAspectRatio,
-  normalizeImageModelCapabilityId,
 } from './image-model-capabilities.mjs';
 
 test('image size conversion is protocol driven and independent of model names', () => {
@@ -15,7 +14,6 @@ test('image size conversion is protocol driven and independent of model names', 
 });
 
 test('model capability lookup preserves supplier ids and exposes descriptive metadata', () => {
-  assert.equal(normalizeImageModelCapabilityId('custom-image-model'), 'custom-image-model');
   const capability = getImageModelCapability('custom-image-model');
   assert.equal(typeof capability.supportsAspectRatio, 'boolean');
   assert.ok(Array.isArray(capability.supportedSizes));

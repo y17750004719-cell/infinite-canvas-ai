@@ -5,7 +5,6 @@ import {
   aspectRatioFromSize,
   buildGenerateRouteErrorMeta,
   normalizeAspectRatio,
-  resolveGenerateImageModelFromAllowedModels,
   resolveIntent,
 } from './generate-request-flow.mjs';
 
@@ -36,22 +35,6 @@ test('resolveIntent keeps conflicting auto hints on ambiguous chat default', () 
     ambiguous: true,
     prompt: '解释这个 logo 并生成图片',
   });
-});
-
-test('resolveGenerateImageModelFromAllowedModels preserves provider-saved image model ids', () => {
-  const allowedProviderModelIds = new Set([
-    'gemini-3.1-flash-image-preview',
-    'vendor/gpt-image-2-custom',
-  ]);
-
-  assert.equal(
-    resolveGenerateImageModelFromAllowedModels('gemini-3.1-flash-image-preview', allowedProviderModelIds),
-    'gemini-3.1-flash-image-preview'
-  );
-  assert.equal(
-    resolveGenerateImageModelFromAllowedModels('vendor/gpt-image-2-custom', allowedProviderModelIds),
-    'vendor/gpt-image-2-custom'
-  );
 });
 
 test('aspect ratio helpers keep current route normalization behavior', () => {

@@ -7,14 +7,10 @@ import {
   getCanvasDragDelta,
   getCanvasDragActivationDistance,
   getCanvasMarqueePath,
-  getRotatedRectAabb,
   hasCanvasDragIntent,
-  isRectIntersecting,
   matchesCanvasItemDragTransaction,
   normalizeCanvasMarqueeRect,
-  ownsCanvasItemVisualHandoff,
   projectCanvasPointToViewport,
-  projectScreenRectToCanvas,
   resolveCanvasFixedOverlayAnchors,
   resolveCanvasItemDragReleasePositions,
   resolveCanvasMarqueeSelection,
@@ -152,91 +148,6 @@ test('marquee paths use fixed screen coordinates without transform scaling', () 
     getCanvasMarqueePath({ x: 40, y: 20, width: 60, height: 80 }),
     'M 40 20 H 100 V 100 H 40 Z'
   );
-});
-
-test('screen marquee coordinates project through the captured viewport', () => {
-  assert.deepEqual(
-    projectScreenRectToCanvas(
-      { x: 140, y: 10, width: 240, height: 120 },
-      { x: -100, y: -50, scale: 2 }
-    ),
-    { left: 120, right: 240, top: 30, bottom: 90 }
-  );
-});
-
-test('marquee item hit testing includes partial overlap and touching edges', () => {
-  const marquee = { left: 10, right: 110, top: 20, bottom: 120 };
-  assert.equal(
-    isRectIntersecting(marquee, { left: 20, right: 100, top: 30, bottom: 110 }),
-    true
-  );
-  assert.equal(
-    isRectIntersecting(marquee, { left: 100, right: 160, top: 110, bottom: 150 }),
-    true
-  );
-  assert.equal(
-    isRectIntersecting(marquee, { left: 110, right: 160, top: 40, bottom: 80 }),
-    true
-  );
-  assert.equal(
-    isRectIntersecting(marquee, { left: 110.001, right: 160, top: 40, bottom: 80 }),
-    false
-  );
-  assert.equal(
-    isRectIntersecting(marquee, { left: -60, right: 9.999, top: 40, bottom: 80 }),
-    false
-  );
-});
-
-test('rotated rectangle AABB follows its center or an explicit transform origin', () => {
-  const centered = getRotatedRectAabb(
-    { left: 100, top: 50, width: 80, height: 40 },
-    90
-  );
-  assert.ok(Math.abs(centered.left - 120) < 1e-9);
-  assert.ok(Math.abs(centered.right - 160) < 1e-9);
-  assert.ok(Math.abs(centered.top - 30) < 1e-9);
-  assert.ok(Math.abs(centered.bottom - 110) < 1e-9);
-
-  const aroundItemCenter = getRotatedRectAabb(
-    { left: 110, top: 60, width: 60, height: 20 },
-    180,
-    { x: 140, y: 90 }
-  );
-  assert.ok(Math.abs(aroundItemCenter.left - 110) < 1e-9);
-  assert.ok(Math.abs(aroundItemCenter.right - 170) < 1e-9);
-  assert.ok(Math.abs(aroundItemCenter.top - 100) < 1e-9);
-  assert.ok(Math.abs(aroundItemCenter.bottom - 120) < 1e-9);
-});
-
-test('rotated marquee hit testing is consistent at every supported scale', () => {
-  const viewportPosition = { x: 137, y: -53 };
-  const itemAabb = getRotatedRectAabb(
-    { left: 40, top: 30, width: 120, height: 60 },
-    45
-  );
-  const canvasMarquee = {
-    left: itemAabb.right,
-    right: itemAabb.right + 25,
-    top: itemAabb.top + 10,
-    bottom: itemAabb.bottom - 10,
-  };
-
-  for (const scale of [0.1, 0.5, 1, 2, 10]) {
-    const screenMarquee = {
-      x: canvasMarquee.left * scale + viewportPosition.x,
-      y: canvasMarquee.top * scale + viewportPosition.y,
-      width: (canvasMarquee.right - canvasMarquee.left) * scale,
-      height: (canvasMarquee.bottom - canvasMarquee.top) * scale,
-    };
-    const projectedMarquee = projectScreenRectToCanvas(screenMarquee, {
-      ...viewportPosition,
-      scale,
-    });
-
-    assert.equal(isRectIntersecting(projectedMarquee, itemAabb), true);
-    assert.ok(Math.abs(projectedMarquee.left - itemAabb.right) < 1e-9);
-  }
 });
 
 test('connection marquee hit testing requires every sampled point inside', () => {
@@ -383,15 +294,4 @@ test('rapid pointer release hands the same coordinates from preview to live stat
       }, { x: 0, y: 0 });
     }
   }
-});
-
-test('visual handoff cleanup requires every item to still belong to its token', () => {
-  const visualTokens = new Map([
-    ['a', 7],
-    ['b', 7],
-  ]);
-  assert.equal(ownsCanvasItemVisualHandoff({ token: 7, itemIds: ['a', 'b'], visualTokens }), true);
-  visualTokens.set('b', 8);
-  assert.equal(ownsCanvasItemVisualHandoff({ token: 7, itemIds: ['a', 'b'], visualTokens }), false);
-  assert.equal(ownsCanvasItemVisualHandoff({ token: 8, itemIds: ['b'], visualTokens }), true);
 });

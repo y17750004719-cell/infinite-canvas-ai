@@ -21,7 +21,6 @@ import {
   syncAutoResizedTextareaLayout,
   appendImageCardOutput,
   buildAsyncImageTaskRequests,
-  buildCanvasImageGenerationFailureMessage,
   buildCanvasImageGenerationRequest,
   buildCanvasImagePanelSubmitInput,
   buildImageCardOutputsState,
@@ -48,31 +47,24 @@ import {
   getRecentFailedAgentTask,
   getSelectedImageToolbarSource,
   getTextCardPanelPlaceholder,
-  getImageCardQualitySummary,
-  getImageCardResolutionStatus,
   getImageCardFrameSizeForAspectRatio,
   getImageCardItemSizeForFrameSize,
   getImageCardItemSizeForNaturalImage,
-  getResolutionFailureReason,
   isImageAssetItem,
   isImageCardItem,
-  isOutputResolutionSufficient,
   moveCanvasItemsToFront,
   removeCanvasTextGenerationEntry,
   isEventInsideTextCardPanel,
-  resolveRequestedResolutionTier,
   shouldSubmitTextCardPanelEnter,
   shouldFocusTextCardPanelInputOnPointerDown,
   getTextCardVisualState,
   resolveTextPanelChatModel,
   resolveSessionPresentationState,
   resolveImageCardModel,
-  resolveImageCardSize,
   resolveImageCardSizeForAspectRatio,
   normalizeImageCardAspectRatio,
   resolveCanvasImageTaskExecutionMode,
   resolveFloatingPopoverOffset,
-  resolveImageGenerationFallbackSizes,
   resolveProviderDeletionFallbacks,
   syncImageCardOptionsForProviderModel,
   extractImageFilesFromClipboardItems,
@@ -168,6 +160,62 @@ test('getRecentFailedAgentTask prefers the staged checkpoint over composer state
   assert.equal(result.originalRequest, '使用海报 Skill 编辑参考图');
   assert.equal(result.failure.stage, 'unknown');
   assert.equal(result.skillId, 'poster');
+});
+
+test('fallback recovery restores Skill id and hash from the persisted selection step', () => {
+  const hash = 'b'.repeat(64);
+  const result = getRecentFailedAgentTask([
+    { id: 'user-root', role: 'user', content: '生成一张极简海报' },
+    {
+      id: 'assistant-failed',
+      role: 'assistant',
+      content: 'Skill lock failed',
+      taskStatus: 'failed',
+      taskSnapshot: { taskId: 'task-root', sessionId: 'topic-1', activeVersions: [] },
+      agentRunProgress: {
+        runId: 'run-root', operationId: 'operation-root', intent: 'image', outcome: 'failed',
+        steps: [{ stepId: 'skill:poster', itemType: 'skill', status: 'completed', phase: 'selected', label: 'Poster', detail: { skillContentHash: hash } }],
+      },
+    },
+  ]);
+  assert.equal(result.skillId, 'poster');
+  assert.equal(result.skillContentHash, hash);
+});
+
+test('fallback recovery never combines a source Skill id with another selected Skill hash', () => {
+  const hash = 'd'.repeat(64);
+  const result = getRecentFailedAgentTask([
+    { id: 'user-root', role: 'user', content: '生成一张海报', skill: { id: 'stale-skill', label: 'Stale' } },
+    {
+      id: 'assistant-failed', role: 'assistant', content: 'failed', taskStatus: 'failed',
+      taskSnapshot: { taskId: 'task-root', sessionId: 'topic-1', activeVersions: [] },
+      agentRunProgress: {
+        runId: 'run-root', operationId: 'operation-root', intent: 'image', outcome: 'failed',
+        steps: [{ stepId: 'skill:selected-skill', itemType: 'skill', status: 'completed', phase: 'selected', detail: { skillContentHash: hash } }],
+      },
+    },
+  ]);
+  assert.equal(result.skillId, 'selected-skill');
+  assert.equal(result.skillContentHash, hash);
+});
+
+test('persisted recovery records inherit Skill metadata from their source message', () => {
+  const hash = 'c'.repeat(64);
+  const result = getRecentFailedAgentTask([
+    { id: 'user-root', role: 'user', content: '生成一张海报', skill: { id: 'poster', label: 'Poster', skillContentHash: hash } },
+    {
+      id: 'assistant-failed',
+      role: 'assistant',
+      taskStatus: 'failed',
+      agentRecovery: createAgentRecoveryRecord({
+        taskId: 'task-root', runId: 'run-root', operationId: 'operation-root', sessionId: 'topic-1',
+        sourceUserMessageId: 'user-root', status: 'failed', resumeRoute: 'main_agent', intent: 'image',
+        originalRequest: '生成一张海报', failureStage: 'tool_dispatch', failureMessage: 'failed',
+      }),
+    },
+  ]);
+  assert.equal(result.skillId, 'poster');
+  assert.equal(result.skillContentHash, hash);
 });
 
 test('getRecentFailedAgentTask skips abandoned image roots', () => {
@@ -2440,36 +2488,6 @@ test('settleCanvasImageGenerationRequests reports parallel results in completion
   assert.deepEqual(results.map((item) => item.value), ['first-ok', 'second-ok', 'third-ok', 'fourth-ok']);
 });
 
-test('buildCanvasImageGenerationFailureMessage asks for manual backfill when request failures leave missing outputs', () => {
-  const result = buildCanvasImageGenerationFailureMessage({
-    requestedCount: 2,
-    completedCount: 1,
-    requestFailureCount: 1,
-  });
-
-  assert.equal(result, '请求 2 张，成功 1 张；请手动补生成剩余 1 张');
-});
-
-test('buildCanvasImageGenerationFailureMessage returns null when outputs exist and there are no request failures', () => {
-  const result = buildCanvasImageGenerationFailureMessage({
-    requestedCount: 2,
-    completedCount: 1,
-    requestFailureCount: 0,
-  });
-
-  assert.equal(result, null);
-});
-
-test('buildCanvasImageGenerationFailureMessage ignores legacy validation failure inputs and only reports request failures', () => {
-  const result = buildCanvasImageGenerationFailureMessage({
-    requestedCount: 3,
-    completedCount: 1,
-    requestFailureCount: 1,
-  });
-
-  assert.equal(result, '请求 3 张，成功 1 张；请手动补生成剩余 1 张');
-});
-
 test('createCanvasCardItemAtCanvasPoint creates a text card centered on the spawn point', () => {
   const result = createCanvasCardItemAtCanvasPoint({
     kind: 'text',
@@ -2586,81 +2604,6 @@ test('getViewportCenteredOnBounds returns the original viewport for invalid size
 
   assert.equal(getViewportCenteredOnBounds(viewport, null, 1000, 800), viewport);
   assert.equal(getViewportCenteredOnBounds(viewport, { left: 0, top: 0, width: 10, height: 10 }, 0, 800), viewport);
-});
-
-test('resolveImageGenerationFallbackSizes returns the 4K to 2K to 1K fallback chain', () => {
-  const result = resolveImageGenerationFallbackSizes('4096x4096');
-
-  assert.deepEqual(result, ['4096x4096', '2048x2048', '1024x1024']);
-});
-
-test('resolveRequestedResolutionTier maps image card sizes onto 1K 2K and 4K tiers', () => {
-  assert.equal(resolveRequestedResolutionTier('1024x1024'), '1K');
-  assert.equal(resolveRequestedResolutionTier('2048x2048'), '2K');
-  assert.equal(resolveRequestedResolutionTier('4096x4096'), '4K');
-});
-
-test('isOutputResolutionSufficient requires both sides to meet the target for square outputs', () => {
-  assert.equal(
-    isOutputResolutionSufficient({
-      requestedSize: '2048x2048',
-      aspectRatio: '1:1',
-      naturalWidth: 2048,
-      naturalHeight: 2048,
-    }),
-    true
-  );
-  assert.equal(
-    isOutputResolutionSufficient({
-      requestedSize: '2048x2048',
-      aspectRatio: '1:1',
-      naturalWidth: 2048,
-      naturalHeight: 1536,
-    }),
-    false
-  );
-});
-
-test('isOutputResolutionSufficient validates longest edge and requested ratio for non-square outputs', () => {
-  assert.equal(
-    isOutputResolutionSufficient({
-      requestedSize: '2048x2048',
-      aspectRatio: '16:9',
-      naturalWidth: 2048,
-      naturalHeight: 1152,
-    }),
-    true
-  );
-  assert.equal(
-    isOutputResolutionSufficient({
-      requestedSize: '2048x2048',
-      aspectRatio: '16:9',
-      naturalWidth: 2048,
-      naturalHeight: 2048,
-    }),
-    false
-  );
-});
-
-test('getResolutionFailureReason explains whether an output missed the target size or ratio', () => {
-  assert.equal(
-    getResolutionFailureReason({
-      requestedSize: '4096x4096',
-      aspectRatio: '1:1',
-      naturalWidth: 2048,
-      naturalHeight: 2048,
-    }),
-    '返回图未达到 4K 分辨率要求'
-  );
-  assert.equal(
-    getResolutionFailureReason({
-      requestedSize: '2048x2048',
-      aspectRatio: '16:9',
-      naturalWidth: 2048,
-      naturalHeight: 2048,
-    }),
-    '返回图宽高比与请求的 16:9 不匹配'
-  );
 });
 
 test('buildCanvasImageGenerationRequest does not invent a default model for unsupported overrides', () => {
@@ -2919,23 +2862,6 @@ test('normalizeImageCardAspectRatio preserves valid explicit aspect ratios', () 
   assert.equal(normalizeImageCardAspectRatio('4:1'), '4:1');
 });
 
-test('getImageCardQualitySummary combines aspect ratio and size label into a single trigger label', () => {
-  assert.equal(getImageCardQualitySummary({ modelId: 'gemini-3.1-flash-image-preview', aspectRatio: '1:1', size: '1024x1024' }), '1:1 · 1K');
-  assert.equal(getImageCardQualitySummary({ modelId: 'gemini-3.1-flash-image-preview', aspectRatio: '9:16', size: '2048x2048' }), '9:16 · 2K');
-  assert.equal(getImageCardQualitySummary({ modelId: 'gemini-3.1-flash-image-preview', aspectRatio: '16:9', size: '4096x4096' }), '16:9 · 4K');
-  assert.equal(getImageCardQualitySummary({ modelId: 'gpt-image-2', aspectRatio: '9:16', size: '1536x1024', quality: 'High' }), '9:16 · 1536x1024');
-  assert.equal(getImageCardQualitySummary({ modelId: 'gpt-image-2', aspectRatio: '1:1', size: '1024x1024' }), '1:1 · 1K');
-  assert.equal(getImageCardQualitySummary({ modelId: 'gpt-image-2', aspectRatio: '9:16', size: '1024x1536' }), '9:16 · 1024x1536');
-  assert.equal(getImageCardQualitySummary({ modelId: 'gpt-image-2', aspectRatio: '1:1', size: '2048x2048' }), '1:1 · 2K');
-  assert.equal(getImageCardQualitySummary({ modelId: 'gpt-image-2', aspectRatio: '16:9', size: '3840x2160' }), '16:9 · 3840x2160');
-  assert.equal(getImageCardQualitySummary({ modelId: 'gpt-image-2', aspectRatio: '9:16', size: '2160x3840' }), '9:16 · 2160x3840');
-});
-
-test('getImageCardQualitySummary normalizes legacy aspect ratios and falls back to the raw size when needed', () => {
-  assert.equal(getImageCardQualitySummary({ modelId: 'gemini-3.1-flash-image-preview', aspectRatio: 'auto', size: '1024x1024' }), '1:1 · 1K');
-  assert.equal(getImageCardQualitySummary({ modelId: 'gemini-3.1-flash-image-preview', aspectRatio: '', size: '1536x1024' }), '1:1 · 1536x1024');
-});
-
 test('buildCanvasImageGenerationRequest remains protocol neutral before provider dispatch', () => {
   const result = buildCanvasImageGenerationRequest({
     input: '生成一张封面',
@@ -3047,38 +2973,6 @@ test('buildAsyncImageTaskRequests keeps gpt-image-2 2K aspect ratio resolved siz
   assert.deepEqual(
     result.map((request) => request.size),
     ['1152x2048', '1152x2048']
-  );
-});
-
-test('getImageCardResolutionStatus returns a warning when the actual output is below the requested 2K target', () => {
-  assert.deepEqual(
-    getImageCardResolutionStatus({
-      requestedSize: '2048x2048',
-      aspectRatio: '1:1',
-      naturalWidth: 1536,
-      naturalHeight: 1536,
-    }),
-    {
-      actualLabel: '1536×1536',
-      warning: '实际返回 1536×1536，未达到目标 2K',
-      meetsRequestedResolution: false,
-    }
-  );
-});
-
-test('getImageCardResolutionStatus reports a clean actual size when the output meets the requested target', () => {
-  assert.deepEqual(
-    getImageCardResolutionStatus({
-      requestedSize: '2048x2048',
-      aspectRatio: '1:1',
-      naturalWidth: 2048,
-      naturalHeight: 2048,
-    }),
-    {
-      actualLabel: '2048×2048',
-      warning: null,
-      meetsRequestedResolution: true,
-    }
   );
 });
 

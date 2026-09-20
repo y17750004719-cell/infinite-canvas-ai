@@ -125,12 +125,6 @@ test('skill pointer hover updates highlight synchronously', () => {
 });
 
 test('skill selection continues updating the active session', () => {
-  const topicUpdateSource = sourceBetween(
-    pageSource,
-    'const setActiveSkillForCurrentSession =',
-    'const setActiveSkillForCurrentSession ='
-  );
-
   assert.match(pageSource, /session\.id === currentSessionId/);
   assert.match(pageSource, /activeSkill:\s*skill/);
 });

@@ -256,7 +256,7 @@ export async function runAgentRequestMainLoop(scope = {}) {
   if (loopResult.stopReason === 'failed' || loopResult.stopReason === 'cancelled') {
     throw Object.assign(new Error(loopResult.errorMessage || 'Native Agent turn failed'), {
       code: loopResult.failureCode || 'native_turn_failed',
-      failureStage: 'native_runtime',
+      failureStage: loopResult.failureCode === 'skill_lock_failed' ? 'skill_selection' : 'native_runtime',
       retryable: loopResult.retryable === true,
     });
   }
@@ -404,24 +404,33 @@ export async function runAgentRequestMainLoopFromRuntimeState(scope = {}) {
     hasImageResult: Boolean(nativeGeneratedImageResult), toolCallCount: toolCallRecords.length,
   });
   const onSkillSelection = async ({ args }) => {
-    const selection = await interactionService.selectVisualSkill({ args, skills: skillManifests, selectedSkill: get('selectedSkill', selectedSkill), imageStarted: directGenerateImageCall, context: { taskId, operationId, runId } });
-    if (!selection.locked) {
+    const selection = await interactionService.selectVisualSkill({ args, skills: skillManifests, selectedSkill: get('selectedSkill', selectedSkill), imageStarted: get('directGenerateImageCall', directGenerateImageCall), context: { taskId, operationId, runId } });
+    if (selection?.isError) {
       mainAgentLoopState.skillSelectionFailed = true;
-      const reason = selection.reason || 'visual Skill could not be locked';
+      return selection;
+    }
+    if (selection?.locked !== true) {
+      mainAgentLoopState.skillSelectionFailed = true;
+      const reason = selection?.reason || 'visual Skill could not be locked';
       return {
         isError: true,
         modelResult: { code: 'skill_lock_failed', reason, retryable: false },
         publicResult: { kind: 'tool_error', toolName: 'select_visual_skill', status: 'failed', code: 'skill_lock_failed', message: reason },
       };
     }
-    if (selection.isError) return selection;
     const skill = selection.skill;
     const content = String(selection.content || '');
     set('selectedSkill', skill); set('skillSource', 'auto');
     set('skillContent', content); set('skillContentHash', String(selection.contentHash || hashPrompt(content)));
     set('visualSkillLoaded', true);
     mainAgentLoopState.skillRead = true; mainAgentLoopState.selectedSkillId = skill.id;
-    writeLifecycleEvent({ type: 'skill_selected', skillId: skill.id, label: skill.name, source: 'auto' });
+    writeLifecycleEvent({
+      type: 'skill_selected',
+      skillId: skill.id,
+      label: skill.name,
+      source: 'auto',
+      skillContentHash: get('skillContentHash', skillContentHash),
+    });
     return { modelResult: { skillId: skill.id, content, contentHash: get('skillContentHash', skillContentHash), truncated: false } };
   };
   let assistantText = '';

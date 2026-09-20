@@ -18,7 +18,6 @@ export type JournalQuery = {
 
 export function loadThread(threadId: string): Promise<{ state: Record<string, unknown>; events: JournalEvent[] }>;
 export function appendThreadEvent(threadId: string, event: JournalEvent): Promise<JournalEvent>;
-export function sanitizeJournalValue(value: unknown): { value: unknown; redactions: number };
 export function sanitizeJournalEvent(event: JournalEvent): { event: JournalEvent; serialized: string };
 export function updateThreadState(threadId: string, patch: Record<string, unknown>): Promise<Record<string, unknown>>;
 export function queueThreadInput(threadId: string, input: Record<string, unknown>): Promise<Record<string, unknown>>;

@@ -210,7 +210,12 @@ export function createAgentMainAgentPreparationService(scope) {
     });
     const savedSkillHash = scope.getSavedSkillHash();
     if (savedSkillHash && visualContentHash && savedSkillHash !== visualContentHash) {
-      throw new Error('The locked visual Skill changed after this task was created');
+      throw Object.assign(new Error('The locked visual Skill changed after this task was created'), {
+        code: 'skill_lock_failed',
+        failureStage: 'skill_selection',
+        retryable: false,
+        skillId: selectedSkill?.id || null,
+      });
     }
     scope.markSkillRead();
     void scope.logger?.info?.('imagegen.context_read', 'Runtime loaded the ImageGen host and locked visual Skill', {

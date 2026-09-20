@@ -88,3 +88,44 @@ test('local delivery recovery replays durable assets without entering provider e
   assert.equal(emitted[0].action.assets[0].deliveryId, 'generated-delivery:version-1');
   assert.ok(Number.isFinite(emitted[0].action.deliveryEventAt));
 });
+
+test('main-agent recovery restores the recorded Skill before execution', async () => {
+  const flow = createAgentContinuationFlow({
+    interactionService: {
+      resolveRecoveryContinuation: () => ({ ok: true, decision: 'resume', route: 'main_agent', skillId: 'poster' }),
+    },
+  });
+  const state = {
+    runReferenceContext: { references: [] },
+    selectedSkill: null,
+    skillSource: null,
+    skillSelectionMethod: 'none',
+    skillCandidateIds: [],
+    imageOperation: null,
+    targetReferenceId: null,
+    recoveryMode: null,
+    activeClarificationState: null,
+  };
+  const result = await flow.routeRecoveryContinuation({
+    state,
+    recoveryRecord: {
+      taskId: 'task-image', runId: 'run-old', resumeRoute: 'main_agent', skillId: 'poster',
+      skillContentHash: 'a'.repeat(64), originalRequest: 'generate', sourceUserMessageId: 'message-1',
+      visualReferenceIds: [], completedAssetCount: 0, intent: 'image',
+    },
+    requestedRecoveryTaskId: 'task-image',
+    body: { messages: [{ id: 'message-1', role: 'user', content: 'generate' }] },
+    sessionVisualAssets: [], contextEntityById: new Map(), runtimeReferenceById: new Map(),
+    runtimeReferenceContext: undefined, normalizeReferenceContext: (value) => value,
+    progressTracker: { snapshot: () => ({ operationId: 'operation-1', lastSequence: 1 }) },
+    writeProgress: () => {}, writeLifecycleEvent: () => {}, writeInteractionEvent: () => {},
+    writeEvent: () => {}, writeContextEvent: () => {}, writeAgentDone: () => {},
+    contextLogger: { info: () => {} }, controller: {}, resolvedChatSelection: { model: 'chat-model' },
+    rootTaskId: () => 'task-image', skillManifests: [{ id: 'poster', name: 'Poster', executionMode: 'image_pipeline', allowedTools: ['generate_image'] }],
+    randomUUID: () => 'id-1',
+  });
+  assert.equal(result.handled, false);
+  assert.equal(state.selectedSkill.id, 'poster');
+  assert.equal(state.skillSource, 'recovery');
+  assert.equal(state.skillSelectionMethod, 'none');
+});

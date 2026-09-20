@@ -371,8 +371,3 @@ export function createAgentImageExecutionFlow(dependencies = {}) {
 
   return { execute };
 }
-
-export async function executeAgentImageFlow(input = {}) {
-  const { dependencies = {}, ...requestInput } = input;
-  return createAgentImageExecutionFlow(dependencies).execute(requestInput);
-}

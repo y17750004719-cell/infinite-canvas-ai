@@ -149,6 +149,9 @@ test('model-selected visual Skills require high confidence and return complete l
   assert.match(interaction, /confidence !== 'high'/);
   assert.match(interaction, /loadSkillContent/);
   assert.match(interaction, /contentHash/);
+  assert.match(interaction, /return \{ locked: true, modelResult/);
+  const streamRun = read(streamRunPath);
+  assert.match(streamRun, /if \(selection\?\.isError\)[\s\S]{0,180}if \(selection\?\.locked !== true\)/);
   assert.doesNotMatch(route, /findDirectSkillMatches\(|selectSkillForPrompt\(/);
 });
 

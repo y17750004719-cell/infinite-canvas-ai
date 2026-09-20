@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { normalizeAgentConversationMemory } from '../chat-message-persistence.mjs';
-import { normalizeAgentRecoveryRecord } from './recovery.mjs';
+import { enrichAgentRecoverySkillMetadata } from './recovery.mjs';
 import { createAgentStreamOrchestrator } from './agent-stream-orchestrator.mjs';
 import { enrichGeneratedAssetDeliveryAction } from './generated-asset-delivery.mjs';
 
@@ -28,7 +28,7 @@ export function createAgentEventWriter({ threadJournal, encoder = new TextEncode
 
 export function normalizeRecentFailedTask(value, messages) {
   if (!value || typeof value !== 'object') return null;
-  const normalized = normalizeAgentRecoveryRecord(value);
+  const normalized = enrichAgentRecoverySkillMetadata(value, { messages });
   if (!normalized) return null;
   const sourceExists = (messages || []).some((message) =>
     message.role === 'user' && message.id === normalized.sourceUserMessageId);

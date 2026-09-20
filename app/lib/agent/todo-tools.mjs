@@ -128,5 +128,3 @@ export function createTodoTools({ readThread, appendThreadEvent, authorizeTodoUp
     },
   };
 }
-
-export const TODO_ITEM_STATUSES = Object.freeze([...TODO_STATUSES]);

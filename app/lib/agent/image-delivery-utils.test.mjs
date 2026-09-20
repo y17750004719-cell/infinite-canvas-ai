@@ -1,18 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import {
-  resolveImageBatchMode,
-  resolveImageDeliveryPlan,
-} from './image-delivery-utils.mjs';
-
-test('delivery planning distinguishes cohesive series from ordinary prompt variants', () => {
-  assert.equal(resolveImageBatchMode('Vogue 动物杂志封面系列，共 5 期', 5), 'series');
-  assert.equal(resolveImageBatchMode('生成 5 个不同版本的封面', 5), 'series');
-  assert.equal(resolveImageBatchMode('Please produce a magazine series for 5 issues', 5), 'series');
-  assert.equal(resolveImageBatchMode('生成 5 张猫咪封面', 5), 'variants');
-  assert.equal(resolveImageBatchMode('做一张四宫格，每格一种动物', 1), 'composite');
-});
+import { resolveImageDeliveryPlan } from './image-delivery-utils.mjs';
 
 test('delivery planning separates variants, series, and composite image scopes', () => {
   assert.deepEqual(resolveImageDeliveryPlan('同一个提示词生成4张供我挑选'), {

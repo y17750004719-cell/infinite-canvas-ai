@@ -4,8 +4,6 @@ import {
   claimConfirmationContinuation,
   fingerprintProviderModel,
   hashEnvelopeValue,
-  resolveConfirmationImageIdentity,
-  resolveRemainingConfirmationTaskIdentities,
 } from './confirmation-continuation.mjs';
 
 const providers = [{
@@ -48,6 +46,31 @@ test('confirmation continuation can be claimed exactly once', () => {
     () => claimConfirmationContinuation({ record, requestedToolName: 'mutate', userMessage: 'run', providers }),
     /already been submitted/,
   );
+});
+
+test('live confirmation hashes are stable across object key order', () => {
+  assert.equal(hashEnvelopeValue({ b: 2, a: [1, true] }), hashEnvelopeValue({ a: [1, true], b: 2 }));
+  assert.notEqual(hashEnvelopeValue({ a: [1, true] }), hashEnvelopeValue({ a: [true, 1] }));
+});
+
+test('live confirmation rejects changed request identity and terminal decisions without consuming', () => {
+  for (const patch of [
+    { requestedToolName: 'another-tool' },
+    { userMessage: 'another-request' },
+  ]) {
+    const record = createRecord();
+    assert.throws(() => claimConfirmationContinuation({
+      record, requestedToolName: 'mutate', userMessage: 'run', providers, ...patch,
+    }), /does not match/);
+    assert.equal(record.status, 'pending');
+  }
+  for (const status of ['rejected', 'consumed', 'completed']) {
+    const record = { ...createRecord(), status };
+    assert.throws(() => claimConfirmationContinuation({
+      record, requestedToolName: 'mutate', userMessage: 'run', providers,
+    }), /already been submitted/);
+    assert.equal(record.status, status);
+  }
 });
 
 test('confirmation continuation rejects an expired record before mutation', () => {
@@ -166,69 +189,4 @@ test('confirmation continuation validates chat and image identities independentl
     providers: [...providers, imageProvider],
   });
   assert.equal(record.status, 'executing');
-});
-
-test('chained confirmation derives image identity for the newly pending tool', () => {
-  const imageProvider = {
-    ...providers[0],
-    imageModels: ['image-1'],
-    imageRequestMode: 'image_generation',
-    imageGenerationEndpoint: '/images/generations',
-  };
-  const toolArgs = { prompt: 'render' };
-  const record = {
-    ...createRecord(),
-    toolName: 'generate_image',
-    toolArgs,
-    pendingToolCall: {
-      id: 'call-image-2',
-      name: 'generate_image',
-      args: toolArgs,
-      argsHash: hashEnvelopeValue(toolArgs),
-      batch: [{ id: 'call-image-2', name: 'generate_image', args: toolArgs }],
-    },
-    ...resolveConfirmationImageIdentity({
-      providers: [imageProvider],
-      toolName: 'generate_image',
-    }),
-  };
-
-  claimConfirmationContinuation({
-    record,
-    requestedToolName: 'generate_image',
-    userMessage: 'run',
-    providers: [imageProvider],
-  });
-
-  assert.equal(record.status, 'executing');
-  assert.equal(record.resolvedImageProviderId, 'provider-1');
-  assert.equal(record.resolvedImageModel, 'image-1');
-});
-
-test('chained confirmation clears inherited image identity for a non-image tool', () => {
-  const record = {
-    resolvedImageProviderId: 'provider-1',
-    resolvedImageModel: 'image-1',
-    imageProviderModelFingerprint: 'stale',
-    ...resolveConfirmationImageIdentity({ providers, toolName: 'mutate' }),
-  };
-
-  assert.equal(record.resolvedImageProviderId, undefined);
-  assert.equal(record.resolvedImageModel, undefined);
-  assert.equal(record.imageProviderModelFingerprint, undefined);
-});
-
-test('partial image failure retries failed current identities before untouched identities', () => {
-  const identity = (slotId) => ({ slotId, versionId: `version-${slotId}`, batchId: 'batch-1' });
-  const queued = resolveRemainingConfirmationTaskIdentities({
-    pendingTaskIdentities: [identity('slot-1'), identity('slot-2'), identity('slot-3')],
-    remainingTaskIdentities: [identity('slot-4'), identity('slot-5')],
-    completedTaskIdentities: [identity('slot-1'), identity('slot-3')],
-  });
-  const nextBatch = queued.slice(0, 2);
-  const laterBatch = queued.slice(2);
-
-  assert.deepEqual(queued.map(({ slotId }) => slotId), ['slot-2', 'slot-4', 'slot-5']);
-  assert.deepEqual(nextBatch.map(({ versionId }) => versionId), ['version-slot-2', 'version-slot-4']);
-  assert.equal(nextBatch.length + laterBatch.length, 3);
 });

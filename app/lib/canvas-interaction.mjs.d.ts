@@ -62,16 +62,6 @@ export function normalizeCanvasMarqueeRect(
   start: CanvasInteractionPoint,
   current: CanvasInteractionPoint
 ): CanvasMarqueeRect;
-export function projectScreenRectToCanvas(
-  rect: CanvasMarqueeRect,
-  viewport: CanvasInteractionViewport
-): CanvasBounds;
-export function isRectIntersecting(first: CanvasBounds, second: CanvasBounds): boolean;
-export function getRotatedRectAabb(
-  rect: CanvasRectBounds,
-  rotationDegrees: number,
-  origin?: CanvasInteractionPoint
-): CanvasBounds;
 export function areCanvasPointsFullyContained(
   rect: CanvasMarqueeRect,
   points: CanvasInteractionPoint[]
@@ -96,11 +86,6 @@ export function resolveCanvasItemDragReleasePositions(options: {
   startPositions: Record<string, CanvasInteractionPoint>;
   delta: CanvasInteractionPoint;
 }): Map<string, CanvasInteractionPoint>;
-export function ownsCanvasItemVisualHandoff(options: {
-  token: number;
-  itemIds: string[];
-  visualTokens: ReadonlyMap<string, number>;
-}): boolean;
 export function shouldCancelCanvasPointerSessionOnLostCapture(options: {
   eventPointerId: number;
   sessionPointerId: number;

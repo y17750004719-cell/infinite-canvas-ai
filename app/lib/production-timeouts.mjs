@@ -8,7 +8,3 @@ function parseTimeout(value) {
 export const PRODUCTION_TIMEOUT_MS = parseTimeout(
   process.env.ZFLOW_PRODUCTION_TIMEOUT_MS || process.env.PRODUCTION_TIMEOUT_MS,
 );
-
-export function productionTimeoutMs() {
-  return PRODUCTION_TIMEOUT_MS;
-}

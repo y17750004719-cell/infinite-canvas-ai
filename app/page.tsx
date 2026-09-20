@@ -438,7 +438,7 @@ interface ChatMessage {
   imageUrl?: string;
   taskKey?: string;
   taskStatus?: 'queued' | 'running' | 'completed' | 'failed' | 'cancelled';
-  skill?: { id: string; label: string };
+  skill?: { id: string; label: string; skillContentHash?: string };
   referenceImages?: string[];
   referenceContext?: AgentReferenceContext;
   inlineContent?: ChatMessageInlineSegment[];
@@ -13991,7 +13991,7 @@ export default function AIWorkspace() {
 
   const handleGenerate = async (options?: {
     input?: string;
-    skill?: { id: string; label: string } | null;
+    skill?: { id: string; label: string; skillContentHash?: string } | null;
     referenceImagesOverride?: Array<{ id?: string; src: string; label: string; alt?: string }>;
     modelOverride?: string;
     agentConfirmation?: AgentConfirmationPayload;
@@ -14161,13 +14161,22 @@ export default function AIWorkspace() {
       }]);
       return;
     }
-    const lockedSkillId = effectiveAgentClarification?.state.skillId
-      || options?.recoveryRecord?.skillId;
+    const requestedRecoveryRecord = options?.recoveryTaskId
+      ? getLatestAgentRecoveryForTask(chatMessages, options.recoveryTaskId) || options.recoveryRecord
+      : undefined;
+    const recoverySourceMessage = requestedRecoveryRecord?.sourceUserMessageId
+      ? chatMessages.find((message) => message.role === 'user' && message.id === requestedRecoveryRecord.sourceUserMessageId)
+      : undefined;
+    const lockedSkillId = options?.recoveryTaskId
+      ? requestedRecoveryRecord?.skillId || recoverySourceMessage?.skill?.id
+      : effectiveAgentClarification?.state.skillId;
     const lockedSkill = lockedSkillId
       ? quickActions.find((skill) => skill.id === lockedSkillId) || { id: lockedSkillId, label: lockedSkillId }
       : null;
-    const requestSkillSnapshot = options?.skill ?? retrySourceMessage?.skill ?? lockedSkill ?? activeSkillRef.current ?? activeSkill;
-    if (activeSkillExplicitRef.current && !requestSkillSnapshot?.id) {
+    const requestSkillSnapshot: ChatMessage['skill'] | null = options?.recoveryTaskId
+      ? lockedSkill
+      : options?.skill ?? retrySourceMessage?.skill ?? lockedSkill ?? activeSkillRef.current ?? activeSkill;
+    if (!options?.recoveryTaskId && activeSkillExplicitRef.current && !requestSkillSnapshot?.id) {
       setChatMessages((previous) => [...previous, {
         id: `msg-${Date.now()}-skill-lock-error`,
         role: 'assistant',
@@ -14306,6 +14315,8 @@ export default function AIWorkspace() {
     let generatedAssetPreloadChain = Promise.resolve();
     let latestTaskSnapshot: TaskSnapshot | undefined;
     let latestRecoveryRecord: AgentRecoveryRecord | undefined;
+    let latestSelectedSkillId = currentSkill?.id;
+    let latestSelectedSkillContentHash = currentSkill?.skillContentHash;
 
     try {
       const isBrandBootstrapPrompt =
@@ -14558,9 +14569,17 @@ export default function AIWorkspace() {
       const requestSessionGeneratedImageHistory = (generationSessionId
         ? generatedImageHistoryBySession[generationSessionId] || []
         : []).slice(0, 200);
-      const recentRecoveryTask = options?.recoveryRecord
-        ? getLatestAgentRecoveryForTask(chatMessages, options.recoveryRecord.taskId) || options.recoveryRecord
+      const recentRecoveryTask = options?.recoveryTaskId
+        ? requestedRecoveryRecord
         : getRecentFailedAgentTask(chatMessages);
+      const isRecoveryRequest = Boolean(
+        options?.recoveryTaskId
+          && recentRecoveryTask?.taskId === options.recoveryTaskId,
+      );
+      const recoverySkillContentHash = isRecoveryRequest
+        ? recentRecoveryTask?.skillContentHash
+          || recoverySourceMessage?.skill?.skillContentHash
+        : undefined;
       const agentRequestBody = {
         clientRunId: agentRunId,
         operationId,
@@ -14606,7 +14625,12 @@ export default function AIWorkspace() {
         agentMemory: requestSessionMemory,
         recentFailedTask: recentRecoveryTask,
         activeSkillId: currentSkill?.id,
-        ...(currentSkill?.id ? { skillSelectionSource: 'manual_ui', activeSkillExplicit: true } : {}),
+        ...(isRecoveryRequest
+          ? { skillSelectionSource: 'recovery' }
+          : currentSkill?.id ? { skillSelectionSource: 'manual_ui', activeSkillExplicit: true } : {}),
+        ...(isRecoveryRequest && recoverySkillContentHash
+          ? { skillContentHash: recoverySkillContentHash }
+          : {}),
         referenceImages: referencesForRequest,
         referenceContext: referenceContextForRequest,
         canvasContext: {
@@ -14801,6 +14825,7 @@ export default function AIWorkspace() {
               index?: number;
               prompt?: string;
               skillId?: string;
+              skillContentHash?: string;
               skill?: { id?: string; label?: string } | null;
               source?: 'manual_ui' | 'explicit_text' | 'user_confirmation' | 'recovery' | 'manual' | 'auto';
               operationId?: string;
@@ -14915,6 +14940,7 @@ export default function AIWorkspace() {
                 index?: number;
                 prompt?: string;
                 skillId?: string;
+                skillContentHash?: string;
                 skill?: { id?: string; label?: string } | null;
                 source?: 'manual_ui' | 'explicit_text' | 'user_confirmation' | 'recovery' | 'manual' | 'auto';
                 runId?: string;
@@ -15274,16 +15300,24 @@ export default function AIWorkspace() {
             }
 
             if (event.type === 'skill_selected' && event.label) {
-              const selectedSkill = { id: event.skillId || 'auto', label: event.label || 'Skill' };
-              if (!currentSkill) {
-                setChatMessages((messages) => messages.map((message) => (
-                  message.id === userMessage.id ? { ...message, skill: selectedSkill } : message
-                )));
-              }
+              const selectedSkill = {
+                id: event.skillId || 'auto',
+                label: event.label || 'Skill',
+                ...(typeof event.skillContentHash === 'string' && event.skillContentHash.trim()
+                  ? { skillContentHash: event.skillContentHash.trim() }
+                  : {}),
+              };
+              latestSelectedSkillId = selectedSkill.id;
+              latestSelectedSkillContentHash = selectedSkill.skillContentHash;
+              const selectedSkillMessageId = requestedRecoveryRecord?.sourceUserMessageId || userMessage.id;
+              setChatMessages((messages) => messages.map((message) => (
+                message.id === selectedSkillMessageId ? { ...message, skill: selectedSkill } : message
+              )));
               updatePendingAssistantMessageImmediately((msg) => updateAgentRunProgress(msg, {
                 type: 'skill_selected',
                 skillId: selectedSkill.id,
                 label: selectedSkill.label,
+                skillContentHash: selectedSkill.skillContentHash,
                 runId: agentRunId,
                 sequence: event.sequence,
                 timestampMs: event.timestampMs,
@@ -15951,7 +15985,8 @@ export default function AIWorkspace() {
               ? `${generatedAssetPreloadFailureCount} 个已生成素材未能完成本地交付`
               : `${generatedAssetFailureCount} 个素材未能生成`,
             retryability: 'retryable',
-            skillId: currentSkill?.id || recentRecoveryTask?.skillId || null,
+            skillId: latestSelectedSkillId || recentRecoveryTask?.skillId || null,
+            skillContentHash: latestSelectedSkillContentHash || recentRecoveryTask?.skillContentHash || null,
             contextEntityIds: contextEntities.length > 0
               ? contextEntities.map((entity) => entity.id)
               : recentRecoveryTask?.contextEntityIds || [],
@@ -16139,7 +16174,8 @@ export default function AIWorkspace() {
         originalRequest: previousRecovery?.originalRequest || currentChatInput,
         failureStage: aborted ? 'cancelled' : failureCode === 'provider_unavailable' ? 'provider_unavailable' : 'transport',
         failureMessage: aborted ? '运行已取消' : failureMessage,
-        skillId: currentSkill?.id || previousRecovery?.skillId || null,
+        skillId: latestSelectedSkillId || previousRecovery?.skillId || null,
+        skillContentHash: latestSelectedSkillContentHash || previousRecovery?.skillContentHash || null,
         contextEntityIds: previousRecovery?.contextEntityIds || [],
         visualReferenceIds: currentReferenceContext?.references.map((reference) => reference.id) || previousRecovery?.visualReferenceIds || [],
         referenceContext: currentReferenceContext || previousRecovery?.referenceContext,

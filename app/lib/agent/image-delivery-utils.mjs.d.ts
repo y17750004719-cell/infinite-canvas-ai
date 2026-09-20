@@ -12,4 +12,3 @@ export interface ImageDeliveryPlan {
 }
 
 export function resolveImageDeliveryPlan(text: string, fallbackOutputCount?: number): ImageDeliveryPlan;
-export function resolveImageBatchMode(text: string, outputCount?: number): ImageDeliveryMode;

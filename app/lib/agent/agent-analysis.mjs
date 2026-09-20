@@ -146,5 +146,3 @@ export function recordAgentUserDecision(snapshot, dimension, answer) {
   ];
   return snapshot;
 }
-
-export const MAX_AGENT_ANALYSIS_CHECKPOINTS = MAX_CHECKPOINTS;

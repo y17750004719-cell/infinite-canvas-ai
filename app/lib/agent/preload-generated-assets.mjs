@@ -96,14 +96,3 @@ export async function preloadGeneratedAsset(asset, options = {}) {
     naturalHeight: asset.naturalHeight || result?.naturalHeight || 1,
   };
 }
-
-export async function preloadGeneratedAssets(assets, options = {}) {
-  const settled = await Promise.allSettled(
-    assets.map((asset) => preloadGeneratedAsset(asset, options)),
-  );
-  return settled.reduce((result, entry, index) => {
-    if (entry.status === 'fulfilled') result.fulfilled.push(entry.value);
-    else result.failed.push({ asset: assets[index], error: entry.reason });
-    return result;
-  }, { fulfilled: [], failed: [] });
-}

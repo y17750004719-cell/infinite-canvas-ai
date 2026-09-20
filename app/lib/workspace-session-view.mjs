@@ -4,8 +4,6 @@ import {
   normalizeGeneratedImageHistory,
 } from './generated-image-history.mjs';
 import {
-  getImageModelCapability,
-  getImageSizeLabel,
   getSupportedImageSizeOptions,
   imageModelSupportsAspectRatioRequest,
   resolveImageSizeForAspectRatio,
@@ -17,7 +15,11 @@ import {
   normalizeProviderModelAspectRatioForSize,
   resolveProviderModelRequestedSize,
 } from './image-provider-option-profiles.mjs';
-import { createAgentRecoveryRecord, normalizeAgentRecoveryRecord } from './agent/recovery.mjs';
+import {
+  createAgentRecoveryRecord,
+  enrichAgentRecoverySkillMetadata,
+  normalizeAgentRecoveryRecord,
+} from './agent/recovery.mjs';
 
 const DEFAULT_VIEWPORT = { x: 0, y: 0, scale: 1 };
 export const CANVAS_TEXT_GENERATION_CONCURRENCY_LIMIT = 5;
@@ -94,6 +96,10 @@ export function getSessionConversationCount(session) {
   return Array.isArray(session?.messages) ? session.messages.length : 0;
 }
 
+function enrichRecoverySkillMetadata(record, messages) {
+  return enrichAgentRecoverySkillMetadata(record, { messages }) || record;
+}
+
 export function getRecentFailedAgentTask(messages) {
   const entries = Array.isArray(messages) ? messages : [];
   for (let index = entries.length - 1; index >= 0; index -= 1) {
@@ -103,7 +109,7 @@ export function getRecentFailedAgentTask(messages) {
     const persisted = normalizeAgentRecoveryRecord(assistant.agentRecovery);
     if (persisted) {
       if (persisted.status === 'cancelled') continue;
-      return persisted;
+      return enrichRecoverySkillMetadata(persisted, entries);
     }
     if (
       assistant.agentConfirmation
@@ -123,6 +129,9 @@ export function getRecentFailedAgentTask(messages) {
     if (!originalRequest) return null;
     const steps = Array.isArray(progress?.steps) ? progress.steps : [];
     const failureStep = steps.findLast((step) => step?.status === 'failed') || steps.at(-1);
+    const selectedSkillStep = steps.findLast((step) => (
+      step?.itemType === 'skill' || String(step?.stepId || '').startsWith('skill:')
+    ));
     const referenceContext = clarificationState?.referenceContext || source.referenceContext;
     const visualReferenceIds = Array.from(new Set(
       ((Array.isArray(referenceContext?.references) ? referenceContext.references : []))
@@ -141,13 +150,17 @@ export function getRecentFailedAgentTask(messages) {
     const sessionId = assistant.taskSnapshot?.sessionId || clarificationState?.sessionId;
     if (![taskId, runId, operationId, sessionId].every((value) => typeof value === 'string' && value.trim())) return null;
 
-    return createAgentRecoveryRecord({
+    const rootSourceUserMessageId = clarificationState?.sourceUserMessageId || source.id;
+    const rootSource = entries.find((message) => (
+      message?.role === 'user' && message?.id === rootSourceUserMessageId
+    ));
+    const recovery = createAgentRecoveryRecord({
       taskId,
       runId,
       operationId,
       lastSequence: Number.isFinite(Number(progress?.lastSequence)) ? Number(progress.lastSequence) : 0,
       sessionId,
-      sourceUserMessageId: clarificationState?.sourceUserMessageId || source.id,
+      sourceUserMessageId: rootSourceUserMessageId,
       status: cancelled ? 'cancelled' : 'failed',
       resumeRoute: String(failureStep?.phase || '') === 'local_delivery'
         ? 'local_delivery'
@@ -158,7 +171,12 @@ export function getRecentFailedAgentTask(messages) {
       originalRequest,
       failureStage: String(failureStep?.phase || 'unknown'),
       failureMessage: String(assistant.content || failureStep?.label || '任务未完成'),
-      skillId: String(source.skill?.id || clarificationState?.skillId || '').trim() || null,
+      skillId: String(
+        rootSource?.skill?.id
+          || clarificationState?.skillId
+          || (selectedSkillStep?.stepId ? String(selectedSkillStep.stepId).slice('skill:'.length) : '')
+          || '',
+      ).trim() || null,
       imageOperation: clarificationState?.imageOperation || undefined,
       targetReferenceId: clarificationState?.targetReferenceId || undefined,
       contextEntityIds: visualReferenceIds,
@@ -167,6 +185,7 @@ export function getRecentFailedAgentTask(messages) {
       referenceContext,
       completedAssetCount: assistant.taskSnapshot?.activeVersions?.length || progress?.assets?.succeeded || 0,
     });
+    return enrichRecoverySkillMetadata(recovery, entries);
   }
   return null;
 }
@@ -182,7 +201,7 @@ export function getLatestAgentRecoveryForTask(messages, taskId) {
       assistant.taskSnapshot?.taskId === normalizedTaskId
       && ['completed', 'waiting'].includes(assistant.agentRunProgress?.outcome)
     ) return null;
-    const recovery = normalizeAgentRecoveryRecord(assistant.agentRecovery);
+    const recovery = enrichRecoverySkillMetadata(normalizeAgentRecoveryRecord(assistant.agentRecovery), entries);
     if (recovery?.taskId === normalizedTaskId) return recovery;
   }
   return null;
@@ -470,12 +489,6 @@ function parseAspectRatioParts(value) {
   };
 }
 
-const RESOLUTION_TIER_MIN_EDGE = {
-  '1K': 1024,
-  '2K': 2048,
-  '4K': 4096,
-};
-const IMAGE_CARD_ASPECT_RATIO_TOLERANCE = 0.03;
 const IMAGE_CARD_FRAME_MIN_EDGE = 384;
 
 export function getImageCardFrameSizeForAspectRatio(aspectRatio, minEdge = IMAGE_CARD_FRAME_MIN_EDGE) {
@@ -540,213 +553,6 @@ export function getImageCardItemSizeForNaturalImage(
     safeNaturalHeight * scale,
     insets
   );
-}
-
-export function getImageCardQualitySummary({ modelId, aspectRatio, size, quality }) {
-  const capability = getImageModelCapability(modelId);
-  const normalizedAspectRatio = normalizeImageCardAspectRatio(aspectRatio);
-  const normalizedSize = typeof size === 'string' ? size.trim() : '';
-  const sizeLabel = getImageSizeLabel(modelId, normalizedSize);
-  const normalizedQuality = typeof quality === 'string' ? quality.trim() : '';
-
-  if (!capability.supportsAspectRatio) {
-    let presetLabel = sizeLabel;
-    const match = normalizedSize.match(/^(\d+)x(\d+)$/i);
-    if (match) {
-      const width = Number(match[1]);
-      const height = Number(match[2]);
-      const gcd = (a, b) => {
-        let x = Math.abs(a);
-        let y = Math.abs(b);
-        while (y > 0) {
-          const remainder = x % y;
-          x = y;
-          y = remainder;
-        }
-        return x || 1;
-      };
-      const divisor = gcd(width, height);
-      const ratioLabel = `${width / divisor}:${height / divisor}`;
-      const longestEdge = Math.max(width, height);
-      let resolutionLabel = '';
-      if (longestEdge >= 3840) resolutionLabel = '4K';
-      else if (longestEdge >= 2048) resolutionLabel = '2K';
-      else if (longestEdge >= 1536) resolutionLabel = '1.5K';
-      else if (longestEdge >= 1024) resolutionLabel = '1K';
-      presetLabel = resolutionLabel ? `${ratioLabel} · ${resolutionLabel}` : ratioLabel;
-    }
-    if (normalizedQuality) {
-      return `${presetLabel} · ${normalizedQuality}`;
-    }
-    return presetLabel;
-  }
-  return `${normalizedAspectRatio} · ${sizeLabel}`;
-}
-
-export function resolveRequestedResolutionTier(size) {
-  const normalizedSize = typeof size === 'string' ? size.trim() : '';
-  const match = normalizedSize.match(/^(\d+)x(\d+)$/i);
-  if (!match) {
-    return '1K';
-  }
-
-  const width = Number(match[1]);
-  const height = Number(match[2]);
-  const longestEdge = Math.max(width, height);
-
-  if (longestEdge >= RESOLUTION_TIER_MIN_EDGE['4K']) {
-    return '4K';
-  }
-  if (longestEdge >= RESOLUTION_TIER_MIN_EDGE['2K']) {
-    return '2K';
-  }
-  return '1K';
-}
-
-function doesOutputMatchRequestedAspectRatio(aspectRatio, naturalWidth, naturalHeight) {
-  const safeNaturalWidth = Number.isFinite(naturalWidth) ? naturalWidth : 0;
-  const safeNaturalHeight = Number.isFinite(naturalHeight) ? naturalHeight : 0;
-  if (safeNaturalWidth <= 0 || safeNaturalHeight <= 0) {
-    return false;
-  }
-
-  const normalizedAspectRatio = normalizeImageCardAspectRatio(aspectRatio);
-  if (normalizedAspectRatio === '1:1') {
-    return true;
-  }
-
-  const parts = parseAspectRatioParts(normalizedAspectRatio);
-  if (!parts) {
-    return true;
-  }
-
-  const requestedRatio = parts.widthRatio / parts.heightRatio;
-  const actualRatio = safeNaturalWidth / safeNaturalHeight;
-  return Math.abs(actualRatio - requestedRatio) / requestedRatio <= IMAGE_CARD_ASPECT_RATIO_TOLERANCE;
-}
-
-export function isOutputResolutionSufficient({
-  requestedSize,
-  aspectRatio,
-  naturalWidth,
-  naturalHeight,
-}) {
-  const safeNaturalWidth = Number.isFinite(naturalWidth) ? naturalWidth : 0;
-  const safeNaturalHeight = Number.isFinite(naturalHeight) ? naturalHeight : 0;
-  if (safeNaturalWidth <= 0 || safeNaturalHeight <= 0) {
-    return false;
-  }
-
-  const resolutionTier = resolveRequestedResolutionTier(requestedSize);
-  const minimumEdge = RESOLUTION_TIER_MIN_EDGE[resolutionTier] || RESOLUTION_TIER_MIN_EDGE['1K'];
-  const normalizedAspectRatio = normalizeImageCardAspectRatio(aspectRatio);
-
-  if (normalizedAspectRatio === '1:1') {
-    return safeNaturalWidth >= minimumEdge && safeNaturalHeight >= minimumEdge;
-  }
-
-  return (
-    Math.max(safeNaturalWidth, safeNaturalHeight) >= minimumEdge &&
-    doesOutputMatchRequestedAspectRatio(normalizedAspectRatio, safeNaturalWidth, safeNaturalHeight)
-  );
-}
-
-export function getResolutionFailureReason({
-  requestedSize,
-  aspectRatio,
-  naturalWidth,
-  naturalHeight,
-}) {
-  const resolutionTier = resolveRequestedResolutionTier(requestedSize);
-  const minimumEdge = RESOLUTION_TIER_MIN_EDGE[resolutionTier] || RESOLUTION_TIER_MIN_EDGE['1K'];
-  const safeNaturalWidth = Number.isFinite(naturalWidth) ? naturalWidth : 0;
-  const safeNaturalHeight = Number.isFinite(naturalHeight) ? naturalHeight : 0;
-  const normalizedAspectRatio = normalizeImageCardAspectRatio(aspectRatio);
-
-  if (safeNaturalWidth <= 0 || safeNaturalHeight <= 0) {
-    return `返回图未达到 ${resolutionTier} 分辨率要求`;
-  }
-
-  if (normalizedAspectRatio === '1:1') {
-    if (safeNaturalWidth < minimumEdge || safeNaturalHeight < minimumEdge) {
-      return `返回图未达到 ${resolutionTier} 分辨率要求`;
-    }
-    return null;
-  }
-
-  if (Math.max(safeNaturalWidth, safeNaturalHeight) < minimumEdge) {
-    return `返回图未达到 ${resolutionTier} 分辨率要求`;
-  }
-
-  if (!doesOutputMatchRequestedAspectRatio(normalizedAspectRatio, safeNaturalWidth, safeNaturalHeight)) {
-    return `返回图宽高比与请求的 ${normalizedAspectRatio} 不匹配`;
-  }
-
-  return null;
-}
-
-export function getImageCardResolutionStatus({
-  requestedSize,
-  aspectRatio,
-  naturalWidth,
-  naturalHeight,
-}) {
-  const safeNaturalWidth = Number.isFinite(naturalWidth) ? Math.floor(naturalWidth) : 0;
-  const safeNaturalHeight = Number.isFinite(naturalHeight) ? Math.floor(naturalHeight) : 0;
-  if (safeNaturalWidth <= 0 || safeNaturalHeight <= 0) {
-    return null;
-  }
-
-  const actualLabel = `${safeNaturalWidth}×${safeNaturalHeight}`;
-  const meetsRequestedResolution = isOutputResolutionSufficient({
-    requestedSize,
-    aspectRatio,
-    naturalWidth: safeNaturalWidth,
-    naturalHeight: safeNaturalHeight,
-  });
-
-  if (meetsRequestedResolution) {
-    return {
-      actualLabel,
-      warning: null,
-      meetsRequestedResolution: true,
-    };
-  }
-
-  const resolutionTier = resolveRequestedResolutionTier(requestedSize);
-  const failureReason = getResolutionFailureReason({
-    requestedSize,
-    aspectRatio,
-    naturalWidth: safeNaturalWidth,
-    naturalHeight: safeNaturalHeight,
-  });
-
-  return {
-    actualLabel,
-    warning:
-      failureReason && failureReason.includes('宽高比')
-        ? `实际返回 ${actualLabel}，${failureReason}`
-        : `实际返回 ${actualLabel}，未达到目标 ${resolutionTier}`,
-    meetsRequestedResolution: false,
-  };
-}
-
-export function resolveImageGenerationFallbackSizes(requestedSize) {
-  const normalizedSize = typeof requestedSize === 'string' ? requestedSize.trim() : '';
-
-  if (normalizedSize === '4096x4096') {
-    return ['4096x4096', '2048x2048', '1024x1024'];
-  }
-
-  if (normalizedSize === '2048x2048') {
-    return ['2048x2048', '1024x1024'];
-  }
-
-  if (normalizedSize) {
-    return [normalizedSize];
-  }
-
-  return ['2048x2048', '1024x1024'];
 }
 
 export function finalizeManualTextCardItem(item) {
@@ -856,7 +662,6 @@ export function getImageToolResultSpawnPosition({
   const safeSourceY = Number.isFinite(sourceItem?.y) ? sourceItem.y : 0;
   const safeSourceWidth = Number.isFinite(sourceItem?.width) ? sourceItem.width : 0;
   const safeSourceHeight = Number.isFinite(sourceItem?.height) ? sourceItem.height : 0;
-  const safeNextWidth = Number.isFinite(nextSize?.width) ? nextSize.width : 0;
   const safeNextHeight = Number.isFinite(nextSize?.height) ? nextSize.height : 0;
 
   return {
@@ -1779,23 +1584,6 @@ export async function settleCanvasImageGenerationRequests({
     if (result.status === 'rejected' && result.reason instanceof Error && result.reason.name === 'AbortError') break;
   }
   return results.filter(Boolean);
-}
-
-export function buildCanvasImageGenerationFailureMessage({
-  requestedCount,
-  completedCount,
-  requestFailureCount = 0,
-}) {
-  const safeRequestedCount = Number.isFinite(requestedCount) && requestedCount > 0 ? Math.floor(requestedCount) : 0;
-  const safeCompletedCount = Number.isFinite(completedCount) && completedCount >= 0 ? Math.floor(completedCount) : 0;
-  const safeRequestFailureCount =
-    Number.isFinite(requestFailureCount) && requestFailureCount > 0 ? Math.floor(requestFailureCount) : 0;
-
-  if (safeRequestFailureCount <= 0) {
-    return null;
-  }
-
-  return `请求 ${safeRequestedCount} 张，成功 ${safeCompletedCount} 张；请手动补生成剩余 ${safeRequestFailureCount} 张`;
 }
 
 export function buildImageCardOutputsState(outputs, requestedActiveIndex = 0) {

@@ -36,43 +36,6 @@ export function fingerprintProviderModel(provider, model, purpose = 'chat') {
   });
 }
 
-export function resolveConfirmationImageIdentity({ providers, toolName, requestedProviderId, requestedModel }) {
-  if (toolName !== 'generate_image') {
-    return {
-      resolvedImageProviderId: undefined,
-      resolvedImageModel: undefined,
-      imageProviderModelFingerprint: undefined,
-    };
-  }
-  const selection = resolveProviderModelSelection({
-    providers,
-    purpose: 'image',
-    requestedProviderId,
-    requestedModel,
-  });
-  if (!selection.providerId || !selection.model) {
-    throw new Error('No enabled image provider and model are configured');
-  }
-  const provider = providers.find((candidate) => candidate.id === selection.providerId);
-  return {
-    resolvedImageProviderId: selection.providerId,
-    resolvedImageModel: selection.model,
-    imageProviderModelFingerprint: fingerprintProviderModel(provider, selection.model, 'image'),
-  };
-}
-
-export function resolveRemainingConfirmationTaskIdentities({
-  pendingTaskIdentities = [],
-  remainingTaskIdentities = [],
-  completedTaskIdentities = [],
-}) {
-  const completedSlotIds = new Set(completedTaskIdentities.map((identity) => identity.slotId));
-  return [
-    ...pendingTaskIdentities.filter((identity) => !completedSlotIds.has(identity.slotId)),
-    ...remainingTaskIdentities,
-  ];
-}
-
 function assertPinnedProviderModel({ providers, purpose, providerId, model, fingerprint }) {
   if (!providerId || !model || !fingerprint) {
     throw new Error('Confirmation continuation envelope is invalid');

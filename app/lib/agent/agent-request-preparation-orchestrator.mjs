@@ -45,6 +45,16 @@ export async function prepareAgentRequestExecution(scope) {
     skillCatalogLoaded,
   } = scope;
 
+  // Preparation owns the selection until it returns to the request runtime.
+  const ensureSelectedSkillContent = async () => {
+    if (!state.selectedSkill) return '';
+    if (state.skillLock?.skillId === state.selectedSkill.id) return state.skillLock.skillContent;
+    const loaded = await interactionService.loadSkill(state.selectedSkill.id);
+    state.skillContent = loaded.content;
+    state.skillContentHash = loaded.contentHash;
+    return loaded.content;
+  };
+
   const interactionResolution = await resolveRequestInteraction({
     body,
     sessionId,
@@ -76,40 +86,6 @@ export async function prepareAgentRequestExecution(scope) {
   state.skillCandidateIds = interactionResolution.skillCandidateIds;
   state.runReferenceContext = interactionResolution.referenceContext;
   state.executionReferenceImages = interactionResolution.referenceImages;
-
-  // A selected Skill is not executable until its content and immutable hash
-  // are loaded in the preparation phase. Keeping this invariant here prevents
-  // Native from starting with `selectedSkill` present but no lock metadata.
-  if (state.selectedSkill) {
-    try {
-      const content = await scope.ensureSelectedSkillContent?.();
-      const contentHash = String(scope.getSkillContentHash?.() || state.skillContentHash || '').trim();
-      state.skillContent = String(content);
-      state.skillContentHash = contentHash;
-      if (!String(content || '').trim() || !contentHash) {
-        throw Object.assign(new Error('The selected Skill could not be locked'), {
-          code: 'skill_lock_failed', failureStage: 'skill_selection', retryable: false,
-        });
-      }
-      state.skillLock = Object.freeze({
-        skillId: state.selectedSkill.id,
-        skillContent: String(content),
-        skillContentHash: contentHash,
-        executionMode: state.selectedSkill.executionMode || null,
-        allowedTools: Object.freeze([...(state.selectedSkill.allowedTools || [])]),
-        selectionMethod: state.skillSelectionMethod || state.skillSource || 'none',
-      });
-    } catch (error) {
-      throw Object.assign(new Error(error instanceof Error ? error.message : 'The selected Skill could not be locked'), {
-        code: error?.code || 'skill_lock_failed',
-        failureStage: error?.failureStage || 'skill_selection',
-        retryable: error?.retryable === true,
-        skillId: state.selectedSkill.id,
-      });
-    }
-  } else {
-    state.skillLock = null;
-  }
 
   const lookup = scope.createReferenceLookupContext({
     contextEntities,
@@ -198,6 +174,30 @@ export async function prepareAgentRequestExecution(scope) {
   Object.assign(state, continuationRoutingState);
   if (recoveryRouting.handled) return { handled: true };
 
+  if (state.selectedSkill) {
+    try {
+      const content = await ensureSelectedSkillContent();
+      if (!String(content || '').trim() || !state.skillContentHash) throw new Error('The selected Skill could not be locked');
+      state.skillLock = Object.freeze({
+        skillId: state.selectedSkill.id,
+        skillContent: content,
+        skillContentHash: state.skillContentHash,
+        executionMode: state.selectedSkill.executionMode || null,
+        allowedTools: Object.freeze([...(state.selectedSkill.allowedTools || [])]),
+        selectionMethod: state.skillSource || state.skillSelectionMethod || 'none',
+      });
+    } catch (error) {
+      throw Object.assign(new Error(error instanceof Error ? error.message : 'The selected Skill could not be locked'), {
+        code: 'skill_lock_failed', failureStage: 'skill_selection', retryable: false,
+        skillId: state.selectedSkill.id,
+      });
+    }
+  } else {
+    state.skillLock = null;
+    state.skillContent = '';
+    state.skillContentHash = '';
+  }
+
   applyImageOperationResponse({
     body,
     resolveImageOperationResponse,
@@ -219,7 +219,7 @@ export async function prepareAgentRequestExecution(scope) {
     imageOperation: state.imageOperation,
     contextLogger,
     ensureImagegenHostContent: scope.ensureImagegenHostContent,
-    ensureSelectedSkillContent: scope.ensureSelectedSkillContent,
+    ensureSelectedSkillContent,
     getSelectedSkill: () => state.selectedSkill,
     hash,
     getSavedSkillHash: () => state.activeClarificationState?.skillContentHash || state.recoveryBaseRecord?.skillContentHash,

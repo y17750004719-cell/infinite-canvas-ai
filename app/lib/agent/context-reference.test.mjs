@@ -4,7 +4,6 @@ import assert from 'node:assert/strict';
 import {
   buildAgentContextEntities,
   isReferentialShorthand,
-  parseAgentProposalBlock,
   resolveContextReference,
 } from './context-reference.mjs';
 
@@ -20,14 +19,6 @@ const proposal = {
     { id: 'three', entityId: 'covers:three', index: 3, label: '先锋双犬（The Dog Duo）', aliases: ['The Dog Duo', 'Vol.3'], brief: '两只德牧或杜宾穿解构主义宽肩西装，在冷酷棚拍环境中拍摄 Vogue 封面。', mustPreserve: ['两只德牧或杜宾', '解构主义宽肩西装'], referenceImageUrls: [], canvasItemIds: [] },
   ],
 };
-
-test('parses and removes structured executable proposal blocks', () => {
-  const raw = `请选择方向。\n<<agent_proposal>>${JSON.stringify(proposal)}<</agent_proposal>>`;
-  const result = parseAgentProposalBlock(raw);
-  assert.equal(result.cleanContent, '请选择方向。');
-  assert.equal(result.proposal?.options.length, 3);
-  assert.equal(result.proposal?.options[2].entityId, 'covers:three');
-});
 
 test('does not semantically resolve numbered labels or aliases without an explicit stable ID', () => {
   const entities = buildAgentContextEntities({ messages: [{ id: 'assistant-1', role: 'assistant', content: '请选择方向', agentProposal: proposal }] });

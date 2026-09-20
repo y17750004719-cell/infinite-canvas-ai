@@ -7,6 +7,8 @@ test('visual Skill selection requires high confidence and image pipeline skill',
   assert.deepEqual(validateVisualSkillSelection({ args: { skillId: 'poster', confidence: 'medium' }, skills: [skill] }), { locked: false, reason: 'confidence_below_high' });
   assert.equal(validateVisualSkillSelection({ args: { skillId: 'poster', confidence: 'high' }, skills: [skill] }).locked, true);
   assert.equal(validateVisualSkillSelection({ args: { skillId: 'missing', confidence: 'high' }, skills: [skill] }).failureCode, 'unknown_visual_skill');
+  assert.equal(validateVisualSkillSelection({ args: { skillId: 'poster', confidence: 'high' }, skills: [skill], selectedSkill: skill }).failureCode, 'skill_locked');
+  assert.equal(validateVisualSkillSelection({ args: { skillId: 'poster', confidence: 'high' }, skills: [skill], imageStarted: true }).failureCode, 'skill_locked');
 });
 
 test('confirmation and clarification helpers are deterministic', () => {
@@ -20,9 +22,13 @@ test('interaction service loads and emits selected Skill through injected depend
   const events = [];
   const service = createInteractionService({ loadSkillContent: async () => 'rules', emitEvent: (event) => events.push(event) });
   const result = await service.selectVisualSkill({ args: { skillId: 'poster', confidence: 'high' }, skills: [{ id: 'poster', name: 'Poster', executionMode: 'image_pipeline' }] });
+  assert.equal(result.locked, true);
   assert.equal(result.skill.id, 'poster');
   assert.equal(result.modelResult.content, 'rules');
+  assert.match(result.contentHash, /^[a-f0-9]{64}$/);
   assert.equal(events[0].type, 'skill_selected');
+  assert.equal(events[0].contentHash, result.contentHash);
+  assert.equal(events[0].skillContentHash, result.contentHash);
 });
 
 test('Skill loading failures are hard, structured lock failures', async () => {
@@ -34,7 +40,7 @@ test('Skill loading failures are hard, structured lock failures', async () => {
   assert.equal(result.isError, true);
   assert.equal(result.failureCode, 'skill_lock_failed');
   assert.equal(result.retryable, false);
-  assert.equal(result.failureStage, 'interaction');
+  assert.equal(result.failureStage, 'skill_selection');
 });
 
 test('interaction boundaries reject stale or out-of-contract responses', () => {
@@ -67,4 +73,21 @@ test('explicit Skill requests never fall back to automatic selection', async () 
   });
   assert.equal(result.selectedSkill.id, 'poster');
   assert.equal(result.skillSelectionMethod, 'manual_text');
+});
+
+test('recovery Skill selection ignores stale UI Skill and user-text directives', async () => {
+  const result = await prepareAgentInteraction({
+    body: {
+      recoveryTaskId: 'task-1',
+      skillSelectionSource: 'recovery',
+      activeSkillId: 'stale-poster',
+    },
+    latestUserMessage: '使用另一个 Skill',
+    skillManifests: [
+      { id: 'stale-poster', name: 'Stale Poster' },
+      { id: 'recovered-poster', name: 'Recovered Poster' },
+    ],
+  });
+  assert.equal(result.selectedSkill, null);
+  assert.equal(result.skillSelectionMethod, 'none');
 });

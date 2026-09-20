@@ -135,7 +135,9 @@ export function createAgentContinuationFlow({ interactionService } = {}) {
     state.recoveryRevisionMessage = typeof recoveryResolution.revision === 'string' ? recoveryResolution.revision.trim() : '';
     if (recoveryResolution.skillId) {
       state.selectedSkill = scope.skillManifests.find((manifest) => manifest.id === recoveryResolution.skillId) || null;
-      if (!state.selectedSkill) throw new Error('Recovery Skill is no longer enabled');
+      if (!state.selectedSkill) throw Object.assign(new Error('Recovery Skill is no longer enabled'), {
+        code: 'skill_lock_failed', failureStage: 'skill_selection', retryable: false,
+      });
       state.skillSource = 'recovery'; state.skillSelectionMethod = 'none'; state.skillCandidateIds = [state.selectedSkill.id];
     } else {
       state.selectedSkill = null; state.skillSource = null; state.skillSelectionMethod = 'none'; state.skillCandidateIds = [];

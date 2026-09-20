@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 
 import {
   preloadGeneratedAsset,
-  preloadGeneratedAssets,
 } from './preload-generated-assets.mjs';
+import { runGeneratedAssetPreloadQueue } from '../generated-asset-preload-queue.mjs';
 
 test('times out each attempt and retries once with a cache-busted URL', async () => {
   const requested = [];
@@ -63,22 +63,21 @@ test('rejects after the initial load and one retry both fail', async () => {
   assert.equal(attempts, 2);
 });
 
-test('batch preloading returns successful assets and isolated final failures', async () => {
-  const result = await preloadGeneratedAssets(
+test('delivery queue preserves successful preloads and isolates final failures', async () => {
+  const result = await runGeneratedAssetPreloadQueue(
     [{ src: '/ok.png' }, { src: '/broken.png' }],
-    {
+    (asset) => preloadGeneratedAsset(asset, {
       timeoutMs: 20,
       loadImage: async (src) => {
         if (src.includes('broken')) throw new Error('broken');
         return { naturalWidth: 800, naturalHeight: 600 };
       },
-    },
+    }),
   );
-
-  assert.equal(result.fulfilled.length, 1);
-  assert.equal(result.fulfilled[0].asset.src, '/ok.png');
-  assert.equal(result.failed.length, 1);
-  assert.equal(result.failed[0].asset.src, '/broken.png');
+  assert.equal(result[0].status, 'fulfilled');
+  assert.equal(result[0].value.asset.src, '/ok.png');
+  assert.equal(result[1].status, 'rejected');
+  assert.match(result[1].reason.message, /broken/);
 });
 
 test('aborting a preload rejects immediately without starting a retry', async () => {

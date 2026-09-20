@@ -18,7 +18,8 @@
     "test": "node --test 'app/**/*.test.mjs' 'scripts/*.test.mjs'",
     "test:native-smoke": "node scripts/smoke-native-codex.mjs runtime/native-codex/target/debug/codex-app-server",
     "test:image-smoke": "node scripts/smoke-image-generation.mjs",
-    "lint": "eslint app",
+    "lint": "eslint app scripts",
+    "check:references": "node scripts/audit-code-references.mjs",
     "typecheck": "next typegen && tsc --noEmit",
     "check": "npm run lint && npm run typecheck && npm test && npm run build"
   },

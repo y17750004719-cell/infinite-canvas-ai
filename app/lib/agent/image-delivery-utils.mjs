@@ -81,10 +81,6 @@ export function resolveImageDeliveryPlan(text, fallbackOutputCount = 1) {
   };
 }
 
-export function resolveImageBatchMode(text, outputCount = 1) {
-  return resolveImageDeliveryPlan(text, outputCount).mode;
-}
-
 export function resolveAgentConversationIntent(messages, hasReferenceImages = false) {
   const latest = (Array.isArray(messages) ? messages : []).findLast((message) => message?.role === 'user')?.content || '';
   const text = String(latest).toLowerCase();

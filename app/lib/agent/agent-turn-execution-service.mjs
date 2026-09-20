@@ -194,29 +194,3 @@ export function createNativeEventForwarder({
     await flush?.();
   };
 }
-
-/** Backwards-friendly descriptive alias for callers that prefer run wording. */
-export const runAgentTurnExecution = executeAgentTurn;
-
-/**
- * Convenience entry point used by callers that already assembled the Native
- * request. Keeping this here centralizes the turn boundary while preserving
- * dependency injection for tests and recovery.
- */
-export async function runNativeResponsesTurn({ runTurn, request }) {
-  if (typeof runTurn !== 'function') throw new TypeError('runNativeResponsesTurn requires runTurn');
-  return executeAgentTurn({
-    onBeforeExecute: undefined,
-    execute: () => runTurn({ ...request }),
-    onAfterExecute: undefined,
-  });
-}
-
-/** Stable descriptive name for recovery and controller callers. */
-export const runMainAgentOnce = async ({ runTurn, request, startKeepalive } = {}) => {
-  return executeAgentTurn({
-    onBeforeExecute: undefined,
-    execute: () => runTurn({ ...request, startKeepalive }),
-    onAfterExecute: undefined,
-  });
-};

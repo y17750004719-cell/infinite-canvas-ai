@@ -50,7 +50,6 @@ export interface AgentContextResolution {
   entityIds: string[];
 }
 
-export function parseAgentProposalBlock(content: string): { cleanContent: string; proposal: AgentProposal | null };
 export function buildAgentContextEntities(input?: Record<string, unknown>): AgentContextEntity[];
 export function resolveContextReference(input?: {
   userMessage?: string;
@@ -58,4 +57,3 @@ export function resolveContextReference(input?: {
   selectedEntityIds?: string[];
 }): AgentContextResolution;
 export function isReferentialShorthand(value: string): boolean;
-export const AGENT_PROPOSAL_MARKERS: { start: string; end: string };

@@ -102,15 +102,6 @@ export function estimateVisualTokens(asset = {}) {
   return asset.assetId || asset.src || asset.durableSrc ? 512 : 0;
 }
 
-/** Estimate one event including tool payloads and visual content. */
-export function estimateEventTokens(event = {}) {
-  if (!event || typeof event !== 'object') return 0;
-  let total = estimateContextTokens(event.content || event.summary || event.message || '');
-  if (event.type === 'tool_call') total += estimateContextTokens(event.arguments || {});
-  if (event.type === 'tool_result') total += estimateContextTokens(event.result || {});
-  if (event.type === 'confirmation' || event.type === 'clarification') total += estimateContextTokens(event.request || {});
-  return total + estimateVisualTokens(event);
-}
 
 export function normalizeContextEvents(events, sessionId = '') {
   const seen = new Set();
@@ -249,9 +240,6 @@ export function requestMessagesToContextEvents(messages, { sessionId = '', refer
   return normalizeContextEvents(events, sessionId);
 }
 
-// Kept as an explicit request-boundary name for callers that still import the
-// helper; it does not read or write historical event formats.
-export const migrateMessagesToContextEvents = requestMessagesToContextEvents;
 
 export function buildReplayableContext({ sessionId = '', events = [], auditEvents = [], modelEvents = [], messages = [], referenceContext, visualAssets = [], compactedWindows = [], compactionRecords = [], activeWindow, mergeMessages = false } = {}) {
   const suppliedModel = Array.isArray(modelEvents) && modelEvents.length ? modelEvents : [];
@@ -427,139 +415,4 @@ export function compactContext(replay, {
     tokenBudget: { ...budgetInfo, historyTokens: finalTokens, visualTokens: compactedEvents.reduce((sum, event) => sum + estimateVisualTokens(event), 0) },
     activeWindow: { ...base.activeWindow, startSequence: summary ? compacted.endSequence : (kept[0]?.sequence || 1), endSequence: events.at(-1)?.sequence || 0, compactCount: (base.activeWindow.compactCount || 0) + 1, summaryVersion: version, estimatedTokens: finalTokens, model, contextWindow },
   };
-}
-
-/**
- * Async compaction hook for callers that can provide a model-backed summarizer.
- * The synchronous compactContext remains the deterministic fallback and never
- * drops the original audit history when the summarizer fails.
- */
-export async function compactContextAsync(replay, { summarize, ...options } = {}) {
-  const base = buildReplayableContext(replay || {});
-  const deterministic = compactContext(base, options);
-  if (typeof summarize !== 'function' || deterministic.activeWindow?.compactCount === 0) return deterministic;
-  const sourceEvents = aggregateAssistantTextEvents(normalizeToolCallPairs(base.events, { sessionId: base.sessionId }));
-  try {
-    const modelSummary = await summarize({ events: sourceEvents, sessionId: base.sessionId, model: options.model || '', contextWindow: options.contextWindow || 32768 });
-    const validatedSummary = validateCompactionSummary(modelSummary);
-    if (!validatedSummary) return { ...base, compactFailed: true, compactFailureReason: 'invalid_summary', activeWindow: base.activeWindow };
-    const records = Array.isArray(deterministic.compactionRecords) ? deterministic.compactionRecords.slice() : [];
-    const latestIndex = records.length - 1;
-    if (latestIndex >= 0) records[latestIndex] = {
-      ...records[latestIndex],
-      structuredSummary: validatedSummary,
-      summary: JSON.stringify(validatedSummary).slice(0, 12000),
-    };
-    const windows = Array.isArray(deterministic.compactedWindows) ? deterministic.compactedWindows.slice() : [];
-    if (latestIndex >= 0 && windows.length > 0) windows[windows.length - 1] = records[latestIndex];
-    return { ...deterministic, compactionRecords: records, compactedWindows: windows };
-  } catch {
-    return { ...base, compactFailed: true, compactFailureReason: 'summary_request_failed', activeWindow: base.activeWindow, modelEvents: base.modelEvents, auditEvents: base.auditEvents };
-  }
-}
-
-export function replayContextEvents(replay, { currentReferenceImages = [] } = {}) {
-  const result = [];
-  const visualAssets = new Map((Array.isArray(replay?.visualAssets) ? replay.visualAssets : []).flatMap((asset) => {
-    const id = text(asset?.id || asset?.assetId);
-    return id ? [[id, asset]] : [];
-  }));
-  const sessionId = replay?.activeWindow?.sessionId || replay?.sessionId || '';
-  const activeEvents = Array.isArray(replay?.modelEvents) && replay.modelEvents.length
-    ? replay.modelEvents
-    : replay?.events;
-  const events = aggregateAssistantTextEvents(normalizeToolCallPairs(activeEvents, { sessionId }));
-  for (const event of events) {
-    if (event.type === 'compaction') {
-      const summary = text(event.content || event.summary).trim();
-      if (summary) result.push({
-        role: 'system',
-        content: `Previous context summary (compacted):\n${summary}`,
-      });
-    }
-    else if (event.type === 'user_text' || event.type === 'assistant_text') result.push({ role: event.type === 'user_text' ? 'user' : 'assistant', content: event.content || '' });
-    else if (event.type === 'tool_call') {
-      const callId = text(event.toolCallId || event.callId || event.id);
-      const name = text(event.toolName || event.name) || 'tool';
-      const args = event.arguments && typeof event.arguments === 'object' ? event.arguments : {};
-      result.push({ role: 'assistant', content: '', tool_calls: [{ id: callId, type: 'function', function: { name, arguments: JSON.stringify(args) } }] });
-    } else if (event.type === 'tool_result') {
-      const callId = text(event.toolCallId || event.callId);
-      const name = text(event.toolName || event.name) || 'tool';
-      const content = typeof event.result === 'string' ? event.result : JSON.stringify(event.result ?? null);
-      result.push({ role: 'tool', tool_call_id: callId, name, content });
-    }
-    else if (event.type === 'image_input') {
-      const asset = event.assetId ? visualAssets.get(event.assetId) : null;
-      const source = replayableImageSource(event.src) || replayableImageSource(event.previewSrc) || replayableImageSource(asset?.durableSrc) || replayableImageSource(asset?.previewSrc);
-      const last = result.at(-1);
-      if (source && last?.role === 'user') last.content = [{ type: 'text', text: typeof last.content === 'string' ? last.content : '' }, { type: 'image_url', image_url: { url: source } }];
-    }
-    else if (event.type === 'image_output') {
-      const asset = event.assetId ? visualAssets.get(event.assetId) : null;
-      const source = replayableImageSource(event.src) || replayableImageSource(event.previewSrc) || replayableImageSource(asset?.durableSrc) || replayableImageSource(asset?.previewSrc);
-      if (source) {
-        const previous = result.at(-1);
-        if (previous?.role === 'tool') {
-          const content = typeof previous.content === 'string'
-            ? [{ type: 'text', text: previous.content }]
-            : [...(Array.isArray(previous.content) ? previous.content : [])];
-          content.push({ type: 'image_url', image_url: { url: source } });
-          previous.content = content;
-        } else {
-          result.push({ role: 'tool', tool_call_id: text(event.toolCallId) || `image-output:${event.eventId}`, name: 'image_output', content: [{ type: 'image_url', image_url: { url: source } }] });
-        }
-      }
-    }
-  }
-  const explicit = (Array.isArray(currentReferenceImages) ? currentReferenceImages : []).map(replayableImageSource).filter(Boolean);
-  if (explicit.length) {
-    const last = result.at(-1);
-    if (last?.role === 'user') {
-      const content = typeof last.content === 'string' ? [{ type: 'text', text: last.content }] : [...(Array.isArray(last.content) ? last.content : [])];
-      const existing = new Set(content.filter((part) => part?.type === 'image_url').map((part) => part.image_url?.url));
-      for (const source of explicit) if (!existing.has(source)) content.push({ type: 'image_url', image_url: { url: source } });
-      last.content = content;
-    }
-  }
-  return result;
-}
-
-/**
- * Convert the active event window into provider-neutral response items.
- * Provider adapters can map these items to their native wire format.
- */
-export function buildResponseItems(replay, { currentReferenceImages = [] } = {}) {
-  const base = buildReplayableContext(replay || {});
-  const sessionId = base.activeWindow?.sessionId || base.sessionId || '';
-  const activeEvents = Array.isArray(base.modelEvents) && base.modelEvents.length ? base.modelEvents : base.events;
-  const events = aggregateAssistantTextEvents(normalizeToolCallPairs(activeEvents, { sessionId }));
-  const items = [];
-  for (const event of events) {
-    if (event.type === 'compaction') {
-      const summary = text(event.content || event.summary).trim();
-      if (summary) items.push({ type: 'text', role: 'system', text: `Previous context summary (compacted):\n${summary}` });
-    }
-    else if (event.type === 'user_text' || event.type === 'assistant_text') items.push({ type: 'text', role: event.type === 'user_text' ? 'user' : 'assistant', text: text(event.content) });
-    else if (event.type === 'tool_call') items.push({ type: 'tool_call', callId: text(event.toolCallId || event.callId || event.id), name: text(event.toolName || event.name) || 'tool', arguments: event.arguments && typeof event.arguments === 'object' ? event.arguments : {} });
-    else if (event.type === 'tool_result') items.push({ type: 'tool_result', callId: text(event.toolCallId || event.callId), name: text(event.toolName || event.name) || 'tool', result: event.result ?? null, isError: event.isError === true });
-    else if (event.type === 'image_input' && text(event.assetId)) items.push({ type: 'local_image', role: 'user', assetId: text(event.assetId) });
-    else if (event.type === 'image_output' && text(event.assetId)) items.push({ type: 'tool_result_image', callId: text(event.toolCallId) || `image-output:${event.eventId}`, assetId: text(event.assetId) });
-    else if (event.type === 'confirmation' || event.type === 'clarification' || event.type === 'recovery') items.push({ type: event.type, data: { ...event } });
-  }
-  // Current request references are transient and may legitimately be data
-  // URLs; only persisted event fields are subject to binary-source filtering.
-  for (const source of (Array.isArray(currentReferenceImages) ? currentReferenceImages : []).map((value) => text(value).trim()).filter(Boolean)) {
-    items.push({ type: 'local_image', role: 'user', source });
-  }
-  return items;
-}
-
-export const replayResponseItems = buildResponseItems;
-
-// Compatibility helper for callers that already hold a normalized event array.
-export function replayContext(eventsOrReplay) {
-  return replayContextEvents(Array.isArray(eventsOrReplay)
-    ? { events: eventsOrReplay, activeWindow: { sessionId: '' } }
-    : eventsOrReplay);
 }

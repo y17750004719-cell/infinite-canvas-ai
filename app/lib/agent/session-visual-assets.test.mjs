@@ -8,11 +8,11 @@ import sharp from 'sharp';
 import {
   isSessionVisualAssetAvailable,
   materializeSessionVisualAsset,
-  normalizeSessionVisualAssets,
   SessionVisualAssetError,
   readSessionVisualAsset,
   removeSessionVisualAssets,
 } from './session-visual-assets.mjs';
+import { normalizeSessionVisualAssets } from './session-visual-asset-metadata.mjs';
 
 const PNG_1X1 = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64');
 const JPEG_1X1 = Buffer.from([0xff, 0xd8, 0xff, 0xd9]);

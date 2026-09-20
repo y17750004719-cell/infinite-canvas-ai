@@ -1,5 +1,3 @@
-const PROPOSAL_START = '<<agent_proposal>>';
-const PROPOSAL_END = '<</agent_proposal>>';
 const LITERAL_NUMBER_PATTERN = /(?:数字|号码|编号|number)\s*[一二三四五六七八九十\d]+/i;
 const RATIO_PATTERN = /\b\d+\s*[:：比]\s*\d+\b/;
 const REFERENCE_LANGUAGE_PATTERN = /(?:(?:按照|按|选择|选|使用|用|继续|基于|参考|修改).{0,12}(?:第[一二三四五六七八九十\d]+(?:个|项|版|张)?|vol\.?\s*\d+|方案\s*[一二三四五六七八九十\d]*|选项\s*[一二三四五六七八九十\d]*|版本\s*[一二三四五六七八九十\d]*|这个|那个|上一个|刚才|之前|上一张|选中的|左边|右边)|(?:生成|制作|出图).{0,8}(?:这个|那个|上一个|刚才|之前|上一张|选中的|左边|右边)|(?:这个|那个|上一个|刚才那个|之前那个|上一张图|选中的|左边那个|右边那个))/i;
@@ -14,66 +12,7 @@ function normalizeAliases(value) {
     .filter(Boolean)));
 }
 
-function normalizeProposalOption(value, index, proposalId) {
-  if (!value || typeof value !== 'object') return null;
-  const id = text(value.id) || `option-${index + 1}`;
-  const label = text(value.label);
-  const brief = text(value.brief);
-  if (!label || !brief) return null;
-  const displayIndex = Number.isFinite(Number(value.index)) && Number(value.index) > 0
-    ? Math.floor(Number(value.index))
-    : index + 1;
-  return {
-    id,
-    entityId: text(value.entityId) || `${proposalId}:${id}`,
-    index: displayIndex,
-    label,
-    aliases: normalizeAliases(value.aliases),
-    summary: text(value.summary),
-    brief,
-    mustPreserve: normalizeAliases(value.mustPreserve),
-    referenceImageUrls: normalizeAliases(value.referenceImageUrls),
-    canvasItemIds: normalizeAliases(value.canvasItemIds),
-  };
-}
 
-/**
- * @param {string} content
- * @returns {{cleanContent: string, proposal: import('./context-reference.types').AgentProposal | null}}
- */
-export function parseAgentProposalBlock(content) {
-  const source = String(content || '');
-  const start = source.indexOf(PROPOSAL_START);
-  const end = source.indexOf(PROPOSAL_END, start + PROPOSAL_START.length);
-  if (start < 0 || end <= start) return { cleanContent: source, proposal: null };
-  const raw = source.slice(start + PROPOSAL_START.length, end).trim();
-  try {
-    const value = JSON.parse(raw);
-    if (!value || value.version !== 1) return { cleanContent: source, proposal: null };
-    const id = text(value.id);
-    const title = text(value.title);
-    const intent = ['image', 'skill_action', 'chat'].includes(value.intent) ? value.intent : 'image';
-    if (!id || !title || !Array.isArray(value.options) || value.options.length < 2 || value.options.length > 8) {
-      return { cleanContent: source, proposal: null };
-    }
-    const options = value.options.map((option, index) => normalizeProposalOption(option, index, id));
-    if (options.some((option) => !option)) return { cleanContent: source, proposal: null };
-    const cleanContent = `${source.slice(0, start)}${source.slice(end + PROPOSAL_END.length)}`.trim();
-    return {
-      cleanContent,
-      proposal: {
-        version: 1,
-        id,
-        title,
-        intent,
-        requiresSelection: value.requiresSelection === true,
-        options,
-      },
-    };
-  } catch {
-    return { cleanContent: source, proposal: null };
-  }
-}
 
 function proposalEntities(proposal, sourceMessageId, createdAt) {
   if (!proposal || !Array.isArray(proposal.options)) return [];
@@ -329,5 +268,3 @@ export function isReferentialShorthand(value) {
     || /(?:按照|按|选择|选|用)\s*(?:方案|选项|版本)?\s*[一二三四五六七八九十\d]+(?:个|项|版)?/i.test(withoutRatios)
     || /^(?:第?[一二三四五六七八九十\d]+(?:个|项|版)?|vol\.?\s*\d+|这个|那个|上一个|刚才那个|之前那个)$/i.test(withoutRatios.trim());
 }
-
-export const AGENT_PROPOSAL_MARKERS = { start: PROPOSAL_START, end: PROPOSAL_END };

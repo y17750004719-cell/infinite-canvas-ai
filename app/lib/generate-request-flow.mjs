@@ -1,4 +1,3 @@
-const DEFAULT_IMAGE_MODEL = 'gemini-2.5-flash-image';
 const ALLOWED_ASPECT_RATIOS = new Set([
   '1:1',
   '1:4',
@@ -49,23 +48,6 @@ export function aspectRatioFromSize(size) {
   const divisor = gcd(width, height);
   const ratio = `${width / divisor}:${height / divisor}`;
   return ALLOWED_ASPECT_RATIOS.has(ratio) ? ratio : '1:1';
-}
-
-export function resolveGenerateImageModel(requestedModel, fallbackModel = DEFAULT_IMAGE_MODEL) {
-  const normalizedModel = typeof requestedModel === 'string' ? requestedModel.trim() : '';
-  return normalizedModel || fallbackModel;
-}
-
-export function resolveGenerateImageModelFromAllowedModels(
-  requestedModel,
-  allowedProviderModelIds,
-  fallbackModel = DEFAULT_IMAGE_MODEL
-) {
-  const normalizedModel = typeof requestedModel === 'string' ? requestedModel.trim() : '';
-  if (normalizedModel && allowedProviderModelIds instanceof Set && allowedProviderModelIds.has(normalizedModel)) {
-    return normalizedModel;
-  }
-  return resolveGenerateImageModel(requestedModel, fallbackModel);
 }
 
 export function resolveIntent(intent, text, hasReferenceImages) {

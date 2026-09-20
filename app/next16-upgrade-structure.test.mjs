@@ -24,7 +24,8 @@ test('framework and runtime versions are pinned for the Next.js 16 upgrade', () 
 });
 
 test('quality scripts use ESLint CLI, Next typegen, tests, and Turbopack build defaults', () => {
-  assert.equal(packageJson.scripts.lint, 'eslint app');
+  assert.equal(packageJson.scripts.lint, 'eslint app scripts');
+  assert.equal(packageJson.scripts['check:references'], 'node scripts/audit-code-references.mjs');
   assert.equal(packageJson.scripts.typecheck, 'next typegen && tsc --noEmit');
   assert.equal(packageJson.scripts.check, 'npm run lint && npm run typecheck && npm test && npm run build');
   assert.equal(packageJson.scripts.lint.includes('next lint'), false);
@@ -47,4 +48,5 @@ test('Next Image uses WebP for faster canvas image transforms', () => {
 test('ESLint uses the Next.js flat core-web-vitals configuration', () => {
   assert.equal(eslintConfigSource.includes("eslint-config-next/core-web-vitals"), true);
   assert.equal(eslintConfigSource.includes('...nextVitals'), true);
+  assert.equal(eslintConfigSource.includes("files: ['app/**/*.mjs', 'scripts/**/*.mjs']"), true);
 });
