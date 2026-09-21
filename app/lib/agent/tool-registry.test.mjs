@@ -110,8 +110,11 @@ test('generate_image exposes a strict direct execution contract and forwards the
     /not allowed/,
   );
   await assert.rejects(
-    () => executeAgentTool(registry, 'generate_image', { ...args, items: [{ prompt: 'valid', style: 'unused' }] }, { allowedTools: ['generate_image'] }),
-    /not allowed/,
+    () => executeAgentTool(registry, 'generate_image', { ...args, items: [{ prompt: 'valid', style: 'unused' }] }, { allowedTools: ['generate_image'], toolCallId: 'invalid-items' }),
+    (error) => error.code === 'tool_arguments_invalid'
+      && error.failureStage === 'tool_dispatch'
+      && error.toolCallId === 'invalid-items'
+      && error.providerRequestStarted === false,
   );
 
   const recentImageArgs = {
@@ -142,6 +145,23 @@ test('generate_image exposes a strict direct execution contract and forwards the
     () => executeAgentTool(registry, 'generate_image', { ...recentImageArgs, numLastImagesToInclude: 2 }, { allowedTools: ['generate_image'] }),
     /allowed value/,
   );
+});
+
+test('generate_image treats nullable optional items as omitted before validation', async () => {
+  const calls = [];
+  const registry = createAgentToolRegistry({
+    generateImage: (args) => { calls.push(args); return { accepted: true }; },
+  });
+  const args = {
+    operation: 'generate', prompt: 'Keep the prompt unchanged', referenceIds: [], targetReferenceId: null,
+    outputCount: 1, aspectRatio: '1:1', deliveryMode: 'single', panelCount: null,
+    items: null, numLastImagesToInclude: null,
+  };
+  await executeAgentTool(registry, 'generate_image', args, { allowedTools: ['generate_image'] });
+  assert.equal(calls.length, 1);
+  assert.equal(Object.hasOwn(calls[0], 'items'), false);
+  assert.equal(Object.hasOwn(calls[0], 'numLastImagesToInclude'), false);
+  assert.equal(calls[0].prompt, args.prompt);
 });
 
 test('entry tools validate lazy routing contracts and forward runtime context', async () => {

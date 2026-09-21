@@ -26,7 +26,7 @@ export type StrictAgentLifecycleEvent =
   | (AgentLifecycleIdentity & { type: 'agent_task_checkpoint'; taskSnapshot?: unknown })
   | (AgentLifecycleIdentity & { type: 'agent_completion_summary'; summary?: string })
   | (AgentLifecycleIdentity & { type: 'agent_done'; stopReason?: string })
-  | (AgentLifecycleIdentity & { type: 'agent_error'; message?: string; retryable?: boolean; code?: 'invalid_reference' | 'invalid_tool_arguments' | 'invalid_plan' | 'terminal_contract' | 'provider_unavailable' | 'provider_http' | 'provider_timeout' | 'transport' | 'budget_exceeded' })
+  | (AgentLifecycleIdentity & { type: 'agent_error'; message?: string; retryable?: boolean; code?: 'invalid_reference' | 'invalid_tool_arguments' | 'tool_arguments_invalid' | 'invalid_plan' | 'terminal_contract' | 'provider_unavailable' | 'provider_http' | 'provider_timeout' | 'transport' | 'budget_exceeded'; failureStage?: string; toolName?: string; toolCallId?: string; fieldPath?: string; providerRequestStarted?: boolean; outcomeUnknown?: boolean })
   | (AgentLifecycleIdentity & { type: 'agent_cancelled'; message?: string });
 
 export type AgentItemStatus = 'in_progress' | 'waiting' | 'completed' | 'failed' | 'declined' | 'cancelled';
@@ -168,7 +168,7 @@ export type AgentRunProgressEvent =
   | { type: 'assets_settled'; succeeded: number; failed: number; sequence?: number; timestampMs?: number; origin?: 'server' | 'client' }
   | { type: 'agent_completion_summary'; taskId?: string; runId?: string; operationId?: string; summary?: string; sequence?: number; timestampMs?: number }
   | { type: 'agent_done'; taskId?: string; runId?: string; operationId?: string; sequence?: number; timestampMs?: number }
-  | { type: 'agent_error'; taskId?: string; runId?: string; operationId?: string; sequence?: number; timestampMs?: number; message?: string; retryable?: boolean; code?: string }
+  | { type: 'agent_error'; taskId?: string; runId?: string; operationId?: string; sequence?: number; timestampMs?: number; message?: string; retryable?: boolean; code?: string; failureStage?: string; toolName?: string; toolCallId?: string; fieldPath?: string; providerRequestStarted?: boolean; outcomeUnknown?: boolean }
   | { type: 'agent_cancelled'; taskId?: string; runId?: string; operationId?: string; sequence?: number; timestampMs?: number }
   | { type: 'agent_activity_delta'; taskId?: string; runId?: string; operationId?: string; activityId: string; delta: string; model?: string; sequence?: number; timestampMs?: number }
   | { type: 'agent_activity_commit'; taskId?: string; runId?: string; operationId?: string; activityId: string; disposition: 'commentary' | 'final'; sequence?: number; timestampMs?: number }

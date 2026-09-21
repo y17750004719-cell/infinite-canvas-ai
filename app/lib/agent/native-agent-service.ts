@@ -71,7 +71,17 @@ export type NativeAgentTurnResult = {
   threadId: string;
   turnId: string | null;
   pendingConfirmation?: Record<string, unknown>;
-  error?: { code: string; message: string; retryable: boolean; outcomeUnknown?: boolean; failureStage?: string };
+  error?: {
+    code: string;
+    message: string;
+    retryable: boolean;
+    outcomeUnknown?: boolean;
+    failureStage?: string;
+    toolName?: string;
+    toolCallId?: string;
+    fieldPath?: string;
+    providerRequestStarted?: boolean;
+  };
 };
 
 type NativeAgentHost = Awaited<ReturnType<typeof acquireNativeCodexHost>>;
@@ -263,6 +273,7 @@ function toolFailure(error: any): Record<string, any> {
     || lower.includes('code mode host is disabled')
     ? 'native_tool_host_disabled'
     : rawCode || 'business_tool_failed';
+  const metadata = error?.modelResult && typeof error.modelResult === 'object' ? error.modelResult : error;
   return {
     isError: true,
     modelResult: {
@@ -271,15 +282,38 @@ function toolFailure(error: any): Record<string, any> {
       message,
       retryable: code === 'native_tool_host_disabled' || outcomeUnknown ? false : error?.retryable === true || error?.isRetryable === true,
       outcomeUnknown,
+      ...(text(metadata?.failureStage) ? { failureStage: text(metadata.failureStage) } : {}),
+      ...(text(metadata?.toolName) ? { toolName: text(metadata.toolName) } : {}),
+      ...(text(metadata?.toolCallId) ? { toolCallId: text(metadata.toolCallId) } : {}),
+      ...(text(metadata?.fieldPath) ? { fieldPath: text(metadata.fieldPath) } : {}),
+      ...(typeof metadata?.providerRequestStarted === 'boolean' ? { providerRequestStarted: metadata.providerRequestStarted } : {}),
     },
   };
 }
 
 function responseMessageText(item: Extract<ResponseItem, { type: 'message' }>) {
-  return item.content
+  return (Array.isArray((item as any)?.content) ? (item as any).content : [])
     .flatMap((part: any) => typeof part?.text === 'string' ? [part.text] : [])
     .join('')
     .trim();
+}
+
+function normalizedNativeItemType(value: unknown) {
+  return text(value).toLowerCase().replace(/[-\s]/g, '_');
+}
+
+function nativeAgentMessageText(item: Record<string, any>) {
+  const direct = text(item?.text || item?.delta);
+  if (direct) return direct;
+  return (Array.isArray(item?.content) ? item.content : [])
+    .flatMap((part: any) => typeof part?.text === 'string' ? [part.text] : [])
+    .join('')
+    .trim();
+}
+
+function isNativeAgentMessage(item: Record<string, any>) {
+  const type = normalizedNativeItemType(item?.type);
+  return type === 'agentmessage' || type === 'agent_message';
 }
 
 const PRIVATE_TEXT_PATTERN = /(?:<\/?(?:skill|system|developer|tool)(?:\s|>)|api[_ -]?key|authorization\s*:\s*bearer|chain[- ]of[- ]thought|hidden reasoning|system prompt|developer instructions|raw[_ -]?arguments)/i;
@@ -350,17 +384,38 @@ function safeNativeEvent(method: string, params: Record<string, any>) {
   }
   if (method === 'item/started' || method === 'item/updated' || method === 'item/completed') {
     const item = params?.item || {};
-    if (item.type === 'agentMessage') {
-      const safeText = sanitizePublicMessage(item.text || item.delta);
+    if (isNativeAgentMessage(item)) {
+      const safeText = sanitizePublicMessage(nativeAgentMessageText(item));
       if (!safeText) return null;
       return {
-        turnId, item: { id: text(item.id), type: 'agentMessage', phase: text(item.phase), text: safeText, delta: method === 'item/updated' ? safeText : undefined, delivery: item.delivery || null },
+        turnId, item: { id: text(item.id), type: 'agentMessage', phase: text(item.phase) || 'commentary', text: safeText, delta: method === 'item/updated' ? safeText : undefined, delivery: item.delivery || null },
       };
     }
-    if (item.type === 'dynamicToolCall') return {
-      turnId,
-      item: { id: text(item.id || item.callId), type: 'dynamicToolCall', tool: text(item.tool), status: text(item.status), success: item.success === true },
-    };
+    if (item.type === 'dynamicToolCall') {
+      const error = item.error && typeof item.error === 'object' ? item.error : null;
+      return {
+        turnId,
+        item: {
+          id: text(item.id || item.callId),
+          type: 'dynamicToolCall',
+          tool: text(item.tool),
+          status: text(item.status),
+          success: item.success === true,
+          ...(error ? {
+            error: {
+              code: text(error.code) || 'tool_execution_failed',
+              message: sanitizePublicMessage(error.message, 2_000) || 'Application tool failed',
+              ...(text(error.failureStage) ? { failureStage: text(error.failureStage) } : {}),
+              ...(text(error.toolName) ? { toolName: text(error.toolName) } : {}),
+              ...(text(error.toolCallId) ? { toolCallId: text(error.toolCallId) } : {}),
+              ...(text(error.fieldPath) ? { fieldPath: text(error.fieldPath) } : {}),
+              ...(typeof error.providerRequestStarted === 'boolean' ? { providerRequestStarted: error.providerRequestStarted } : {}),
+              ...(error.outcomeUnknown === true ? { outcomeUnknown: true } : {}),
+            },
+          } : {}),
+        },
+      };
+    }
   }
   return null;
 }
@@ -471,8 +526,14 @@ export async function runNativeAgentTurn(input: RunNativeAgentTurnInput): Promis
     const pendingCommentaryByTurn = new Map<string, CommentaryObservation>();
     const completedCommentaryByTurn = new Map<string, CommentaryObservation>();
     const commentaryBuffers = new Map<string, string>();
+    // The Native host may emit a canonical completion after a raw tool call,
+    // but local dispatch failures can happen before that notification. Keep a
+    // small identity set so the failure projection is emitted exactly once
+    // and the later canonical failure is not projected twice.
+    const projectedDynamicToolFailures = new Set<string>();
     const sampledToolCalls = new Map<string, { modelSampleIndex: number; hasCommentary: boolean; commentarySource?: string; turnId: string }>();
     let missingCommentaryAttempts = 0;
+    let lastCommentaryProtocolFailure: NativeAgentTurnResult['error'] | null = null;
     const toolCalls = new Map<string, { argsHash: string; promise: Promise<Record<string, any>> }>();
     let resolveTurn!: (value: NativeAgentTurnResult) => void;
     const turnFinished = new Promise<NativeAgentTurnResult>((resolve) => {
@@ -490,10 +551,45 @@ export async function runNativeAgentTurn(input: RunNativeAgentTurnInput): Promis
         ...input.identity,
       });
     };
+    const emitDynamicToolFailure = async (callId: string, tool: string, result: Record<string, any>) => {
+      if (!callId || projectedDynamicToolFailures.has(callId)) return;
+      projectedDynamicToolFailures.add(callId);
+      const failure = result?.modelResult || result || {};
+      await emit('item/completed', {
+        threadId,
+        turnId,
+        item: {
+          id: callId,
+          type: 'dynamicToolCall',
+          tool,
+          status: 'failed',
+          success: false,
+          error: {
+            code: text(failure.code) || 'tool_execution_failed',
+            message: text(failure.message) || 'Application tool failed',
+            failureStage: text(failure.failureStage) || 'tool_dispatch',
+            ...(text(failure.toolName) ? { toolName: text(failure.toolName) } : {}),
+            ...(text(failure.toolCallId) ? { toolCallId: text(failure.toolCallId) } : {}),
+            ...(text(failure.fieldPath) ? { fieldPath: text(failure.fieldPath) } : {}),
+            ...(typeof failure.providerRequestStarted === 'boolean' ? { providerRequestStarted: failure.providerRequestStarted } : {}),
+            ...(failure.outcomeUnknown === true ? { outcomeUnknown: true } : {}),
+          },
+        },
+      });
+    };
     const finish = (result: NativeAgentTurnResult) => {
       if (completed) return;
       completed = true;
       resolveTurn(result);
+    };
+    // App Server notifications and dynamic tool callbacks may arrive from
+    // separate transport paths. Keep all request-scoped observation and
+    // dispatch state on one FIFO so commentary cannot race its tool call.
+    let requestQueue: Promise<void> = Promise.resolve();
+    const enqueueRequest = <T>(task: () => Promise<T> | T): Promise<T> => {
+      const result = requestQueue.then(task, task);
+      requestQueue = result.then(() => undefined, () => undefined);
+      return result;
     };
     const noteCommentary = (value: unknown, source: string, eventTurnId?: string) => {
       const safeText = sanitizePublicMessage(value, 2_000);
@@ -544,28 +640,32 @@ export async function runNativeAgentTurn(input: RunNativeAgentTurnInput): Promis
       });
     };
     const unregister = host.registerThreadHandler(threadId, {
-      onNotification: async ({ method, params }: { method: string; params: Record<string, any> }) => {
+      onNotification: (event: { method: string; params: Record<string, any> }) => enqueueRequest(async () => {
+        const { method, params } = event;
         const eventTurnId = text(params?.turnId || params?.turn?.id);
         if (eventTurnId) turnId = eventTurnId;
         if (method === 'rawResponseItem/completed') {
           const raw = params as Partial<RawResponseItemCompletedNotification>;
           const rawItem = raw.item as ResponseItem | undefined;
+          const rawItemRecord = rawItem as Record<string, any> | undefined;
+          const rawCommentaryText = rawItemRecord && isNativeAgentMessage(rawItemRecord)
+            ? nativeAgentMessageText(rawItemRecord)
+            : rawItem?.type === 'message' ? responseMessageText(rawItem) : '';
+          const rawIsCommentary = rawItemRecord?.phase === 'commentary'
+            || (isNativeAgentMessage(rawItemRecord || {}) && !rawItemRecord?.phase);
           if (
-            rawItem?.type === 'message'
-            && rawItem.role === 'assistant'
-            && rawItem.phase === 'commentary'
-            && isMeaningfulPublicCommentary(responseMessageText(rawItem))
+            rawCommentaryText
+            && (isNativeAgentMessage(rawItemRecord || {})
+              || (rawItem?.type === 'message' && rawItem.role === 'assistant'))
+            && rawIsCommentary
+            && isMeaningfulPublicCommentary(rawCommentaryText)
           ) {
-            noteCommentary(responseMessageText(rawItem), 'raw_response_item', eventTurnId);
+            noteCommentary(rawCommentaryText, 'raw_response_item', eventTurnId);
           } else if (rawItem?.type === 'function_call' || rawItem?.type === 'custom_tool_call') {
-            const sampledCallId = text((rawItem as any).call_id || (rawItem as any).callId || (rawItem as any).id);
-            const commentary = commentaryForTurn(eventTurnId);
-            if (sampledCallId) sampledToolCalls.set(sampledCallId, {
-              modelSampleIndex,
-              hasCommentary: sampleHasCommentary || Boolean(commentary),
-              ...(sampleCommentarySource || commentary?.source ? { commentarySource: sampleCommentarySource || commentary?.source } : {}),
-              turnId: text(eventTurnId) || turnId,
-            });
+            // Raw and canonical lifecycle items can describe the same call in
+            // either order. Route both through the merge-aware observer so a
+            // later empty lifecycle event cannot erase valid commentary.
+            noteSampledToolCall(rawItem as Record<string, any>, eventTurnId);
           }
           return;
         }
@@ -603,6 +703,18 @@ export async function runNativeAgentTurn(input: RunNativeAgentTurnInput): Promis
         const item = params?.item;
         if (item && (method === 'item/started' || method === 'item/updated' || method === 'item/completed')) {
           noteSampledToolCall(item, eventTurnId);
+          const canonicalToolCompletion = method === 'item/completed' && item.type === 'dynamicToolCall';
+          const canonicalToolCallId = text(item.id || item.callId);
+          const canonicalToolStatus = text(item.status).toLowerCase();
+          const suppressProjectedFailure = canonicalToolCompletion
+            && ['completed', 'failed', 'cancelled', 'declined', 'interrupted'].includes(canonicalToolStatus)
+            && canonicalToolCallId
+            && projectedDynamicToolFailures.has(canonicalToolCallId);
+          if (suppressProjectedFailure) {
+            // Still process local text/sample bookkeeping and raw journal
+            // forwarding below, but do not emit a duplicate public item.
+            return;
+          }
         }
         if (method === 'item/agentMessage/delta') {
           const deltaText = sanitizePublicMessage(item?.delta || params?.delta || params?.text);
@@ -615,14 +727,15 @@ export async function runNativeAgentTurn(input: RunNativeAgentTurnInput): Promis
           }
           if (deltaText && phase !== 'commentary') finalText += deltaText;
         }
-        if ((method === 'item/started' || method === 'item/updated' || method === 'item/completed') && item?.type === 'agentMessage') {
-          const safeText = sanitizePublicMessage(item.text || item.delta);
-          if (item.phase === 'commentary' && safeText) {
+        if ((method === 'item/started' || method === 'item/updated' || method === 'item/completed') && isNativeAgentMessage(item)) {
+          const safeText = sanitizePublicMessage(nativeAgentMessageText(item));
+          const itemPhase = text(item.phase) || 'commentary';
+          if (itemPhase === 'commentary' && safeText) {
             const itemId = text(item.id) || `${text(eventTurnId) || turnId}:commentary`;
             commentaryBuffers.delete(itemId);
             noteCommentary(safeText, `canonical_${method.replaceAll('/', '_')}`, eventTurnId);
           }
-          if (item.phase !== 'commentary' && safeText && !finalText.endsWith(safeText)) finalText = method === 'item/updated' ? `${finalText}${safeText}` : safeText;
+          if (itemPhase !== 'commentary' && safeText && !finalText.endsWith(safeText)) finalText = method === 'item/updated' ? `${finalText}${safeText}` : safeText;
         }
         await emit(method, params);
         if (method !== 'turn/completed') return;
@@ -633,13 +746,14 @@ export async function runNativeAgentTurn(input: RunNativeAgentTurnInput): Promis
           finish({ status: 'completed', text: finalText, threadId, turnId });
         } else if (status === 'interrupted') {
           finish({ status: input.signal?.aborted ? 'cancelled' : 'failed', text: finalText, threadId, turnId,
-            ...(input.signal?.aborted ? {} : { error: nativeError(params?.turn?.error || { code: 'native_turn_interrupted', message: 'Native Codex turn was interrupted' }) }),
+            ...(input.signal?.aborted ? {} : { error: lastCommentaryProtocolFailure || nativeError(params?.turn?.error || { code: 'native_turn_interrupted', message: 'Native Codex turn was interrupted' }) }),
           });
         } else {
           finish({ status: 'failed', text: finalText, threadId, turnId, error: nativeError(params?.turn?.error) });
         }
-      },
-      onToolCall: async ({ params }: { params: DynamicToolCallParams }) => {
+      }),
+      onToolCall: (event: { params: DynamicToolCallParams }) => enqueueRequest(async () => {
+        const { params } = event;
         const normalized = normalizeNativeToolCall(params);
         if (!normalized.ok) {
           const error = (normalized as { ok: false; error: Record<string, unknown> }).error;
@@ -677,6 +791,7 @@ export async function runNativeAgentTurn(input: RunNativeAgentTurnInput): Promis
           ? sampledCall.hasCommentary === true
           : Boolean(scopedCommentary);
         const commentarySource = sampledCall?.commentarySource || (sampledCall ? null : scopedCommentary?.source) || null;
+        const commentarySampleIndex = sampledCall?.modelSampleIndex ?? modelSampleIndex;
         // `server_fallback` is deliberately restricted to the application
         // image boundary. Ordinary tools must keep the strict public
         // commentary contract even if a malformed definition carries the
@@ -687,37 +802,85 @@ export async function runNativeAgentTurn(input: RunNativeAgentTurnInput): Promis
         const commentaryFallbackUsed = definition.requiresCommentary && !hasCommentary && commentaryPolicy === 'server_fallback';
         if (definition.requiresCommentary && !hasCommentary && !commentaryFallbackUsed) {
           missingCommentaryAttempts += 1;
+          const protocolFailure: NonNullable<NativeAgentTurnResult['error']> = {
+            code: 'decision_commentary_missing',
+            message: 'The model tool call was not preceded by public commentary',
+            failureStage: 'tool_dispatch',
+            toolName: name,
+            toolCallId: callId,
+            providerRequestStarted: false,
+            retryable: missingCommentaryAttempts === 1,
+          };
+          lastCommentaryProtocolFailure = { ...protocolFailure, retryable: false };
+          await emitDynamicToolFailure(callId, name, { modelResult: protocolFailure });
+          await input.onEvent?.({
+            method: 'zflow/native_tool_commentary',
+            params: {
+              threadId,
+              turnId,
+              modelSampleIndex: commentarySampleIndex,
+              toolCallId: callId,
+              commentaryMatched: false,
+              commentarySource: commentarySource || null,
+            },
+            threadId,
+            turnId,
+            ...input.identity,
+          });
           if (missingCommentaryAttempts > 1) {
             queueMicrotask(() => { void host.client.request('turn/interrupt', { threadId, turnId }).catch(() => {}); });
           }
           return { success: false, contentItems: [{ type: 'inputText', text: JSON.stringify({
             code: 'decision_commentary_missing',
             retryable: missingCommentaryAttempts === 1,
+            failureStage: 'tool_dispatch',
+            toolName: name,
+            toolCallId: callId,
+            providerRequestStarted: false,
             instruction: missingCommentaryAttempts === 1 ? 'Explain the immediate action to the user before calling this tool again.' : undefined,
           }) }] };
         }
-        if (commentaryFallbackUsed) {
-          try {
-            await input.onEvent?.({
-              method: 'zflow/tool/progress',
-              params: {
-                status: 'active',
-                phase: 'preparing',
-                message: '正在提交已验证的图片生成请求。',
-                callId,
-                tool: name,
-                commentarySource,
-                commentaryFallbackUsed: true,
-              },
+        // Register the in-flight call before awaiting any diagnostic/progress
+        // callback. Native hosts can deliver duplicate callbacks concurrently;
+        // the first callback must own the execution promise before the second
+        // one checks the map.
+        const execution: Promise<Record<string, any>> = (async () => {
+          await input.onEvent?.({
+            method: 'zflow/native_tool_commentary',
+            params: {
               threadId,
               turnId,
-              ...input.identity,
-            });
-          } catch {
-            // A progress projection must never prevent the image side effect.
+              modelSampleIndex: commentarySampleIndex,
+              toolCallId: callId,
+              commentaryMatched: hasCommentary,
+              commentarySource: commentarySource || null,
+            },
+            threadId,
+            turnId,
+            ...input.identity,
+          });
+          if (commentaryFallbackUsed) {
+            try {
+              await input.onEvent?.({
+                method: 'zflow/tool/progress',
+                params: {
+                  status: 'active',
+                  phase: 'preparing',
+                  message: '正在提交已验证的图片生成请求。',
+                  callId,
+                  tool: name,
+                  commentarySource,
+                  commentaryFallbackUsed: true,
+                },
+                threadId,
+                turnId,
+                ...input.identity,
+              });
+            } catch {
+              // A progress projection must never prevent the image side effect.
+            }
           }
-        }
-        const execution: Promise<Record<string, any>> = input.executeTool(name, args, {
+          return input.executeTool(name, args, {
             threadId,
             turnId,
             toolCallId: callId,
@@ -729,13 +892,14 @@ export async function runNativeAgentTurn(input: RunNativeAgentTurnInput): Promis
               params: { status: text(progress?.status), phase: text(progress?.phase), message: text(progress?.message), callId, tool: name },
               threadId, turnId, ...input.identity,
             }); },
-          }).then((result) => {
-            if (result?.isError === true) {
-              const failure = result?.modelResult || result;
-              return toolFailure(failure);
-            }
-            return result;
-          }).catch((error) => toolFailure(error));
+          });
+        })().then((result) => {
+          if (result?.isError === true) {
+            const failure = result?.modelResult || result;
+            return toolFailure(failure);
+          }
+          return result;
+        }).catch((error) => toolFailure(error));
         toolCalls.set(callId, { argsHash, promise: execution });
         const result = await execution;
         const rawToolFailureCode = text(result?.modelResult?.code || result?.failureCode || result?.code);
@@ -748,6 +912,7 @@ export async function runNativeAgentTurn(input: RunNativeAgentTurnInput): Promis
         if (toolFailureCode === 'native_tool_host_disabled') {
           // A disabled tool host cannot recover inside this turn. End it now so
           // callers receive a precise failure instead of waiting for timeout.
+          await emitDynamicToolFailure(callId, name, result);
           finish({
             status: 'failed',
             text: finalText,
@@ -765,6 +930,7 @@ export async function runNativeAgentTurn(input: RunNativeAgentTurnInput): Promis
         if (toolFailureCode === 'skill_lock_failed') {
           // Skill selection is a hard prerequisite for this interaction. Do
           // not let the model continue and later report a false image success.
+          await emitDynamicToolFailure(callId, name, result);
           finish({
             status: 'failed',
             text: finalText,
@@ -787,6 +953,7 @@ export async function runNativeAgentTurn(input: RunNativeAgentTurnInput): Promis
             || Boolean(result?.modelResult?.code || result?.failureCode || result?.code));
         if (imageToolFailed && toolFailureCode !== 'skill_lock_failed' && toolFailureCode !== 'native_tool_host_disabled') {
           const failureCode = rawToolFailureCode || 'image_execution_failed';
+          await emitDynamicToolFailure(callId, name, result);
           finish({
             status: 'failed',
             text: finalText,
@@ -798,6 +965,10 @@ export async function runNativeAgentTurn(input: RunNativeAgentTurnInput): Promis
               retryable: false,
               failureStage: text(result?.modelResult?.failureStage) || 'image_execution',
               outcomeUnknown: result?.modelResult?.outcomeUnknown === true || result?.outcomeUnknown === true,
+              ...(text(result?.modelResult?.toolName) ? { toolName: text(result.modelResult.toolName) } : {}),
+              ...(text(result?.modelResult?.toolCallId) ? { toolCallId: text(result.modelResult.toolCallId) } : {}),
+              ...(text(result?.modelResult?.fieldPath) ? { fieldPath: text(result.modelResult.fieldPath) } : {}),
+              ...(typeof result?.modelResult?.providerRequestStarted === 'boolean' ? { providerRequestStarted: result.modelResult.providerRequestStarted } : {}),
             },
           });
           queueMicrotask(() => { void host.client.request('turn/interrupt', { threadId, turnId }).catch(() => {}); });
@@ -807,7 +978,7 @@ export async function runNativeAgentTurn(input: RunNativeAgentTurnInput): Promis
           queueMicrotask(() => { void host.client.request('turn/interrupt', { threadId, turnId }).catch(() => {}); });
         }
         return { success: result?.isError !== true && result?.confirmationRequired !== true, contentItems: toolResultContent(result) };
-      },
+      }),
     });
 
     const abort = () => {

@@ -491,6 +491,45 @@ interface ChatMessage {
   agentRecovery?: AgentRecoveryRecord;
 }
 
+const TERMINAL_AGENT_TURN_STATUSES = new Set(['completed', 'failed', 'cancelled', 'interrupted']);
+
+/**
+ * Resolve a terminal journal turn for a locally persisted run marker. The
+ * identity match is authoritative; the timestamp fallback only applies when
+ * the journal has no active turn, which covers older markers that predate the
+ * server identity fields being persisted.
+ */
+const findTerminalTurnForLiveAgentRun = (
+  state: { activeTurn?: string | null; turns?: unknown[] } | null | undefined,
+  liveRun: ProjectSession['activeAgentRun'] | null | undefined,
+) => {
+  if (!liveRun || !Array.isArray(state?.turns)) return null;
+  // An active journal turn means this session has advanced to another round;
+  // never let an older terminal turn settle the new run.
+  if (state.activeTurn != null) return null;
+  const turns = state.turns.filter((turn): turn is Record<string, any> => (
+    Boolean(turn) && typeof turn === 'object' && TERMINAL_AGENT_TURN_STATUSES.has(String((turn as any).status || ''))
+  ));
+  const identityMatch = turns.find((turn) => (
+    (liveRun.operationId && turn.operationId === liveRun.operationId)
+    || (liveRun.taskId && turn.taskId === liveRun.taskId)
+    || (liveRun.runId && (turn.runId === liveRun.runId || turn.runIds?.includes?.(liveRun.runId)))
+    || (liveRun.turnId && turn.turnId === liveRun.turnId)
+  ));
+  if (identityMatch) return identityMatch;
+  const startedAt = Number(liveRun.startedAt || 0);
+  if (!Number.isFinite(startedAt) || startedAt <= 0) return null;
+  return turns
+    .filter((turn) => {
+      const completedAt = Number(turn.completedAt || 0);
+      const turnStartedAt = Number(turn.startedAt || 0);
+      return completedAt > 0
+        && completedAt >= startedAt
+        && (!turnStartedAt || turnStartedAt <= startedAt + 5_000);
+    })
+    .sort((left, right) => Number(right.startedAt || 0) - Number(left.startedAt || 0))[0] || null;
+};
+
 const updateAgentRunProgress = (
   message: ChatMessage,
   event: AgentRunProgressEvent,
@@ -721,6 +760,7 @@ const AgentToolCallBlock = memo(function AgentToolCallBlock({
 }) {
   const [isOpen, setIsOpen] = useState(step.status !== 'completed');
   const toolName = step.toolName || (typeof step.tool === 'string' ? step.tool : step.tool?.name) || '工具';
+  const displayToolName = toolName === 'select_visual_skill' ? '视觉风格' : toolName;
   const statusLabel = getToolLifecycleStatusLabel(step.status);
   const failed = step.status === 'failed';
   const detail = getTimelineExecutionDetail(step);
@@ -744,11 +784,12 @@ const AgentToolCallBlock = memo(function AgentToolCallBlock({
       <summary className="flex min-h-6 cursor-pointer list-none items-center gap-2 rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-[var(--workspace-border-strong)] [&::-webkit-details-marker]:hidden">
         <AgentItemStatusIcon step={step} />
         <span className="text-[var(--workspace-text-muted)]">{statusLabel}</span>
-        <code className="min-w-0 break-all font-mono text-[12px]">{toolName}</code>
+        <span className="min-w-0 break-all text-[12px]">{displayToolName}</span>
         {(detail || step.completionSummary) ? <ChevronRight size={13} className="ml-auto shrink-0 transition-transform group-open:rotate-90 motion-reduce:transition-none" aria-hidden="true" /> : null}
       </summary>
       {detail || step.completionSummary ? (
         <p className="mt-1.5 whitespace-pre-wrap break-words border-l border-[var(--workspace-border)] pl-5 text-[11px] text-[var(--workspace-text-muted)]">
+          {toolName === 'select_visual_skill' ? <code className="mr-1 font-mono">select_visual_skill:</code> : null}
           {step.completionSummary || detail}
         </p>
       ) : null}
@@ -6533,6 +6574,7 @@ export default function AIWorkspace() {
   const [visibleChatMessageLimit, setVisibleChatMessageLimit] = useState(20);
   const [activeAgentRunMarker, setActiveAgentRunMarker] = useState<ProjectSession['activeAgentRun']>(undefined);
   const activeAgentRunMarkerRef = useRef<ProjectSession['activeAgentRun']>(undefined);
+  const [agentConnectionStatus, setAgentConnectionStatus] = useState<'connected' | 'checking' | 'offline' | 'unknown'>('connected');
   const [interruptedRunRecoveryPending, setInterruptedRunRecoveryPending] = useState(false);
   const [isGenerating, setIsGenerating] = useState(false);
   const [activeCanvasTextGenerations, setActiveCanvasTextGenerations] = useState<
@@ -14312,6 +14354,7 @@ export default function AIWorkspace() {
     setHasStartedChat(true);
     const processedAgentActionKeysForRun = new Set<string>();
     let runController: AbortController | null = null;
+    let keepAgentWatchdog = false;
     let generatedAssetPreloadChain = Promise.resolve();
     let latestTaskSnapshot: TaskSnapshot | undefined;
     let latestRecoveryRecord: AgentRecoveryRecord | undefined;
@@ -15036,6 +15079,7 @@ export default function AIWorkspace() {
                     ...(event.taskId ? { taskId: event.taskId } : {}),
                     ...(event.runId ? { runId: event.runId } : {}),
                     ...(event.operationId ? { operationId: event.operationId } : {}),
+                    ...(identity.turnId ? { turnId: identity.turnId } : {}),
                     ...(Number.isFinite(event.sequence)
                       ? { lastSequence: Math.max(current.lastSequence || 0, event.sequence || 0) }
                       : {}),
@@ -15842,7 +15886,6 @@ export default function AIWorkspace() {
 
             if (event.type === 'agent_error') {
               agentTerminalReceived = true;
-              await generatedAssetPreloadChain;
               flushQueuedChatMessageUpdates();
               const publicFailureMessage = presentAgentErrorMessage(event.stage, event.message || event.error, event.code);
               if (event.recoveryRecord) latestRecoveryRecord = event.recoveryRecord;
@@ -15929,7 +15972,36 @@ export default function AIWorkspace() {
               content?: string;
               channel?: 'content' | 'reasoning';
               error?: string;
+              message?: string;
+              taskId?: string;
+              runId?: string;
+              operationId?: string;
+              sequence?: number;
+              timestampMs?: number;
+              retryable?: boolean;
+              code?: string;
             };
+            // A final NDJSON record is allowed to omit its trailing newline.
+            // Apply terminal lifecycle records before handling deltas so a
+            // successful stream cannot be mistaken for a hung run.
+            if (event.type === 'agent_error') {
+              agentTerminalReceived = true;
+              const publicFailureMessage = presentAgentErrorMessage(undefined, event.message || event.error, event.code);
+              updatePendingAssistantMessageImmediately((msg) => ({
+                ...updateAgentRunProgress(msg, {
+                  type: 'agent_error', taskId: event.taskId, runId: event.runId || agentRunId,
+                  operationId: event.operationId, sequence: event.sequence, timestampMs: event.timestampMs,
+                  message: publicFailureMessage, retryable: event.retryable,
+                } as AgentRunProgressEvent),
+                taskStatus: 'failed',
+              }));
+            } else if (event.type === 'agent_done') {
+              agentTerminalReceived = true;
+              updatePendingAssistantMessageImmediately((msg) => updateAgentRunProgress(msg, {
+                type: 'agent_done', taskId: event.taskId, runId: event.runId || agentRunId,
+                operationId: event.operationId, sequence: event.sequence, timestampMs: event.timestampMs,
+              } as AgentRunProgressEvent));
+            }
             if (event.type === 'delta' && event.content) {
               const channel = event.channel || 'content';
               if (channel !== 'reasoning') {
@@ -16125,12 +16197,20 @@ export default function AIWorkspace() {
       }
       
     } catch (error) {
-      await generatedAssetPreloadChain;
       console.error('Generation failed:', error);
 
       const conflictCode = error && typeof error === 'object' && 'code' in error
         ? String((error as { code?: unknown }).code || '')
         : '';
+      if (conflictCode === 'terminal_contract' && usesAgentRequest) {
+        // EOF without a terminal event is a transport uncertainty, not a
+        // business failure. Leave the run live so the journal watchdog can
+        // reconcile the authoritative state without resubmitting generation.
+        keepAgentWatchdog = true;
+        setAgentConnectionStatus('unknown');
+        updatePendingAssistantMessage((msg) => ({ ...msg, taskStatus: 'running' }));
+        return;
+      }
       if (['stale_operation', 'stale_sequence', 'agent_run_settled'].includes(conflictCode)) {
         updatePendingAssistantMessage((msg) => ({
           ...msg,
@@ -16208,10 +16288,16 @@ export default function AIWorkspace() {
             content: `生成失败: ${failureMessage}`,
           });
     } finally {
-      await generatedAssetPreloadChain;
+      // Asset preloading is a delivery concern and must not hold the Agent
+      // run in a visible "running" state after its terminal event arrived.
+      // The queue keeps its own session/controller guards and continues in
+      // the background; terminal UI state is settled immediately here.
+      void generatedAssetPreloadChain.catch((error) => {
+        console.warn('Generated asset delivery finished after Agent terminal state', error);
+      });
       stopStreamTypewriter();
-      if (usesAgentRequest) setActiveAgentRunMarker(undefined);
-      if (!runController || generateAbortRef.current === runController) {
+      if (usesAgentRequest && !keepAgentWatchdog) setActiveAgentRunMarker(undefined);
+      if ((!runController || generateAbortRef.current === runController) && !keepAgentWatchdog) {
         if (runController) generateAbortRef.current = null;
         setIsGenerating(false);
         if (pendingAssistantMessageIdRef.current === assistantPlaceholderId) {
@@ -17010,23 +17096,32 @@ export default function AIWorkspace() {
         const { state, events } = await response.json();
         if (controller.signal.aborted || currentSessionIdRef.current !== threadId || !state) return;
         const liveRun = activeAgentRunMarkerRef.current;
+        const terminalTurnForLiveRun = findTerminalTurnForLiveAgentRun(state, liveRun);
         const liveRunMatchesJournal = !isGeneratingRef.current || !liveRun || (Array.isArray(state.turns) && state.turns.some((turn: any) => (
           (liveRun.operationId && turn.operationId === liveRun.operationId)
           || (liveRun.runId && (turn.runId === liveRun.runId || turn.runIds?.includes?.(liveRun.runId)))
           || (liveRun.taskId && turn.taskId === liveRun.taskId)
-        )));
+        ))) || Boolean(terminalTurnForLiveRun);
         // A response that predates a newly started live run must not replace
-        // its running message with stale journal state.
+        // its running message with stale journal state. A terminal turn that
+        // post-dates the persisted marker is safe to apply even when older
+        // clients did not persist the server-generated identity fields.
         if (!liveRunMatchesJournal) return;
         setSessions((sessions) => sessions.map((session) => session.id !== threadId ? session : {
           ...session, threadId, turns: state.turns, activeTurn: state.activeTurn,
           lastSequence: state.lastSequence, threadStatus: state.threadStatus, archived: state.archived,
           pendingApproval: state.pendingApproval, todoItems: state.todoItems, commandState: state.commandState,
+          ...(terminalTurnForLiveRun && !state.activeTurn ? { activeAgentRun: undefined } : {}),
         }));
         // Journal turn state is authoritative for terminal status, even when
         // local persistence already contains a stale running assistant row.
         setChatMessages((messages) => reconcileHydratedChatMessages(messages, state, { events, threadId }) as ChatMessage[]);
-        if (!isGeneratingRef.current && !state.activeTurn) {
+        if (terminalTurnForLiveRun && !state.activeTurn) {
+          activeAgentRunMarkerRef.current = undefined;
+          setActiveAgentRunMarker(undefined);
+          setAgentConnectionStatus('connected');
+          setIsGenerating(false);
+        } else if (!isGeneratingRef.current && !state.activeTurn) {
           activeAgentRunMarkerRef.current = undefined;
           setActiveAgentRunMarker(undefined);
         }
@@ -17039,6 +17134,98 @@ export default function AIWorkspace() {
     })();
     return () => controller.abort();
   }, [currentSessionId, restorePendingGeneratedAssets, setChatMessages, setSessions]);
+
+  // Reconcile a live stream with the journal while the page is visible. This
+  // is deliberately read-only: it never retries generation and only applies
+  // a response that belongs to every known identity of the active run.
+  useEffect(() => {
+    if (!currentSessionId || !isGenerating) {
+      setAgentConnectionStatus('connected');
+      return;
+    }
+    let disposed = false;
+    let inFlight = false;
+    let timer: number | undefined;
+    let controller: AbortController | null = null;
+    const threadId = currentSessionId;
+
+    const reconcile = async () => {
+      if (disposed || inFlight || document.visibilityState === 'hidden') return;
+      inFlight = true;
+      controller?.abort();
+      controller = new AbortController();
+      const timeout = window.setTimeout(() => controller?.abort(), 10_000);
+      setAgentConnectionStatus('checking');
+      try {
+        const marker = activeAgentRunMarkerRef.current;
+        const afterSequence = Math.max(0, Number(marker?.lastSequence || 0));
+        const response = await fetch(`/api/agent?threadId=${encodeURIComponent(threadId)}&afterSequence=${afterSequence}`, {
+          signal: controller.signal,
+          cache: 'no-store',
+        });
+        if (!response.ok) throw new Error(`状态查询失败: ${response.status}`);
+        const payload = await response.json();
+        if (disposed || currentSessionIdRef.current !== threadId) return;
+        const state = payload?.state;
+        const turns = Array.isArray(state?.turns) ? state.turns : [];
+        const live = activeAgentRunMarkerRef.current;
+        const terminalTurnForLiveRun = findTerminalTurnForLiveAgentRun(state, live);
+        const matchingTurn = turns.find((turn: any) => (
+          live && live.taskId && turn.taskId === live.taskId
+          && live.operationId && turn.operationId === live.operationId
+          && (!live.turnId || turn.turnId === live.turnId)
+          && live.runId && (turn.runId === live.runId || turn.runIds?.includes?.(live.runId))
+        )) || terminalTurnForLiveRun;
+        if (!matchingTurn) return;
+        setAgentConnectionStatus('connected');
+        setSessions((sessions) => sessions.map((session) => session.id !== threadId ? session : {
+          ...session,
+          turns: state.turns,
+          activeTurn: state.activeTurn,
+          lastSequence: state.lastSequence,
+          threadStatus: state.threadStatus,
+          ...(terminalTurnForLiveRun && !state.activeTurn ? { activeAgentRun: undefined } : {}),
+        }));
+        setChatMessages((messages) => reconcileHydratedChatMessages(messages, state, {
+          events: Array.isArray(payload?.events) ? payload.events : [],
+          threadId,
+        }) as ChatMessage[]);
+        if (terminalTurnForLiveRun && !state.activeTurn) {
+          activeAgentRunMarkerRef.current = undefined;
+          setActiveAgentRunMarker(undefined);
+          setIsGenerating(false);
+        }
+      } catch (error) {
+        if (!disposed && (error as Error)?.name !== 'AbortError') setAgentConnectionStatus(navigator.onLine ? 'unknown' : 'offline');
+      } finally {
+        window.clearTimeout(timeout);
+        inFlight = false;
+        controller = null;
+      }
+    };
+    const schedule = () => {
+      if (timer !== undefined) window.clearTimeout(timer);
+      timer = window.setTimeout(() => { void reconcile().finally(schedule); }, 15_000);
+    };
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') { void reconcile(); schedule(); }
+    };
+    const onOnline = () => { void reconcile(); schedule(); };
+    const onOffline = () => setAgentConnectionStatus('offline');
+    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('online', onOnline);
+    window.addEventListener('offline', onOffline);
+    void reconcile();
+    schedule();
+    return () => {
+      disposed = true;
+      if (timer !== undefined) window.clearTimeout(timer);
+      controller?.abort();
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('online', onOnline);
+      window.removeEventListener('offline', onOffline);
+    };
+  }, [currentSessionId, isGenerating, setChatMessages, setSessions]);
 
   const getCurrentSession = () => sessions.find(s => s.id === currentSessionId);
   const sessionsWithGeneratedImageHistory = React.useMemo(() => {
@@ -20399,6 +20586,11 @@ export default function AIWorkspace() {
               <h1 className="text-base font-medium">{currentProjectName}</h1>
             </div>
             <div className="flex items-center gap-1">
+              {isGenerating && agentConnectionStatus !== 'connected' ? (
+                <span className="mr-1 text-[11px] text-[var(--workspace-text-muted)]" role="status">
+                  {agentConnectionStatus === 'offline' ? '连接中断，状态待确认' : '正在校对任务状态'}
+                </span>
+              ) : null}
               <button 
                 className="rounded-lg p-2  hover:bg-[var(--workspace-control-hover)]"
                 title="收缩"

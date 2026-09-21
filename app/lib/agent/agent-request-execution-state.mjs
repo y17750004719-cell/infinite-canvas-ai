@@ -108,12 +108,13 @@ export function createAgentRequestExecutionState(scope) {
     } } : {}), ...(id ? { itemId: `${runId}:${input.type === 'confirmation_required' ? 'approval' : 'clarification'}:${id}` } : {}), ...stamp() });
   };
   const writeProgress = (input) => {
+    const independent = ['image_brief', 'image_prompt', 'image_contract', 'asset_delivery'].includes(input.stepId);
+    if (!independent && input.toolCallId && settledToolCalls.has(input.toolCallId)) return;
     if (input.status === 'active' && input.label && (!input.toolCallId || !settledToolCalls.has(input.toolCallId))) {
       activeAgentStageLabel = input.label;
       activeAgentStage = { label: input.label, phase: input.phase, action: input.action || activeAgentStage.action,
         ...(input.toolName ? { toolName: input.toolName } : {}), ...(input.toolCallId ? { toolCallId: input.toolCallId } : {}) };
     }
-    const independent = ['image_brief', 'image_prompt', 'image_contract', 'asset_delivery'].includes(input.stepId);
     return tracker.update({ ...input, ...(input.toolCallId ? (independent ? {
       itemId: `${runId}:${input.stepId}:${input.toolCallId}`, executionId: toolExecutionId(input.toolCallId), parentItemId: toolItemId(input.toolCallId),
     } : { ...toolEventMetadata(input.toolCallId) }) : {}) });
@@ -127,14 +128,19 @@ export function createAgentRequestExecutionState(scope) {
   const toolActionLabel = (name) => ({ generate_image: '正在整理图片合同', read_relevant_context: '正在读取相关上下文', load_visual_reference: '正在加载视觉参考' }[name] || `正在执行 ${name}`);
   const writeToolStartEvent = (toolCallId, toolName, args = {}, turnMetadata = {}) => {
     const key = `${toolCallId}:${toolName}`;
-    if (announcedToolStarts.has(key)) return;
+    if (settledToolCalls.has(toolCallId) || announcedToolStarts.has(key)) return;
     announcedToolStarts.add(key);
     writeProgress({ stepId: toolName === 'generate_image' ? 'generate_image' : 'tool', phase: toolName === 'generate_image' ? 'checking' : 'reading', status: 'active', label: lastModelTaskDescription || toolActionLabel(toolName), action: toolName, toolCallId, toolName });
     writeLifecycleEvent({ type: 'tool_start', toolCallId, toolName, arguments: args, ...turnMetadata, action: toolName, ...toolEventMetadata(toolCallId), ...stamp() });
   };
-  const writeToolUpdateEvent = (id, message) => writeLifecycleEvent({ type: 'tool_update', toolCallId: id, message, ...toolEventMetadata(id), ...stamp() });
+  const writeToolUpdateEvent = (id, message) => {
+    if (settledToolCalls.has(id)) return;
+    return writeLifecycleEvent({ type: 'tool_update', toolCallId: id, message, ...toolEventMetadata(id), ...stamp() });
+  };
   const writeToolResultEvent = (id, name, result, isError = false) => {
+    if (settledToolCalls.has(id)) return;
     settledToolCalls.add(id); lastCommentaryItemId = '';
+    tracker.completeItem(toolItemId(id));
     if (activeAgentStage.toolCallId === id) {
       activeAgentStageLabel = '正在等待模型响应';
       activeAgentStage = { label: activeAgentStageLabel, phase: 'analyzing', action: 'await_model_response' };

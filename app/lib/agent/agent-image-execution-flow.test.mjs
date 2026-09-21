@@ -95,6 +95,28 @@ test('image execution reaches the provider and delivers an asset without a selec
   assert.equal(logs.find((entry) => entry.name === 'image.execution_completed').details.assetCount, 1);
 });
 
+test('model-selected reference images are carried into the provider request', async () => {
+  let providerBody;
+  const flow = createAgentImageExecutionFlow({
+    runId: 'run-reference', sessionId: 'session-reference', taskId: 'task-reference', operationId: 'op-reference',
+    resolveSelection: async () => ({ selection: { providerId: 'mock', model: 'model' }, allowedModelIds: ['model'] }),
+    resolveReferences: async ({ referenceImages }) => ({ referenceIds: ['reference-1'], linkedImagePreviews: (referenceImages || []).map((src) => ({ id: 'reference-1', src, label: 'selected reference' })) }),
+    buildRequests: async ({ prompt, references }) => ({ requests: [{ messages: [{ role: 'user', content: prompt }], reference_images: references.linkedImagePreviews.map((item) => item.src) }], options: {} }),
+    reserveTask: async () => ({ identities: [{ slotId: 'slot-1' }] }),
+    executeBusinessOperation: async (_meta, run) => run(),
+    requestProvider: async ({ body }) => { providerBody = body; return { status: 'completed', result: { outputs: [{ id: 'asset-ref', src: 'data:image/png;base64,ref' }] } }; },
+    generatedAssetsFromResult: (payload) => payload?.result?.outputs || [],
+    materializeAsset: async (asset) => ({ ...asset, assetId: asset.id, durableSrc: `/api/local-assets/${asset.id}` }),
+    emit: () => {}, writeProgress: () => {}, writeLog: () => {}, recordSucceeded: () => {}, heartbeat: () => () => {}, flush: async () => {},
+  });
+  await flow.execute({
+    finalPromptSource: 'edit the selected reference', imageOptions: { count: 1 }, countMetadata: { totalCount: 1 },
+    referenceImages: ['data:image/png;base64,selected'], imageTask: { operation: 'edit', targetReferenceId: 'reference-1' },
+    streamOptions: { toolCallId: 'call-reference' }, referenceContext: { references: [{ id: 'reference-1', assetId: 'asset-input' }] },
+  });
+  assert.deepEqual(providerBody.reference_images, ['data:image/png;base64,selected']);
+});
+
 test('image execution preserves the selected Skill identity without changing provider reachability', async () => {
   const logs = [];
   const { flow, getProviderCalls } = createFlow({ logs });

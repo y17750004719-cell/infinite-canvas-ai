@@ -298,6 +298,9 @@ export function createAgentProgressTracker({
   return {
     update,
     stamp,
+    completeItem(itemId) {
+      active.delete(itemId);
+    },
     resume(next = {}) {
       if (typeof next.operationId === 'string' && next.operationId && currentOperationId && next.operationId !== currentOperationId) {
         const error = new Error('Agent operation is stale');

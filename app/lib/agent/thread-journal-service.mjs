@@ -12,6 +12,7 @@ import {
   updateThreadState as update,
   forkThread as fork,
   consumeThreadInputs as consume,
+  interruptOrphanedTurn as interruptOrphan,
 } from './thread-journal.mjs';
 
 export const appendThreadEvent = (threadId, event) => append(threadId, event);
@@ -20,6 +21,7 @@ export const loadThread = (threadId) => load(threadId);
 export const updateThreadState = (threadId, patch) => update(threadId, patch);
 export const forkThread = (threadId) => fork(threadId);
 export const consumeThreadInputs = (threadId, identity, delivery, limit) => consume(threadId, identity, delivery, limit);
+export const interruptOrphanedTurn = (threadId, identity, getActive) => interruptOrphan(threadId, identity, getActive);
 
 export function createThreadJournalService(overrides = {}) {
   return {
@@ -29,5 +31,6 @@ export function createThreadJournalService(overrides = {}) {
     updateThreadState: overrides.updateThreadState || updateThreadState,
     forkThread: overrides.forkThread || forkThread,
     consumeThreadInputs: overrides.consumeThreadInputs || consumeThreadInputs,
+    interruptOrphanedTurn: overrides.interruptOrphanedTurn || interruptOrphanedTurn,
   };
 }

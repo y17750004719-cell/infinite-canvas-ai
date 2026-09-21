@@ -254,6 +254,89 @@ test('marks a tool lifecycle step failed without exposing raw result data', () =
   assert.doesNotMatch(JSON.stringify(state.steps[0]), /secret-pixels/);
 });
 
+test('terminal failure freezes the current run against late progress and keeps loaded Skill successful', () => {
+  let state = createInitialAgentRunProgress('run-late-progress');
+  state = reduceAgentRunProgress(state, {
+    type: 'tool_start', runId: 'run-late-progress', toolCallId: 'skill-1',
+    toolName: 'select_visual_skill', sequence: 1, timestampMs: 10,
+  });
+  state = reduceAgentRunProgress(state, {
+    type: 'tool_result', runId: 'run-late-progress', toolCallId: 'skill-1',
+    toolName: 'select_visual_skill', result: { locked: true, summary: 'ZINE' }, sequence: 2, timestampMs: 20,
+  });
+  state = reduceAgentRunProgress(state, {
+    type: 'agent_error', runId: 'run-late-progress', sequence: 3, timestampMs: 30,
+    message: '图片参数无效',
+  });
+  const frozen = JSON.stringify(state);
+  state = reduceAgentRunProgress(state, {
+    type: 'progress_update', runId: 'run-late-progress', stepId: 'select_visual_skill',
+    status: 'active', phase: 'executing', label: '正在调用 select_visual_skill', sequence: 4, timestampMs: 40,
+  });
+  assert.equal(JSON.stringify(state), frozen);
+  assert.equal(state.outcome, 'failed');
+  assert.equal(state.steps.find((step) => step.toolName === 'select_visual_skill')?.status, 'completed');
+  assert.equal(state.steps.find((step) => step.toolName === 'select_visual_skill')?.label, '视觉风格已加载');
+});
+
+test('visual Skill result exposes a safe loaded name or an explicit unlocked state', () => {
+  let state = reduceAgentRunProgress(null, {
+    type: 'tool_start', runId: 'run-skill-label', toolCallId: 'skill-1',
+    toolName: 'select_visual_skill', sequence: 1,
+  });
+  state = reduceAgentRunProgress(state, {
+    type: 'tool_result', runId: 'run-skill-label', toolCallId: 'skill-1',
+    toolName: 'select_visual_skill', result: { locked: true, skillId: 'zine', skillName: '极简 ZINE' }, sequence: 2,
+  });
+  assert.equal(state.steps[0].label, '视觉风格已加载');
+  assert.equal(state.steps[0].completionSummary, '已加载视觉风格：极简 ZINE');
+
+  let unlocked = reduceAgentRunProgress(null, {
+    type: 'tool_start', runId: 'run-skill-unlocked', toolCallId: 'skill-2',
+    toolName: 'select_visual_skill', sequence: 1,
+  });
+  unlocked = reduceAgentRunProgress(unlocked, {
+    type: 'tool_result', runId: 'run-skill-unlocked', toolCallId: 'skill-2',
+    toolName: 'select_visual_skill', result: { locked: false }, sequence: 2,
+  });
+  assert.equal(unlocked.steps[0].label, '未锁定视觉风格');
+  assert.equal(unlocked.steps[0].completionSummary, '未锁定视觉风格，继续使用通用图像指令');
+});
+
+test('visual Skill protocol failures are not rendered as an intentional no-lock result', () => {
+  let state = reduceAgentRunProgress(null, {
+    type: 'tool_start', runId: 'run-skill-protocol', toolCallId: 'skill-1',
+    toolName: 'select_visual_skill', sequence: 1,
+  });
+  state = reduceAgentRunProgress(state, {
+    type: 'tool_result', runId: 'run-skill-protocol', toolCallId: 'skill-1',
+    toolName: 'select_visual_skill', isError: true,
+    result: {
+      code: 'decision_commentary_missing',
+      failureStage: 'tool_dispatch',
+      toolName: 'select_visual_skill',
+      providerRequestStarted: false,
+    },
+    sequence: 2,
+  });
+  assert.equal(state.steps[0].status, 'failed');
+  assert.equal(state.steps[0].label, '视觉风格加载失败');
+  assert.equal(state.steps[0].completionSummary, '模型已选择 Skill，但工具协议校验失败');
+  assert.doesNotMatch(state.steps[0].completionSummary, /未锁定/);
+});
+
+test('late events from an older run do not mutate a newer recovery attempt', () => {
+  let state = createInitialAgentRunProgress('run-old');
+  state = reduceAgentRunProgress(state, { type: 'agent_error', runId: 'run-old', sequence: 1, timestampMs: 10 });
+  state = reduceAgentRunProgress(state, { type: 'progress_update', runId: 'run-new', operationId: 'op-new', stepId: 'new', status: 'active', label: '新轮', sequence: 1, timestampMs: 20 });
+  state = reduceAgentRunProgress(state, {
+    type: 'progress_update', runId: 'run-old', stepId: 'stale', status: 'active',
+    label: '旧轮迟到事件', sequence: 99, timestampMs: 99,
+  });
+  assert.equal(state.runId, 'run-new');
+  assert.equal(state.steps.some((step) => step.label === '旧轮迟到事件'), false);
+});
+
 test('promotes an agent error into a redacted retryable error item', () => {
   const state = reduceAgentRunProgress(createInitialAgentRunProgress('run-error-item'), {
     type: 'agent_error',

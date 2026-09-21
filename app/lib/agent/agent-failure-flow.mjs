@@ -44,9 +44,13 @@ export async function handleAgentFailure({
     ? recoveryBaseRecord
     : buildRecoveryRecord({ stage, message, status: aborted ? 'cancelled' : 'failed', ...(mainAgentFailureCheckpoint ? { resumeRoute: 'main_agent' } : {}) });
   const retryable = !aborted && error?.outcomeUnknown !== true && error?.retryable === true;
-  await log({ failureCode, stage, message, retryable, aborted, error, ...context });
+  const metadata = {
+    ...Object.fromEntries(['toolName', 'toolCallId', 'fieldPath'].filter((key) => typeof error?.[key] === 'string').map((key) => [key, error[key].slice(0, 200)])),
+    ...(typeof error?.providerRequestStarted === 'boolean' ? { providerRequestStarted: error.providerRequestStarted } : {}),
+  };
+  await log({ failureCode, stage, message, retryable, aborted, ...metadata, ...context });
   settle('failed', aborted ? '运行已取消' : '运行失败');
-  emit({ type: aborted ? 'agent_cancelled' : 'agent_error', ...(!aborted ? { code: classify(error, stage) } : {}), stage, message, failureStage: stage, failureCode, retryable, outcomeUnknown: error?.outcomeUnknown === true, recoveryRecord });
+  emit({ type: aborted ? 'agent_cancelled' : 'agent_error', ...(!aborted ? { code: classify(error, stage) } : {}), stage, message, failureStage: stage, failureCode, retryable, outcomeUnknown: error?.outcomeUnknown === true, ...metadata, recoveryRecord });
   return { aborted, failureCode, failureStage: stage, failureMessage: message, recoveryRecord, retryable };
 }
 
@@ -107,7 +111,7 @@ export async function runAgentRequestFailureBoundary({ error, scope } = {}) {
       runId,
       taskId,
       attemptId: runId,
-      toolCallId: directGenerateImageCallId || null,
+      toolCallId: directGenerateImageCallId || error?.toolCallId || null,
       providerId: resolvedChatSelection.providerId,
       model: resolvedChatSelection.model,
       ...failure,

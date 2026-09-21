@@ -98,7 +98,11 @@ export function adaptCanonicalEvent(event) {
   if (type === 'turn.completed') return pageEvent(event, { type: 'agent_done', stopReason: event.stopReason || 'completed', usage: event.usage || null });
   if (type === 'turn.failed') {
     const status = event.status === 'cancelled' ? 'agent_cancelled' : 'agent_error';
-    return pageEvent(event, { type: status, message: event.error?.message || event.message || 'Agent run failed', code: event.error?.code || event.code, retryable: event.error?.retryable });
+    const metadata = Object.fromEntries(['failureStage', 'failureCode', 'toolName', 'toolCallId', 'fieldPath', 'providerRequestStarted', 'outcomeUnknown', 'retryable'].flatMap((key) => {
+      const value = event[key] ?? event.error?.[key];
+      return value !== undefined ? [[key, value]] : [];
+    }));
+    return pageEvent(event, { type: status, message: event.error?.message || event.message || 'Agent run failed', code: event.error?.code || event.code, ...metadata, stage: metadata.failureStage || event.stage, ...(event.recoveryRecord ? { recoveryRecord: event.recoveryRecord } : {}) });
   }
   if (type === 'error') return pageEvent(event, { type: 'error', message: event.message || event.error?.message || 'Agent error', code: event.code || event.error?.code });
   return null;

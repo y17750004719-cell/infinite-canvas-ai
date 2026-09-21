@@ -642,8 +642,14 @@ export type AgentEvent =
       providerId?: string | null;
       model?: string | null;
       message: string;
-      code?: 'invalid_reference' | 'invalid_tool_arguments' | 'invalid_plan' | 'terminal_contract' | 'provider_unavailable' | 'provider_http' | 'provider_timeout' | 'transport' | 'budget_exceeded';
+      code?: 'invalid_reference' | 'invalid_tool_arguments' | 'tool_arguments_invalid' | 'invalid_plan' | 'terminal_contract' | 'provider_unavailable' | 'provider_http' | 'provider_timeout' | 'transport' | 'budget_exceeded';
       reason?: string;
+      failureStage?: string;
+      toolName?: string;
+      toolCallId?: string;
+      fieldPath?: string;
+      providerRequestStarted?: boolean;
+      outcomeUnknown?: boolean;
       retryable?: boolean;
       recoveryRecord?: AgentRecoveryRecord;
     }

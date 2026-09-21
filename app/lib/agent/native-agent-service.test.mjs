@@ -6,6 +6,9 @@ import { createServer } from 'node:http';
 import { once } from 'node:events';
 import { runNativeAgentTurn, normalizeNativeToolCall, markNativeContextForRotation } from './native-agent-service.ts';
 import { loadThread, updateThreadState } from './thread-journal.mjs';
+import { createAgentToolRegistry } from './tool-registry.mjs';
+import { createDynamicToolCallback } from './agent-turn-execution-service.mjs';
+import { dispatchRegisteredApplicationTool } from './application-tool-dispatcher.mjs';
 
 test('normalizes provider function/custom tool calls to item/tool/call', () => {
   const result = normalizeNativeToolCall({
@@ -98,6 +101,168 @@ async function runWithHost(host, overrides = {}) {
   }
 }
 
+test('native image call traverses callback and dispatcher with nullable items exactly once', async () => {
+  let providerCalls = 0;
+  const registry = createAgentToolRegistry({
+    generateImage: async (args) => {
+      providerCalls += 1;
+      assert.equal(args.prompt, 'sanitized prompt');
+      assert.deepEqual(args.referenceIds, ['canvas:reference-1']);
+      assert.equal(Object.hasOwn(args, 'items'), false);
+      return { modelResult: { accepted: true } };
+    },
+  });
+  const definition = [...registry.values()].find((tool) => tool.name === 'generate_image');
+  const host = fakeHost({ script: async ({ handler, threadId, turnId }) => {
+    await handler.onNotification({ method: 'rawResponseItem/completed', params: {
+      threadId, turnId, item: { type: 'message', role: 'assistant', phase: 'commentary', content: [{ type: 'output_text', text: 'Submitting the validated image request.' }] },
+    } });
+    await handler.onNotification({ method: 'rawResponseItem/completed', params: {
+      threadId, turnId, item: { type: 'function_call', name: 'generate_image', arguments: JSON.stringify({
+        operation: 'generate', prompt: 'sanitized prompt', referenceIds: ['canvas:reference-1'], targetReferenceId: null,
+        outputCount: 1, aspectRatio: '1:1', deliveryMode: 'single', panelCount: null, items: null,
+      }), call_id: 'call-full-chain' },
+    } });
+    const response = await handler.onToolCall({ params: { threadId, turnId, callId: 'call-full-chain', tool: 'generate_image', arguments: {
+      operation: 'generate', prompt: 'sanitized prompt', referenceIds: ['canvas:reference-1'], targetReferenceId: null,
+      outputCount: 1, aspectRatio: '1:1', deliveryMode: 'single', panelCount: null, items: null,
+    } } });
+    assert.equal(response.success, true);
+    await handler.onNotification({ method: 'turn/completed', params: { threadId, turn: { id: turnId, status: 'completed' } } });
+  } });
+  const result = await runWithHost(host, {
+    tools: [definition],
+    executeTool: async (name, args, context) => createDynamicToolCallback({
+      registry,
+      nativeTools: [definition],
+      executionContext: { allowedTools: ['generate_image'] },
+      dispatch: (input) => dispatchRegisteredApplicationTool({ ...input, registry }),
+    })(name, args, context),
+  });
+  assert.equal(result.status, 'completed');
+  assert.equal(providerCalls, 1);
+});
+
+test('native chat-entry image payload keeps prompt and references unchanged', async () => {
+  let providerCalls = 0;
+  const registry = createAgentToolRegistry({
+    generateImage: async (args) => {
+      providerCalls += 1;
+      assert.equal(args.prompt, 'chat-entry sanitized prompt');
+      assert.deepEqual(args.referenceIds, []);
+      assert.equal(Object.hasOwn(args, 'items'), false);
+      return { modelResult: { accepted: true } };
+    },
+  });
+  const definition = [...registry.values()].find((tool) => tool.name === 'generate_image');
+  const payload = {
+    operation: 'generate', prompt: 'chat-entry sanitized prompt', referenceIds: [], targetReferenceId: null,
+    outputCount: 1, aspectRatio: '1:1', deliveryMode: 'single', panelCount: null, items: null,
+  };
+  const host = fakeHost({ script: async ({ handler, threadId, turnId }) => {
+    await handler.onNotification({ method: 'rawResponseItem/completed', params: {
+      threadId, turnId, item: { type: 'message', role: 'assistant', phase: 'commentary', content: [{ type: 'output_text', text: 'Submitting the chat image request.' }] },
+    } });
+    await handler.onNotification({ method: 'rawResponseItem/completed', params: {
+      threadId, turnId, item: { type: 'function_call', name: 'generate_image', arguments: JSON.stringify(payload), call_id: 'call-chat-entry' },
+    } });
+    const response = await handler.onToolCall({ params: { threadId, turnId, callId: 'call-chat-entry', tool: 'generate_image', arguments: payload } });
+    assert.equal(response.success, true);
+    await handler.onNotification({ method: 'turn/completed', params: { threadId, turn: { id: turnId, status: 'completed' } } });
+  } });
+  const result = await runWithHost(host, {
+    tools: [definition],
+    executeTool: async (name, args, context) => createDynamicToolCallback({
+      registry,
+      nativeTools: [definition],
+      executionContext: { allowedTools: ['generate_image'] },
+      dispatch: (input) => dispatchRegisteredApplicationTool({ ...input, registry }),
+    })(name, args, context),
+  });
+  assert.equal(result.status, 'completed');
+  assert.equal(providerCalls, 1);
+});
+
+test('native image argument failures stay local and preserve approval identity', async () => {
+  let providerCalls = 0;
+  const registry = createAgentToolRegistry({ generateImage: async () => { providerCalls += 1; return { ok: true }; } });
+  const definition = [...registry.values()].find((tool) => tool.name === 'generate_image');
+  const dispatch = (input) => dispatchRegisteredApplicationTool({ ...input, registry });
+  const callback = (approvedConfirmation) => createDynamicToolCallback({
+    approvedConfirmation,
+    registry,
+    nativeTools: [definition],
+    executionContext: { allowedTools: ['generate_image'] },
+    dispatch,
+  });
+  const base = {
+    operation: 'generate', prompt: 'sanitized prompt', referenceIds: [], targetReferenceId: null,
+    outputCount: 1, aspectRatio: '1:1', deliveryMode: 'single', panelCount: null,
+  };
+  const invalidItems = await callback()('generate_image', { ...base, items: 'not-an-array' }, { toolCallId: 'call-invalid-items' });
+  assert.equal(invalidItems.isError, true);
+  assert.equal(invalidItems.modelResult.code, 'tool_arguments_invalid');
+  assert.equal(invalidItems.modelResult.fieldPath, 'arguments.items');
+  assert.equal(invalidItems.modelResult.toolCallId, 'call-invalid-items');
+  assert.equal(invalidItems.modelResult.providerRequestStarted, false);
+  const invalidEdit = await callback()('generate_image', { ...base, operation: 'generate', numLastImagesToInclude: 1 }, { toolCallId: 'call-invalid-edit' });
+  assert.equal(invalidEdit.isError, true);
+  assert.equal(invalidEdit.modelResult.code, 'tool_arguments_invalid');
+  assert.equal(invalidEdit.modelResult.providerRequestStarted, false);
+  const approvalMismatch = await callback({ toolName: 'generate_image', toolArgs: base })('generate_image', { ...base, items: null }, { toolCallId: 'call-approval' });
+  assert.equal(approvalMismatch.modelResult.code, 'approval_contract_changed');
+  assert.equal(providerCalls, 0);
+});
+
+test('native turn reports structured nullable-image argument rejection without provider execution', async () => {
+  let providerCalls = 0;
+  const registry = createAgentToolRegistry({ generateImage: async () => { providerCalls += 1; return { ok: true }; } });
+  const definition = [...registry.values()].find((tool) => tool.name === 'generate_image');
+  const host = fakeHost({ script: async ({ handler, threadId, turnId }) => {
+    await handler.onNotification({ method: 'rawResponseItem/completed', params: {
+      threadId, turnId, item: { type: 'message', role: 'assistant', phase: 'commentary', content: [{ type: 'output_text', text: 'I will validate the image request before sending it.' }] },
+    } });
+    await handler.onNotification({ method: 'rawResponseItem/completed', params: {
+      threadId, turnId, item: { type: 'function_call', name: 'generate_image', arguments: JSON.stringify({
+        operation: 'generate', prompt: 'sanitized prompt', referenceIds: [], targetReferenceId: null,
+        outputCount: 1, aspectRatio: '1:1', deliveryMode: 'single', panelCount: null, items: 'bad',
+      }), call_id: 'call-native-invalid' },
+    } });
+    const response = await handler.onToolCall({ params: { threadId, turnId, callId: 'call-native-invalid', tool: 'generate_image', arguments: {
+      operation: 'generate', prompt: 'sanitized prompt', referenceIds: [], targetReferenceId: null,
+      outputCount: 1, aspectRatio: '1:1', deliveryMode: 'single', panelCount: null, items: 'bad',
+    } } });
+    assert.equal(response.success, false);
+    const modelResult = JSON.parse(response.contentItems[0].text);
+    assert.equal(modelResult.code, 'tool_arguments_invalid');
+    assert.equal(modelResult.fieldPath, 'arguments.items');
+    assert.equal(modelResult.providerRequestStarted, false);
+    await handler.onNotification({ method: 'item/completed', params: {
+      threadId, turnId, item: { id: 'call-native-invalid', type: 'dynamicToolCall', tool: 'generate_image', status: 'failed', success: false },
+    } });
+    await handler.onNotification({ method: 'turn/completed', params: { threadId, turn: { id: turnId, status: 'failed', error: { message: 'tool rejected' } } } });
+  } });
+  const events = [];
+  const result = await runWithHost(host, {
+    tools: [definition],
+    executeTool: async (name, args, context) => createDynamicToolCallback({
+      registry,
+      nativeTools: [definition],
+      executionContext: { allowedTools: ['generate_image'] },
+      dispatch: (input) => dispatchRegisteredApplicationTool({ ...input, registry }),
+    })(name, args, context),
+    onEvent: (event) => events.push(event),
+  });
+  assert.equal(result.status, 'failed');
+  assert.equal(result.error.code, 'tool_arguments_invalid');
+  assert.equal(result.error.failureStage, 'tool_dispatch');
+  assert.equal(result.error.providerRequestStarted, false);
+  assert.equal(providerCalls, 0);
+  const failedItem = events.find((event) => event.method === 'item/completed' && event.params?.item?.id === 'call-native-invalid');
+  assert.equal(failedItem?.params?.item?.error?.fieldPath, 'arguments.items');
+  assert.equal(events.filter((event) => event.method === 'item/completed' && event.params?.item?.id === 'call-native-invalid').length, 1);
+});
+
 test('native service requires commentary from the same upstream sample and continues after a real tool result', async () => {
   let executions = 0;
   const events = [];
@@ -150,6 +315,63 @@ test('native service correlates canonical commentary with a generate_image call'
   assert.equal(result.status, 'completed');
   assert.equal(executions, 1);
   assert.equal(events.some((event) => event.method === 'zflow/tool/progress' && event.params?.commentaryFallbackUsed === true), false);
+});
+
+test('native service keeps canonical commentary attached to a following select_visual_skill response item', async () => {
+  const calls = [];
+  const events = [];
+  const host = fakeHost({ script: async ({ handler, threadId, turnId }) => {
+    await handler.onNotification({ method: 'item/completed', params: {
+      threadId, turnId,
+      item: {
+        id: 'commentary-regenerate',
+        type: 'AgentMessage',
+        content: [{ type: 'Text', text: 'I will reuse the selected visual direction before generating the revised image.' }],
+      },
+    } });
+    await handler.onNotification({ method: 'rawResponseItem/completed', params: {
+      threadId, turnId,
+      item: { type: 'function_call', name: 'select_visual_skill', arguments: '{}', call_id: 'call-select-skill' },
+    } });
+    const skillResponse = await handler.onToolCall({ params: {
+      threadId, turnId, callId: 'call-select-skill', tool: 'select_visual_skill',
+      arguments: { skillId: 'fixture-zine', confidence: 'high' },
+    } });
+    assert.equal(skillResponse.success, true);
+    assert.equal(JSON.parse(skillResponse.contentItems[0].text).locked, true);
+    calls.push('select_visual_skill');
+    await handler.onNotification({ method: 'item/completed', params: {
+      threadId, turnId,
+      item: { id: 'call-select-skill', type: 'dynamicToolCall', tool: 'select_visual_skill', status: 'completed', success: true },
+    } });
+    await handler.onNotification({ method: 'item/completed', params: {
+        threadId, turnId,
+        item: { id: 'commentary-generate', type: 'AgentMessage', content: [{ type: 'Text', text: 'The visual rules are loaded; I will submit the revised image now.' }] },
+    } });
+    const imageResponse = await handler.onToolCall({ params: {
+      threadId, turnId, callId: 'call-generate-image', tool: 'generate_image', arguments: {},
+    } });
+    assert.equal(imageResponse.success, true);
+    calls.push('generate_image');
+    await handler.onNotification({ method: 'turn/completed', params: { threadId, turn: { id: turnId, status: 'completed' } } });
+  } });
+  const result = await runWithHost(host, {
+    tools: [
+      { name: 'select_visual_skill', description: 'Select a visual Skill.', parameters: { type: 'object' }, requiresCommentary: true },
+      { name: 'generate_image', description: 'Generate an image.', parameters: { type: 'object' }, requiresCommentary: true },
+    ],
+    executeTool: async (name) => {
+      if (name === 'select_visual_skill') return { modelResult: { locked: true, skillId: 'fixture-zine' } };
+      return { modelResult: { accepted: true } };
+    },
+    onEvent: (event) => events.push(event),
+  });
+  assert.equal(result.status, 'completed');
+  assert.deepEqual(calls, ['select_visual_skill', 'generate_image']);
+  assert.equal(events.some((event) => event.method === 'item/completed' && event.params?.item?.error?.code === 'decision_commentary_missing'), false);
+  const skillDiagnostic = events.find((event) => event.method === 'zflow/native_tool_commentary' && event.params?.toolCallId === 'call-select-skill');
+  assert.equal(skillDiagnostic?.params?.commentaryMatched, true);
+  assert.equal(skillDiagnostic?.params?.modelSampleIndex, 1);
 });
 
 test('native service uses a server commentary fallback for generate_image without commentary', async () => {
@@ -281,6 +503,41 @@ test('native service blocks ordinary side effects when the originating sample om
   assert.equal(executions, 0);
 });
 
+test('native service preserves the commentary protocol error after a second rejection interrupts the turn', async () => {
+  let executions = 0;
+  const events = [];
+  const host = fakeHost({ script: async ({ handler, threadId, turnId }) => {
+    const first = await handler.onToolCall({ params: {
+      threadId, turnId, callId: 'call-missing-1', tool: 'read_relevant_context', arguments: {},
+    } });
+    assert.equal(first.success, false);
+    assert.equal(JSON.parse(first.contentItems[0].text).retryable, true);
+    const second = await handler.onToolCall({ params: {
+      threadId, turnId, callId: 'call-missing-2', tool: 'read_relevant_context', arguments: {},
+    } });
+    assert.equal(second.success, false);
+    assert.equal(JSON.parse(second.contentItems[0].text).retryable, false);
+    await handler.onNotification({ method: 'turn/completed', params: {
+      threadId, turn: { id: turnId, status: 'interrupted', error: { code: 'aborted', message: 'aborted by user' } },
+    } });
+  } });
+  const result = await runWithHost(host, {
+    tools: [{ name: 'read_relevant_context', description: 'Read context.', parameters: { type: 'object' }, requiresCommentary: true }],
+    executeTool: async () => { executions += 1; return {}; },
+    onEvent: (event) => events.push(event),
+  });
+  assert.equal(result.status, 'failed');
+  assert.equal(result.error.code, 'decision_commentary_missing');
+  assert.equal(result.error.failureStage, 'tool_dispatch');
+  assert.equal(result.error.toolName, 'read_relevant_context');
+  assert.equal(result.error.toolCallId, 'call-missing-2');
+  assert.equal(result.error.providerRequestStarted, false);
+  assert.equal(result.error.retryable, false);
+  assert.equal(executions, 0);
+  assert.equal(host.requests.filter((request) => request.method === 'turn/interrupt').length, 1);
+  assert.equal(events.filter((event) => event.method === 'item/completed' && event.params?.item?.error?.code === 'decision_commentary_missing').length, 2);
+});
+
 test('native service does not reuse prior-sample commentary for a later ordinary tool call', async () => {
   let executions = 0;
   const host = fakeHost({ script: async ({ handler, threadId, turnId }) => {
@@ -387,6 +644,7 @@ test('native service rejects empty or too-short commentary for ordinary tools', 
 });
 
 test('native service converts thrown business errors into structured failed tool results', async () => {
+  const events = [];
   const host = fakeHost({ script: async ({ handler, threadId, turnId }) => {
     await handler.onNotification({ method: 'rawResponseItem/completed', params: {
       threadId, turnId, item: { type: 'message', role: 'assistant', phase: 'commentary', content: [{ type: 'output_text', text: 'I will validate and execute the requested image operation now.' }] },
@@ -413,7 +671,11 @@ test('native service converts thrown business errors into structured failed tool
         failureStage: 'image_reference_resolution',
       });
     },
+    onEvent: (event) => events.push(event),
   });
+  const failedItem = events.find((event) => event.method === 'item/completed' && event.params?.item?.id === 'call-error');
+  assert.equal(failedItem?.params?.item?.status, 'failed');
+  assert.equal(failedItem?.params?.item?.success, false);
 });
 
 test('native service preserves unknown provider outcomes as non-retryable', async () => {

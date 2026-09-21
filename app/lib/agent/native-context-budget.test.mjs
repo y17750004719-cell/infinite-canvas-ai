@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildNativeContinuationCapsule,
+  buildRecentImageTaskFacts,
   prepareBoundedNativeContext,
 } from './native-context-budget.mjs';
 
@@ -164,4 +165,24 @@ test('five current visual references are bounded to four', () => {
   assert.equal(result.diagnostics.uniqueImageCount, 4);
   assert.equal(result.diagnostics.imageLimitOmitted, 1);
   assert.equal(result.rotationReason, 'current_visual_reference_budget');
+});
+
+test('recent image facts are bounded metadata and do not become a Skill lock', () => {
+  const facts = buildRecentImageTaskFacts({
+    generatedImageHistory: [
+      { taskId: 'task-2', createdAt: 20, assetId: 'asset-2', sourceReferenceId: 'ref-2', operation: 'edit', providerId: 'p', model: 'm', promptTrace: { skillId: 'poster' } },
+      { taskId: 'task-1', createdAt: 10, assetId: 'asset-1', operation: 'generate', promptTrace: { sourcePrompt: 'rendered supplier prompt' } },
+    ],
+    contextEvents: [{ taskId: 'task-2', type: 'skill_selected', skillId: 'poster', skillContentHash: 'hash-2' }],
+    messages: [{ role: 'assistant', taskSnapshot: { taskId: 'task-2', status: 'completed', contract: { intent: 'image' }, activeVersions: [{ assetId: 'asset-3', referenceId: 'ref-3' }] } }],
+  });
+  assert.equal(facts.length, 2);
+  assert.deepEqual(facts[0], {
+    taskId: 'task-2', status: 'completed', originalRequest: 'unknown',
+    skill: { id: 'poster', hash: 'hash-2' }, referenceIds: ['ref-2', 'ref-3'],
+    outputAssetIds: ['asset-2', 'asset-3'], options: { operation: 'edit', providerId: 'p', model: 'm' },
+  });
+  assert.equal(facts[1].skill, 'unknown');
+  assert.equal(facts[1].status, 'unknown');
+  assert.equal(facts[1].originalRequest, 'unknown');
 });

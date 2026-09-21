@@ -301,8 +301,9 @@ test('generated asset preload failures always settle the agent delivery state', 
   assert.match(source, /const settleGeneratedAssetDelivery = \(\) => \{/);
   assert.match(source, /currentSessionIdRef\.current !== generationSessionId[\s\S]{0,900}generatedAssetPreloadFailureCount \+= freshAssets\.length[\s\S]{0,200}settleGeneratedAssetDelivery\(\)/);
   assert.match(source, /Generated asset preload queue failed:[\s\S]{0,700}generatedAssetPreloadFailureCount \+= freshAssets\.length[\s\S]{0,800}settleGeneratedAssetDelivery\(\)/);
-  assert.match(source, /catch \(error\) \{\s*await generatedAssetPreloadChain;\s*console\.error\('Generation failed:'/);
-  assert.match(source, /finally \{\s*await generatedAssetPreloadChain;\s*stopStreamTypewriter\(\)/);
+  assert.match(source, /catch \(error\) \{\s*console\.error\('Generation failed:'/);
+  assert.match(source, /finally \{[\s\S]{0,500}void generatedAssetPreloadChain\.catch/);
+  assert.match(source, /finally \{[\s\S]{0,900}stopStreamTypewriter\(\)/);
 });
 
 test('clarification and confirmation preserve waiting agent progress', () => {
@@ -669,7 +670,8 @@ test('timeline v2 renders an open interleaved Agent turn while retaining the leg
   assert.match(source, /const AgentTurnTimeline = memo/);
   assert.match(source, /const AgentTimelineCommentary = memo/);
   assert.match(source, /const AgentToolCallBlock = memo/);
-  assert.match(source, /<code className="min-w-0 break-all font-mono/);
+  assert.match(source, /displayToolName/);
+  assert.match(source, /select_visual_skill/);
   assert.match(source, /getToolLifecycleStatusLabel/);
   assert.match(source, /aria-live="polite"/);
   assert.match(source, /const AgentExecutionItem = memo/);
@@ -708,6 +710,10 @@ test('assistant chat content uses the Codex-style content axis while user messag
 
 test('session hydration normalizes persisted Agent timelines before rendering them', () => {
   assert.ok(source.includes('reconcileHydratedChatMessages(messages, state, { events, threadId })'));
+  assert.match(source, /findTerminalTurnForLiveAgentRun\(state, liveRun\)/);
+  assert.match(source, /if \(state\.activeTurn != null\) return null/);
+  assert.match(source, /setIsGenerating\(false\)/);
+  assert.match(source, /activeAgentRun: undefined/);
   assert.ok(source.includes("const key = step.itemId || `${step.stepId}:${step.toolCallId || ''}:${index}`;"));
   assert.match(source, /type: 'session_hydrate'/);
   assert.match(source, /const normalizedProgress = message\.agentRunProgress/);

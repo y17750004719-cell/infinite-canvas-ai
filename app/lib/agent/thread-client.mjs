@@ -127,7 +127,22 @@ function terminalProgressEvent(turn, state = {}, message = {}) {
 function reconcileMessageWithTerminalTurn(message, turn, state) {
   if (!turn || !TERMINAL_TURN_STATUSES.has(turn.status)) return message;
   const event = terminalProgressEvent(turn, state, message);
-  const progress = reduceAgentRunProgress(message.agentRunProgress || null, event);
+  const existingProgress = message.agentRunProgress && typeof message.agentRunProgress === 'object'
+    ? message.agentRunProgress
+    : null;
+  // Older persisted messages can carry the client-side run identity while the
+  // journal only knows the server-generated identity. Rebase that identity
+  // before reducing the authoritative terminal event so the reducer does not
+  // reject it as a stale operation.
+  const progressSeed = existingProgress
+    ? {
+        ...existingProgress,
+        taskId: event.taskId,
+        operationId: event.operationId,
+        runId: event.runId,
+      }
+    : null;
+  const progress = reduceAgentRunProgress(progressSeed, event);
   const taskStatus = turn.status === 'completed'
     ? 'completed'
     : turn.status === 'cancelled'

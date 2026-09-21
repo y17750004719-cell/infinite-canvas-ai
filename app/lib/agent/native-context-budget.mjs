@@ -9,6 +9,8 @@ export const NATIVE_CONTEXT_DEFAULTS = Object.freeze({
   keepRecent: 8,
   maxVisualReferences: 4,
   maxCapsuleBytes: 12 * 1024,
+  maxRecentImageTasks: 4,
+  maxImageTaskRequestBytes: 800,
 });
 
 const dataUrlPattern = /data:image\/[a-z0-9.+-]+;base64,[a-z0-9+/=]+/gi;
@@ -29,6 +31,82 @@ function safeContextText(value, maxBytes = 2_000) {
     .replace(dataUrlPattern, '[image data omitted]')
     .replace(/<\/?(?:system|developer|skill|tool)(?:\s[^>]*)?>/gi, '')
     .trim(), maxBytes);
+}
+
+/**
+ * Build a bounded, factual summary of recent image work for the Main Agent.
+ * This is deliberately metadata-only: it never selects a Skill or reference
+ * and it never treats a historical Skill as a lock for the current turn.
+ */
+export function buildRecentImageTaskFacts({ generatedImageHistory = [], contextEvents = [], messages = [], maxTasks = NATIVE_CONTEXT_DEFAULTS.maxRecentImageTasks } = {}) {
+  const safeLimit = Math.max(0, Math.min(NATIVE_CONTEXT_DEFAULTS.maxRecentImageTasks, Math.floor(Number(maxTasks) || NATIVE_CONTEXT_DEFAULTS.maxRecentImageTasks)));
+  const eventList = Array.isArray(contextEvents) ? contextEvents : [];
+  const histories = Array.isArray(generatedImageHistory) ? generatedImageHistory : [];
+  const messageList = Array.isArray(messages) ? messages : [];
+  const taskById = new Map();
+  const ensure = (taskId, createdAt = 0) => {
+    const id = taskId || `history-${createdAt || 'unknown'}`;
+    if (!taskById.has(id)) taskById.set(id, { taskId: taskId || undefined, createdAt: Number(createdAt) || 0, status: 'unknown', originalRequest: undefined, skill: undefined, referenceIds: [], outputAssetIds: [], options: {} });
+    const task = taskById.get(id);
+    task.createdAt = Math.max(task.createdAt, Number(createdAt) || 0);
+    return task;
+  };
+  const skillByTask = new Map();
+  for (const event of eventList) {
+    const taskId = text(event?.taskId || event?.taskSnapshot?.taskId);
+    const skillId = text(event?.skillId || event?.selectedSkillId);
+    const hash = text(event?.skillContentHash || event?.contentHash || event?.skillHash);
+    if (taskId && (skillId || hash)) skillByTask.set(taskId, { ...(skillId ? { id: skillId } : {}), ...(hash ? { hash } : {}) });
+    if (taskId && (event?.type === 'user_text' || event?.type === 'user_message')) {
+      const task = ensure(taskId, event?.timestampMs || event?.createdAt);
+      if (!task.originalRequest) task.originalRequest = safeContextText(event?.content || event?.text || event?.message, NATIVE_CONTEXT_DEFAULTS.maxImageTaskRequestBytes);
+    }
+  }
+  for (const entry of histories) {
+    const operation = text(entry?.operation || entry?.promptTrace?.operation);
+    if (!text(entry?.taskId) && !operation) continue;
+    const task = ensure(text(entry?.taskId), entry?.createdAt);
+    const skillId = text(entry?.promptTrace?.skillId);
+    const skill = skillByTask.get(task.taskId || '');
+    if (skillId || skill) task.skill = { ...(skill || {}), ...(skillId ? { id: skillId } : {}) };
+    if (text(entry?.status)) task.status = text(entry.status);
+    if (operation === 'edit' && text(entry?.sourceReferenceId)) task.referenceIds.push(text(entry.sourceReferenceId));
+    if (text(entry?.assetId)) task.outputAssetIds.push(text(entry.assetId));
+    task.options = {
+      ...(operation ? { operation } : {}),
+      ...(text(entry?.providerId) ? { providerId: text(entry.providerId) } : {}),
+      ...(text(entry?.model) ? { model: text(entry.model) } : {}),
+      ...(Number.isFinite(entry?.naturalWidth) ? { width: entry.naturalWidth } : {}),
+      ...(Number.isFinite(entry?.naturalHeight) ? { height: entry.naturalHeight } : {}),
+    };
+  }
+  for (const message of messageList) {
+    const snapshot = message?.taskSnapshot;
+    const taskId = text(snapshot?.taskId || message?.taskId);
+    if (!taskId || (!snapshot?.contract?.intent && !Array.isArray(snapshot?.activeVersions))) continue;
+    const task = ensure(taskId, message?.createdAt || message?.timestamp);
+    if (!task.originalRequest && message?.role === 'user') task.originalRequest = safeContextText(message?.content, NATIVE_CONTEXT_DEFAULTS.maxImageTaskRequestBytes);
+    const versions = Array.isArray(snapshot?.activeVersions) ? snapshot.activeVersions : [];
+    for (const version of versions) {
+      const assetId = text(version?.assetId);
+      if (assetId) task.outputAssetIds.push(assetId);
+      const referenceId = text(version?.referenceId);
+      if (referenceId) task.referenceIds.push(referenceId);
+    }
+    if (text(snapshot?.status)) task.status = text(snapshot.status);
+  }
+  return [...taskById.values()]
+    .sort((a, b) => b.createdAt - a.createdAt)
+    .slice(0, safeLimit)
+    .map((task) => ({
+      ...(task.taskId ? { taskId: task.taskId } : {}),
+      status: task.status || 'unknown',
+      originalRequest: task.originalRequest || 'unknown',
+      skill: task.skill || 'unknown',
+      referenceIds: [...new Set(task.referenceIds)].slice(0, 4),
+      outputAssetIds: [...new Set(task.outputAssetIds)].slice(0, 8),
+      options: Object.keys(task.options).length ? task.options : 'unknown',
+    }));
 }
 
 export function hashNativeImage(value) {

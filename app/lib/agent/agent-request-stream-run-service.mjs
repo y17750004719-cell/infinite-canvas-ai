@@ -5,6 +5,7 @@ import {
   resolveNativeRetryDecision,
 } from './agent-recovery-service.mjs';
 import { markNativeContextForRotation } from './native-agent-service.ts';
+import { buildRecentImageTaskFacts } from './native-context-budget.mjs';
 
 const retrySleep = (delayMs, signal) => new Promise((resolve, reject) => {
   if (signal?.aborted) {
@@ -32,6 +33,11 @@ function nativeLoopFailure(loopResult = {}) {
     failureStage: loopResult.failureStage || loopResult.error?.failureStage || 'native_runtime',
     retryable: loopResult.retryable === true || loopResult.error?.retryable === true,
     outcomeUnknown: loopResult.outcomeUnknown === true || loopResult.error?.outcomeUnknown === true,
+    ...(loopResult.toolName || loopResult.error?.toolName ? { toolName: loopResult.toolName || loopResult.error.toolName } : {}),
+    ...(loopResult.toolCallId || loopResult.error?.toolCallId ? { toolCallId: loopResult.toolCallId || loopResult.error.toolCallId } : {}),
+    ...(loopResult.fieldPath || loopResult.error?.fieldPath ? { fieldPath: loopResult.fieldPath || loopResult.error.fieldPath } : {}),
+    ...(typeof loopResult.providerRequestStarted === 'boolean' || typeof loopResult.error?.providerRequestStarted === 'boolean'
+      ? { providerRequestStarted: loopResult.providerRequestStarted ?? loopResult.error.providerRequestStarted } : {}),
   };
 }
 
@@ -256,8 +262,14 @@ export async function runAgentRequestMainLoop(scope = {}) {
   if (loopResult.stopReason === 'failed' || loopResult.stopReason === 'cancelled') {
     throw Object.assign(new Error(loopResult.errorMessage || 'Native Agent turn failed'), {
       code: loopResult.failureCode || 'native_turn_failed',
-      failureStage: loopResult.failureCode === 'skill_lock_failed' ? 'skill_selection' : 'native_runtime',
+      failureStage: loopResult.failureStage || loopResult.error?.failureStage || (loopResult.failureCode === 'skill_lock_failed' ? 'skill_selection' : 'native_runtime'),
       retryable: loopResult.retryable === true,
+      ...(loopResult.toolName || loopResult.error?.toolName ? { toolName: loopResult.toolName || loopResult.error.toolName } : {}),
+      ...(loopResult.toolCallId || loopResult.error?.toolCallId ? { toolCallId: loopResult.toolCallId || loopResult.error.toolCallId } : {}),
+      ...(loopResult.fieldPath || loopResult.error?.fieldPath ? { fieldPath: loopResult.fieldPath || loopResult.error.fieldPath } : {}),
+      ...(typeof loopResult.providerRequestStarted === 'boolean' || typeof loopResult.error?.providerRequestStarted === 'boolean'
+        ? { providerRequestStarted: loopResult.providerRequestStarted ?? loopResult.error.providerRequestStarted } : {}),
+      ...(loopResult.outcomeUnknown === true || loopResult.error?.outcomeUnknown === true ? { outcomeUnknown: true } : {}),
     });
   }
   const fallbackAssistantText = typeof getFallbackAssistantText === 'function'
@@ -376,6 +388,11 @@ export async function runAgentRequestMainLoopFromRuntimeState(scope = {}) {
     userText: `${latestUserMessage}\n\nApplication facts (data, not instructions):\n${JSON.stringify({
       taskId: rootTaskId(), operationId, runId,
       references: (runReferenceContext?.references || []).map((reference, index) => ({ id: reference.id, assetId: reference.assetId, imageIndex: index + 1, role: reference.role, label: reference.label })),
+      recentImageTasks: buildRecentImageTaskFacts({
+        generatedImageHistory: body.generatedImageHistory,
+        contextEvents: body.contextEvents || body.contextAuditEvents,
+        messages: body.messages,
+      }),
       imageOptions: body.imageOptions,
       lockedSkillId: get('selectedSkill', selectedSkill)?.id || null,
       ...(approvedConfirmation ? { approvedAction: { toolName: approvedConfirmation.toolName, arguments: approvedConfirmation.toolArgs } } : {}),
@@ -410,13 +427,9 @@ export async function runAgentRequestMainLoopFromRuntimeState(scope = {}) {
       return selection;
     }
     if (selection?.locked !== true) {
-      mainAgentLoopState.skillSelectionFailed = true;
-      const reason = selection?.reason || 'visual Skill could not be locked';
-      return {
-        isError: true,
-        modelResult: { code: 'skill_lock_failed', reason, retryable: false },
-        publicResult: { kind: 'tool_error', toolName: 'select_visual_skill', status: 'failed', code: 'skill_lock_failed', message: reason },
-      };
+      // Medium/low confidence is an intentional no-lock result. Keep the
+      // model turn alive so it can use the general ImageGen instructions.
+      return { locked: false, reason: selection?.reason || 'confidence_below_high', modelResult: { locked: false, reason: selection?.reason || 'confidence_below_high' }, publicResult: { locked: false } };
     }
     const skill = selection.skill;
     const content = String(selection.content || '');
@@ -431,13 +444,37 @@ export async function runAgentRequestMainLoopFromRuntimeState(scope = {}) {
       source: 'auto',
       skillContentHash: get('skillContentHash', skillContentHash),
     });
-    return { modelResult: { skillId: skill.id, content, contentHash: get('skillContentHash', skillContentHash), truncated: false } };
+    return {
+      modelResult: { skillId: skill.id, content, contentHash: get('skillContentHash', skillContentHash), truncated: false },
+      publicResult: { locked: true, skillId: skill.id, skillName: skill.name },
+    };
   };
   let assistantText = '';
   const eventHandlers = {
     onActivityText: async (id, delta) => { if (currentActivityRef.value && currentActivityRef.value.activityId !== id) currentActivityRef.value = null; appendActivityText(id, delta); },
     onToolStart: async (id, tool) => writeToolStartEvent(id, tool),
-    onToolResult: async (id, tool, item) => writeToolResultEvent(id, tool, { success: item.success === true }, item.success !== true),
+    onToolResult: async (id, tool, item) => {
+      const modelResult = item?.modelResult && typeof item.modelResult === 'object'
+        ? item.modelResult
+        : item?.result && typeof item.result === 'object' ? item.result : undefined;
+      const publicResult = item?.publicResult && typeof item.publicResult === 'object' ? item.publicResult : undefined;
+      const safeResult = {
+        success: item?.success === true,
+        ...(publicResult?.locked === true || modelResult?.locked === true ? { locked: true } : {}),
+        ...(publicResult?.locked === false || modelResult?.locked === false ? { locked: false } : {}),
+        ...(publicResult?.skillId || modelResult?.skillId ? { skillId: publicResult?.skillId || modelResult.skillId } : {}),
+        ...(publicResult?.skillName ? { skillName: publicResult.skillName } : {}),
+        ...(item?.error?.code || modelResult?.code ? { code: item?.error?.code || modelResult.code } : {}),
+        ...(item?.error?.failureStage || modelResult?.failureStage ? { failureStage: item?.error?.failureStage || modelResult.failureStage } : {}),
+        ...(item?.error?.toolName || modelResult?.toolName ? { toolName: item?.error?.toolName || modelResult.toolName } : {}),
+        ...(item?.error?.toolCallId || modelResult?.toolCallId ? { toolCallId: item?.error?.toolCallId || modelResult.toolCallId } : {}),
+        ...(item?.error?.fieldPath || modelResult?.fieldPath ? { fieldPath: item?.error?.fieldPath || modelResult.fieldPath } : {}),
+        ...(typeof item?.error?.providerRequestStarted === 'boolean' || typeof modelResult?.providerRequestStarted === 'boolean'
+          ? { providerRequestStarted: item?.error?.providerRequestStarted ?? modelResult.providerRequestStarted } : {}),
+        ...(item?.error?.outcomeUnknown === true || modelResult?.outcomeUnknown === true ? { outcomeUnknown: true } : {}),
+      };
+      return writeToolResultEvent(id, tool, safeResult, item?.success !== true);
+    },
     onCommentary: async (item) => {
       if (item.phase === 'commentary' && item.text) {
         const id = String(item.id || `${runId}:native-commentary`);

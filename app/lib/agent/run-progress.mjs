@@ -17,6 +17,7 @@ const TOOL_LABELS = {
   resolve_failed_task_recovery: '定位上次任务',
   request_context_selection: '等待选择引用',
   generate_image: '生成图片',
+  select_visual_skill: '视觉风格',
 };
 
 const PHASE_EMOJI_RULES = [
@@ -356,6 +357,10 @@ function summarizeToolResult(result) {
   return '';
 }
 
+function isPlainRecord(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
 function toolStepMatches(step, event) {
   return isToolStep(step) && step.toolCallId === event.toolCallId && (!event.runId || step.runId === event.runId);
 }
@@ -370,12 +375,32 @@ function reduceToolLifecycleEvent(state, event) {
   const toolName = String(event.toolName || toolNameFromStep(existing) || '').trim();
   const status = event.type === 'tool_result' ? (event.isError ? 'failed' : 'completed') : 'active';
   const message = event.type === 'tool_update' && typeof event.message === 'string' ? event.message.trim() : '';
-  const resultSummary = event.type === 'tool_result' ? summarizeToolResult(event.result) : '';
-  const defaultLabel = status === 'completed'
-    ? `${toolName || '工具'}已完成`
-    : status === 'failed'
-      ? `${toolName || '工具'}失败`
-      : `正在调用 ${toolName || '工具'}`;
+  const skillResult = isPlainRecord(event.result) && toolName === 'select_visual_skill' ? event.result : null;
+  const skillName = typeof skillResult?.skillName === 'string' ? skillResult.skillName.trim().slice(0, 160) : '';
+  const skillLocked = skillResult?.locked === true;
+  const skillExplicitlyUnlocked = skillResult?.locked === false;
+  const skillFailureCode = typeof skillResult?.code === 'string'
+    ? skillResult.code
+    : typeof skillResult?.failureCode === 'string' ? skillResult.failureCode : '';
+  const skillFailed = event.type === 'tool_result'
+    && (event.isError === true || Boolean(skillFailureCode) || Boolean(skillResult?.failureStage));
+  const resultSummary = event.type === 'tool_result'
+    ? (toolName === 'select_visual_skill'
+      ? (skillFailed
+        ? (skillFailureCode === 'decision_commentary_missing'
+          ? '模型已选择 Skill，但工具协议校验失败'
+          : '视觉风格加载失败')
+        : skillLocked && skillName ? `已加载视觉风格：${skillName}` : skillLocked ? '视觉风格已加载' : skillExplicitlyUnlocked ? '未锁定视觉风格，继续使用通用图像指令' : '')
+      : summarizeToolResult(event.result))
+    : '';
+  const isSkillSelection = toolName === 'select_visual_skill';
+  const defaultLabel = isSkillSelection
+    ? (status === 'completed' ? (skillLocked ? '视觉风格已加载' : skillExplicitlyUnlocked ? '未锁定视觉风格' : '视觉风格加载完成') : status === 'failed' ? '视觉风格加载失败' : '正在加载视觉风格')
+    : status === 'completed'
+      ? `${toolName || '工具'}已完成`
+      : status === 'failed'
+        ? `${toolName || '工具'}失败`
+        : `正在调用 ${toolName || '工具'}`;
   const nextStep = {
     stepId: existing?.stepId || `tool:${event.toolCallId}`,
     kind: 'tool',
@@ -437,6 +462,19 @@ export function reduceAgentRunProgress(input, inputEvent) {
   const event = eventClassification.identity
     ? { ...eventForClassification, ...eventClassification.identity }
     : inputEvent;
+
+  // A terminal event closes the current attempt. Late progress/tool events
+  // from that same run must never reopen or rewrite its completed timeline;
+  // a new runId is still allowed to start a recovery attempt below.
+  const sameTerminalRun = (event.runId || state.runId) === state.runId;
+  const isClosedOlderRun = event.runId && event.runId !== state.runId
+    && Array.isArray(state.attempts)
+    && state.attempts.some((attempt) => attempt.runId === event.runId && attempt.endedAt);
+  if (isClosedOlderRun && event.type !== 'agent_start') return state;
+  if (sameTerminalRun && (state.agentDone || state.terminalFailed || state.terminalCancelled)
+    && !['agent_start', 'agent_done', 'agent_error', 'agent_cancelled', 'agent_completion_summary', 'assets_pending', 'assets_progress', 'assets_settled'].includes(event.type)) {
+    return state;
+  }
 
   if (event.type === 'agent_start') {
     if (event.operationId && state.operationId && event.operationId !== state.operationId) return createBaseState(event);

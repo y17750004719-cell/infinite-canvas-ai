@@ -27,7 +27,19 @@ export const NATIVE_CONTEXT_DEFAULTS: Readonly<{
   keepRecent: number;
   maxVisualReferences: number;
   maxCapsuleBytes: number;
+  maxRecentImageTasks: number;
+  maxImageTaskRequestBytes: number;
 }>;
+export interface RecentImageTaskFact {
+  taskId?: string;
+  status: string;
+  originalRequest: string;
+  skill: { id?: string; hash?: string } | 'unknown';
+  referenceIds: string[];
+  outputAssetIds: string[];
+  options: Record<string, unknown> | 'unknown';
+}
+export function buildRecentImageTaskFacts(input?: Record<string, any>): RecentImageTaskFact[];
 export function hashNativeImage(value: unknown): string;
 export function normalizeNativeContextLedger(value: unknown): NativeContextLedger | null;
 export function buildNativeContinuationCapsule(input?: Record<string, any>): string;

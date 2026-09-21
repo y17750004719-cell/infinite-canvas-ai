@@ -48,15 +48,20 @@ function stripPublicProgress(args) {
 // Native models may serialize an optional image-history selector as null.
 // Canonicalize that representation before schema validation and execution so
 // null and an omitted field have the same, safe meaning.
-function normalizeToolArguments(toolName, args) {
+export function normalizeToolArguments(toolName, args) {
   if (toolName !== 'generate_image' || !args || typeof args !== 'object' || Array.isArray(args)) return args;
-  if (!Object.prototype.hasOwnProperty.call(args, 'numLastImagesToInclude') || args.numLastImagesToInclude !== null) return args;
   const normalized = { ...args };
-  delete normalized.numLastImagesToInclude;
-  return normalized;
+  let changed = false;
+  for (const key of ['numLastImagesToInclude', 'items']) {
+    if (Object.prototype.hasOwnProperty.call(normalized, key) && normalized[key] === null) {
+      delete normalized[key];
+      changed = true;
+    }
+  }
+  return changed ? normalized : args;
 }
 
-function validateToolArgumentRelationships(toolName, args) {
+export function validateToolArgumentRelationships(toolName, args) {
   if (toolName !== 'generate_image' || !args || typeof args !== 'object' || Array.isArray(args)) return;
   if (args.numLastImagesToInclude !== 1) return;
   if (args.operation !== 'edit') throw new Error('Invalid arguments for generate_image: numLastImagesToInclude 仅可用于图片编辑');
@@ -176,7 +181,7 @@ export function createAgentToolRegistry({
           deliveryMode: { type: 'string', enum: ['single', 'variants', 'series', 'composite'] },
           panelCount: { type: ['integer', 'null'], minimum: 2, maximum: 100 },
           items: {
-            type: 'array',
+            type: ['array', 'null'],
             maxItems: 100,
             items: {
               type: 'object',
@@ -634,8 +639,25 @@ export async function executeAgentTool(registry, toolName, args, context = {}) {
   }
   const publicProgress = args?.publicProgress;
   const toolArgs = normalizeToolArguments(toolName, stripPublicProgress(args));
-  validateAgentToolArguments(tool.parameters, toolArgs, toolName);
-  validateToolArgumentRelationships(toolName, toolArgs);
+  try {
+    validateAgentToolArguments(tool.parameters, toolArgs, toolName);
+    validateToolArgumentRelationships(toolName, toolArgs);
+  } catch (error) {
+    // Keep the direct executor's established throw contract, but classify it
+    // with the same bounded metadata used by Native and dispatcher callers.
+    const message = error instanceof Error ? error.message : String(error);
+    const fieldPath = message.match(/arguments(\.[\w]+|\[[^\]]+\])+/)?.[0] || undefined;
+    if (error && typeof error === 'object') {
+      error.code = 'tool_arguments_invalid';
+      error.failureStage = 'tool_dispatch';
+      error.toolName = toolName;
+      if (context.toolCallId) error.toolCallId = context.toolCallId;
+      if (fieldPath) error.fieldPath = fieldPath;
+      error.providerRequestStarted = false;
+      error.retryable = false;
+    }
+    throw error;
+  }
   if (tool.requiresConfirmation && context.confirmed !== true) {
     return {
       confirmationRequired: true,

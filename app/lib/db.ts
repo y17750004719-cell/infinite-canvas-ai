@@ -413,6 +413,7 @@ export interface ProjectSession {
   activeAgentRun?: {
     taskId?: string;
     runId: string;
+    turnId?: string;
     operationId?: string;
     lastSequence?: number;
     userMessageId: string;

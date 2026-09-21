@@ -44,7 +44,7 @@ test('tool settlement clears heartbeat ownership and independent phases receive 
     const runId = 'run';
     let lastCommentaryItemId = 'commentary';
     const events = [];
-    const tracker = { update: value => events.push(value), stamp: () => ({}) };
+    const tracker = { update: value => events.push(value), stamp: () => ({}), completeItem: () => {} };
     const stamp = () => tracker.stamp();
     const writeLifecycleEvent = value => events.push(value);
     ${['toolItemId', 'toolExecutionId', 'settledToolCalls', 'toolEventMetadata'].map(declaration).join('\n')}

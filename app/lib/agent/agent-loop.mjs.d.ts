@@ -24,6 +24,7 @@ export function createAgentProgressTracker(input: {
     detail?: string;
   }): AgentProgressUpdate;
   stamp(): { sequence: number; timestampMs: number; runId: string; operationId: string };
+  completeItem(itemId: string): void;
   resume(input: { operationId?: string; lastSequence?: number }): void;
   settleActive(status?: Exclude<AgentProgressStatus, 'active'>, label?: string): void;
   snapshot(): { operationId: string; lastSequence: number };

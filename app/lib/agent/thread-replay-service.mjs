@@ -1,8 +1,8 @@
-import { appendThreadEvent, queryThread } from './thread-journal-service.mjs';
+import { interruptOrphanedTurn, queryThread } from './thread-journal-service.mjs';
 
 export async function handleThreadReplay(request, { journal = {}, activeRunRegistry = {} } = {}) {
   const query = journal.queryThread || queryThread;
-  const append = journal.appendThreadEvent || appendThreadEvent;
+  const interruptOrphan = journal.interruptOrphanedTurn || interruptOrphanedTurn;
   const getActive = activeRunRegistry.getActiveAgentRun || (() => null);
   const threadId = request.nextUrl.searchParams.get('threadId')?.trim();
   if (!threadId) return Response.json({ error: 'threadId is required' }, { status: 400 });
@@ -10,11 +10,13 @@ export async function handleThreadReplay(request, { journal = {}, activeRunRegis
   const beforeSequenceValue = request.nextUrl.searchParams.get('beforeSequence');
   const options = { afterSequence: Number.isFinite(afterSequence) ? afterSequence : 0, ...(beforeSequenceValue ? { beforeSequence: Number(beforeSequenceValue) } : {}) };
   let result = await query(threadId, options);
-  const activeTurn = result.state.turns?.find((turn) => turn.turnId === result.state.activeTurn);
-  const activeRun = activeTurn?.runId ? getActive(activeTurn.runId) : null;
+  let activeTurn = result.state.turns?.find((turn) => turn.turnId === result.state.activeTurn);
+  let activeRun = activeTurn?.runId ? getActive(activeTurn.runId) : null;
   if (activeTurn && !activeRun) {
-    await append(threadId, { type: 'turn.failed', turnId: activeTurn.turnId, taskId: activeTurn.taskId || threadId, operationId: activeTurn.operationId, runId: activeTurn.runId, status: 'interrupted', error: { code: 'run_interrupted', message: 'The server restarted before this run completed. Continue or retry explicitly.' } });
+    await interruptOrphan(threadId, activeTurn, getActive);
     result = await query(threadId, options);
+    activeTurn = result.state.turns?.find((turn) => turn.turnId === result.state.activeTurn);
+    activeRun = activeTurn?.runId ? getActive(activeTurn.runId) : null;
   }
   return Response.json({ ...result, activeStream: Boolean(activeRun) });
 }

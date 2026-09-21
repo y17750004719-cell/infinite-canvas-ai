@@ -181,9 +181,7 @@ async function read(id) {
   return { state, events };
 }
 export async function loadThread(id) { return queue(id, () => read(id)); }
-export async function appendThreadEvent(id, input) {
-  return queue(id, async () => {
-    const { state } = await read(id);
+async function appendWithState(id, input, state) {
     const turn = state.turns.find((entry) => entry.turnId === input.turnId);
     if (state.archived && input.type === 'turn.started') throw Object.assign(new Error('Thread is archived'), { statusCode: 409, code: 'thread_archived' });
     if (input.type === 'turn.started' && state.activeTurn && state.activeTurn !== input.turnId) throw Object.assign(new Error('Turn is active'), { statusCode: 409, code: 'turn_active' });
@@ -191,6 +189,28 @@ export async function appendThreadEvent(id, input) {
     const { event, serialized } = sanitizeJournalEvent(eventInput);
     await fs.appendFile(path.join(directory(id), 'events.jsonl'), `${serialized}\n`);
     reduce(state, event); await save(id, state); return event;
+}
+export async function appendThreadEvent(id, input) {
+  return queue(id, async () => {
+    const { state } = await read(id);
+    return appendWithState(id, input, state);
+  });
+}
+// A replay snapshot may already be stale. Check both durable and in-memory
+// ownership while holding the very same queue used by terminal persistence.
+export async function interruptOrphanedTurn(id, expected, getActive) {
+  return queue(id, async () => {
+    const { state } = await read(id);
+    const turn = state.turns.find((entry) => entry.turnId === state.activeTurn);
+    if (!turn || turn.status !== 'running'
+      || ['turnId', 'operationId', 'runId'].some((key) => turn[key] !== expected?.[key])
+      || (expected?.taskId && turn.taskId !== expected.taskId)
+      || getActive(turn.runId)) return null;
+    return appendWithState(id, {
+      type: 'turn.failed', turnId: turn.turnId, taskId: turn.taskId || id,
+      operationId: turn.operationId, runId: turn.runId, status: 'interrupted',
+      error: { code: 'run_interrupted', message: 'The server restarted before this run completed. Continue or retry explicitly.' },
+    }, state);
   });
 }
 export async function updateThreadState(id, patch) {

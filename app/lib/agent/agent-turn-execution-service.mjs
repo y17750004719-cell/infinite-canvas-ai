@@ -1,4 +1,4 @@
-import { validateAgentToolArguments } from './tool-registry.mjs';
+import { normalizeToolArguments, validateAgentToolArguments } from './tool-registry.mjs';
 import { dispatchRegisteredApplicationTool } from './application-tool-dispatcher.mjs';
 
 /**
@@ -145,20 +145,42 @@ export function createDynamicToolCallback({
     )) {
       return { isError: true, modelResult: { code: 'approval_contract_changed', retryable: false } };
     }
+    // Approval identity is checked against the model's original payload. The
+    // compatibility normalization below only changes nullable optional fields
+    // immediately before schema validation and execution.
+    const normalizedArgs = normalizeToolArguments(toolName, args);
     const allowedTools = typeof resolveAllowedTools === 'function'
       ? resolveAllowedTools()
       : executionContext.allowedTools;
-    if (typeof validate === 'function') validate(toolName, args, allowedTools);
-    else {
-      const nativeTool = nativeTools.find((tool) => tool?.name === toolName);
-      if (nativeTool) validateAgentToolArguments(nativeTool.parameters || { type: 'object' }, args, toolName);
+    try {
+      if (typeof validate === 'function') validate(toolName, normalizedArgs, allowedTools);
+      else {
+        const nativeTool = nativeTools.find((tool) => tool?.name === toolName);
+        if (nativeTool) validateAgentToolArguments(nativeTool.parameters || { type: 'object' }, normalizedArgs, toolName);
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      const fieldPath = message.match(/arguments(\.[\w]+|\[[^\]]+\])+/)?.[0] || undefined;
+      return {
+        isError: true,
+        modelResult: {
+          code: 'tool_arguments_invalid',
+          failureStage: 'tool_dispatch',
+          retryable: false,
+          toolName,
+          ...(context.toolCallId ? { toolCallId: context.toolCallId } : {}),
+          ...(fieldPath ? { fieldPath } : {}),
+          providerRequestStarted: false,
+          message,
+        },
+      };
     }
     if (toolName === 'select_visual_skill' && typeof onSkillSelection === 'function') {
       return onSkillSelection({ args, context, allowedTools, tool: nativeTools.find((entry) => entry?.name === toolName) });
     }
     return dispatchTool({
       name: toolName,
-      args,
+      args: normalizedArgs,
       allowedTools,
       executionContext: { ...executionContext, ...context, toolName },
     });

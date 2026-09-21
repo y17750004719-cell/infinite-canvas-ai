@@ -112,6 +112,41 @@ test('legacy running message converges to the newest terminal turn when the jour
   assert.equal(message.agentRunProgress.outcome, 'failed');
 });
 
+test('hydration converges when a legacy client marker uses identities different from the journal', () => {
+  const [message] = reconcileHydratedChatMessages([
+    {
+      id: 'legacy-server-mismatch',
+      role: 'assistant',
+      content: '',
+      taskStatus: 'running',
+      agentRunProgress: {
+        taskId: 'client-run',
+        runId: 'client-run',
+        operationId: 'client-operation',
+        outcome: 'running',
+        steps: [],
+        lastSequence: 4,
+      },
+    },
+  ], {
+    activeTurn: null,
+    threadStatus: 'error',
+    turns: [{
+      turnId: 'server-turn',
+      taskId: 'server-task',
+      runId: 'server-run',
+      operationId: 'server-operation',
+      status: 'failed',
+      startSequence: 5,
+      completedAt: 10,
+      error: { code: 'tool_arguments_invalid', message: '参数无效' },
+      items: [],
+    }],
+  });
+  assert.equal(message.taskStatus, 'failed');
+  assert.equal(message.agentRunProgress.outcome, 'failed');
+});
+
 test('journal-only hydration reconstructs terminal progress', () => {
   const result = reconcileHydratedChatMessages([], {
     activeTurn: null,

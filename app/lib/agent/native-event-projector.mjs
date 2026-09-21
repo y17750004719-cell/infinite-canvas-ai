@@ -6,6 +6,7 @@ const publicKeys = [
   'entityIds', 'labels', 'kind', 'confidence', 'resolvedEntityIds', 'mustPreserveCount',
   'taskSnapshot', 'recoveryRecord', 'parameters', 'title', 'operation', 'succeeded', 'failed', 'skillContentHash',
   'addedToCanvas', 'stopReason', 'detail', 'completionSummary', 'completedLabel',
+  'commentaryMatched', 'commentarySource', 'modelSampleIndex',
 ];
 
 export function projectNativeEvent(event = {}, context = {}) {
@@ -44,14 +45,20 @@ export function projectNativeEvent(event = {}, context = {}) {
     const retryable = event.retryable ?? event.error?.retryable;
     const outcomeUnknown = event.outcomeUnknown ?? event.error?.outcomeUnknown;
     const message = event.message || event.error?.message || 'Agent run failed';
+    const metadata = Object.fromEntries(['toolName', 'toolCallId', 'fieldPath', 'providerRequestStarted'].flatMap((key) => {
+      const value = event[key] ?? event.error?.[key];
+      return value !== undefined ? [[key, value]] : [];
+    }));
     return [{
       type: 'turn.failed',
       status: type === 'agent_cancelled' ? 'cancelled' : 'failed',
       failureCode,
       failureStage,
+      ...metadata,
+      ...(event.recoveryRecord ? { recoveryRecord: event.recoveryRecord } : {}),
       ...(retryable !== undefined ? { retryable: retryable === true } : {}),
       ...(outcomeUnknown !== undefined ? { outcomeUnknown: outcomeUnknown === true } : {}),
-      error: { message, code: event.code || event.error?.code || failureCode, failureStage, failureCode, retryable: retryable === true, outcomeUnknown: outcomeUnknown === true },
+      error: { message, code: event.code || event.error?.code || failureCode, failureStage, failureCode, retryable: retryable === true, outcomeUnknown: outcomeUnknown === true, ...metadata },
       ...base,
     }];
   }

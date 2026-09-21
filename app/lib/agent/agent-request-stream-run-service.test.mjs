@@ -201,3 +201,23 @@ test('retry suppresses replayed activity/raw timeline events but preserves new c
   assert.deepEqual(activities, ['分析请求', '重新连接成功']);
   assert.deepEqual(rawTexts, ['正在处理', '继续生成']);
 });
+
+test('Native tool failure metadata survives the request-loop boundary', async () => {
+  await assert.rejects(
+    executeMainAgentTurnWithSafeRetry(async () => ({
+      loopResult: {
+        stopReason: 'failed', failureCode: 'tool_arguments_invalid', errorMessage: 'items must be array',
+        failureStage: 'tool_dispatch', retryable: false, toolName: 'generate_image', toolCallId: 'call-1',
+        fieldPath: 'arguments.items', providerRequestStarted: false,
+      },
+    }), { sleep: async () => {} }),
+    (error) => {
+      assert.equal(error.failureStage, 'tool_dispatch');
+      assert.equal(error.toolName, 'generate_image');
+      assert.equal(error.toolCallId, 'call-1');
+      assert.equal(error.fieldPath, 'arguments.items');
+      assert.equal(error.providerRequestStarted, false);
+      return true;
+    },
+  );
+});

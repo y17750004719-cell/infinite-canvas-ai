@@ -10,10 +10,13 @@ const normalizeName = (value) => String(value || '').trim().toLowerCase().replac
 async function validateRegisteredArguments(registry, name, args) {
   const tool = registry?.get?.(name);
   if (!tool) return;
-  const { validateAgentToolArguments } = await import('./tool-registry.mjs');
-  const raw = args && typeof args === 'object' && !Array.isArray(args) ? { ...args } : args;
+  const { validateAgentToolArguments, validateToolArgumentRelationships, normalizeToolArguments } = await import('./tool-registry.mjs');
+  const normalized = normalizeToolArguments(name, args);
+  const raw = normalized && typeof normalized === 'object' && !Array.isArray(normalized) ? { ...normalized } : normalized;
   if (raw && typeof raw === 'object' && !Array.isArray(raw)) delete raw.publicProgress;
   validateAgentToolArguments(tool.parameters, raw, name);
+  validateToolArgumentRelationships(name, raw);
+  return normalized;
 }
 
 // Keep the registry-specific execution contract behind this boundary. The
@@ -113,29 +116,36 @@ export async function dispatchApplicationTool({ name, args, allowedTools = [], e
   if (!validation.ok) return { isError: true, modelResult: validation.error };
   const imageExecutor = context.generateImage || context.executeImage || context.imageExecutor;
   if (typeof execute !== 'function' && !(isApplicationImageTool(name) && typeof imageExecutor === 'function')) return dispatchError('tool_dispatch_unavailable');
+  let normalizedArgs = args;
   try {
-    await validateRegisteredArguments(registry, name, args);
+    normalizedArgs = await validateRegisteredArguments(registry, name, args) ?? args;
   } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const fieldPath = message.match(/arguments(\.[\w]+|\[[^\]]+\])+/)?.[0] || undefined;
     return {
       isError: true,
       modelResult: {
         code: 'tool_arguments_invalid',
         failureStage: 'tool_dispatch',
         retryable: false,
-        message: error instanceof Error ? error.message : String(error),
+        toolName: name,
+        ...(context.toolCallId ? { toolCallId: context.toolCallId } : {}),
+        ...(fieldPath ? { fieldPath } : {}),
+        providerRequestStarted: false,
+        message,
       },
     };
   }
   try {
     let result;
     if (name === 'generate_image' && typeof imageExecutor === 'function') {
-      result = await dispatchImageGeneration({ generateImage: imageExecutor, request: args, context });
+      result = await dispatchImageGeneration({ generateImage: imageExecutor, request: normalizedArgs, context });
     } else if (INTERACTION_TOOLS.has(name) && typeof interaction?.[name] === 'function') {
-      result = await interaction[name]({ args, context });
+      result = await interaction[name]({ args: normalizedArgs, context });
     } else if (name === 'select_visual_skill' && typeof interaction?.selectVisualSkill === 'function') {
-      result = await interaction.selectVisualSkill({ args, context });
+      result = await interaction.selectVisualSkill({ args: normalizedArgs, context });
     } else if (typeof execute === 'function') {
-      result = await execute(name, args, context);
+      result = await execute(name, normalizedArgs, context);
     } else {
       return dispatchError('tool_dispatch_unavailable');
     }
